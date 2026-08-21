@@ -7803,6 +7803,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = str(message.get("message") or "") if isinstance(message, dict) else ""
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -7823,7 +7824,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_protocol_noise(candidate, message=message_text):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8003,6 +8004,45 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+def _is_intermediate_navigation_pin_guard_failure(
+    candidate: dict,
+    *,
+    message: str = "",
+) -> bool:
+    """Host-pin refusals ERROR then continue; those are coaching, not terminal failures.
+
+    Local repro: browser-doordash-usb-c-cable agent
+    b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached an unresolved Place Order write_lock
+    after an evaluate pin-guard ERROR, then failed only on no_tool_failures.
+    """
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+    if action_type == "navigation_pin_guard":
+        return True
+    blob = " ".join(
+        str(part or "")
+        for part in (
+            candidate.get("title"),
+            message,
+            candidate.get("error"),
+            candidate.get("message"),
+        )
+    ).lower()
+    if "refusing" not in blob:
+        return False
+    return "pinned host" in blob or "pinned page host" in blob
+
+
+def _is_intermediate_browser_protocol_noise(
+    candidate: dict,
+    *,
+    message: str = "",
+) -> bool:
+    """Return True for browser ERROR rows that are expected mid-trajectory protocol."""
+    return _is_intermediate_challenge_recovery_failure(candidate) or (
+        _is_intermediate_navigation_pin_guard_failure(candidate, message=message)
+    )
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -8010,6 +8050,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = str(message.get("message") or "") if isinstance(message, dict) else ""
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -8017,7 +8058,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
                 continue
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_protocol_noise(candidate, message=message_text):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
