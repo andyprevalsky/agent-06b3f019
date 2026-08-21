@@ -338,13 +338,104 @@ printf '%s\n' "$force_loop" | grep -q 'kill -KILL' || fail \
 
 # ── Case 8: retained PIDs must be identity-checked before force cleanup ───────
 # A short-lived child can exit during the grace phase and its numeric PID can be
-# reused before a later force-loop iteration. Start time plus parent/group identity
-# distinguish the owned child from the unrelated replacement process.
+# reused before a later force-loop iteration. PID plus start time distinguish the
+# owned process incarnation from the unrelated replacement process; parent/group
+# values are capture-time provenance because descendants may detach or reparent.
 printf '%s\n' "$force_loop" | grep -q 'setup_db_pid_matches_record' || fail \
   "case 8: force cleanup can SIGKILL a recycled PID without revalidating identity"
 grep -q 'lstart=' "$SETUP_DB" || fail \
   "case 8: descendant identity does not include process start time"
 grep -q 'current_started.*expected_started' "$SETUP_DB" || fail \
   "case 8: process start time is captured but never revalidated"
+
+# ── Case 9: retained identity must survive setsid plus reparenting ────────────
+# A seed can detach from its original process group while its wrapper exits.
+# PPID and PGID then both differ from the capture-time descendant record, but it
+# is still the same live process and must remain eligible for force cleanup.
+DETACHED_TRIGGER="$TMP/detached-child-trigger"
+DETACHED_READY="$TMP/detached-child-ready"
+DETACHED_PID_FILE="$TMP/detached-child.pid"
+rm -f "$DETACHED_TRIGGER" "$DETACHED_READY" "$DETACHED_PID_FILE"
+cat > "$TMP/detaching-child.py" <<STUB
+#!/usr/bin/env python3
+import os
+import time
+from pathlib import Path
+
+trigger = Path("$DETACHED_TRIGGER")
+ready = Path("$DETACHED_READY")
+if os.fork():
+    while True:
+        time.sleep(0.1)
+
+Path("$DETACHED_PID_FILE").write_text(str(os.getpid()))
+while not trigger.exists():
+    time.sleep(0.02)
+os.setsid()
+ready.write_text("detached")
+while True:
+    time.sleep(0.1)
+STUB
+python3 "$TMP/detaching-child.py" &
+detach_parent_pid=$!
+detached_pid=""
+case9_cleanup() {
+  [ -z "$detached_pid" ] || kill -KILL "$detached_pid" 2>/dev/null || true
+  kill -KILL "$detach_parent_pid" 2>/dev/null || true
+  wait "$detach_parent_pid" 2>/dev/null || true
+}
+case9_fail() {
+  local message="$1"
+  case9_cleanup
+  fail "$message"
+}
+for _ in $(seq 1 200); do
+  [ -f "$DETACHED_PID_FILE" ] && break
+  sleep 0.05
+done
+[ -f "$DETACHED_PID_FILE" ] || case9_fail \
+  "case 9: could not observe the forked seed child"
+detached_pid="$(cat "$DETACHED_PID_FILE")"
+detached_record="$(ps -o pid=,ppid=,pgid=,lstart= -p "$detached_pid" 2>/dev/null | awk '
+  NR == 1 { print $1 "|" $2 "|" $3 "|" $4 " " $5 " " $6 " " $7 " " $8 }
+')"
+[ -n "$detached_record" ] || case9_fail \
+  "case 9: could not capture the seed child's original identity"
+IFS='|' read -r _ expected_parent expected_group _ <<< "$detached_record"
+
+: > "$DETACHED_TRIGGER"
+for _ in $(seq 1 100); do
+  [ -f "$DETACHED_READY" ] && break
+  sleep 0.05
+done
+[ -f "$DETACHED_READY" ] || case9_fail \
+  "case 9: seed child did not call setsid"
+# Reparent only after setsid so the regression covers both identity changes in
+# the same order as a detaching child whose wrapper subsequently exits.
+kill -TERM "$detach_parent_pid" 2>/dev/null || true
+wait "$detach_parent_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  current_parent_group="$(ps -o ppid=,pgid= -p "$detached_pid" 2>/dev/null | awk \
+    'NR == 1 { print $1 "|" $2 }')"
+  IFS='|' read -r current_parent current_group <<< "$current_parent_group"
+  if [ -n "$current_parent" ] \
+      && [ "$current_parent" != "$expected_parent" ] \
+      && [ "$current_group" != "$expected_group" ]; then
+    break
+  fi
+  sleep 0.05
+done
+[ -n "${current_parent:-}" ] \
+  && [ "$current_parent" != "$expected_parent" ] \
+  && [ "$current_group" != "$expected_group" ] || case9_fail \
+    "case 9: child did not change both PPID and PGID after setsid/reparenting"
+
+matcher_impl="$(sed -n '/^setup_db_pid_matches_record() {$/,/^}$/p' "$SETUP_DB")"
+[ -n "$matcher_impl" ] || case9_fail \
+  "case 9: could not load setup_db_pid_matches_record"
+eval "$matcher_impl"
+setup_db_pid_matches_record "$detached_record" || case9_fail \
+  "case 9: retained child identity was lost after setsid plus reparenting"
+case9_cleanup
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"

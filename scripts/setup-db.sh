@@ -247,17 +247,22 @@ setup_db_child_records() {
 setup_db_pid_matches_record() {
     local record="$1"
     local pid expected_parent expected_group expected_started
-    local current current_parent current_group current_state current_started
+    local current current_state current_started
     IFS='|' read -r pid expected_parent expected_group expected_started <<< "$record"
-    [ -n "$pid" ] && [ -n "$expected_started" ] || return 1
-    current="$(ps -o ppid=,pgid=,stat=,lstart= -p "$pid" 2>/dev/null | awk '
-        NR == 1 { print $1 "|" $2 "|" $3 "|" $4 " " $5 " " $6 " " $7 " " $8 }
+    [ -n "$pid" ] && [ -n "$expected_parent" ] && [ -n "$expected_group" ] \
+        && [ -n "$expected_started" ] || return 1
+    current="$(ps -o stat=,lstart= -p "$pid" 2>/dev/null | awk '
+        NR == 1 { print $1 "|" $2 " " $3 " " $4 " " $5 " " $6 }
     ')"
     [ -n "$current" ] || return 1
-    IFS='|' read -r current_parent current_group current_state current_started <<< "$current"
+    IFS='|' read -r current_state current_started <<< "$current"
     [[ "$current_state" != Z* ]] || return 1
-    [ "$current_started" = "$expected_started" ] || return 1
-    [ "$current_group" = "$expected_group" ] || [ "$current_parent" = "$expected_parent" ]
+    # Parent and process-group IDs prove ownership when the descendant record is
+    # first discovered, but neither remains stable: a retained child can call
+    # setsid and then be reparented after its wrapper exits. PID plus start time
+    # identifies the captured process incarnation across both transitions while
+    # still refusing a recycled PID before TERM or KILL.
+    [ "$current_started" = "$expected_started" ]
 }
 
 setup_db_pid_is_running() {
