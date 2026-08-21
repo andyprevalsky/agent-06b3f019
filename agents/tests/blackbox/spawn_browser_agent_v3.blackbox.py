@@ -4727,6 +4727,11 @@ def test_text_indicates_guest_completion_option_matches_booking_cta():
     from domains.spawn_browser_agent_v3.service import text_indicates_guest_completion_option
 
     assert text_indicates_guest_completion_option("I'll reserve")
+    # Booking.com hotel DOM uses a non-breaking space in the submit CTA.
+    assert text_indicates_guest_completion_option("I'll\xa0reserve")
+    assert text_indicates_guest_completion_option(
+        "[8848]<button type=submit />\n\t\tI'll\xa0reserve\n\tYou won't be charged yet"
+    )
     assert text_indicates_guest_completion_option("Continue as guest")
     assert not text_indicates_guest_completion_option("Sign in")
     assert not text_indicates_guest_completion_option("Homes guests love")

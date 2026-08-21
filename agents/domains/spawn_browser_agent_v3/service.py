@@ -77,8 +77,9 @@ GUEST_COMPLETION_OPTION_RE = re.compile(
     r"continue without (?:signing|logging|an account|creating)|"
     r"book without (?:signing|logging|an account)|"
     r"reserve without|"
-    r"i['’]?ll reserve|"
-    r"i will reserve|"
+    # Booking.com renders "I'll\xa0reserve" with a non-breaking space.
+    r"i['’]?ll\s+reserve|"
+    r"i\s+will\s+reserve|"
     r"pay at the property|"
     r"no account (?:needed|required)|"
     r"skip (?:sign|log)\s*in"
