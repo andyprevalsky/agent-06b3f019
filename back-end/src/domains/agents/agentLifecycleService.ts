@@ -133,7 +133,8 @@ async function startChatMode(
     repo
       .failAgentIfStillActive(
         agentDbId,
-        'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
+        'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
+        agentDbId
       )
       .catch((updateErr: unknown) =>
         log.error('Failed to update agent status', {
