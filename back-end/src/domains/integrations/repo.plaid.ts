@@ -15,7 +15,7 @@ import {
   type PlaidAccount,
   type PlaidItem,
 } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { PLAID_DEFAULT_PRODUCTS } from '../../providers/plaid';
 
 export type PlaidItemWithAccounts = PlaidItem & { accounts: PlaidAccount[] };
@@ -168,7 +168,7 @@ export async function persistPlaidItem(
   input: PersistPlaidItemInput,
   accounts: AccountUpsertInput[]
 ): Promise<PlaidItemWithAccounts> {
-  return prisma.$transaction(
+  return runTransactionWithRetry(
     async (tx) => {
       const integration = await upsertIntegrationRow(tx, userId);
       const plaidItem = await upsertPlaidItemRow(tx, {
@@ -184,7 +184,7 @@ export async function persistPlaidItem(
       if (!updated) throw new Error('PlaidItem disappeared mid-transaction');
       return updated;
     },
-    // Coverage + multi-worker blackbox load routinely exceeds Prisma's 5s default;
+    // Coverage + multi-worker blackbox load routinely exceeds the 10s default;
     // an expired commit surfaces as 500 on /exchange-public-token.
     { maxWait: 10_000, timeout: 30_000 }
   );
