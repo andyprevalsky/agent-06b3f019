@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR/agents"
 
 # Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
-# dependency set — notably boto3 for R2 world-model/trace-archive reads under --simulate.
+# dependency set — notably boto3 for R2 world-model/[REDACTED] reads under --simulate.
 # The system/asdf python may lack these. Fall back to PATH python3/python if the venv
 # is absent. Prefer python3: many cloud images ship python3 without a `python`
 # symlink (bare `exec python` exits 127).
@@ -41,7 +41,9 @@ fi
 # box, which is NOT parallel-safe — two worktrees collide on the same machine and
 # whichever stops it kills the other's in-flight run. Reject it before the
 # production-only classifier sees the legacy dispatcher flag, so the safety
-# explanation is preserved even when the task name is not in the catalog.
+# explanation is preserved even when the task name is not in the catalog or the
+# multi-workstream sandbox has no tasks.json (scenario 14 requires the rejection
+# message to include "parallel-safe").
 # The default fleet path already isolates each bench on its own cloned machine,
 # so a single bench is just `run-bench <task>`. (run-bench-cloud enforces the
 # same guard directly.)

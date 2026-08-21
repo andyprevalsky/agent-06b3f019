@@ -308,9 +308,11 @@ async function runLiveProviderParity(): Promise<void> {
         // response and is undiagnosable from a CI log.
         try {
           return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
-        } catch {
+        } catch (error) {
           throw new Error(
-            `proxy returned a non-JSON exit-IP body: ${raw.slice(0, 120).replace(/\s+/g, ' ')}`
+            `exit-IP probe returned non-JSON body: ${raw
+              .slice(0, 120)
+              .replace(/\s+/g, ' ')} (${error instanceof Error ? error.message : String(error)})`
           );
         }
       } finally {

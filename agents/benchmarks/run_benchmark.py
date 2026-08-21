@@ -5433,6 +5433,41 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     return True
 
 
+def _sync_email_credentials() -> bool:
+    """Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential from prod.
+
+    The canonical base-image dump can freeze abandoned OAuth rows (null email /
+    null accessToken). Connected Integrations then omits every send-from address
+    and ``message_person`` fails closed with ``Missing from_email`` before any
+    email_send approval can fire. Same pattern as ``_sync_compute_tokens``.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Email credential sync skipped: local Victoria DB not found")
+        return False
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-local.ts", "--email-credentials-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(f"    ⚠ Email credential sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Email credential sync error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Email credential sync failed: {_seed_sync_error_detail(result)}")
+        return False
+    print("    ✉️  Refreshed email credentials from prod")
+    return True
+
+
 def _sync_passkeys() -> None:
     """Refresh only passkeys from prod into the isolated benchmark DB.
 
@@ -5710,6 +5745,8 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         )
     if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
+    if not _sync_email_credentials():
+        raise RuntimeError("Live fixture could not refresh email credentials")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     # A green sync only proves the command exited 0. For domains whose task
@@ -7844,7 +7881,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8024,6 +8061,67 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
+    """Join transcript + metadata error surfaces for intermediate-failure classifiers.
+
+    Agent GET payloads use `text` (see `extract_message_transcript`); archived
+    run JSON often remaps that to `message`. Read both so live eval and offline
+    replay classify the same ERROR rows.
+    """
+    parts: list[str] = []
+    if isinstance(message, dict):
+        parts.append(
+            str(
+                message.get("text")
+                or message.get("message")
+                or message.get("content")
+                or ""
+            )
+        )
+    for key in ("error", "title", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """Stale DOM indexes / invalid CDP backendNodeIds ERROR then the browser agent retries.
+
+    SPA remounts (Amazon checkout re-auth, etc.) invalidate selector-map indexes. Humanize
+    then refuses click/TypeTextEvent with `Cannot humanize … no coordinates available`
+    (CDP often reports `No node found for given backend id` underneath). The browser
+    agent is expected to re-observe and retry; counting those rows in `no_tool_failures`
+    / `no_browser_agent_failures` fails closed on expected retry noise after a later
+    grounded write-lock / payment boundary.
+    """
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    is_browser = tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+    if not is_browser:
+        return False
+    blob = _message_failure_text(message, candidate).lower()
+    if "cannot humanize" in blob and "no coordinates available" in blob:
+        return True
+    return (
+        "no node found for given backend id" in blob
+        or "no node with given id found" in blob
+    )
+
+
+def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """True when a browser-agent ERROR is expected recovery / retry noise."""
+    return _is_intermediate_challenge_recovery_failure(candidate) or _is_intermediate_stale_dom_node_failure(
+        candidate, message
+    )
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -8038,7 +8136,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
                 continue
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -10152,6 +10250,15 @@ async def main_async(args):
             require_claude_code=bool(claude_code_tasks_for_refresh)
             and not allow_claude_code_credential_skip,
         )
+        # Base-image dumps can freeze unusable Gmail OAuth rows; any local task
+        # that must send email (message_person) needs a fresh credential overlay
+        # or Connected Integrations never lists a from_email and the harness
+        # fails before an email_send approval can fire.
+        if any("message_person" in (t.expected_tools or []) for t in tasks):
+            if not _sync_email_credentials():
+                raise RuntimeError(
+                    "Benchmark run could not refresh email credentials for message_person tasks"
+                )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     # Default (fleet/cloud): missing Claude Code credentials after a required
