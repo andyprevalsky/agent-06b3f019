@@ -8,7 +8,10 @@ import assert from 'node:assert';
 import { rotateProxySchema } from '../../domains/browser-session/types';
 import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
-import { isSteelProvisioningOutage } from '../blackbox/browser-provider-rotation.support';
+import {
+  isSteelProvisioningOutage,
+  isSteelSessionRateLimited,
+} from '../blackbox/browser-provider-rotation.support';
 
 function testMobileCandidates(): void {
   const candidates = kernelProxyCandidates(
@@ -148,6 +151,37 @@ function testSteelOutageDetector(): void {
       )
     ),
     'a non-5xx status is not a provisioning outage'
+  );
+
+  // Session rate-limit under parallel blackbox load is skippable (Kernel already
+  // proved rotation) but is NOT classified as a provisioning outage shape.
+  assert.ok(
+    isSteelSessionRateLimited(
+      new Error(
+        '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+      )
+    ),
+    'Steel session rate-limit 429 is skippable contention'
+  );
+  assert.ok(
+    !isSteelSessionRateLimited(
+      new Error('/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"kernel"}')
+    ),
+    'Kernel rate-limit must not skip the Steel legs detector'
+  );
+  assert.ok(
+    !isSteelSessionRateLimited(
+      new Error('/rotate-proxy 401: {"error":"unauthorized","provider":"steel"}')
+    ),
+    'Steel AUTH rejection is not a session rate-limit skip'
+  );
+  assert.ok(
+    !isSteelProvisioningOutage(
+      new Error(
+        '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+      )
+    ),
+    'rate-limit is a separate skip path from provisioning outage'
   );
 }
 

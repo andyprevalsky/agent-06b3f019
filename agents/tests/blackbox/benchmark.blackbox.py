@@ -324,7 +324,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "14 passed" in result.stdout
+    # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases plus
+    # controller-token / private-repo auth cementing raised this to 17.
+    assert "17 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -859,6 +861,7 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         "SEED_ALLOW_MISSING_GPT_CODE",
         "AGENTCARD_ONBOARDING_RETURN_URL",
         "BENCHMARK_AGENT_PAYMENT_USER_ID",
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH",
     )
     with patch.dict(os.environ, {}, clear=False):
         for key in keys:
@@ -868,21 +871,22 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
         assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
         assert os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
         assert (
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
             == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
         )
 
 
-def test_payment_benchmark_seeds_non_admin_fixture_identity():
-    """Stripe lifecycle tasks must not inherit the admin operator's no-charge semantics."""
+def test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path():
+    """Sandbox lifecycle benches run as the admin account and force the charged mint path."""
     import os
     from unittest.mock import patch
 
     from benchmarks import local
     from benchmarks import run_benchmark as bench
 
-    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID != local.BENCHMARK_USER_ID
+    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID == local.BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_BENCHMARK_USER_ID == local.AGENT_PAYMENT_BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_SANDBOX_TASK_NAMES == local.AGENT_PAYMENT_TASK_NAMES
 
@@ -894,6 +898,11 @@ def test_payment_benchmark_seeds_non_admin_fixture_identity():
 
     command = run.call_args.args[0]
     assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH", None)
+        local.configure_task_environment(["agent-payment-test-shop"])
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
+        assert os.environ[local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
 
 
 async def test_agentcard_setup_targets_effective_benchmark_user():
@@ -1041,6 +1050,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
+    assert "export BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1" in helper
+    assert "1f85ff25-6e29-4c1b-8739-f917bd101a30" in helper
     assert "DATABASE_URL=" in helper
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
     assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
@@ -1058,8 +1069,12 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in import_block, (
         "setup-benchmark-payment.ts must import BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
     )
-    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in fixture
-    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in fixture
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in import_block
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID" in import_block
+    assert "benchmarkPaymentIdentity" in import_block
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in fixture
+    assert "assertDedicatedBenchmarkUser(userId, mode)" in fixture
     assert "pg_advisory_xact_lock" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "await prisma.$transaction" in fixture
@@ -1096,15 +1111,15 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_AGENTCARD_ORG_ID" in dotenv_helper
 
 
-def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
-    """The four AgentCard lifecycle benchmarks must run as the NON-ADMIN payment fixture user.
+def test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path():
+    """Sandbox AgentCard lifecycle benches run as the default admin account.
 
-    `resolveAndIssuePurchaseCard` routes ADMIN_USER_IDS to `issueAdminCompanyCard`, which mints a
-    company-funded card and never authorizes a personal Stripe hold. Every one of these tasks
-    asserts `expected_payment_lifecycle.stripeHold`, so running them as the default (admin)
-    benchmark user makes that assertion unreachable by construction. Three places must agree on
-    the identity — the harness run-user override, the local stack's fixture seeding, and the
-    back-end constant the seeding script and back-end blackbox share — so pin all three here.
+    Credit checks use the admin unlimited path so the agent is not gated at
+    `gate:subscription`. `BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH` (honored only
+    when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+    `resolveAndIssuePurchaseCard` onto `chargeAndIssueCard` so stripeHold /
+    payment_approval stay reachable. The disposable `…106` identity remains
+    the non-admin blackbox fixture (`BENCHMARK_PAYMENT_LIFECYCLE_USER_ID`).
     """
     import re
 
@@ -1118,27 +1133,40 @@ def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
 
     repo_root = Path(__file__).resolve().parents[3]
     config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts)
-    assert match, "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID =\s*'([^']+)'",
+        config_ts,
+    )
+    assert match, (
+        "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID"
+    )
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_USER_ID, (
         "benchmark payment identity drifted between the harness and the back-end: "
         f"{AGENT_PAYMENT_LIFECYCLE_USER_ID} vs {match.group(1)}"
     )
+    assert "function benchmarkForceCustomerPurchasePath()" in config_ts
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in config_ts
+    disposable = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts
+    )
+    assert disposable, "back-end purchases/config.ts must keep BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    assert disposable.group(1) == "00000000-0000-4000-8000-000000000106"
+    assert disposable.group(1) != AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_LIFECYCLE_USER_ID == AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_TASK_NAMES == AGENT_PAYMENT_LIFECYCLE_TASK_NAMES
-    # Never the default (admin) benchmark user, and never a hardcoded ADMIN_USER_IDS entry.
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID != USER_ID
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID == USER_ID
     admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID not in admin_ts
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID in admin_ts
 
     for name in sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES):
         task = get_task_by_name(name)
         assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
         assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
-            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding path can produce"
+            f"{name} asserts a captured Stripe hold, which the forced customer path must produce"
         )
         assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
         assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
+        assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in task.environment["context_notes"]
 
 
 def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
@@ -1237,7 +1265,7 @@ def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
         local.configure_task_environment([local.ADMIN_BYPASS_TASK_NAME])
         assert os.environ["ADMIN_USER_IDS_EXTRA"] == local.ADMIN_BYPASS_USER_ID
 
-    # Only that task opts in; the lifecycle tasks must stay NON-admin on the same stack.
+    # Only that task opts in; lifecycle benches are already hardcoded admins and must not get EXTRA.
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
         local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
@@ -4385,15 +4413,17 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     import benchmarks.run_benchmark as bench
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
     raised = False
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         # Mirror the real signatures: _apply_live_fixture calls
-        # _sync_compute_tokens(tolerate_gpt_code_unavailable=True) and
+        # _sync_compute_tokens → _sync_email_credentials →
         # _sync_browser_credentials(ctx.cookie_domains).
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         bench._sync_browser_credentials = lambda *_a, **_k: False
         bench._apply_live_fixture(
             bench.LiveFixtureContext(
@@ -4406,6 +4436,7 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
         raised = "browser auth" in str(exc).lower()
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         if original_mode is None:
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
@@ -4500,6 +4531,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     }
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_sql = bench._run_local_victoria_sql
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
@@ -4527,6 +4559,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         # The sync COMMAND succeeds — exactly the state that misreported the outage.
         bench._sync_browser_credentials = lambda *_a, **_k: True
         bench._run_local_victoria_sql = fake_sql
@@ -4577,6 +4610,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
         assert sql_calls == []
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         bench._run_local_victoria_sql = original_sql
         if original_mode is None:
@@ -4622,6 +4656,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
     with (
         patch.object(bench, "_is_simulate_mode", return_value=False),
         patch.object(bench, "_sync_compute_tokens", return_value=True),
+        patch.object(bench, "_sync_email_credentials", return_value=True),
         patch.object(bench, "_sync_browser_credentials", side_effect=fake_sync_browser_credentials),
         patch.object(bench, "_live_cookie_domain_credential_summary", side_effect=fake_credential_summary),
     ):
@@ -11465,6 +11500,7 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
     assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
     assert get_task_by_name("browser-smoke").min_steps == {"browser": 1}
+    assert get_task_by_name("cache-coverage").min_steps == {"browser": 2}
     assert get_task_by_name("chat-mode").min_steps == {}
 
     base = {"name": "min-steps-contract", "bench": "rose-bench"}
@@ -11529,6 +11565,158 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert counts == {"browser": {"browser-task": 1}}
     assert task.min_steps == {"browser": 1}
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
+    """cache-coverage's example.com heading read is goto+evaluate; default min_steps=5 is wrong."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("cache-coverage")
+    browser_id = "4eaa7d1f-fade-4db5-9fff-1a6bb9ab6891"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_browser_agent",
+                        "type": "browser",
+                        "tool_call_id": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "goto",
+                "steps_taken": 0,
+                "toolStatus": "FINISHED",
+                "title": "Navigated → https://example.com",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "toolu_01Pv8PTgDN1gpibr4Uq98HRc",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "evaluate",
+                "steps_taken": 1,
+                "toolStatus": "FINISHED",
+                "title": "evaluate",
+                "text": "Executed JS, result: Example Domain",
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+    assert (
+        _validate_agent_class_min_steps({"browser": 5}, counts)
+        == (
+            f"Browser agent {browser_id} recorded 2 trajectory step(s); "
+            "expected at least 5 per browser agent"
+        )
+    )
+
+
+def test_live_fixture_refreshes_email_credentials_before_browser_auth():
+    """cache-coverage message_person needs from_email; live overlay must sync email rows."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    calls: list[str] = []
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: calls.append("compute") or True
+        bench._sync_email_credentials = lambda: calls.append("email") or True
+        bench._sync_browser_credentials = lambda *_a, **_k: calls.append("browser") or True
+        manifest = bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert calls == ["compute", "email", "browser"]
+    assert manifest == {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
+
+
+def test_live_fixture_fails_closed_when_email_credentials_refresh_fails():
+    """A frozen dump without usable Gmail tokens must abort before the agent runs."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: False
+        bench._sync_browser_credentials = lambda *_a, **_k: True
+        bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "email credentials" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "live fixture must fail closed when email credential refresh fails"
+
+
+def test_message_person_tasks_refresh_email_credentials_in_local_preflight():
+    """Local runs with message_person must overlay email creds after compute tokens."""
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("cache-coverage")
+    assert "message_person" in task.expected_tools
+    source = inspect.getsource(bench.main_async)
+    assert "_sync_email_credentials" in source
+    assert 'any("message_person" in (t.expected_tools or []) for t in tasks)' in source
 
 
 def test_payment_abandonment_accepts_captured_two_step_trajectory():
@@ -13643,8 +13831,8 @@ async def run_all_tests():
         test_payment_benchmark_preserves_lifecycle_stack_contract,
     )
     r.record(
-        "payment_benchmark_non_admin_fixture_identity",
-        test_payment_benchmark_seeds_non_admin_fixture_identity,
+        "payment_benchmark_admin_run_user_forced_customer_path",
+        test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path,
     )
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
@@ -13667,8 +13855,8 @@ async def run_all_tests():
         test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
     )
     r.record(
-        "agent_payment_lifecycle_user_is_non_admin",
-        test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user,
+        "agent_payment_lifecycle_user_is_admin_with_forced_customer_path",
+        test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path,
     )
     r.record(
         "production_payment_lifecycle_user_is_non_admin",
@@ -14028,6 +14216,22 @@ async def run_all_tests():
     r.record(
         "browser_smoke_single_step_trajectory",
         test_browser_smoke_accepts_captured_single_step_trajectory,
+    )
+    r.record(
+        "cache_coverage_two_step_browser_trajectory",
+        test_cache_coverage_accepts_captured_two_step_browser_trajectory,
+    )
+    r.record(
+        "live_fixture_refreshes_email_credentials",
+        test_live_fixture_refreshes_email_credentials_before_browser_auth,
+    )
+    r.record(
+        "live_fixture_fails_closed_email_credentials",
+        test_live_fixture_fails_closed_when_email_credentials_refresh_fails,
+    )
+    r.record(
+        "message_person_tasks_refresh_email_credentials",
+        test_message_person_tasks_refresh_email_credentials_in_local_preflight,
     )
     r.record(
         "payment_abandonment_two_step_trajectory",

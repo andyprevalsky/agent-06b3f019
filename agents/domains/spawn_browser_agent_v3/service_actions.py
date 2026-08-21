@@ -1127,10 +1127,28 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             )
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={"expression": code, "returnByValue": True},
+            params={"expression": code, "returnByValue": True, "awaitPromise": True},
             session_id=cdp_session.session_id,
         )
         value = result.get("result", {}).get("value")
+        # CDP returns exceptionDetails when the expression throws; surface that
+        # instead of a silent null/empty value (async fetch failures used to look
+        # like successful empty objects).
+        exception = result.get("exceptionDetails")
+        if exception:
+            error_text = (
+                exception.get("text")
+                or (exception.get("exception") or {}).get("description")
+                or "evaluate raised"
+            )
+            await context.action_history.record_action(
+                dom_service=context.dom_service,
+                action="evaluate",
+                thinking=context.thinking,
+                params={"code": code},
+                result={"success": False, "error": error_text},
+            )
+            return {"success": False, "error": error_text, "value": value}
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="evaluate",
@@ -3066,12 +3084,58 @@ async def _execute_goto(
                 if key in prepared
             }
 
-    event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
-    await event
-    await event.event_result(raise_if_any=True, raise_if_none=False)
+    try:
+        event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
 
-    navigation_waiter = wait_for_navigation or wait_for_navigation_ready
-    await navigation_waiter(dom_service, url=url)
+        navigation_waiter = wait_for_navigation or wait_for_navigation_ready
+        await navigation_waiter(dom_service, url=url)
+    except Exception as nav_error:
+        error_text = extract_error_message(nav_error)
+        if (
+            session_id
+            and config is not None
+            and url.startswith(("http://", "https://"))
+            and "ERR_ABORTED" in error_text
+        ):
+            try:
+                from domains.spawn_browser_agent_v3.download_persist import (
+                    persist_navigation_download_via_page_fetch,
+                )
+
+                download = await persist_navigation_download_via_page_fetch(
+                    session=session,
+                    url=url,
+                    session_id=session_id,
+                    config=config,
+                )
+            except Exception as persist_error:
+                logger.warning(
+                    "ERR_ABORTED download persist failed",
+                    url=url[:200],
+                    error=f"{type(persist_error).__name__}:{extract_error_message(persist_error)[:160]}",
+                )
+                download = None
+            if download:
+                result = {
+                    "success": True,
+                    "message": (
+                        f"Navigation aborted into a file download; saved to session "
+                        f"as {download.get('path')} ({download.get('size')} bytes)"
+                    ),
+                    "current_url": url,
+                    "download": download,
+                }
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="goto",
+                    thinking=thinking,
+                    params={"url": url},
+                    result=result,
+                )
+                return result
+        raise
 
     result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:
