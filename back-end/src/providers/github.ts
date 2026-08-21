@@ -82,53 +82,80 @@ export async function checkGithubRepoAccess(
 
 /**
  * Create a fresh public GitHub repo under the rose-gh-agent account.
- * Uses GITHUB_TOKEN (PAT with repo scope).
+ * Prefers GITHUB_TOKEN, then falls back to GITHUB_DISPATCH_TOKEN when the
+ * primary PAT is present but rejected (401/403) — same pattern as admin-health
+ * velocity commits.
  *
  * @param repoName - The repo name (e.g., "agent-a1b2c3d4")
  * @returns The HTTPS URL of the created repo, or null on failure
  */
 export async function createGithubRepo(repoName: string): Promise<string | null> {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) {
+  const candidates = [process.env.GITHUB_TOKEN ?? '', process.env.GITHUB_DISPATCH_TOKEN ?? '']
+    .map((token) => token.trim())
+    .filter((token) => token !== '');
+  const unique = [...new Set(candidates)];
+  if (unique.length === 0) {
     log.error('GITHUB_TOKEN not configured — cannot create repo');
     return null;
   }
 
-  try {
-    const response = await fetch('https://api.github.com/user/repos', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/vnd.github+json',
-      },
-      body: JSON.stringify({
-        name: repoName,
-        description: 'Auto-created workspace for Rose Labs agent',
-        private: false,
-        auto_init: true,
-      }),
-    });
+  let lastStatus: number | null = null;
+  let lastBody = '';
+  for (let index = 0; index < unique.length; index += 1) {
+    const token = unique[index];
+    try {
+      const response = await fetch('https://api.github.com/user/repos', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/vnd.github+json',
+        },
+        body: JSON.stringify({
+          name: repoName,
+          description: 'Auto-created workspace for Rose Labs agent',
+          private: false,
+          auto_init: true,
+        }),
+      });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
+      if (response.ok) {
+        const data = (await response.json()) as { html_url: string };
+        const repoUrl = data.html_url;
+        log.info('Created repo', { repoUrl });
+        return repoUrl;
+      }
+
+      lastStatus = response.status;
+      lastBody = await response.text();
+      const hasFallback =
+        index < unique.length - 1 && (response.status === 401 || response.status === 403);
+      if (hasFallback) {
+        log.warn('GitHub token rejected for create repo; trying fallback', {
+          repoName,
+          status: response.status,
+        });
+        continue;
+      }
       log.error('Failed to create repo', {
         repoName,
         status: response.status,
-        errorBody,
+        errorBody: lastBody,
+      });
+      return null;
+    } catch (error) {
+      log.error('Error creating repo', {
+        repoName,
+        error: error instanceof Error ? error.message : String(error),
       });
       return null;
     }
-
-    const data = (await response.json()) as { html_url: string };
-    const repoUrl = data.html_url;
-    log.info('Created repo', { repoUrl });
-    return repoUrl;
-  } catch (error) {
-    log.error('Error creating repo', {
-      repoName,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
   }
+
+  log.error('Failed to create repo', {
+    repoName,
+    status: lastStatus,
+    errorBody: lastBody,
+  });
+  return null;
 }
