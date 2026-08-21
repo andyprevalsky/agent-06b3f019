@@ -44,12 +44,43 @@ interface WriteLockNotificationService {
   url?: unknown;
 }
 
+interface WriteLockMessageDetails {
+  to?: unknown;
+  cc?: unknown;
+  bcc?: unknown;
+  subject?: unknown;
+  body?: unknown;
+}
+
+interface WriteLockSocialPostDetails {
+  destination?: unknown;
+  audience?: unknown;
+  body?: unknown;
+}
+
+interface WriteLockPaymentDetails {
+  merchant?: unknown;
+  amount?: unknown;
+  purpose?: unknown;
+  fields?: unknown;
+}
+
+interface WriteLockGenericWriteDetails {
+  label?: unknown;
+  target?: unknown;
+  payload_summary?: unknown;
+}
+
 export interface WriteLockNotification {
   trigger_type?: unknown;
   action?: unknown;
   service?: WriteLockNotificationService;
   media?: unknown;
   purchase?: WriteLockNotificationPurchase;
+  message?: WriteLockMessageDetails;
+  social_post?: WriteLockSocialPostDetails;
+  payment?: WriteLockPaymentDetails;
+  generic_write?: WriteLockGenericWriteDetails;
 }
 
 interface WriteLockMetadata {
@@ -139,7 +170,18 @@ function displayServiceName(service: WriteLockNotificationService | null): strin
 }
 
 export function sanitizeSmsText(value: string): string {
-  return value
+  // Preserve email addresses — the domain→label rewrite would turn
+  // alex@example.com into alex@Example and break approval copy.
+  const emails: string[] = [];
+  const withEmailPlaceholders = value.replace(
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+    (match) => {
+      emails.push(match);
+      return `__EMAIL_${String(emails.length - 1)}__`;
+    }
+  );
+
+  const cleaned = withEmailPlaceholders
     .replace(/https?:\/\/[^\s)]+/gi, '')
     .replace(/\bwww\.[a-z0-9.-]+\.[a-z]{2,}\b/gi, '')
     .replace(/\b([a-z0-9-]+)\.(?:com|co|net|org|io|ai)\b/gi, (_match, label: string) => {
@@ -148,6 +190,10 @@ export function sanitizeSmsText(value: string): string {
     .replace(/[ \t]+/g, ' ')
     .replace(/\s+([.,;:])/g, '$1')
     .trim();
+
+  return cleaned.replace(/__EMAIL_(\d+)__/g, (_match, index: string) => {
+    return emails[Number(index)] ?? '';
+  });
 }
 
 export function getWriteLockNotification(metadata: unknown): WriteLockNotification | null {
@@ -317,27 +363,42 @@ function formatPaymentCardBody(card: PaymentCard): string {
   return truncateText(lines.map((line) => sanitizeSmsText(line)).join('\n'), 900);
 }
 
-function formatWriteLockNotificationBody(
-  notification: WriteLockNotification | null,
-  fallbackQuestion: string
-): string {
-  if (!notification) {
-    return SMS_TEMPLATES.writeLock('', stripMarkdownForSms(fallbackQuestion));
+function sentenceCaseAction(action: string): string {
+  if (!action) {
+    return action;
   }
+  if (action.length >= 2 && action[0] === action[0].toUpperCase() && action[1] === action[1].toUpperCase()) {
+    return action;
+  }
+  return action[0].toLowerCase() + action.slice(1);
+}
 
-  const service = asRecord(notification.service) as WriteLockNotificationService | null;
-  const serviceName = displayServiceName(service);
-  const lines = [`Approval needed`, `Rose needs your approval for ${serviceName} checkout.`];
+function pushLabeledValue(lines: string[], label: string, value: unknown): void {
+  const text = asString(value);
+  if (!text) {
+    return;
+  }
+  lines.push(`${label}: ${text}`);
+}
+
+function formatRecipientList(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return asString(value);
+  }
+  const recipients = value.map((entry) => asString(entry)).filter((entry): entry is string => entry !== null);
+  return recipients.length > 0 ? recipients.join(', ') : null;
+}
+
+function appendPurchaseSmsLines(lines: string[], notification: WriteLockNotification): number {
+  const before = lines.length;
   const items = getWriteLockItems(notification);
 
   if (items.length === 1) {
     const item = items[0];
     const title = asString(item.title);
     if (title) lines.push('', `Item: ${sanitizeSmsText(title)}`);
-    const price = asString(item.price);
-    if (price) lines.push(`Price: ${price}`);
-    const quantity = asString(item.quantity);
-    if (quantity) lines.push(`Qty: ${quantity}`);
+    pushLabeledValue(lines, 'Price', item.price);
+    pushLabeledValue(lines, 'Qty', item.quantity);
     const description = asString(item.description);
     if (description) {
       const sanitizedDescription = sanitizeSmsText(description);
@@ -345,10 +406,8 @@ function formatWriteLockNotificationBody(
         lines.push(`Description: ${sanitizedDescription}`);
       }
     }
-    const rating = asString(item.rating);
-    if (rating) lines.push(`Rating: ${rating}`);
-    const reviewCount = asString(item.review_count);
-    if (reviewCount) lines.push(`Reviews: ${reviewCount}`);
+    pushLabeledValue(lines, 'Rating', item.rating);
+    pushLabeledValue(lines, 'Reviews', item.review_count);
   } else if (items.length > 1) {
     lines.push('', `Items (${String(items.length)}):`);
     for (const [index, item] of items.slice(0, 6).entries()) {
@@ -375,7 +434,136 @@ function formatWriteLockNotificationBody(
     if (total) lines.push(`Total: ${total}`);
   }
 
-  return truncateText(lines.map((line) => sanitizeSmsText(line)).join('\n'), 900);
+  const purchase = asRecord(notification.purchase);
+  pushLabeledValue(lines, 'Payment', purchase?.payment_method);
+  pushLabeledValue(lines, 'Delivery', purchase?.delivery_address);
+
+  return lines.length - before;
+}
+
+function appendMessageSmsLines(lines: string[], message: Record<string, unknown> | null): number {
+  if (!message) {
+    return 0;
+  }
+  const before = lines.length;
+  for (const [label, key] of [
+    ['To', 'to'],
+    ['Cc', 'cc'],
+    ['Bcc', 'bcc'],
+  ] as const) {
+    const recipients = formatRecipientList(message[key]);
+    if (recipients) {
+      lines.push(`${label}: ${recipients}`);
+    }
+  }
+  pushLabeledValue(lines, 'Subject', message.subject);
+  const body = asString(message.body);
+  if (body) {
+    lines.push('', 'Body:', body);
+  }
+  return lines.length - before;
+}
+
+function appendSocialPostSmsLines(lines: string[], socialPost: Record<string, unknown> | null): number {
+  if (!socialPost) {
+    return 0;
+  }
+  const before = lines.length;
+  pushLabeledValue(lines, 'Destination', socialPost.destination);
+  pushLabeledValue(lines, 'Audience', socialPost.audience);
+  const body = asString(socialPost.body);
+  if (body) {
+    lines.push('', 'Post:', body);
+  }
+  return lines.length - before;
+}
+
+function appendPaymentSmsLines(lines: string[], payment: Record<string, unknown> | null): number {
+  if (!payment) {
+    return 0;
+  }
+  const before = lines.length;
+  pushLabeledValue(lines, 'Merchant', payment.merchant);
+  pushLabeledValue(lines, 'Amount', payment.amount);
+  pushLabeledValue(lines, 'Purpose', payment.purpose);
+  if (Array.isArray(payment.fields) && payment.fields.length > 0) {
+    const fields = payment.fields
+      .map((entry) => asString(entry))
+      .filter((entry): entry is string => entry !== null);
+    if (fields.length > 0) {
+      lines.push(`Fields: ${fields.join(', ')}`);
+    }
+  }
+  if (lines.length > before) {
+    lines.push('', 'Payment secrets are not included in this message.');
+  }
+  return lines.length - before;
+}
+
+function appendGenericWriteSmsLines(
+  lines: string[],
+  genericWrite: Record<string, unknown> | null
+): number {
+  if (!genericWrite) {
+    return 0;
+  }
+  const before = lines.length;
+  pushLabeledValue(lines, 'Action', genericWrite.label);
+  pushLabeledValue(lines, 'Target', genericWrite.target);
+  pushLabeledValue(lines, 'Change', genericWrite.payload_summary);
+  return lines.length - before;
+}
+
+/**
+ * Render SMS from structured writeLockNotification for every trigger_type.
+ * Purchase keeps the carrier-safe "checkout" header; other triggers use the
+ * action-based header that matches the in-app approval renderer. Falls back to
+ * the rendered approval question when structured details are missing.
+ */
+function formatWriteLockNotificationBody(
+  notification: WriteLockNotification | null,
+  fallbackQuestion: string
+): string {
+  if (!notification) {
+    return SMS_TEMPLATES.writeLock('', stripMarkdownForSms(fallbackQuestion));
+  }
+
+  const triggerType = asString(notification.trigger_type) ?? 'purchase';
+  const service = asRecord(notification.service) as WriteLockNotificationService | null;
+  const serviceName = displayServiceName(service);
+  const action = asString(notification.action) ?? 'perform a write action';
+
+  const lines: string[] =
+    triggerType === 'purchase'
+      ? [`Approval needed`, `Rose needs your approval for ${serviceName} checkout.`]
+      : [`Approval needed`, `Rose wants to ${sentenceCaseAction(action)} on ${serviceName}.`];
+
+  let detailCount = 0;
+  if (triggerType === 'purchase') {
+    detailCount = appendPurchaseSmsLines(lines, notification);
+  } else if (triggerType === 'message') {
+    detailCount = appendMessageSmsLines(lines, asRecord(notification.message));
+  } else if (triggerType === 'social_post') {
+    detailCount = appendSocialPostSmsLines(lines, asRecord(notification.social_post));
+  } else if (triggerType === 'payment') {
+    detailCount = appendPaymentSmsLines(lines, asRecord(notification.payment));
+  } else if (triggerType === 'generic_write') {
+    detailCount = appendGenericWriteSmsLines(lines, asRecord(notification.generic_write));
+  }
+
+  if (detailCount === 0) {
+    // Sparse / unknown trigger — prefer the already-rendered approval question
+    // so SMS still carries the key facts instead of a hollow "checkout" stub.
+    return SMS_TEMPLATES.writeLock('', stripMarkdownForSms(fallbackQuestion));
+  }
+
+  const body = lines.map((line) => sanitizeSmsText(line)).join('\n');
+  // Message / social / return bodies are the content being approved — do not
+  // apply the purchase 900-char truncate budget (same rule as plain-question path).
+  if (triggerType === 'message' || triggerType === 'social_post' || triggerType === 'generic_write') {
+    return body;
+  }
+  return truncateText(body, 900);
 }
 
 /**
