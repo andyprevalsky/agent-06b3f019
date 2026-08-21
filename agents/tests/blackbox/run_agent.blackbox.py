@@ -1794,6 +1794,86 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     assert result["tokens_out"] >= 7
 
 
+async def test_pause_after_forced_completion_llm_still_dispatches_attempt_completion():
+    """External PAUSE must not discard an already-returned forced attempt_completion.
+
+    Regression: gate-subscription-card-mint-admin-bypass pass@5 agent
+    b7b53dfb-20b4-4b8e-b019-432a315cee83 — browser child returned schema-complete
+    structured_response; parent logged run_agent.completed_child_forces_completion
+    and the LLM returned attempt_completion; the benchmark timeout PAUSE arrived
+    inside _account_llm_usage before tool dispatch, so EXECUTE ended paused and the
+    agent stayed ACTIVE despite a successful confirm.
+    """
+    response_schema = {
+        "fields": [
+            {"name": "payment_card_last4", "type": "str", "required": True},
+            {"name": "purchased_products", "type": "list", "required": True},
+            {"name": "order_confirmation_id", "type": "str", "required": True},
+        ]
+    }
+    child_result = {
+        "payment_card_last4": "6168",
+        "purchased_products": ["Aurora Notebook", "Ceramic Mug", "Canvas Tote"],
+        "order_confirmation_id": "tp_81fcdf56",
+    }
+    context = [
+        {"role": "USER", "text": "Buy the three products", "timestamp": "2026-08-21T18:22:41Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-08-21T18:23:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "browser-one",
+                        "type": "browser",
+                        "goal": "Complete checkout",
+                        "output_schema": response_schema,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Browser automation complete",
+            "timestamp": "2026-08-21T18:28:52Z",
+            "metadata": {
+                "toolCallId": "browser-one",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "structured_response": child_result,
+            },
+        },
+    ]
+    pause_after_usage = False
+
+    async def on_tokens(*_args, **_kwargs):
+        nonlocal pause_after_usage
+        pause_after_usage = True
+
+    async def check_paused():
+        return pause_after_usage
+
+    result, _, executed = await _run_single_iteration(
+        [{"tool": "attempt_completion"}],
+        [("attempt_completion", "tc-forced-ac", 1.0)],
+        skip_verification=False,
+        initial_context=context,
+        response_schema=response_schema,
+        verifier_structured_response=child_result,
+        on_tokens_override=on_tokens,
+        check_paused_override=check_paused,
+        max_iterations=2,
+    )
+
+    assert result["status"] == "completed", (
+        f"forced attempt_completion must finish even when PAUSE arrives after the LLM "
+        f"return; got status={result.get('status')!r} executed={[e['tool_name'] for e in executed]}"
+    )
+    assert [item["tool_name"] for item in executed] == ["attempt_completion"]
+
+
 async def test_max_iterations_runs_final_verifier():
     """When max_iterations reached, final verifier runs and result includes verifier_progress."""
     tool_calls = [{"tool": "web_search", "query": "x"}]
@@ -2105,6 +2185,10 @@ async def run_all_tests():
     await r.record_async(
         "completed_child_required_tool_bypasses_rejected_fast_cache",
         test_completed_child_required_tool_is_enforced_inside_direct_activity,
+    )
+    await r.record_async(
+        "pause_after_forced_completion_llm_still_dispatches_attempt_completion",
+        test_pause_after_forced_completion_llm_still_dispatches_attempt_completion,
     )
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
     await r.record_async(
