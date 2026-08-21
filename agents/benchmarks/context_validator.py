@@ -208,18 +208,28 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
                 file_pointer = msg.get("file_pointer") or msg.get("filePointer")
                 if isinstance(file_pointer, dict):
                     fname = (
-                        file_pointer.get("filename")
+                        file_pointer.get("original_filename")
+                        or file_pointer.get("filename")
                         or file_pointer.get("storage_path")
                         or "file"
                     )
-                    tool_content += f"\n\n[Attached file: {fname}]"
+                    tool_content += (
+                        f"\n\nfile_pointer:\n  original_filename: {fname}"
+                    )
                 attachments = metadata.get("attachments")
                 if isinstance(attachments, list):
                     for a in attachments:
                         if not isinstance(a, dict):
                             continue
-                        fname = a.get("filename") or a.get("storage_path") or "file"
-                        tool_content += f"\n\n[Attached file: {fname}]"
+                        fname = (
+                            a.get("original_filename")
+                            or a.get("filename")
+                            or a.get("storage_path")
+                            or "file"
+                        )
+                        tool_content += (
+                            f"\n\nfile_pointer:\n  original_filename: {fname}"
+                        )
                 label = metadata.get("toolName") or "tool"
                 result.append({"role": "user", "content": f"[{label} result]: {tool_content}"})
 
