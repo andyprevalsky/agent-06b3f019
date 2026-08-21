@@ -21,7 +21,11 @@ from domains.spawn_browser_agent_v3.config import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
-from helpers.workflow_generation import workflow_generation_headers
+from helpers.workflow_generation import (
+    WorkflowGenerationSealed,
+    raise_if_generation_sealed,
+    workflow_generation_headers,
+)
 
 logger = structlog.get_logger()
 
@@ -66,6 +70,8 @@ async def fetch_claude_token(
                 logger.info(f"[ClaudeAuth] Token fetch returned {resp.status_code}", user_id=user_id)
                 return None
             return resp.json()
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"[ClaudeAuth] Token fetch failed: {e}", user_id=user_id)
         return None
@@ -111,6 +117,8 @@ async def report_claude_token_rate_limited(
                 pool_token_id=pool_token_id,
                 rate_limited_until=rate_limited_until,
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"[ClaudeAuth] Failed to report token rate limit: {e}")
 
@@ -204,6 +212,7 @@ async def save_browser_action_message(
                 },
                 json={"message": message, "role": "TOOL", "metadata": metadata},
             )
+            raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
             if not response.is_success:
                 logger.error(
                     "Failed to save browser action message",
@@ -211,6 +220,8 @@ async def save_browser_action_message(
                 )
                 return False
         return True
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save browser action message", error=extract_error_message(e))
         return False
@@ -242,6 +253,8 @@ async def save_browser_assistant_message(
                 },
                 json={"message": message, "role": "ASSISTANT", "metadata": metadata},
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save browser assistant message", error=extract_error_message(e))
 
@@ -302,6 +315,7 @@ async def save_browser_credential_ref_message(
                 },
                 json={"message": message, "role": role, "metadata": metadata},
             )
+            raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
             if response.is_error:
                 logger.error(
                     "Failed to save credential ref message",
@@ -309,6 +323,8 @@ async def save_browser_credential_ref_message(
                 )
                 return False
         return True
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save credential ref message", error=extract_error_message(e))
         return False
@@ -360,6 +376,8 @@ async def list_session_files(config: Any, session_id: str) -> List[Dict[str, Any
                 return files if isinstance(files, list) else []
             logger.warning("Failed to list browser session files", session_id=session_id, status=response.status_code)
             return []
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Error listing browser session files", session_id=session_id, error=extract_error_message(e))
         return []
@@ -400,6 +418,8 @@ async def download_session_file(config: Any, session_id: str, file_path: str) ->
                     response=response.text[:200],
                 )
                 return None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(
             "[Browser] Error downloading file",
@@ -729,6 +749,8 @@ async def close_browser_session(config: Any, session_id: str, pause: bool = Fals
                 headers={"x-api-key": config.backend.api_key or ""},
                 json=payload,
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(f"Failed to close/pause session: {e}")
 
@@ -751,6 +773,8 @@ async def inject_local_storage(config: Any, session_id: str, origin: str) -> Opt
             else:
                 logger.warning(f"Failed to inject localStorage: HTTP {inject_response.status_code}")
                 return None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(f"Failed to inject localStorage: {e}")
         return None
@@ -780,6 +804,8 @@ async def upload_file_to_session(
             else:
                 logger.error(f"Failed to upload {filename}: HTTP {response.status_code} - {response.text[:200]}")
                 return None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"Failed to upload file {filename}: {e}")
         return None
@@ -870,6 +896,8 @@ Extract the requested information from the page content above."""
             content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             return content or "No content extracted"
 
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"Extract LLM call failed: {e}")
         return f"Extraction failed: {e!s}"
@@ -902,6 +930,8 @@ async def fetch_recent_emails(user_id: str, api_url: str, api_key: str, since: s
 
             data = response.json()
             return data.get("emails", [])
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Failed to fetch emails", error=str(e))
         return []
@@ -931,6 +961,8 @@ async def fetch_recent_sms_messages(
 
             data = response.json()
             return data.get("messages", [])
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Failed to fetch SMS messages", error=str(e))
         return []
@@ -962,6 +994,8 @@ async def fetch_recent_imessages(user_id: str, api_url: str, api_key: str, since
 
             data = response.json()
             return data.get("messages", [])
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Failed to fetch iMessages", error=str(e))
         return []

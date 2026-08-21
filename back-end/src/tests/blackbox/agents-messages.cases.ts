@@ -77,8 +77,14 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
   assertStatus(progress.status, 201, progress.data);
   assertStatus(earlySuccess.status, 201, earlySuccess.data);
   assertStatus(success.status, 201, success.data);
-  assertStatus(staleProgress.status, 201, staleProgress.data);
-  assertStatus(brandNewStale.status, 201, brandNewStale.data);
+  // CONTRACT CHANGE: a stale TOOL write now returns 409 instead of 200 + the
+  // fenced row. The writer is an orphaned activity of a terminated workflow,
+  // not the LLM — Temporal terminate() does not cancel in-flight activities,
+  // so a success response was the reason a replaced generation kept stepping
+  // and clobbering its own chips (15 in one local cutover, 105 in prod).
+  // The fenced row is still written; only the dead worker's status changes.
+  assertStatus(staleProgress.status, 409, staleProgress.data);
+  assertStatus(brandNewStale.status, 409, brandNewStale.data);
   assertStatus(replacementProgress.status, 201, replacementProgress.data);
   assertStatus(replacementSuccess.status, 201, replacementSuccess.data);
   const successBody = assertSchema(PostMessageResponse, success.data, 'sticky TOOL success');
@@ -87,23 +93,9 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
     earlySuccess.data,
     'early TOOL success'
   );
-  const staleProgressBody = assertSchema(
-    PostMessageResponse,
-    staleProgress.data,
-    'sticky TOOL progress'
-  );
   assert(
     earlySuccessBody.message_id !== successBody.message_id,
     'ordinary terminal updates must retain their existing multi-event behavior'
-  );
-  assert(
-    staleProgressBody.message_id === successBody.message_id,
-    'late stale progress must resolve to the fenced terminal result'
-  );
-  const brandNewStaleBody = assertSchema(
-    PostMessageResponse,
-    brandNewStale.data,
-    'brand-new stale TOOL progress'
   );
   const replacementSuccessBody = assertSchema(
     PostMessageResponse,
@@ -130,8 +122,14 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
       JSON.stringify(['FINISHED', 'FINISHED', 'FINISHED']),
     `Expected old and replacement successes without a contradictory error, got ${JSON.stringify(terminalStatuses)}`
   );
-  const brandNewStaleRow = await prisma.message.findUniqueOrThrow({
-    where: { id: brandNewStaleBody.message_id },
+  // Rejecting the dead worker must NOT stop the fence from recording the
+  // interruption — the replacement LLM still needs to see it in history.
+  const brandNewStaleRow = await prisma.message.findFirstOrThrow({
+    where: {
+      agentId,
+      role: 'TOOL',
+      metadata: { path: ['toolCallId'], equals: brandNewStaleCallId },
+    },
   });
   assert(
     brandNewStaleRow.text === 'new code version deployed, retry this tool',

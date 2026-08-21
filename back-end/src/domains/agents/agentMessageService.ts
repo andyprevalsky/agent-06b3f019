@@ -154,6 +154,26 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
 // Post message
 // ---------------------------------------------------------------------------
 
+/**
+ * A stale TOOL write must TELL the worker it is dead.
+ *
+ * This used to return 200 + the fenced row so "the LLM observes the deployment
+ * interruption and decides whether to retry". But the writer is an orphaned
+ * activity of a terminated workflow, not the LLM: Temporal `terminate()` closes
+ * a workflow without cancelling its in-flight activities, and the browser
+ * activity has no cancellation poll. Handing it a success response removed the
+ * only signal it could act on, so it kept stepping and every step became
+ * another red chip — 15 from a single cutover in the local e2e, 105 on one prod
+ * agent.
+ *
+ * The fenced row is still written by the generation fence, so the replacement
+ * LLM still sees the interruption in its history. Only the dead worker's HTTP
+ * result changes, and 409 is the same signal non-TOOL stale writes always got.
+ */
+function staleWorkerRejection(): { error: string; status: number } {
+  return { error: 'Workflow generation is no longer current', status: 409 };
+}
+
 /** Post a message to an agent (user or internal). */
 export async function postMessage(
   agentId: string,
@@ -224,11 +244,7 @@ export async function postMessage(
         status: 409,
       };
     }
-    // A stale TOOL lifecycle write is not accepted as the worker's requested
-    // transition, but the generation fence returns its canonical terminal row.
-    // Return that row to the stale worker so the LLM observes the deployment
-    // interruption and decides whether to retry. Non-TOOL stale writes have no
-    // canonical row and still take the 409 path above.
+    if (!result.accepted) return staleWorkerRejection();
     message = result.message;
   } else {
     message = await createMessage(messageParams);

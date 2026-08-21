@@ -11,6 +11,8 @@ import structlog
 from config import load_config
 from domains.call_phone_number.config import HTTP_TIMEOUT_MESSAGE
 from helpers.workflow_generation import (
+    WorkflowGenerationSealed,
+    raise_if_generation_sealed,
     stamp_tool_workflow_generation,
     workflow_generation_headers,
 )
@@ -47,7 +49,7 @@ async def save_phone_call_message(
         metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_MESSAGE) as client:
-            await client.post(
+            response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
                 headers={
                     "x-api-key": config.backend.api_key or "",
@@ -56,5 +58,8 @@ async def save_phone_call_message(
                 },
                 json={"message": message, "role": "TOOL", "metadata": metadata},
             )
+            raise_if_generation_sealed(response.status_code, "call_phone_number")
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save phone call message", error=str(e))

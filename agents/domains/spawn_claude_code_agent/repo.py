@@ -10,6 +10,8 @@ import structlog
 
 from config import load_config
 from helpers.workflow_generation import (
+    WorkflowGenerationSealed,
+    raise_if_generation_sealed,
     stamp_tool_workflow_generation,
     workflow_generation_headers,
 )
@@ -94,6 +96,7 @@ async def save_claude_code_message(
                     "metadata": metadata,
                 },
             )
+            raise_if_generation_sealed(response.status_code, "spawn_claude_code_agent")
             logger.info(
                 "[ClaudeCode] Saved message",
                 agent_id=agent_id,
@@ -102,6 +105,8 @@ async def save_claude_code_message(
                 status=status.value,
                 response_status=response.status_code,
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(
             "[ClaudeCode] Failed to save message",
@@ -191,6 +196,8 @@ async def persist_terminal_output(
                 output_len=len(output),
                 response_status=output_response.status_code,
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(
             "[ClaudeCode] Failed to persist output",
@@ -235,6 +242,8 @@ async def close_e2b_session(
                 status_code=close_response.status_code,
             )
             return {}
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(
             "[ClaudeCode] Failed to close session",
@@ -259,6 +268,8 @@ async def check_sandbox_health(
             )
             if health_resp.status_code == 200:
                 return health_resp.json()
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as health_err:
         logger.warning(
             "[ClaudeCode] Failed to check sandbox health",
