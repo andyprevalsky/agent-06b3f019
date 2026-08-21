@@ -103,6 +103,18 @@ maintain_object_store() {
 }
 
 acquire_fetch_lock
+
+# Idempotent fast path: when the warm volume is already at the exact SHA, skip
+# maintain/fetch/checkout/reset. A full-tree reset on a large /data/repo burned
+# the controller ssh_exec budget after HEAD already matched (descend I-08).
+if [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    current="$(git_cmd rev-parse HEAD 2>/dev/null || true)"
+    if [ "$(printf '%s' "$current" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$REF" | tr '[:upper:]' '[:lower:]')" ]; then
+        echo "[cloudbench] already-at $current"
+        exit 0
+    fi
+fi
+
 maintain_object_store
 
 remote_url="$(git_cmd remote get-url origin)"
