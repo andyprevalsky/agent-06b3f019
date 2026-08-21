@@ -8,7 +8,7 @@
  */
 
 import { createLogger } from '../../providers/logger';
-import { pending } from './connectSession';
+import { pending } from './connectSession.state';
 
 const log = createLogger('ComputeGrants');
 

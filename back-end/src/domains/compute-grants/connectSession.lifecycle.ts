@@ -10,7 +10,8 @@
  */
 
 import { createLogger } from '../../providers/logger';
-import { pending, type PendingConnect } from './connectSession';
+import { pending } from './connectSession.state';
+import type { PendingConnect } from './connectSession.types';
 
 const log = createLogger('ComputeGrants');
 

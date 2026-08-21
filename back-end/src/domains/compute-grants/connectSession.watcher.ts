@@ -10,7 +10,7 @@ import { createLogger } from '../../providers/logger';
 import { persistFirstGrant } from './connectSession.grant';
 import { finish, releaseBrowser } from './connectSession.lifecycle';
 import { upsertAccountConnection } from './repo';
-import type { ConnectProviderConfig, PendingConnect } from './connectSession';
+import type { ConnectProviderConfig, PendingConnect } from './connectSession.types';
 
 const log = createLogger('ComputeGrants');
 

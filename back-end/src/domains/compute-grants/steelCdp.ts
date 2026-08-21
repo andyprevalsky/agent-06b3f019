@@ -19,10 +19,8 @@
 
 import { createLogger } from '../../providers/logger';
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
-import {
-  createSteelRecoverySession,
-  releaseSteelRemoteSession,
-} from '../../providers/steel/session';
+import { createSteelRecoverySession } from '../../providers/steel/sessionRecovery';
+import { releaseSteelRemoteSession } from '../../providers/steel/session';
 import { REQUIRED_CHROME_FLAGS } from '../../providers/browser/claudeGrantMint';
 import type { CdpProvider } from './minter';
 
