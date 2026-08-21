@@ -57,6 +57,13 @@ async function main(): Promise<void> {
     assert.match(kill, /agentAttentionRequest\.deleteMany/);
     assert.match(kill, /deletedAt:\s*new Date\(\)/);
     assert.match(kill, /cleanupAgentSessions/);
+    // Soft-delete under workflow-generation lock before recursing children so a
+    // concurrent child create cannot commit after the descendant snapshot.
+    assert.match(kill, /lockAgentWorkflowGeneration/);
+    assert.match(kill, /runTransactionWithRetry/);
+    const softDeleteIdx = kill.indexOf('deletedAt: new Date()');
+    const recurseIdx = kill.indexOf('for (const childId of sealed.childIds)');
+    assert.ok(softDeleteIdx > 0 && recurseIdx > softDeleteIdx);
 
     const helpers = readSrc('src', 'providers', 'smsSupervisor', 'supervisorTools.helpers.ts');
     assert.doesNotMatch(
