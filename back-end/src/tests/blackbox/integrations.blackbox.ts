@@ -331,6 +331,8 @@ const INFRA_URL_PATTERNS = [
   'stripe.com',
   'parallel.ai',
   'connect.steelbrowser.com',
+  'connect.steel.dev',
+  'api.steel.dev',
   'perplexity.ai',
   'exa.ai',
   'vapi.ai',
@@ -484,6 +486,14 @@ async function testWhatsappUpload_noAuth() {
   assertStatus(res.status, 401, res.data);
 }
 
+async function testWhatsappConnect_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testTelegramConnect_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/telegram/connect`, {
     method: 'POST',
@@ -572,6 +582,14 @@ async function testEmailGmailAccountDelete_noAuth() {
   assertStatus(res.status, 401, res.data);
 }
 
+async function testEmailGmailAccountResync_noAuth() {
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('noauth@gmail.com')}/resync`,
+    { method: 'POST' }
+  );
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testEmailSend_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/email/send`, {
     method: 'POST',
@@ -630,9 +648,10 @@ const ANTHROPIC_COOLDOWN_NAME = 'anthropic_api_key_cooldown';
 async function snapshotAnthropicApiKeyCooldown() {
   return prisma.integration.findUnique({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: ANTHROPIC_COOLDOWN_USER_ID,
         name: ANTHROPIC_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     select: { id: true, rateLimitedUntil: true, failureReason: true, updatedAt: true },
@@ -1209,6 +1228,51 @@ async function testWhatsappUpload_happyPath() {
   assertSchema(MessagingUploadResponse, res.data, 'whatsapp happy');
 }
 
+async function testWhatsappConnect_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(TelegramConnectResponse, res.data, 'whatsapp connect');
+}
+
+/**
+ * Re-connecting an existing WhatsApp integration must merge config, not clobber
+ * it — re-pairing is routine and must not drop stored integration settings.
+ */
+async function testWhatsappConnect_preservesExistingConfig() {
+  const { accessToken } = await createAnonSession();
+
+  const createRes = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify({
+      name: 'whatsapp',
+      type: 'DATA_SOURCE',
+      config: { existingPolicy: 'preserve-me', nested: { value: 1 } },
+    }),
+  });
+  assertStatus(createRes.status, 200, createRes.data);
+
+  const connectRes = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+  });
+  assertStatus(connectRes.status, 200, connectRes.data);
+  const body = assertSchema(TelegramConnectResponse, connectRes.data, 'whatsapp connect preserve');
+  const integration = IntegrationSchema.passthrough().parse(body.integration);
+  const config = integration.config as Record<string, unknown>;
+  assert(
+    config.existingPolicy === 'preserve-me',
+    `Expected existing config to survive, got ${JSON.stringify(config)}`
+  );
+  assert(
+    typeof config.lastConnectedAt === 'string',
+    `Expected lastConnectedAt string, got ${JSON.stringify(config)}`
+  );
+}
+
 async function testTelegramConnect_happyPath() {
   const res = await request(`${BASE_URL}/api/integrations/telegram/connect`, {
     method: 'POST',
@@ -1652,7 +1716,7 @@ async function testPasswordsUpload_appleSourceMarksApplePasswordsIntegration() {
   assertSchema(PasswordsUploadResponse, res.data, 'passwords apple source');
 
   const appleIntegration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'apple_passwords' } },
+    where: { userId_name_accountId: { userId, name: 'apple_passwords', accountId: '' } },
   });
   assert(appleIntegration !== null, 'Expected apple_passwords integration to be marked connected');
   assert(
@@ -2357,6 +2421,229 @@ async function testEmailMessages_gmailNotConnected() {
   assertSchema(ErrorResponse, res.data, 'email messages not connected');
 }
 
+/**
+ * Regression (prod, 2026-08-18): starting an OAuth flow replaced `config`
+ * wholesale, so merely opening the consent screen destroyed `connectedEmails`.
+ * A user who abandoned the flow never reached the callback that rewrites them,
+ * and a still-connected account silently lost its UI account chips.
+ */
+async function testEmailOAuthStart_preservesConnectedEmailsOnAbandonedFlow() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      config: {
+        provider: 'gmail',
+        contacts: 229,
+        connectedEmail: 'primary@gmail.com',
+        connectedEmails: ['primary@gmail.com', 'secondary@gmail.com'],
+      },
+    },
+  });
+
+  // Start a flow and then abandon it -- never hit the callback.
+  const res = await request(`${BASE_URL}/api/integrations/email/gmail/start`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+  });
+  assert(res.status === 200 || res.status === 400, `oauth start responded ${res.status}`);
+
+  const after = await prisma.integration.findUnique({ where: { id: integration.id } });
+  const config = after?.config as {
+    connectedEmails?: unknown;
+    connectedEmail?: unknown;
+    contacts?: unknown;
+    startedAt?: unknown;
+  };
+  assert(
+    Array.isArray(config.connectedEmails) && config.connectedEmails.length === 2,
+    `abandoned OAuth start must preserve connectedEmails, got ${JSON.stringify(config.connectedEmails)}`
+  );
+  assert(
+    config.connectedEmail === 'primary@gmail.com',
+    `abandoned OAuth start must preserve connectedEmail, got ${String(config.connectedEmail)}`
+  );
+  assert(config.contacts === 229, 'unrelated config keys must survive an OAuth start');
+  assert(config.startedAt !== undefined, 'OAuth start must still record its flow marker');
+  assert(
+    after?.status === 'CONNECTED',
+    `a healthy integration must not be downgraded by starting a flow, got ${String(after?.status)}`
+  );
+}
+
+/**
+ * Even if some other writer already stripped the denormalized copy, the list
+ * response must still show the accounts: credentials are the source of truth.
+ */
+async function testGetIntegrations_derivesConnectedEmailsFromCredentials() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      // Exactly the damaged prod shape: no connectedEmails, failed sync.
+      status: 'SYNC_FAILED',
+      isActive: true,
+      config: { provider: 'gmail', contacts: 229, messages: 533 },
+    },
+  });
+  await prisma.emailIntegrationCredential.createMany({
+    data: [
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'live@roselabs.ai',
+        accessToken: 'access-live',
+        refreshToken: 'refresh-live',
+      },
+      // An abandoned flow leaves a null-email, tokenless row; it must not appear.
+      { userId, integrationId: integration.id, provider: 'GMAIL', email: null },
+    ],
+  });
+
+  const res = await request(`${BASE_URL}/api/integrations`, { headers: authHeaders(accessToken) });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { integrations?: Array<{ name: string; config?: unknown }> };
+  const gmail = body.integrations?.find((i) => i.name === 'gmail');
+  const config = gmail?.config as { connectedEmails?: unknown; connectedEmail?: unknown };
+  assert(
+    Array.isArray(config.connectedEmails) &&
+      config.connectedEmails.length === 1 &&
+      config.connectedEmails[0] === 'live@roselabs.ai',
+    `stripped config must self-heal from credentials, got ${JSON.stringify(config.connectedEmails)}`
+  );
+  assert(
+    config.connectedEmail === 'live@roselabs.ai',
+    `connectedEmail must derive too, got ${String(config.connectedEmail)}`
+  );
+}
+
+/**
+ * The merge must happen in the database, not as a read-modify-write: two
+ * concurrent OAuth starts would otherwise both read the pre-write config and
+ * the loser's write would erase whatever the winner just persisted (and could
+ * collide on `@@unique([userId, name])`, failing one request outright).
+ */
+async function testEmailOAuthStart_concurrentStartsPreserveConfig() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      config: {
+        provider: 'gmail',
+        connectedEmail: 'primary@gmail.com',
+        connectedEmails: ['primary@gmail.com'],
+      },
+    },
+  });
+
+  // Interleave a start with a callback-style write. A read-modify-write reads
+  // config BEFORE the callback lands, then writes its stale copy back over it,
+  // erasing the account the callback just recorded. A DB-level merge cannot.
+  const started = request(`${BASE_URL}/api/integrations/email/gmail/start`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await prisma.integration.update({
+    where: { id: integration.id },
+    data: {
+      config: {
+        provider: 'gmail',
+        connectedEmail: 'primary@gmail.com',
+        connectedEmails: ['primary@gmail.com', 'callback-added@gmail.com'],
+      },
+    },
+  });
+  const res = await started;
+  assert(res.status !== 500, `OAuth start must not 500, got ${res.status}`);
+
+  const after = await prisma.integration.findUnique({ where: { id: integration.id } });
+  const config = after?.config as { connectedEmails?: unknown; startedAt?: unknown };
+  assert(
+    Array.isArray(config.connectedEmails) && config.connectedEmails.length === 2,
+    `a start must not erase an interleaved callback's accounts, got ${JSON.stringify(config.connectedEmails)}`
+  );
+
+  // Concurrent starts must also not collide on @@unique([userId, name]).
+  const parallel = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      request(`${BASE_URL}/api/integrations/email/gmail/start`, {
+        method: 'POST',
+        headers: authHeaders(accessToken),
+      })
+    )
+  );
+  for (const parallelRes of parallel) {
+    assert(parallelRes.status !== 500, `concurrent start must not 500, got ${parallelRes.status}`);
+  }
+  const rowCount = await prisma.integration.count({ where: { userId, name: 'gmail' } });
+  assert(rowCount === 1, `expected exactly one gmail integration row, got ${rowCount}`);
+}
+
+/** The displayed primary must not flicker between a user's accounts. */
+async function testGetIntegrations_primaryConnectedEmailIsStable() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      // Records a primary that is NOT the oldest credential.
+      config: { provider: 'gmail', connectedEmail: 'second@gmail.com' },
+    },
+  });
+  await prisma.emailIntegrationCredential.createMany({
+    data: [
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'first@gmail.com',
+        accessToken: 'a1',
+        refreshToken: 'r1',
+      },
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'second@gmail.com',
+        accessToken: 'a2',
+        refreshToken: 'r2',
+      },
+    ],
+  });
+
+  const seen = new Set<string>();
+  for (let i = 0; i < 4; i += 1) {
+    const res = await request(`${BASE_URL}/api/integrations`, {
+      headers: authHeaders(accessToken),
+    });
+    assertStatus(res.status, 200, res.data);
+    const body = res.data as { integrations?: Array<{ name: string; config?: unknown }> };
+    const gmail = body.integrations?.find((i) => i.name === 'gmail');
+    const config = gmail?.config as { connectedEmail?: unknown };
+    seen.add(String(config.connectedEmail));
+  }
+  assert(seen.size === 1, `primary must be stable across requests, saw ${[...seen].join(', ')}`);
+  assert(
+    seen.has('second@gmail.com'),
+    `a still-connected configured primary must be retained, got ${[...seen][0]}`
+  );
+}
+
 async function testEmailGmailAccountDelete_removesOneCredential() {
   const { accessToken, userId } = await createAnonSession();
   const integration = await prisma.integration.create({
@@ -2426,6 +2713,157 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
       config.connectedEmails.length === 1 &&
       config.connectedEmails[0] === 'secondary@gmail.com',
     'connectedEmails config should be recomputed'
+  );
+}
+
+/**
+ * The regression this whole feature exists for.
+ *
+ * A user with two connected Gmail accounts, one of which has a dead refresh
+ * token, previously saw a single rose "Connected" chip: the per-account fact
+ * was rolled up onto the shared Integration row and never reached the client.
+ * GET /api/integrations must expose per-account health so the FE can render the
+ * broken one amber -- and must never leak tokens while doing it.
+ */
+async function testListIntegrations_exposesPerAccountHealth() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      config: { provider: 'gmail', connectedEmails: ['healthy@gmail.com', 'broken@gmail.com'] },
+    },
+  });
+  await prisma.emailIntegrationCredential.createMany({
+    data: [
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'healthy@gmail.com',
+        accessToken: 'access-healthy',
+        refreshToken: 'refresh-healthy',
+      },
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'broken@gmail.com',
+        accessToken: 'access-broken',
+        refreshToken: 'refresh-broken',
+        state: 'needs_reconnect',
+        lastErrorReason: 'Access was revoked or expired.',
+      },
+    ],
+  });
+
+  const res = await request(`${BASE_URL}/api/integrations`, {
+    headers: authHeaders(accessToken),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as {
+    integrations: Array<{
+      name: string;
+      emailCredentials?: Array<Record<string, unknown>>;
+    }>;
+  };
+  const gmail = body.integrations.find((i) => i.name === 'gmail');
+  assert(gmail !== undefined, 'gmail integration should be listed');
+  const creds = gmail!.emailCredentials ?? [];
+  assert(creds.length === 2, `expected 2 credentials, got ${creds.length}`);
+
+  const broken = creds.find((c) => c.email === 'broken@gmail.com');
+  const healthy = creds.find((c) => c.email === 'healthy@gmail.com');
+  assert(broken !== undefined && healthy !== undefined, 'both accounts should be present');
+  assert(
+    broken!.state === 'needs_reconnect',
+    `broken account must report needs_reconnect, got ${String(broken!.state)}`
+  );
+  assert(
+    healthy!.state === 'connected',
+    `healthy account must stay connected, got ${String(healthy!.state)}`
+  );
+  assert(
+    typeof broken!.lastErrorReason === 'string' && broken!.lastErrorReason !== '',
+    'the broken account must carry a reason for the chip tooltip'
+  );
+
+  // Tokens must never cross the API edge.
+  for (const cred of creds) {
+    for (const secret of ['accessToken', 'refreshToken', 'pkceVerifier', 'stateToken']) {
+      assert(
+        !(secret in cred),
+        `GET /api/integrations must not expose ${secret} (found on ${String(cred.email)})`
+      );
+    }
+  }
+}
+
+async function testEmailGmailAccountResync_notFound() {
+  const { accessToken } = await createAnonSession();
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('nobody@gmail.com')}/resync`,
+    { method: 'POST', headers: authHeaders(accessToken) }
+  );
+  assertStatus(res.status, 404, res.data);
+  assertSchema(ErrorResponse, res.data, 'resync unknown account');
+}
+
+/**
+ * A credential with no refresh token cannot be repaired by retrying, so resync
+ * must report it as terminal rather than silently doing nothing.
+ */
+async function testEmailGmailAccountResync_reportsNeedsReauth() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      config: { provider: 'gmail', connectedEmails: ['dead@gmail.com'] },
+    },
+  });
+  await prisma.emailIntegrationCredential.create({
+    data: {
+      userId,
+      integrationId: integration.id,
+      provider: 'GMAIL',
+      email: 'dead@gmail.com',
+      accessToken: 'stale-access',
+      // No refresh token and an already-expired access token: unrecoverable
+      // without user re-consent, and reproducible with no outbound call.
+      expiresAt: new Date(Date.now() - 60 * 60 * 1000),
+    },
+  });
+
+  const res = await request(
+    `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('dead@gmail.com')}/resync`,
+    { method: 'POST', headers: authHeaders(accessToken) }
+  );
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { needsReauth?: boolean; state?: string; email?: string };
+  assert(body.email === 'dead@gmail.com', 'resync should echo the account');
+  assert(body.needsReauth === true, 'a credential with no refresh token needs re-consent');
+  assert(body.state === 'needs_reconnect', `expected needs_reconnect, got ${String(body.state)}`);
+
+  // And the terminal state must be persisted, so the chip stays amber on reload
+  // rather than reverting to "Connected" until the next cron tick.
+  const stored = await prisma.emailIntegrationCredential.findFirst({
+    where: { userId, email: 'dead@gmail.com' },
+    select: { state: true, lastErrorReason: true },
+  });
+  assert(
+    stored?.state === 'needs_reconnect',
+    `persisted state should be needs_reconnect, got ${String(stored?.state)}`
+  );
+  assert(
+    typeof stored?.lastErrorReason === 'string' && stored.lastErrorReason !== '',
+    'a persisted failure must carry a reason'
   );
 }
 
@@ -2677,7 +3115,9 @@ async function testApplePasswordsUpload_validCsv() {
   assert(body.passwordCount === 3, `Expected 3 passwords, got ${body.passwordCount}`);
 
   const appleIntegration = await prisma.integration.findUnique({
-    where: { userId_name: { userId: ctx.userId1!, name: 'apple_passwords' } },
+    where: {
+      userId_name_accountId: { userId: ctx.userId1!, name: 'apple_passwords', accountId: '' },
+    },
   });
   assert(appleIntegration !== null, 'Expected apple_passwords integration to be created');
   assert(
@@ -3158,6 +3598,26 @@ async function testBoundary_telegramConnectNoOutbound() {
   assert(
     relevant.length === 0,
     `Expected 0 outbound calls for telegram/connect, got ${relevant.length}: ${JSON.stringify(relevant.map((c) => c.url))}`
+  );
+}
+
+/**
+ * POST /api/integrations/whatsapp/connect makes NO outbound calls.
+ * All work is local (DB upsert only).
+ */
+async function testBoundary_whatsappConnectNoOutbound() {
+  const token = captureToken('whatsapp-connect');
+
+  await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
+  });
+
+  const calls = await readCapturesForToken(token);
+  const relevant = filterInfraCalls(calls);
+  assert(
+    relevant.length === 0,
+    `Expected 0 outbound calls for whatsapp/connect, got ${relevant.length}: ${JSON.stringify(relevant.map((c) => c.url))}`
   );
 }
 
@@ -3871,7 +4331,7 @@ async function seedClaudeIntegration(
   const encryptedCredentials = buildCredentialPayload(accessToken);
 
   const integration = await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'claude_code' } },
+    where: { userId_name_accountId: { userId, name: 'claude_code', accountId: '' } },
     create: {
       userId,
       name: 'claude_code',
@@ -3920,7 +4380,7 @@ async function seedGptIntegration(
   const encryptedCredentials = buildGptCredentialPayload(accessToken, accountId);
 
   const integration = await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'gpt_code' } },
+    where: { userId_name_accountId: { userId, name: 'gpt_code', accountId: '' } },
     create: {
       userId,
       name: 'gpt_code',
@@ -4657,6 +5117,94 @@ async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope() 
   }
 }
 
+/**
+ * Regression: a generic short cooldown must never SHORTEN a provider-supplied
+ * long reset window.
+ *
+ * Prod 2026-07-28 (agent 49b3cc7a): the compute-token endpoint marked the user's
+ * claude_code token rate-limited until 2026-07-30T22:00:00Z (the reset Anthropic
+ * actually reported) at 16:54:51, then a second generic call at 16:55:06 — with no
+ * `rateLimitedUntil` in the body — overwrote it with the default 5-minute window
+ * (17:00:06Z). Five minutes later the still-exhausted token was handed out again.
+ * Meanwhile, for every second the token was flagged, `fetchClaudeCodeCredentialsWithMeta`
+ * skipped it, the pool was exhausted too, and the Claude Code path fell through to
+ * the unfunded shared ANTHROPIC_API_KEY — surfacing as "Your credit balance is too
+ * low" and `POST /api/claude-code-session/create -> 500` ("No Claude Code credentials
+ * available"), even though a perfectly valid synced OAuth token was sitting in the row.
+ */
+async function testRotation_rateLimitWindowIsMonotonic() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const userToken = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolToken = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  const longReset = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+  const markRateLimited = async (body: Record<string, unknown>) => {
+    const res = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify(body),
+    });
+    assertStatus(res.status, 200, res.data);
+  };
+
+  try {
+    // 1. Provider reported an explicit long reset.
+    await markRateLimited({
+      type: 'claude',
+      source: 'user',
+      userId: caller.userId,
+      rateLimitedUntil: longReset.toISOString(),
+    });
+    const afterLong = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterLong?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `Expected the provider reset ${longReset.toISOString()}, got ${String(afterLong?.rateLimitedUntil)}`
+    );
+
+    // 2. A later generic backoff (no rateLimitedUntil → short default) must NOT shorten it.
+    await markRateLimited({ type: 'claude', source: 'user', userId: caller.userId });
+    const afterGeneric = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterGeneric?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `A generic backoff shortened the provider reset window to ${String(afterGeneric?.rateLimitedUntil)} ` +
+        `(expected it to stay ${longReset.toISOString()}). An exhausted token would be re-served early, ` +
+        `and the Claude Code path would fall through to the unfunded ANTHROPIC_API_KEY.`
+    );
+
+    // 3. Same invariant on the pool side.
+    await markRateLimited({
+      type: 'claude',
+      source: 'pool',
+      poolTokenId: poolToken.id,
+      rateLimitedUntil: longReset.toISOString(),
+    });
+    await markRateLimited({ type: 'claude', source: 'pool', poolTokenId: poolToken.id });
+    const afterPoolGeneric = await prisma.integration.findUnique({ where: { id: poolToken.id } });
+    assert(
+      afterPoolGeneric?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `A generic backoff shortened the pool token's provider reset window to ${String(afterPoolGeneric?.rateLimitedUntil)}`
+    );
+
+    // 4. A genuinely LONGER window must still extend the backoff.
+    const longerReset = new Date(longReset.getTime() + 60 * 60 * 1000);
+    await markRateLimited({
+      type: 'claude',
+      source: 'user',
+      userId: caller.userId,
+      rateLimitedUntil: longerReset.toISOString(),
+    });
+    const afterExtend = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterExtend?.rateLimitedUntil?.getTime() === longerReset.getTime(),
+      `A longer provider reset must extend the window, got ${String(afterExtend?.rateLimitedUntil)}`
+    );
+  } finally {
+    await cleanupIntegrations([userToken.id, poolToken.id]);
+  }
+}
+
 async function testRotation_gptUserAuthErrorDisablesToken() {
   const caller = await createAnonSession();
   const poolOwner = await createAnonSession();
@@ -4877,6 +5425,184 @@ async function testGptCodeUpload_clearsExpiredAndRateLimitState() {
     assert(row?.rateLimitedUntil === null, 'upload must clear stale rateLimitedUntil');
     assert(row?.lastUsedAt === null, 'upload must clear stale lastUsedAt');
     assert(row?.failureReason === null, 'upload must clear stale failureReason');
+  } finally {
+    await cleanupIntegrations([userInt.id]);
+  }
+}
+
+// =====================================================================
+// Account-level token pooling default
+// ---------------------------------------------------------------------
+// `User.poolTokensByDefault` is an ACCOUNT policy: when on, every compute
+// credential that account syncs must land pool-eligible, so the pool is never
+// a single point of failure when the owner's own token hits its rate-limit
+// window. `Integration.poolingEnabledOverride` is the explicit per-integration
+// choice and always wins; null means "inherit the account default".
+// Regression net for the 3-agent benchmark wipeout where the only connected
+// claude_code row had pool=false and fetchPoolToken had nothing to rotate to.
+// =====================================================================
+
+async function setAccountPoolDefault(userId: string, enabled: boolean): Promise<void> {
+  // User.userId is the Supabase auth id — the same key Integration.userId uses.
+  await prisma.user.update({ where: { userId }, data: { poolTokensByDefault: enabled } });
+}
+
+async function uploadClaudeCredentials(accessToken: string): Promise<void> {
+  const encryptedCredentials = buildCredentialPayload(
+    `sk-ant-oat-acctdefault-${crypto.randomBytes(8).toString('hex')}`
+  );
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify(encryptPayload({ encryptedCredentials })),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
+async function uploadGptCredentials(accessToken: string): Promise<void> {
+  const encryptedCredentials = buildGptCredentialPayload(
+    `gpt-acctdefault-${crypto.randomBytes(8).toString('hex')}`,
+    `acct-${crypto.randomBytes(6).toString('hex')}`
+  );
+  const res = await request(`${BASE_URL}/api/integrations/gpt-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify(encryptPayload({ encryptedCredentials })),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
+async function readCredentialRow(userId: string, name: 'claude_code' | 'gpt_code') {
+  return prisma.integration.findUnique({
+    where: { userId_name_accountId: { userId, name, accountId: '' } },
+  });
+}
+
+// Account default ON -> a freshly synced Claude token is pool-eligible.
+async function testAccountPoolDefault_claudeSyncInheritsEnabled() {
+  const caller = await createAnonSession();
+  await setAccountPoolDefault(caller.userId, true);
+  const ids: string[] = [];
+
+  try {
+    await uploadClaudeCredentials(caller.accessToken);
+    const row = await readCredentialRow(caller.userId, 'claude_code');
+    assert(row !== null, 'upload must create a claude_code integration');
+    ids.push(row!.id);
+    assert(
+      row!.poolingEnabled === true,
+      `synced token must inherit poolTokensByDefault=true (got ${row!.poolingEnabled})`
+    );
+    assert(
+      row!.poolingEnabledOverride === null,
+      'inheriting the account default must NOT record a per-integration override'
+    );
+  } finally {
+    await cleanupIntegrations(ids);
+  }
+}
+
+// Account default ON -> a freshly synced GPT token is pool-eligible too.
+async function testAccountPoolDefault_gptSyncInheritsEnabled() {
+  const caller = await createAnonSession();
+  await setAccountPoolDefault(caller.userId, true);
+  const ids: string[] = [];
+
+  try {
+    await uploadGptCredentials(caller.accessToken);
+    const row = await readCredentialRow(caller.userId, 'gpt_code');
+    assert(row !== null, 'upload must create a gpt_code integration');
+    ids.push(row!.id);
+    assert(
+      row!.poolingEnabled === true,
+      `synced GPT token must inherit poolTokensByDefault=true (got ${row!.poolingEnabled})`
+    );
+  } finally {
+    await cleanupIntegrations(ids);
+  }
+}
+
+// Account default OFF -> unchanged behavior, token stays out of the pool.
+async function testAccountPoolDefault_syncStaysUnpooledWhenDefaultOff() {
+  const caller = await createAnonSession();
+  const ids: string[] = [];
+
+  try {
+    const user = await prisma.user.findUnique({ where: { userId: caller.userId } });
+    assert(
+      user?.poolTokensByDefault === false,
+      'new accounts must default to poolTokensByDefault=false'
+    );
+
+    await uploadClaudeCredentials(caller.accessToken);
+    const row = await readCredentialRow(caller.userId, 'claude_code');
+    assert(row !== null, 'upload must create a claude_code integration');
+    ids.push(row!.id);
+    assert(
+      row!.poolingEnabled === false,
+      'account default OFF must keep the synced token out of the pool'
+    );
+  } finally {
+    await cleanupIntegrations(ids);
+  }
+}
+
+// Explicit per-integration override beats the account policy in BOTH directions.
+async function testAccountPoolDefault_explicitOverrideWins() {
+  const optOut = await createAnonSession();
+  const optIn = await createAnonSession();
+  const optOutInt = await seedClaudeIntegration(optOut.userId, { poolingEnabled: true });
+  const optInInt = await seedClaudeIntegration(optIn.userId, { poolingEnabled: false });
+
+  try {
+    // Account says "pool everything", operator explicitly excluded this token.
+    await setAccountPoolDefault(optOut.userId, true);
+    await prisma.integration.update({
+      where: { id: optOutInt.id },
+      data: { poolingEnabledOverride: false },
+    });
+    await uploadClaudeCredentials(optOut.accessToken);
+    const optOutRow = await readCredentialRow(optOut.userId, 'claude_code');
+    assert(
+      optOutRow?.poolingEnabled === false,
+      'explicit override=false must beat account default=true on re-sync'
+    );
+
+    // Account says "do not pool", operator explicitly opted this token in.
+    await prisma.integration.update({
+      where: { id: optInInt.id },
+      data: { poolingEnabledOverride: true },
+    });
+    await uploadClaudeCredentials(optIn.accessToken);
+    const optInRow = await readCredentialRow(optIn.userId, 'claude_code');
+    assert(
+      optInRow?.poolingEnabled === true,
+      'explicit override=true must beat account default=false on re-sync'
+    );
+  } finally {
+    await cleanupIntegrations([optOutInt.id, optInInt.id]);
+  }
+}
+
+// Re-syncing a rotated token must never silently drain the pool.
+async function testAccountPoolDefault_resyncKeepsPooledToken() {
+  const caller = await createAnonSession();
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: true });
+
+  try {
+    const before = await readCredentialRow(caller.userId, 'claude_code');
+    assert(
+      before?.poolingEnabled === true && before.poolingEnabledOverride === null,
+      'fixture must start pooled with no explicit override'
+    );
+
+    await uploadClaudeCredentials(caller.accessToken);
+
+    const after = await readCredentialRow(caller.userId, 'claude_code');
+    assert(
+      after?.poolingEnabled === true,
+      're-syncing a token must not reset an already-pooled integration'
+    );
   } finally {
     await cleanupIntegrations([userInt.id]);
   }
@@ -5166,9 +5892,10 @@ async function testClaudeCodeBillingFailure_backsOffFundedApiKey() {
 
     const cooldown = await prisma.integration.findUnique({
       where: {
-        userId_name: {
+        userId_name_accountId: {
           userId: ANTHROPIC_COOLDOWN_USER_ID,
           name: ANTHROPIC_COOLDOWN_NAME,
+          accountId: '',
         },
       },
     });
@@ -5702,6 +6429,7 @@ async function runAll() {
     { name: 'DELETE /:name no auth -> 401', fn: testDelete_noAuth },
     { name: 'POST /imessage/upload no auth -> 401', fn: testImessageUpload_noAuth },
     { name: 'POST /whatsapp/upload no auth -> 401', fn: testWhatsappUpload_noAuth },
+    { name: 'POST /whatsapp/connect no auth -> 401', fn: testWhatsappConnect_noAuth },
     { name: 'POST /telegram/connect no auth -> 401', fn: testTelegramConnect_noAuth },
     { name: 'POST /telegram/upload no auth -> 401', fn: testTelegramUpload_noAuth },
     { name: 'POST /cookies/upload no auth -> 401', fn: testCookiesUpload_noAuth },
@@ -5718,6 +6446,10 @@ async function runAll() {
     {
       name: 'DELETE /email/gmail/accounts/:email no auth -> 401',
       fn: testEmailGmailAccountDelete_noAuth,
+    },
+    {
+      name: 'POST /email/gmail/accounts/:email/resync no auth -> 401',
+      fn: testEmailGmailAccountResync_noAuth,
     },
     { name: 'POST /email/send no auth -> 401', fn: testEmailSend_noAuth },
     { name: 'POST /upload no auth -> 401', fn: testUpload_noAuth },
@@ -5789,6 +6521,11 @@ async function runAll() {
     { name: 'POST /imessage/upload happy path', fn: testImessageUpload_happyPath },
     { name: 'POST /whatsapp/upload empty contacts -> 400', fn: testWhatsappUpload_emptyContacts },
     { name: 'POST /whatsapp/upload happy path', fn: testWhatsappUpload_happyPath },
+    { name: 'POST /whatsapp/connect happy path', fn: testWhatsappConnect_happyPath },
+    {
+      name: 'POST /whatsapp/connect preserves existing config',
+      fn: testWhatsappConnect_preservesExistingConfig,
+    },
     { name: 'POST /telegram/connect happy path', fn: testTelegramConnect_happyPath },
     { name: 'POST /telegram/upload empty contacts -> 400', fn: testTelegramUpload_emptyContacts },
     { name: 'POST /telegram/upload happy path', fn: testTelegramUpload_happyPath },
@@ -6008,6 +6745,36 @@ async function runAll() {
     {
       name: 'DELETE /email/gmail/accounts/:email removes one credential',
       fn: testEmailGmailAccountDelete_removesOneCredential,
+    },
+    {
+      name: 'POST /email/gmail/start abandoned flow preserves connectedEmails',
+      fn: testEmailOAuthStart_preservesConnectedEmailsOnAbandonedFlow,
+    },
+    {
+      name: 'GET / derives connectedEmails from credentials when config is stripped',
+      fn: testGetIntegrations_derivesConnectedEmailsFromCredentials,
+    },
+    {
+      name: 'POST /email/gmail/start concurrent starts preserve config',
+      fn: testEmailOAuthStart_concurrentStartsPreserveConfig,
+    },
+    {
+      name: 'GET / primary connectedEmail is stable across requests',
+      fn: testGetIntegrations_primaryConnectedEmailIsStable,
+    },
+
+    // Per-account email health (needs-reconnection surface)
+    {
+      name: 'GET / exposes per-account email health without leaking tokens',
+      fn: testListIntegrations_exposesPerAccountHealth,
+    },
+    {
+      name: 'POST /email/gmail/accounts/:email/resync unknown account -> 404',
+      fn: testEmailGmailAccountResync_notFound,
+    },
+    {
+      name: 'POST /email/gmail/accounts/:email/resync reports needs-reauth and persists it',
+      fn: testEmailGmailAccountResync_reportsNeedsReauth,
     },
 
     // File upload validation
@@ -6233,6 +7000,10 @@ async function runAll() {
       fn: testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
     },
     {
+      name: 'rotation -- rate-limit window never shortens',
+      fn: testRotation_rateLimitWindowIsMonotonic,
+    },
+    {
       name: 'rotation -- GPT user auth_error disables token',
       fn: testRotation_gptUserAuthErrorDisablesToken,
     },
@@ -6268,6 +7039,26 @@ async function runAll() {
     {
       name: 'claude-code upload -- clears stale rate-limit cooldown',
       fn: testClaudeCodeUpload_clearsRateLimitCooldown,
+    },
+    {
+      name: 'account pooling default -- synced Claude token inherits enabled',
+      fn: testAccountPoolDefault_claudeSyncInheritsEnabled,
+    },
+    {
+      name: 'account pooling default -- synced GPT token inherits enabled',
+      fn: testAccountPoolDefault_gptSyncInheritsEnabled,
+    },
+    {
+      name: 'account pooling default -- OFF keeps synced token unpooled',
+      fn: testAccountPoolDefault_syncStaysUnpooledWhenDefaultOff,
+    },
+    {
+      name: 'account pooling default -- explicit per-integration override wins',
+      fn: testAccountPoolDefault_explicitOverrideWins,
+    },
+    {
+      name: 'account pooling default -- re-sync keeps an already-pooled token',
+      fn: testAccountPoolDefault_resyncKeepsPooledToken,
     },
     {
       name: 'claude-code exhaustion -- pool token marked rate-limited at parsed reset time',
@@ -6316,6 +7107,10 @@ async function runAll() {
         fn: testBoundary_emailMessagesValidationNoOutbound,
       },
       { name: 'boundary -- passwords/request SMS boundary', fn: testBoundary_passwordsRequestSms },
+      {
+        name: 'boundary -- whatsapp/connect no outbound',
+        fn: testBoundary_whatsappConnectNoOutbound,
+      },
       {
         name: 'boundary -- telegram/connect no outbound',
         fn: testBoundary_telegramConnectNoOutbound,

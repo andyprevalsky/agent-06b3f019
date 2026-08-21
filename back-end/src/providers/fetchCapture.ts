@@ -19,6 +19,9 @@
  * Activation: BLACKBOX_TEST_CAPTURE_OUTBOUND=1 before server boot. Replay is a
  * separate opt-in via BLACKBOX_TEST_REPLAY_OUTBOUND=1.
  * Only intended for isolated blackbox test backends — never in production.
+ *
+ * Binary responses (`image/*`, `application/pdf`, …) are stored as base64 so
+ * capture/replay does not UTF-8-corrupt attachment bytes used by E2B uploads.
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
@@ -68,6 +71,64 @@ interface SerializedResponse {
   statusText: string;
   body: string;
   headers: Record<string, string>;
+  /** Private capture metadata — never store this in upstream HTTP headers. */
+  bodyEncoding?: 'base64';
+}
+
+/**
+ * Content types whose bodies must not pass through `response.text()` — that path
+ * UTF-8-decodes with U+FFFD replacement and permanently corrupts JPEGs/PDFs/etc.
+ * Benchmark stacks enable capture by default (`BLACKBOX_TEST_CAPTURE_OUTBOUND=1`),
+ * so this boundary sits on the real attachment → E2B upload path.
+ *
+ * Prefer an allowlist for *text* decoding: missing/unknown content-types are
+ * treated as binary. Supabase Storage occasionally omits Content-Type on
+ * signed-URL downloads; treating those as text reintroduced the 207364→369851
+ * JPEG corruption on fleet after the image/* fix landed.
+ */
+export function isBinaryContentType(contentType: string | null | undefined): boolean {
+  return !isTextContentType(contentType);
+}
+
+/** Only these content-types may safely go through `response.text()`. */
+export function isTextContentType(contentType: string | null | undefined): boolean {
+  if (contentType === null || contentType === undefined || contentType === '') return false;
+  const ct = contentType.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (ct.startsWith('text/')) return true;
+  if (ct === 'application/json') return true;
+  if (ct === 'application/ld+json') return true;
+  if (ct === 'application/xml' || ct === 'text/xml' || ct.endsWith('+xml')) return true;
+  if (ct === 'application/javascript' || ct === 'application/x-javascript') return true;
+  if (ct === 'application/xhtml+xml') return true;
+  if (ct === 'application/graphql' || ct === 'application/graphql+json') return true;
+  if (ct === 'application/x-www-form-urlencoded') return true;
+  if (ct === 'application/problem+json') return true;
+  return false;
+}
+
+/**
+ * Detect the classic fetchCapture `response.text()` JPEG corruption signature:
+ * UTF-8 replacement sequences (EF BF BD) dominating a buffer that should be
+ * binary (no JPEG/PNG SOI). Used as a last-line guard before E2B upload.
+ *
+ * PDF magic alone is not enough to skip the scan — a `%PDF` prefix can survive
+ * UTF-8 replacement while the rest of the stream is corrupted.
+ */
+export function looksLikeUtf8ReplacementCorruption(buf: Buffer): boolean {
+  if (buf.length < 16) return false;
+  // Intact image magic → not this failure mode.
+  if (buf[0] === 0xff && buf[1] === 0xd8) return false; // JPEG
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return false; // PNG
+  const fffd = Buffer.from([0xef, 0xbf, 0xbd]);
+  let count = 0;
+  for (let i = 0; i <= buf.length - 3; i++) {
+    if (buf[i] === fffd[0] && buf[i + 1] === fffd[1] && buf[i + 2] === fffd[2]) {
+      count += 1;
+      i += 2;
+    }
+  }
+  // Classic rs.jpeg case: 82673 / 369851 ≈ 22% of bytes are the 3-byte sequence.
+  return count >= 100 && count * 3 >= Math.floor(buf.length * 0.15);
 }
 
 export function isRetryableOutboundResponseStatus(status: number): boolean {
@@ -76,6 +137,18 @@ export function isRetryableOutboundResponseStatus(status: number): boolean {
 
 export function outboundReplayCacheKey(url: string, method: string, body: string | null): string {
   return `call:${JSON.stringify([url, method, body])}`;
+}
+
+function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
+  const headers: Record<string, string> = { ...serialized.headers };
+  const body =
+    serialized.bodyEncoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
+
+  return new globalThis.Response(body, {
+    status: serialized.status,
+    statusText: serialized.statusText,
+    headers,
+  });
 }
 
 class NonReplayableResponseError extends Error {
@@ -108,12 +181,32 @@ class FetchReplayClient {
       body: body ?? undefined,
     });
 
-    const responseBody = await response.text();
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((v, k) => {
       responseHeaders[k] = v;
     });
 
+    const contentType =
+      responseHeaders['content-type'] ??
+      responseHeaders['Content-Type'] ??
+      response.headers.get('content-type');
+
+    // Binary / unknown content-types must round-trip as raw bytes. `response.text()`
+    // UTF-8-decodes with replacement characters (U+FFFD), expanding a 207KB JPEG
+    // into ~370KB of corrupted text — the files-in-sub-agents / Claude Code
+    // attachment failure mode. Only known text types use `.text()`.
+    if (!isTextContentType(contentType)) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        body: bytes.toString('base64'),
+        headers: responseHeaders,
+        bodyEncoding: 'base64',
+      };
+    }
+
+    const responseBody = await response.text();
     return {
       status: response.status,
       statusText: response.statusText,
@@ -208,13 +301,36 @@ export function installFetchCapture(): Router {
       return originalFetch(input, init);
     }
 
+    const resolveMethod = (): string => {
+      const raw =
+        init?.method ??
+        (typeof globalThis.Request === 'function' && input instanceof globalThis.Request
+          ? input.method
+          : 'GET');
+      const trimmed = String(raw || 'GET').trim();
+      const upper = trimmed.toUpperCase();
+      // Fetch canonicalizes the standard method tokens; preserve custom methods.
+      const standard = new Set([
+        'GET',
+        'HEAD',
+        'POST',
+        'PUT',
+        'DELETE',
+        'CONNECT',
+        'OPTIONS',
+        'TRACE',
+        'PATCH',
+      ]);
+      return standard.has(upper) ? upper : trimmed || 'GET';
+    };
+
     // Mutable control-plane calls bypass replay. E2B also uses Request objects
     // with streaming bodies that cannot round-trip through the string cache.
     // Captures are still recorded for outbound boundary assertions.
     if (shouldBypassOutboundReplay(url)) {
       const captureId = nextId++;
       const captureStart = Date.now();
-      const captureMethod = init?.method ?? 'GET';
+      const captureMethod = resolveMethod();
       try {
         const response = await originalFetch(input, init);
         const entry: CapturedCall = {
@@ -255,9 +371,9 @@ export function installFetchCapture(): Router {
 
     const id = nextId++;
     const start = Date.now();
-    const method = init?.method ?? 'GET';
+    const method = resolveMethod();
 
-    // Serialize request body
+    // Serialize request body (init.body, else Request body for fake markers).
     let requestBody: string | null = null;
     let bodySerializable = true;
     if (init?.body !== undefined && init?.body !== null) {
@@ -267,6 +383,18 @@ export function installFetchCapture(): Router {
         requestBody = init.body.toString();
       } else {
         requestBody = '[non-string body]';
+        bodySerializable = false;
+      }
+    } else if (
+      typeof globalThis.Request === 'function' &&
+      input instanceof globalThis.Request &&
+      method.toUpperCase() !== 'GET' &&
+      method.toUpperCase() !== 'HEAD'
+    ) {
+      try {
+        requestBody = await input.clone().text();
+      } catch {
+        requestBody = null;
         bodySerializable = false;
       }
     }
@@ -305,24 +433,14 @@ export function installFetchCapture(): Router {
       }
     }
 
-    // Collect full headers for the real call
+    // Collect full headers for the real call. Request headers come first so
+    // absent/partial init.headers still preserve Authorization/Content-Type on
+    // replay; init then overrides on conflict.
     const fullHeaders: Record<string, string> = {};
-    const rawHeaders = init?.headers;
-    if (rawHeaders) {
-      if (rawHeaders instanceof Headers) {
-        rawHeaders.forEach((v, k) => {
-          fullHeaders[k] = v;
-        });
-      } else if (Array.isArray(rawHeaders)) {
-        for (const [k, v] of rawHeaders) {
-          fullHeaders[k] = v;
-        }
-      } else {
-        for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
-          fullHeaders[k] = v;
-        }
-      }
+    if (typeof globalThis.Request === 'function' && input instanceof globalThis.Request) {
+      assignHeadersInto(fullHeaders, input.headers);
     }
+    assignHeadersInto(fullHeaders, init?.headers);
 
     // Redacted headers for the capture log (visible to tests)
     const redactedHeaders: Record<string, string> = {};
@@ -379,6 +497,29 @@ export function installFetchCapture(): Router {
       });
     }
 
+    if (
+      process.env.BLACKBOX_TEST_FAKE_WHATSAPP === '1' &&
+      new URL(url).hostname === 'graph.facebook.com' &&
+      new URL(url).pathname.endsWith('/messages') &&
+      method.toUpperCase() === 'POST'
+    ) {
+      const unavailable = requestBody?.includes('__BLACKBOX_WHATSAPP_503__') === true;
+      const status = unavailable ? 503 : 200;
+      const body = unavailable
+        ? JSON.stringify({ error: { message: 'blackbox fake WhatsApp unavailable' } })
+        : JSON.stringify({ messages: [{ id: `blackbox-whatsapp-message-${String(id)}` }] });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = status;
+      entry.responseBody = body;
+      captures.push(entry);
+
+      return new globalThis.Response(body, {
+        status,
+        statusText: unavailable ? 'Service Unavailable' : 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
     // AgentCard MCP is a stateful payment boundary. Replaying tools/call responses
     // (especially list_transfers) can hide a card issued seconds earlier and make
     // the benchmark exercise stale financial state. Preserve capture metadata but
@@ -428,12 +569,8 @@ export function installFetchCapture(): Router {
 
       captures.push(entry);
 
-      // Reconstruct a Response object from the serialized data
-      return new globalThis.Response(serialized.body, {
-        status: serialized.status,
-        statusText: serialized.statusText,
-        headers: serialized.headers,
-      });
+      // Reconstruct a Response object from the serialized data (base64 for binary).
+      return responseFromSerialized(serialized);
     } catch (err) {
       entry.durationMs = Date.now() - start;
       entry.error = err instanceof Error ? err.message : String(err);
@@ -503,6 +640,33 @@ export function installFetchCapture(): Router {
   });
 
   return router;
+}
+
+function assignHeadersInto(target: Record<string, string>, rawHeaders: unknown): void {
+  if (!rawHeaders) return;
+  const apply = (key: string, value: string): void => {
+    const lower = key.toLowerCase();
+    for (const existing of Object.keys(target)) {
+      if (existing.toLowerCase() === lower) {
+        delete target[existing];
+      }
+    }
+    target[key] = value;
+  };
+  if (typeof Headers !== 'undefined' && rawHeaders instanceof Headers) {
+    rawHeaders.forEach((v, k) => {
+      apply(k, v);
+    });
+  } else if (Array.isArray(rawHeaders)) {
+    for (const entry of rawHeaders) {
+      if (!Array.isArray(entry) || entry.length < 2) continue;
+      apply(String(entry[0]), String(entry[1]));
+    }
+  } else if (typeof rawHeaders === 'object') {
+    for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
+      apply(k, v);
+    }
+  }
 }
 
 function redactHeader(key: string, value: string): string {

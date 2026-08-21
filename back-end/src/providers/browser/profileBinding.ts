@@ -13,12 +13,16 @@ export interface ProviderProfileBinding {
   required: boolean;
 }
 
-// Steel SessionAuth snapshots are the only profiles the agent MUST load exactly;
-// their recorded source is steel_session_auth[/_read_only]. Every other source
-// (Kernel/Steel user-persistent, benchmark-anon, disabled, etc.) is a
-// best-effort continuation binding that tolerates a differing/NONE loaded id.
+export const INVALIDATED_STEEL_PROFILE_SOURCE = 'steel_session_auth_invalidated';
+
+// Enabled Steel SessionAuth snapshots are the only profiles the agent MUST load
+// exactly. An invalidated source retains completion lineage but is never a
+// provider replacement binding. Every other source is best-effort.
 export function providerProfileBindingIsRequired(profileSource: string): boolean {
-  return profileSource.startsWith('steel_session_auth');
+  return (
+    profileSource !== INVALIDATED_STEEL_PROFILE_SOURCE &&
+    profileSource.startsWith('steel_session_auth')
+  );
 }
 
 export function recordedProviderProfileBinding(session: {
@@ -29,6 +33,9 @@ export function recordedProviderProfileBinding(session: {
     return undefined;
   }
   const profileSource = session.providerProfileSource ?? 'session_bound';
+  if (profileSource === INVALIDATED_STEEL_PROFILE_SOURCE) {
+    return undefined;
+  }
   return {
     profileId: session.providerProfileId,
     profileSource,

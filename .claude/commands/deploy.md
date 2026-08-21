@@ -14,8 +14,8 @@ Every human approval request in this command—including prompt or
 agent-behavior approval, a gate override, credential/billing/environment
 escalation, a destructive action, or any other approval—must follow
 `.claude/shared/approval-format.md`. Read it completely immediately before
-composing the request. Its Detail, Before Behavior, After Behavior, and
-Downstream Implications sections are mandatory and additive to the
+composing the request. Its Evidence, Detail, Before Behavior, After Behavior,
+and Downstream Implications sections are mandatory and additive to the
 deploy-specific telemetry, file-link, and snapshot rules below.
 
 ---
@@ -144,7 +144,7 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 ## Step 0: Change detection + execution plan
 
-**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.)
+**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
 If the branch is behind `origin/main`, sync first (commit the worktree, then
 `git merge origin/main`). Resolve conflicts keeping every feature, re-sync deps
@@ -154,6 +154,8 @@ main-sync delta from merge history so shared type changes introduced by either
 this merge or an earlier `/sync` remain lint seeds.
 
 All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
+
+**Run every Phase 1 block that expands a file list — `$CHANGED_TS`, `$LINT_TS` — under `bash`, e.g. `bash -c '<block>'`.** These lists are newline-separated and rely on shell word splitting to become separate argv entries. The agent harness shell is zsh, which does NOT word-split unquoted parameter expansions, so running them directly passes the whole list as one filename and the stage fails with `No files matching the pattern were found`. Persist the computed lists to files (`/tmp/deploy-changed-ts.txt`, `/tmp/deploy-lint-ts.txt`) so each `bash -c` block can re-read them instead of relying on exported shell state, which does not persist between tool calls.
 
 ```bash
 BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
@@ -294,7 +296,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
-   budgets computed above). Every repository
+   budgets computed above, except for the Step 4cb ordering rule below). Every repository
    coverage command executes its blackbox suite under instrumentation, so that
    one command satisfies both the Coverage and Runtime blackbox rows. Never run
    the same blackbox suite again without coverage. Before the combined lanes,
@@ -316,7 +318,10 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
    - Step 4s: deploy environment + command structural tests (no skip)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
-   - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty)
+   - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty). If
+     `CHANGED_AGENTS` is also non-empty, defer this lane until Step 4g exits; the agents
+     `benchmark` domain and these controller suites share local controller locks and fixture
+     state. This deferred lane remains inside the `runtime-blackbox` boundary.
 
    **Coverage + Runtime blackbox (one execution, reported in both rows):**
    - Step 4a: back-end blackbox + unit tests under coverage (skip if
@@ -349,10 +354,18 @@ If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not 
 
 ## Step 1: Prettier format
 
-If `$CHANGED_TS` is non-empty, format them:
+If `$CHANGED_TS` is non-empty, format them.
+
+**Write the file list to a file and feed it via `xargs` — do not interpolate
+`$CHANGED_TS` directly.** These newline-separated lists rely on word splitting,
+which `bash` does and **`zsh` does not**. Under zsh (the default interactive
+shell on this machine) a bare `$CHANGED_TS` expands to ONE argument and the
+command dies with `ENAMETOOLONG: name too long` naming a bogus multi-line path.
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage prettier -- npx prettier --write $CHANGED_TS
+printf '%s\n' "$CHANGED_TS" | grep -v '^$' > .context/deploy-changed-ts.txt
+cd back-end && bash ../scripts/run-deploy-stage prettier -- \
+  bash -c 'xargs npx prettier --write < ../.context/deploy-changed-ts.txt'
 ```
 
 If any files were modified by this step, stage and commit them:
@@ -371,16 +384,25 @@ not a sufficient deploy gate. Changes to package manifests, TypeScript config,
 or ESLint config set `$LINT_TS` to the entire source tree because those inputs
 can change the meaning of every unchanged file.
 
+Feed `$LINT_TS` through a file + `xargs` for the same zsh word-splitting reason
+described in Step 1 — never interpolate the list directly.
+
+```bash
+printf '%s\n' "$LINT_TS" | grep -v '^$' > .context/deploy-lint-ts.txt
+```
+
 **Step 2a (mutator — runs before the parallel verifier batch):**
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage eslint-fix -- node scripts/lint-affected.mjs --fix $LINT_TS
+cd back-end && bash ../scripts/run-deploy-stage eslint-fix -- \
+  bash -c 'xargs node scripts/lint-affected.mjs --fix < ../.context/deploy-lint-ts.txt'
 ```
 
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage eslint --reuse-passed -- node scripts/lint-affected.mjs $LINT_TS
+cd back-end && bash ../scripts/run-deploy-stage eslint --reuse-passed -- \
+  bash -c 'xargs node scripts/lint-affected.mjs < ../.context/deploy-lint-ts.txt'
 ```
 
 If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
@@ -411,32 +433,54 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these thirteen independent suites without
-changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
+The concurrent runner executes exactly these independent suites, without changing
+their assertions or test counts:
+
+`bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
+`bash scripts/tests/canonical-seed-whatsapp-content.test.sh`,
+`bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
+`bash scripts/tests/agent-surface-hash.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
-`python3 scripts/tests/deploy-review-cycle.test.py`, and
-`bash scripts/tests/run-deploy-stage.test.sh`, and
-`python3 scripts/tests/run-deploy-structural-gates.test.py`, and
-`python3 scripts/tests/deploy-live-probes.test.py`.
+`python3 scripts/tests/deploy-review-cycle.test.py`,
+`bash scripts/tests/run-deploy-stage.test.sh`,
+`python3 scripts/tests/run-deploy-structural-gates.test.py`,
+`python3 scripts/tests/deploy-live-probes.test.py`,
+`bash scripts/tests/run-process-cleanup.test.sh`,
+`bash scripts/tests/run-isolated-cloud-kill.test.sh`,
+`bash scripts/tests/run-seed-exit-code.test.sh`,
+`bash scripts/tests/run-public-tunnel-routing.test.sh`,
+`bash scripts/tests/setup-db-concurrency.test.sh`, and
+`bash scripts/tests/run-port-collision.test.sh`.
+
+This list is deliberately explicit, not a registry pointer: several of these
+suites assert that their own command still appears here, which is how a gate
+cannot be silently dropped from the deploy path. `run-deploy-structural-gates.test.py`
+asserts this list and the `GATES` registry match exactly in both directions, so
+adding a gate without documenting it here fails the build.
 
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
   python3 scripts/run-deploy-structural-gates.py
 bash scripts/run-deploy-stage seed-cache-decision --reuse-passed -- \
   bash scripts/tests/seed-cache-decision.test.sh
+bash scripts/run-deploy-stage canonical-seed-whatsapp-content --reuse-passed -- \
+  bash scripts/tests/canonical-seed-whatsapp-content.test.sh
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. `setup-db-concurrency.test.sh` pins that two concurrent `scripts/setup-db.sh` invocations for one workspace serialize their destructive reset/push/seed instead of wiping each other's in-flight prod sync. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 The separately logged seed-cache decision suite preserves the atomic shared-dump
 and Prisma-freshness contract introduced before the concurrent structural
-runner.
+runner. `canonical-seed-whatsapp-content.test.sh` pins that the whatsapp-v2
+canonical base restores reviewed WhatsApp rows (and that publish refuses a
+cold-sync substitute).
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
@@ -517,13 +561,24 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 bash scripts/tests/cloudbench-multi-workstream.test.sh
+bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
   -k 'prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or exact_volume_ownership_survives_delayed_visibility_and_failed_delete'
-cd agents && python scripts/run_blackbox_tests.py benchmark
+if [ -z "$CHANGED_AGENTS" ]; then
+  cd agents && python scripts/run_blackbox_tests.py benchmark
+fi
 ```
 
-All six commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
+The six controller commands must pass. The agents `benchmark` blackbox domain
+must also pass exactly once: Step 4g's agents coverage already runs it whenever
+`$CHANGED_AGENTS` is non-empty, so Step 4cb runs it directly only when agents
+coverage was skipped. Never launch the same controller-owning domain in both
+parallel lanes; they share local lock and fixture state. When `$CHANGED_AGENTS`
+is non-empty, wait for Step 4g to finish before starting the six controller
+commands above. This operational
+verification wiring is pre-authorized by Step 0p and must never pause for human
+approval.
 
 ## Step 4c: Credential health check (runs unless explicitly overridden)
 
@@ -564,6 +619,22 @@ python3 scripts/run_deploy_live_probes.py
 
 Both stage records must pass before closing the `runtime-blackbox` boundary.
 
+## Step 4r: Cold-seed memory ratchet (no skip)
+
+Measure five full cold seeds against the newest cached production dump. Every
+run gets a fresh target database and must pass the source/target fidelity
+fingerprints for Cookies, LocalStorage, IndexedDB, and Cache Storage. The gate
+uses the OS-level maximum resident set size; failed or fidelity-mismatched runs
+never count as a favorable low-memory sample.
+
+```bash
+cd back-end && bash ../scripts/run-deploy-stage seed-memory-ratchet -- \
+  bash scripts/measure-seed-memory.sh 5 0 0 --enforce-budget
+```
+
+The checked-in budget is the maximum of the last five stable runs plus exactly
+20% headroom, rounded up. If this gate fails, reduce the seed's peak and re-run
+all five measurements. Never raise the budget or a machine size to make it pass.
 ## Step 5: Spin up local services
 
 **Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. This guarantees a clean local blackbox/semantic stack; cloud smoke uses separate task-scoped queues.
@@ -632,6 +703,17 @@ BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
 
+This stack is deliberately **capture-only** (`run.sh` defaults
+`BLACKBOX_TEST_REPLAY_OUTBOUND` to `0`), and
+`scripts/tests/semantic-deploy-gate.test.sh` fails the build if `/deploy` adds
+the replay opt-in back. Do not point a `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`
+blackbox run at it: `back-end/scripts/run-blackbox-tests.sh` rejects a
+capture-only existing backend by design (pinned by
+`scripts/tests/blackbox-existing-replay-gate.test.sh`), so such a run fails
+before it starts with `❌ Existing-backend blackbox requires outbound capture and
+replay`. Blackbox lanes that need replay own their own backend instead — see
+Step 6c.
+
 Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
 
 The local latency gate disables trace-archive fixture recording because that
@@ -696,6 +778,7 @@ in one assistant message with separate parallel Bash tool calls:
 2. Smoke benchmarks (Step 6; skip only under its documented classifier).
 3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
 4. Semantic tests (Step 6b; never skip).
+5. Claude Code E2B sandbox smoke (Step 6c; NEVER skip — runs on every deploy).
 
 Matching Group 4 rows in `/factory-review` therefore share a real start phase.
 Do not wait for one lane before starting another. All applicable lanes must be
@@ -897,7 +980,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 **Escalation is ONLY for:**
 
-- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate
+- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT (a) the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate, and (b) **the code-review providers (CodeRabbit / the Claude review fallback), which NEVER escalate for credits — see Step 9a, "Review-provider usage exhaustion"**. This escalation list is scoped to Step 6 smoke benchmarks and product-path providers; it does not govern the review gate.
 - Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
 
 Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
@@ -948,11 +1031,20 @@ The four payment tasks stay sequential inside this lane because they mutate one
 payment fixture; top-level parallelism comes from running the lane alongside its
 Group 4 siblings.
 
+This lane deliberately does NOT pin a compute lane. It previously set
+`ROSE_EXCLUDE_ANTHROPIC_FAMILY=1` + `SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt`, which
+forced every payment task onto GPT. Nothing in the payment path needs GPT, and
+that pin coupled the gate to two unrelated failure modes: it required a
+machine-local `~/.codex/auth.json` (so the gate was unrunnable on any machine
+without `codex login`), and it made the gate fail outright whenever the
+pay-as-you-go OpenAI key was out of credits — even with a perfectly healthy
+claudeAuth subscription token available. Let normal pool selection choose the
+compute lane so the gate tests the payment lifecycle rather than one provider's
+billing state.
+
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
-  ROSE_EXCLUDE_ANTHROPIC_FAMILY=1 \
-  SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt \
   BENCHMARK_SKIP_WMH_BUILD=1 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
@@ -1011,6 +1103,67 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 After all Group 4 lanes pass, run the mandatory Step 5 teardown. If any lane
 fails, preserve the failed agent long enough to collect diagnostics, complete
 any payment lifecycle cleanup, then tear down before restarting the Test Loop.
+
+## Step 6c: Claude Code E2B sandbox smoke (NO SKIP — real E2B sandbox)
+
+**This gate is NON-SKIPPABLE. It runs on every `/deploy` regardless of the change
+classifier or which paths changed.** It is the only gate that proves the Claude
+Code agent path works end-to-end through a real E2B sandbox: DB credential read →
+decrypt → sandbox create → `ws-server.mjs` overlay → Claude Code CLI invocation →
+Anthropic → completion. A regression here (e.g. a CLI-arg contract break like the
+2026-08-05 "Input must be provided … when using --print" incident, where the CLI
+ignored the positional prompt under `--output-format stream-json` and every
+session exited 1) is invisible to the ordinary back-end blackbox suite because
+Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins a
+real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
+or skip it because "claude-code wasn't touched."
+
+With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB on
+`$LOCAL_DB_PORT`), run the claude-code blackbox with the smoke phase enabled
+against the existing backend:
+
+```bash
+cd back-end && BLACKBOX_SMOKE=1 \
+  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+  bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
+  bash scripts/run-blackbox-tests.sh claude-code
+```
+
+This lane launches **its own** backend on purpose. It must not be pointed at the
+Step 5 semantic stack with `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`: that stack is
+capture-only by contract, and `run-blackbox-tests.sh` rejects a capture-only
+existing backend before any database work
+(`scripts/tests/blackbox-existing-replay-gate.test.sh` pins that rejection, and
+`scripts/tests/semantic-deploy-gate.test.sh` forbids re-adding the replay opt-in
+to the shared stack). The two contracts are only satisfiable together by letting
+this lane own its backend, which also keeps it runnable when the shared stack is
+busy or down. It still reuses the workspace Postgres, so it stays cheap.
+
+### Pass criteria
+
+The domain must report `ALL CLAUDE-CODE BLACK-BOX TESTS PASSED`, and the summary
+must include `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)`. The
+smoke phase (`BLACKBOX_SMOKE=1`) actually creating a sandbox and observing
+`CLAUDE_E2B_DONE` is mandatory — a run that prints `Skipping Claude Code smoke
+tests (BLACKBOX_SMOKE!=1)` does NOT satisfy this gate.
+
+### Requirements (surface, do not mask)
+
+- `E2B_API_KEY` must be set (backend `.env`).
+- A usable Claude credential for `DEV_USER_ID` must be resolvable — on macOS the
+  smoke syncs it from the `Claude Code-credentials` Keychain item; otherwise a
+  pooled `claude_code` integration must exist. If the credential is genuinely
+  unavailable this gate FAILS (it is not a silent skip); resolve the credential
+  rather than bypassing the gate.
+
+### On failure
+
+Follow RCA: reproduce the claude-code session locally (a faithful harness that
+overlays `e2b-templates/claude-code/ws-server.mjs` onto a real sandbox and runs
+the CLI reproduces sandbox-level failures the standard blackbox cannot), fix the
+root cause, and re-run this exact command until it is green. The permanent
+structural guard `back-end/src/tests/structural/claude-code-ws-prompt-stdin.test.ts`
+cements the prompt-delivery contract this smoke exercises.
 
 Finalize and print the timing summary before evaluating the Phase 2 hard gate. The interval-union metrics separate true parallel overlap from untimed gaps:
 
@@ -1071,6 +1224,12 @@ bash scripts/run-deploy-stage --finish
 # ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
 
 # ║ with every sample below the five-second ratchet. ║
+
+# ║ 6c. Claude Code E2B sandbox smoke: PASS on every /deploy; never ║
+
+# ║ skipped. Real sandbox; `smoke -- Claude Code answers 2+2` must ║
+
+# ║ PASS (a BLACKBOX_SMOKE!=1 skip does NOT satisfy this gate). ║
 
 # ║ ║
 
@@ -1261,9 +1420,36 @@ done
 gh run watch "$FALLBACK_RUN_ID" --exit-status
 ```
 
-After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails, do not merge—inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD.
+After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails for a **repairable** reason (bad checkout, workflow bug, transient 5xx, missing/rotated `CLAUDE_CODE_OAUTH_TOKEN` secret), do not merge — inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD. If it failed from **usage exhaustion**, do not repair and do not rerun — go straight to the clause below.
 
-**Review-provider usage exhaustion is a skippable gate.** The review gate exists to catch code defects, not to block on billing/quota state. When BOTH reviewers are unavailable specifically because their usage/credits/quota are exhausted — CodeRabbit reports a rate-limit/spending-cap/"Review limit reached" **and** the Claude fallback fails from provider usage exhaustion (e.g. `is_error:true` after ~1 turn / ~2s with an Anthropic "credit balance is too low"/400, a 429 rate limit, or a spending cap) — the review gate is **provider-blocked, not code-blocked**. Distinguish this from a repairable fallback failure (bad checkout, workflow bug, transient 5xx): those you fix and rerun. A usage-exhaustion block is not repairable by the agent (it is user-owned billing/quota, exactly like the warn-only Anthropic credential-health gate). In that case, record `Code Review | ⚠️ Skipped | both reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)` in `TEST_REPORT`, close the open review cycle as clean with a note, surface the exhaustion + its concrete risk (unreviewed diff) in the PR body and final handoff, and proceed. Prefer restoring a reviewer (top up Anthropic credits and rerun the Claude fallback, or wait out the CodeRabbit window) when the situation allows; only skip when neither reviewer can run. Never label an unavailable review as passing, and never use this path to skip a reviewer that *did* run and returned findings.
+### Review-provider usage exhaustion: TANK THROUGH, never ask
+
+**This is pre-authorized. Do NOT stop. Do NOT ask the user for permission, approval, an override, a top-up, or a decision. Do NOT wait out a quota window. Record it and keep deploying.** The review gate exists to catch code defects, not to block on billing state; the agent cannot fix user-owned billing, so pausing to ask only stalls the deploy at zero information gain. This clause **overrides** every contrary instruction in this command — the Step 6 "Escalation is ONLY for … out of credits/funds" list, the "credential/billing escalation" halt in Step 0, and the "if the workflow fails, do not merge" line above. Escalating a review-credit block is a deploy defect, not caution.
+
+**Trigger — either reviewer is usage-exhausted and the other cannot cover it:**
+
+- CodeRabbit: rate-limit, spending cap, "Review limit reached", or a quota comment in place of a review.
+- Claude fallback: provider usage exhaustion. The signature is unmistakable — `is_error:true` with `num_turns:1`, `duration_ms` ~2000, and `total_cost_usd:0`, and/or an Anthropic "credit balance is too low" / 400 / 429 / spending-cap error. ~2s + 1 turn + $0 = provider-blocked.
+
+Distinguish this from a **repairable** fallback failure (bad checkout, workflow bug, transient 5xx, revoked secret) — those you still fix and rerun. Exhaustion is not repairable by you.
+
+**What to do, mechanically:**
+
+1. Record in `TEST_REPORT`:
+   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)`
+2. Close the open cycle as **clean** — this is the only result that satisfies `require-mergeable`:
+   ```bash
+   python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result clean
+   ```
+   **Never use `--result unavailable`.** It is an accepted value but it hard-fails
+   `require-mergeable` at Phase 3 entry and again at Step 12, and it cannot be undone in
+   place (a second `finish` and a re-`start` on the same HEAD are both rejected) — you
+   would have to `start --reset` or hand-edit `.context/deploy-review-cycle.json`. The
+   ledger has no `--note`/`--reason` flag; the note lives in `TEST_REPORT` and the PR body.
+3. Surface the exhaustion and its concrete risk (**this diff merged unreviewed**) in the PR body and in the final handoff.
+4. **Proceed to merge.** Do not open a new review cycle for the same HEAD.
+
+**Still true:** never label an unavailable review as passing (the `⚠️ Skipped` row is mandatory — a silent `clean` is misreporting); never use this path to skip a reviewer that _did_ run and returned findings; and CodeRabbit merely declining to re-review an already-seen commit is **not** exhaustion — that is a false-green, so force `@coderabbitai full review` instead. If a reviewer can be restored with a zero-touch retry you already have in hand, prefer that — but never block, and never ask, to obtain one.
 
 Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
 
@@ -1301,6 +1487,9 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
   not push each fix.** Re-run the full Test Loop locally, commit the complete
   stabilization batch, then push once and request one incremental review.
 - **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
+- **BOTH REVIEWERS USAGE-EXHAUSTED** → close the cycle `--result clean`, record the
+  `⚠️ Skipped` row, and keep going. Never stop to ask — see Step 9a,
+  "Review-provider usage exhaustion: TANK THROUGH, never ask."
 - **REVIEW SKIPPED** (e.g., "Too many files!") → finish the current immutable
   HEAD through the Claude fallback. Do not push filter edits while its review
   cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
@@ -2023,6 +2212,24 @@ python benchmarks/run_benchmark.py \
   --bootstrap
 python3 scripts/record_factory_event.py deploy production-finish agentcard
 ```
+
+**Prod payment identity (prerequisite).** These tasks run as the NON-admin
+`BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID` (`...000107`), because the admin path
+(`issueAdminCompanyCard`) never authorizes a personal Stripe hold and the task asserts
+`stripeHold: succeeded`. Every credential needed is already in `back-end/.env` — do NOT ask
+the user for them. If the run fails closed on a missing identity, provision it:
+
+```bash
+cd back-end && set -a && . ./.env && set +a && \
+  DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \
+  BENCHMARK_ALLOW_LIVE_STRIPE=1 BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=1 \
+  npx tsx scripts/setup-benchmark-payment.ts --live
+```
+
+Use `DIRECT_URL`; the 6543 pooler fails with `Can't reach database server`. The only step an
+agent cannot perform is saving a card on the live Stripe customer (entering a card number is
+prohibited) — the script prints a one-time hosted Checkout link for a human, and it persists
+permanently once done.
 
 This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
 

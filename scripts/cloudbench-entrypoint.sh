@@ -108,6 +108,7 @@ chown "$APP_USER:$APP_USER" "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 chmod 600 "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 cloudbench_verify_env_file "$APP_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || exit 1
 cloudbench_verify_env_file "$APP_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || exit 1
+cloudbench_require_agentcard_org_oauth "$APP_DIR/back-end/.env" || exit 1
 cloudbench_validate_browser_provider_contract \
     "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || exit 1
@@ -198,6 +199,7 @@ STACK_ENV=(
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
+    "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1"
     "DISABLE_GMAIL_SYNC=1"
@@ -318,6 +320,7 @@ set +e
 gosu "$APP_USER" env \
     "HOME=/home/$APP_USER" \
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR" \
+    "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json" \
     "BENCHMARK_ISOLATED_RUN=true" \
     "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1" \
     bash -c "cd '$APP_DIR/agents' && exec venv/bin/python -u benchmarks/run_benchmark.py \"\$@\"" _ "${BENCH_ARGS[@]}"

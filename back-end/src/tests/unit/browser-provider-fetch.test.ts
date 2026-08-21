@@ -28,9 +28,12 @@ async function main(): Promise<void> {
     assert(signal, 'provider fetch must receive an abort signal');
     const stalledBody = <T>(): Promise<T> =>
       new Promise<T>((_resolve, reject) => {
-        signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {
-          once: true,
-        });
+        const rejectAbort = (): void => reject(new DOMException('Aborted', 'AbortError'));
+        // Match fetch body readers: an AbortSignal remains observable even if
+        // host contention lets the timer fire before this synthetic consumer
+        // installs its listener.
+        if (signal.aborted) rejectAbort();
+        else signal.addEventListener('abort', rejectAbort, { once: true });
       });
     return {
       ok: true,

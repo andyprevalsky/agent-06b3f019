@@ -309,11 +309,13 @@ run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
-if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)'; then
+run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
+if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)'; then
   run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
   run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
   run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
   run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
+  run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
   run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
   run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
   run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
@@ -322,6 +324,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|r
 fi
 if auto_rca_changed '^(scripts/(seed-|setup-db|cloud-build)|back-end/(prisma/|scripts/seed))'; then
   run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
+  run_suite "Canonical Seed WhatsApp Content" bash scripts/tests/canonical-seed-whatsapp-content.test.sh
   run_suite "Seed-Dump Toolchain Compatibility" bash scripts/tests/seed-dump-toolchain.test.sh
 fi
 if auto_rca_changed '^(scripts/(run\.sh|setup-db|seed-|fast-mode)|back-end/)'; then
@@ -369,10 +372,10 @@ fi
 
 if should_run "agents"; then
   if $AUTO_RCA_MODE; then
-    run_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
+    run_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
     run_suite "Agents Coverage and Blackbox" bash -c "cd agents && source venv/bin/activate && AGENTS_COVERAGE_CONCURRENCY=3 bash scripts/run-coverage.sh"
   else
-    bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
+    bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
 
     if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
       bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"

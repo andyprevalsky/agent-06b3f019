@@ -2,14 +2,39 @@
 set -eo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Reject --single-box BEFORE cd into agents/: cloudbench multi-workstream
+# sandboxes are scripts-only, and a failed cd would exit under `set -e` without
+# the parallel-safety message the guard exists to print.
+# --single-box is DISABLED: it ran every task directly on the ONE shared warm
+# box, which is NOT parallel-safe — two worktrees collide on the same machine and
+# whichever stops it kills the other's in-flight run. The default fleet path
+# already isolates each bench on its own cloned machine, so a single bench is
+# just `run-bench <task>`. Reject at arg-parse time BEFORE cd/catalog/Fly work
+# (cloudbench-multi scenario 14; run-bench-cloud enforces the same guard).
+if [[ "${1:-}" == "--single-box" ]]; then
+    echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
+    echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
+    echo "       bash scripts/run-bench <task...>" >&2
+    exit 2
+fi
+
 cd "$ROOT_DIR/agents"
 
 # Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
-# dependency set — notably boto3 for R2 world-model/trace-archive reads under --simulate.
-# The system/asdf python may lack these. Fall back to PATH python if the venv is absent.
-PY="python"
+# dependency set — notably boto3 for R2 world-model/[REDACTED] reads under --simulate.
+# The system/asdf python may lack these. Fall back to PATH python3/python if the venv
+# is absent. Prefer python3: many cloud images ship python3 without a `python`
+# symlink (bare `exec python` exits 127).
+PY=""
 if [ -x "venv/bin/python" ]; then
     PY="venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="python3"
+elif command -v python >/dev/null 2>&1; then
+    PY="python"
+else
+    echo "❌ No Python interpreter found (venv/bin/python, python3, or python)." >&2
+    exit 127
 fi
 
 if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then
@@ -33,11 +58,44 @@ fi
 # whichever stops it kills the other's in-flight run. The default fleet path
 # already isolates each bench on its own cloned machine, so a single bench is
 # just `run-bench <task>`. (run-bench-cloud enforces the same guard directly.)
+#
+# Reject before the production-only classifier. Minimal controller fixtures may
+# not carry a benchmark catalog, and classifier failure must not mask this
+# argument-level safety guard.
 if [[ "${1:-}" == "--single-box" ]]; then
     echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
     echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
     echo "       bash scripts/run-bench <task...>" >&2
     exit 2
+fi
+
+# Production-only tasks hit live Temporal/API (roselabs / Render). They must not
+# provision Fly guests or contend for the shared warm donor — that path is both
+# unnecessary and races every concurrent workspace. Route them through the same
+# controller-local --prod invocation /deploy Step 13c uses.
+#
+# Helper exit codes (do not collapse):
+#   0 — all-production_only batch (newline-delimited names on stdout)
+#   1 — valid catalog, but not an all-production_only batch → fall through to fleet
+#   2 — catalog unreadable / invalid names → fail closed (never look like "empty")
+PROD_ONLY_STATUS=0
+PROD_ONLY_TASKS="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "$@")" || PROD_ONLY_STATUS=$?
+if [ "$PROD_ONLY_STATUS" -eq 2 ]; then
+    echo "❌ production-only classifier failed (catalog unreadable or invalid task names)" >&2
+    exit 2
+fi
+if [ "$PROD_ONLY_STATUS" -eq 0 ] && [ -n "$PROD_ONLY_TASKS" ]; then
+    echo "🌐 production-only batch — controller-local --prod (skipping Fly fleet)"
+    ec=0
+    # Preserve newline-delimited task names (no unquoted expansion / pathname globbing).
+    while IFS= read -r task; do
+        [ -n "$task" ] || continue
+        echo "═══ run_benchmark.py --task $task --prod --ci --bootstrap ═══"
+        if ! "$PY" -u benchmarks/run_benchmark.py --task "$task" --prod --ci --bootstrap; then
+            ec=1
+        fi
+    done <<< "$PROD_ONLY_TASKS"
+    exit "$ec"
 fi
 
 # DEFAULT: per-bench ISOLATED cloud fleet. Every bench gets its OWN Fly machine

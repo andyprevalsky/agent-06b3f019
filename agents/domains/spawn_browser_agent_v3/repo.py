@@ -411,6 +411,16 @@ _TRANSIENT_INIT_FAILURE_MARKERS = (
     "no healthy",
     "temporarily unavailable",
     "try again",
+    # A proxy can also fail BELOW the provider API: allocation succeeds, then the
+    # browser's CDP navigation to start_url dies inside the tunnel. Chrome reports
+    # these as net::ERR_*, which carried no marker and so classified FATAL — the
+    # bounded fresh-proxy retry in handler.py was skipped and the activity escaped
+    # to Temporal, which replayed the identical doomed spawn (prod agent c8dc9824
+    # burned 124 retries / 900s this way, never reaching the payment step it was
+    # benchmarking). A dead tunnel is retryable for the same reason an unhealthy
+    # proxy is: a fresh init reallocates a different one.
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
 )
 
 
@@ -454,13 +464,18 @@ async def init_browser_session(
     raise Exception(f"Failed to init session: {response.text}")
 
 
-async def resume_browser_session(config: Any, task_id: str) -> Dict[str, Any]:
+async def resume_browser_session(
+    config: Any,
+    task_id: str,
+    *,
+    force_fresh_profile: bool = False,
+) -> Dict[str, Any]:
     """Resume a paused browser session by asking backend/Steel for a fresh session."""
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
             headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-            json={"task_id": task_id},
+            json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
         )
     if response.status_code in [200, 201]:
         return response.json()
@@ -487,21 +502,30 @@ async def recover_browser_challenge(
     current_url: str,
     storage_state: Dict[str, Any],
     user_agent: str = "",
+    *,
+    blocked_resource_url: str = "",
+    require_payment_cdn: bool = False,
 ) -> Dict[str, Any]:
     """Run the backend's parallel Kernel/Steel browser-configuration search."""
     # A challenged candidate can spend up to two 45s navigations plus two 45s
     # provider-solver windows. The six candidates run concurrently, so this is
     # a bounded wall-clock allowance for one search rather than six serial waits.
+    payload: Dict[str, Any] = {
+        "task_id": task_id,
+        "current_url": current_url,
+        "storage_state": storage_state,
+    }
+    if user_agent:
+        payload["user_agent"] = user_agent
+    if blocked_resource_url:
+        payload["blocked_resource_url"] = blocked_resource_url
+    if require_payment_cdn:
+        payload["require_payment_cdn"] = True
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/recover-challenge",
             headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-            json={
-                "task_id": task_id,
-                "current_url": current_url,
-                "storage_state": storage_state,
-                **({"user_agent": user_agent} if user_agent else {}),
-            },
+            json=payload,
         )
     if response.status_code in [200, 201]:
         return response.json()
@@ -557,6 +581,8 @@ async def mark_steel_session_auth_failed(
     user_id: str,
     steel_session_auth_id: str,
     reason: str,
+    *,
+    preserve_browser_session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Disable a stale Steel auth marker so the next session can fall through to cookies."""
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -567,7 +593,14 @@ async def mark_steel_session_auth_failed(
                 "x-user-id": user_id,
                 "Content-Type": "application/json",
             },
-            json={"reason": reason},
+            json={
+                "reason": reason,
+                **(
+                    {"preserve_browser_session_id": preserve_browser_session_id}
+                    if preserve_browser_session_id
+                    else {}
+                ),
+            },
         )
     if response.status_code in (200, 204):
         return response.json() if response.content else {"ok": True}
@@ -696,14 +729,18 @@ async def upload_file_to_session(
     filename: str,
     file_content: bytes,
     mime_type: str = "application/octet-stream",
+    *,
+    directory: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Upload a file to a Steel browser session."""
+    """Upload a file into a browser session (uploads or downloads root)."""
     try:
+        data = {"directory": directory} if directory else None
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/{session_id}/files",
                 headers={"x-api-key": config.backend.api_key or ""},
                 files={"file": (filename, file_content, mime_type)},
+                data=data,
             )
             if response.status_code in [200, 201]:
                 return response.json()

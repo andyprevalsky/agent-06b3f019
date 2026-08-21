@@ -47,6 +47,18 @@ Workaround in use: launch with `--dash-base <free-port>` (e.g. 61020) or
 that a reused hub actually serves this run's directories before trusting it —
 i.e. validate hub identity instead of assuming port ownership.
 
+On 2026-08-03 a related allocation-boundary failure surfaced in
+`back-end/scripts/run-coverage.sh`: a `CONDUCTOR_PORT+200` coverage backend
+escaped the workspace's owned ten-port allocation and collided with a sibling's
+valid primary backend. Unlike this fleet incident, coverage rejected the
+foreign listener instead of reusing it, and the workspace base ports were
+distinct, so this is a relative rather than a recurrence of the duplicate-base
+plus unchecked-identity cause. Both cases still show that derived port
+arithmetic does not confer ownership. The coverage boundary now stays within
+its allocated `+7..+8` ports and uses process-bound run and port locks. See
+`2026-08-03-backend-coverage-hard-coded-port-collides-sibling-workspace` for the
+reproduction and fix.
+
 ## Human feedback
 
 None recorded.

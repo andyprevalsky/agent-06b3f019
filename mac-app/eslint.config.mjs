@@ -12,8 +12,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * Paths are relative globs from mac-app/.
  */
 const STRICT_DOMAIN_FILES = [
-  'main/services/cookieSync.ts',
-  'main/domains/cookie-sync/**/*.ts',
   'main/services/iMessageSync.ts',
   'main/domains/i-message-sync/**/*.ts',
   'ui/onboarding/**/*.{ts,tsx}',

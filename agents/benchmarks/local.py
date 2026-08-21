@@ -24,6 +24,7 @@ import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Sequence, TextIO
 
@@ -32,9 +33,10 @@ REPO_ROOT = AGENTS_DIR.parent
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
-from benchmarks.benchmark_tasks import all_tasks, selected_tasks_require_gate_type
+from benchmarks.benchmark_tasks import RUNNABLE_TASK_RUNNERS, all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
-from benchmarks.seed_cache_path import seed_dump_path
+from benchmarks.results import bounded_path_component
+from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
@@ -50,6 +52,11 @@ RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 # run.sh can publish services.json. That fixture currently includes 10k messages
 # and 20k+ browser cookies, so a healthy first start can exceed three minutes.
 SERVICE_START_TIMEOUT_SECONDS = 600
+# An explicitly opted-in cold seed can spend the entire warm-start budget
+# copying browser state before run.sh starts the public tunnel and publishes its
+# manifest. Keep the normal bound for cached starts, but give that one-time
+# bootstrap enough room to finish cleanly.
+COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -62,11 +69,21 @@ TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
 }
-# Payment lifecycle tasks must exercise the regular Stripe-backed purchase path. The default Rose
-# benchmark identity is a production admin and intentionally receives a company-funded card with no
-# personal Stripe hold, so use an isolated non-admin fixture for these settlement benchmarks.
-AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Sandbox lifecycle benches run as the default admin account so credit checks
+# stay unlimited. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH (set below, honored
+# only in benchmark/isolated mode) forces chargeAndIssueCard so stripeHold
+# stays reachable. Must equal run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID and
+# BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID in purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+# Same identity, reached through the harness-wide env override so `run_benchmark` and this launcher
+# cannot drift: `configure_task_environment` publishes it and `seed_payment_fixture` reads it back.
+# Must equal run_benchmark.AGENT_PAYMENT_BENCHMARK_USER_ID.
+AGENT_PAYMENT_BENCHMARK_USER_ID = AGENT_PAYMENT_LIFECYCLE_USER_ID
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
+# Counterpart to the above: the ADMIN funding path keeps its own benchmark, run as a synthetic
+# admin. Must equal run_benchmark.ADMIN_SUBSCRIPTION_BYPASS_USER_ID.
+ADMIN_BYPASS_TASK_NAME = "gate-subscription-card-mint-admin-bypass"
+ADMIN_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
 _RESERVED_PORTS: set[int] = set()
 
@@ -118,6 +135,23 @@ class ServiceStack:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-")
     return slug or "bench"
+
+
+def isolated_workspace_name(base_name: str, run_id: str, max_len: int = 60) -> str:
+    """Build a CONDUCTOR_WORKSPACE_NAME that stays unique under the length cap.
+
+    Naive ``slugify(f"{base}-{run_id}")[:60]`` truncates the uniqueness suffix, so
+    two isolated stacks started in the same second (e.g. /deploy smoke + AgentCard)
+    can collapse onto one Temporal task queue and steal each other's workflows.
+    Keep the ``bench-<run_id>`` suffix intact and truncate only the human prefix.
+    """
+    suffix = slugify(f"bench-{run_id}")
+    if len(suffix) >= max_len:
+        digest = hashlib.sha1(run_id.encode("utf-8")).hexdigest()[:12]
+        suffix = f"b{digest}"
+    prefix_budget = max_len - len(suffix) - 1
+    prefix = slugify(base_name)[: max(1, prefix_budget)].strip("-") or "ws"
+    return f"{prefix}-{suffix}"
 
 
 def make_run_id(explicit: str | None = None) -> str:
@@ -232,7 +266,7 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
         )
     context_dir = BENCHMARK_CONTEXT_ROOT / run_id
     base_name = os.environ.get("CONDUCTOR_WORKSPACE_NAME") or REPO_ROOT.name
-    workspace_name = slugify(f"{base_name}-bench-{run_id}")[:60].strip("-")
+    workspace_name = isolated_workspace_name(base_name, run_id)
     preferred_base = args.base_port
     if preferred_base is None:
         env_base = os.environ.get("CONDUCTOR_PORT")
@@ -254,15 +288,17 @@ def known_task_names() -> list[str]:
 
 
 def validate_task_names(names: Sequence[str]) -> list[str]:
+    """Validate task names and preserve intentional repeats.
+
+    Repeating a task name N times runs it N times (pass@k). Matching
+    ``run_benchmark.py --task`` / cloudbench-run behavior. Callers that want a
+    unique set must dedupe themselves.
+    """
     known = set(known_task_names())
     unknown = sorted(set(names) - known)
     if unknown:
         raise ValueError(f"Unknown benchmark task(s): {', '.join(unknown)}")
-    deduped: list[str] = []
-    for name in names:
-        if name not in deduped:
-            deduped.append(name)
-    return deduped
+    return list(names)
 
 
 def plan_invocations(tasks: Sequence[str]) -> list[BenchmarkInvocation]:
@@ -515,14 +551,32 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
     if database.get("use_system_postgres") or not database.get("owned_by_run_sh"):
         return
     container = database.get("container")
+    # Always issue the docker teardown argv (tests assert the calls). Catch
+    # FileNotFoundError so hosts without a docker binary still tear down cleanly.
     if isinstance(container, str) and container:
-        subprocess.run(["docker", "rm", "-f", container], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return
     volume = database.get("volume")
     if not isinstance(volume, str) or not volume:
         if isinstance(container, str) and container.startswith("victoria-db-"):
             volume = f"victoria-pgdata-{container[len('victoria-db-'):]}"
     if isinstance(volume, str) and volume:
-        subprocess.run(["docker", "volume", "rm", volume], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(
+                ["docker", "volume", "rm", volume],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return
 
 
 def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
@@ -531,20 +585,23 @@ def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
         return
     container = f"victoria-db-{stack.workspace_name}"
     volume = f"victoria-pgdata-{stack.workspace_name}"
-    subprocess.run(
-        ["docker", "rm", "-f", container],
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    subprocess.run(
-        ["docker", "volume", "rm", volume],
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        subprocess.run(
+            ["docker", "volume", "rm", volume],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -677,6 +734,41 @@ def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
     )
 
 
+def sms_web_search_fixture_path(stack: "ServiceStack") -> str:
+    """The single absolute path the backend reads and run_benchmark.py writes.
+
+    Defined once because the two sides are a contract: if they ever disagree the
+    fixture silently no-ops and the SMS benchmarks score live search while
+    reporting green.
+    """
+    return str((stack.context_dir / "sms-web-search-fixture.json").resolve())
+
+
+def needs_public_tunnel(tasks: Sequence[str]) -> bool:
+    """True when some selected task actually needs a publicly reachable frontend.
+
+    run.sh opens a trycloudflare quick tunnel on every benchmark stack. Real
+    browser agents need it — they drive a hosted page and must reach it from the
+    provider's network — but a bench that never opens a browser does not, and
+    trycloudflare rate-limits per IP: back-to-back local runs start getting 429s,
+    run.sh exits 1, and a task that never wanted a tunnel is recorded as failed.
+    Only pay that dependency when a task's own contract asks for it.
+    """
+    selected = set(tasks)
+    if os.environ.get("BENCHMARK_PUBLIC_TUNNEL") == "1":
+        return True
+    if selected & TEST_PAYMENT_FRONTEND_TASK_NAMES:
+        return True
+    for task in all_tasks():
+        if task.name not in selected:
+            continue
+        if task.requires_browser_agent:
+            return True
+        if "{frontend_url}" in task.prompt:
+            return True
+    return False
+
+
 def needs_imessage_relay(tasks: Sequence[str]) -> bool:
     return "message-person" in set(tasks) and sys.platform == "darwin"
 
@@ -747,7 +839,8 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
-        # The lifecycle agents run as a dedicated synthetic customer. Make the dev-owned compute
+        # The lifecycle agents run as the admin account with the forced customer
+        # mint path. Make the dev-owned compute
         # token pool-eligible only after stack selection proves this run owns an isolated database;
         # never let shared-stack/use-existing modes mutate credential-pool eligibility.
         if isolated:
@@ -758,10 +851,26 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
             AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
             AGENT_PAYMENT_BENCHMARK_USER_ID,
         )
+        os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] = "1"
         if not os.environ.get("AGENTCARD_ONBOARDING_RETURN_URL"):
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
                 "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
             )
+    if ADMIN_BYPASS_TASK_NAME in selected:
+        # The admin-bypass gate benchmark runs as a SYNTHETIC admin so it can prove
+        # issueAdminCompanyCard without touching a real admin's account. isAdminUser() only honors
+        # extra ids from ADMIN_USER_IDS_EXTRA, which nothing else sets — so without this the task
+        # ran as an ordinary user and silently exercised the charged path instead of the bypass.
+        # Additive by construction: it grants admin ONLY to the synthetic id, never to a real one,
+        # and only on this local isolated stack.
+        configured = [
+            entry.strip()
+            for entry in os.environ.get("ADMIN_USER_IDS_EXTRA", "").split(",")
+            if entry.strip()
+        ]
+        if ADMIN_BYPASS_USER_ID not in configured:
+            configured.append(ADMIN_BYPASS_USER_ID)
+        os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
     if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
         os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
 
@@ -773,17 +882,22 @@ def seed_payment_fixture(manifest: dict) -> None:
         "DATABASE_URL": database_url,
         "DIRECT_URL": database_url,
     }
-    print("Seeding Stripe test billing fixture for agent-payment-test-shop")
+    # `configure_task_environment` publishes the payment identity on
+    # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV. Prefer that, else the dedicated
+    # synthetic lifecycle id — never BENCHMARK_USER_ID / the admin operator,
+    # which would seed the no-charge admin path instead of the customer fixture.
+    payment_user_id = (
+        os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
+        or AGENT_PAYMENT_LIFECYCLE_USER_ID
+    )
+    print(f"Seeding Stripe test billing fixture for the payment-lifecycle user {payment_user_id}")
     subprocess.run(
         [
             "npx",
             "tsx",
             "scripts/setup-benchmark-payment.ts",
             "--user-id",
-            os.environ.get(
-                AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
-                AGENT_PAYMENT_BENCHMARK_USER_ID,
-            ),
+            payment_user_id,
         ],
         cwd=REPO_ROOT / "back-end",
         env=env,
@@ -847,12 +961,138 @@ def local_seed_dump_path(
     cache_root: Path | None = None,
     cache_day: str | None = None,
 ) -> Path:
-    """Resolve the producer/consumer seed path through the shared cache contract."""
-    return seed_dump_path(
-        schema_path or REPO_ROOT / "back-end" / "prisma" / "schema.prisma",
-        cache_root or BENCHMARK_CONTEXT_ROOT / "seed-cache",
-        cache_day,
-    )
+    """Resolve the canonical base artifact used by an isolated benchmark.
+
+    An explicit day retains the legacy synchronized-prod materialization path
+    used by setup tooling. Normal benchmark launches use the immutable base
+    revision shared with cloud runners.
+    """
+    resolved_schema = schema_path or REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
+    resolved_root = cache_root or BENCHMARK_CONTEXT_ROOT / "seed-cache"
+    if cache_day is not None:
+        return seed_dump_path(resolved_schema, resolved_root, cache_day)
+    return canonical_base_dump_path(resolved_schema, resolved_root)
+
+
+def _seed_dump_pair_is_usable(seed_dump: Path, schema_hash: str) -> bool:
+    sidecar = Path(f"{seed_dump}.schemahash")
+    try:
+        return seed_dump.stat().st_size > 0 and sidecar.read_text().strip() == schema_hash
+    except OSError:
+        return False
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@contextlib.contextmanager
+def _benchmark_seed_publish_lock(
+    seed_dump: Path,
+    *,
+    attempts: int = 600,
+    retry_seconds: float = 0.1,
+):
+    """Interop with scripts/lib/seed-cache.sh's per-pair symlink lock."""
+    lock_path = Path(f"{seed_dump}.publish.lock")
+    owner = str(os.getpid())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = False
+    for attempt in range(attempts):
+        try:
+            lock_path.symlink_to(owner)
+            acquired = True
+            break
+        except FileExistsError:
+            try:
+                current_owner = os.readlink(lock_path)
+            except OSError:
+                current_owner = ""
+            if current_owner.isdigit() and not _pid_is_alive(int(current_owner)):
+                try:
+                    if os.readlink(lock_path) == current_owner:
+                        lock_path.unlink()
+                        continue
+                except OSError:
+                    pass
+            if attempt + 1 < attempts:
+                time.sleep(retry_seconds)
+    if not acquired:
+        raise TimeoutError(f"timed out acquiring benchmark seed lock: {seed_dump}")
+    try:
+        yield
+    finally:
+        try:
+            if os.readlink(lock_path) == owner:
+                lock_path.unlink()
+        except OSError:
+            pass
+
+
+def _promote_previous_utc_day_seed_dump(
+    seed_dump: Path,
+    *,
+    schema_hash: str,
+    now: datetime,
+) -> bool:
+    """Promote yesterday's pair while the caller holds today's publish lock."""
+    current_time = now
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    current_time = current_time.astimezone(timezone.utc)
+    if current_time.hour >= 2:
+        return False
+
+    match = re.fullmatch(r"([0-9a-f]{40})-(\d{8})\.dump", seed_dump.name)
+    if (
+        match is None
+        or match.group(1) != schema_hash
+        or match.group(2) != current_time.strftime("%Y%m%d")
+    ):
+        return False
+    previous_day = (current_time - timedelta(days=1)).strftime("%Y%m%d")
+    previous_dump = seed_dump.with_name(f"{schema_hash}-{previous_day}.dump")
+    previous_sidecar = Path(f"{previous_dump}.schemahash")
+    seed_dump.parent.mkdir(parents=True, exist_ok=True)
+    temp_token = f"{os.getpid()}-{time.monotonic_ns()}"
+    temp_dump = seed_dump.with_name(f".{seed_dump.name}.rollover-{temp_token}")
+    temp_sidecar = Path(f"{temp_dump}.schemahash")
+    try:
+        with _benchmark_seed_publish_lock(previous_dump):
+            try:
+                previous_stat = previous_dump.stat()
+                if (
+                    previous_stat.st_size <= 0
+                    or previous_sidecar.read_text().strip() != schema_hash
+                ):
+                    return False
+            except OSError:
+                return False
+
+            age_seconds = current_time.timestamp() - previous_stat.st_mtime
+            if age_seconds < 0 or age_seconds > 26 * 60 * 60:
+                return False
+
+            try:
+                os.link(previous_dump, temp_dump)
+            except OSError:
+                shutil.copy2(previous_dump, temp_dump)
+            temp_sidecar.write_text(schema_hash)
+
+        if not _seed_dump_pair_is_usable(temp_dump, schema_hash):
+            return False
+        os.replace(temp_dump, seed_dump)
+        os.replace(temp_sidecar, Path(f"{seed_dump}.schemahash"))
+        return _seed_dump_pair_is_usable(seed_dump, schema_hash)
+    finally:
+        temp_dump.unlink(missing_ok=True)
+        temp_sidecar.unlink(missing_ok=True)
 
 
 def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
@@ -860,23 +1100,25 @@ def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
     schema = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
     schema_hash = hashlib.sha1(schema.read_bytes()).hexdigest()
     sidecar = Path(f"{seed_dump}.schemahash")
-    lock_path = Path(f"{seed_dump}.lock")
     seed_dump.parent.mkdir(parents=True, exist_ok=True)
 
     def current_dump_exists() -> bool:
-        try:
-            return seed_dump.stat().st_size > 0 and sidecar.read_text().strip() == schema_hash
-        except OSError:
-            return False
+        return _seed_dump_pair_is_usable(seed_dump, schema_hash)
 
     if current_dump_exists():
         return True
 
-    with open(lock_path, "a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        if current_dump_exists():
-            return True
-        try:
+    try:
+        with _benchmark_seed_publish_lock(seed_dump):
+            if current_dump_exists():
+                return True
+            if _promote_previous_utc_day_seed_dump(
+                seed_dump,
+                schema_hash=schema_hash,
+                now=datetime.now(timezone.utc),
+            ):
+                print(f"Promoted recent previous-day benchmark seed dump: {seed_dump}")
+                return current_dump_exists()
             manifest = json.loads(SERVICES_MANIFEST.read_text())
             if manifest.get("status") != "running":
                 return False
@@ -911,13 +1153,13 @@ def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
             sidecar_tmp.write_text(schema_hash)
             os.replace(sidecar_tmp, sidecar)
             print(f"Primed isolated benchmark seed dump from shared stack: {seed_dump}")
-            return True
-        except Exception as exc:
-            print(
-                f"Warning: could not prime isolated benchmark seed dump from shared stack: {exc}",
-                file=sys.stderr,
-            )
-            return False
+            return current_dump_exists()
+    except Exception as exc:
+        print(
+            f"Warning: could not prime isolated benchmark seed dump from shared stack: {exc}",
+            file=sys.stderr,
+        )
+        return False
 
 
 def start_services(
@@ -927,11 +1169,13 @@ def start_services(
     anon_steel_profile: bool = False,
     simulate: bool = False,
     world_model_name: str | None = None,
+    tasks: Sequence[str] = (),
 ) -> tuple[subprocess.Popen, dict]:
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
+    skip_public_tunnel = bool(tasks) and not needs_public_tunnel(tasks)
     if anon_steel_profile:
         env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
         env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
@@ -954,24 +1198,43 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # The benchmark owns a fresh isolated Postgres. Its Fast Mode cache is
+        # task-local state, so routing schema setup through the shared production
+        # pooler only adds an external startup dependency. A closed or saturated
+        # pooler previously aborted the stack before either task could run.
+        # Clear any ambient FAST_MODE_CACHE_DATABASE_URL too, so a caller cannot
+        # accidentally retain the prod pooler despite the local opt-in; run.sh
+        # binds the concrete local URL after it starts Postgres.
+        env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+        env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
+        # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
+        # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
+        # parent shell; if that leaks into an isolated run, every local smoke /
+        # AgentCard stack collapses onto one shared queue (and often the wrong
+        # backend). Force run.sh to derive the queue from this stack's workspace.
+        env.pop("TEMPORAL_TASK_QUEUE", None)
         # Isolated stacks can start in the same second and share a long
         # workspace-name prefix. Stable ngrok domains truncate that prefix,
         # which can collapse distinct runs onto one public endpoint. Give each
         # isolated stack a provider-assigned quick tunnel instead; the shared
         # dev stack keeps its stable ngrok domain.
-        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "1"
-        # Every isolated run starts with an empty per-run database. Opt into
-        # run.sh's schema/day-keyed R2 seed cache so startup restores the same
-        # prod snapshot in seconds instead of row-syncing tens of thousands of
-        # records before services.json can be published.
+        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0" if skip_public_tunnel else "1"
+        # trycloudflare quick tunnels often never route from cloud VMs (edge
+        # probe stays at curl status 000 for the full timeout). Fail the CF
+        # provider after one short attempt so the existing ngrok fallback can
+        # take over without burning ~3 minutes of stack startup.
+        env.setdefault("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", "1")
+        env.setdefault("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", "10")
+        # Every isolated run starts with an empty per-run database and restores
+        # the same immutable canonical base artifact from the shared cache. Do
+        # NOT snapshot the developer's shared DB here: it is mutable and may not
+        # contain the fixture rows the cloud runner depends on.
         seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
         seed_dump.parent.mkdir(parents=True, exist_ok=True)
-        _prime_local_seed_dump_from_shared_stack(seed_dump)
         env["BENCHMARK_SEED_DUMP"] = str(seed_dump)
-        # Default: require a schema-matched cached dump and refuse the slow prod
-        # cold-sync. But the very first local run on a fresh schema/day has no
-        # cached dump to restore, so allow an explicit opt-in
-        # (BENCHMARK_REQUIRE_SEED_DUMP=0) to bootstrap the cache via one cold-sync.
+        # The canonical fixture is published explicitly after validation. A cache
+        # miss must fail rather than silently substituting a fresh prod sync with
+        # different fixture contents.
         env["BENCHMARK_REQUIRE_SEED_DUMP"] = os.environ.get("BENCHMARK_REQUIRE_SEED_DUMP", "1")
         if not simulate:
             # Real-mode local benches never use the World Model Harness, so skip its
@@ -989,6 +1252,26 @@ def start_services(
             resolved_model = world_model_name or os.environ.get("WMH_MODEL_NAME")
             if resolved_model:
                 env["WMH_MODEL_NAME"] = resolved_model
+    # The SMS benchmarks stub web_search through a file the backend re-reads per
+    # call. The path has to be in the BACKEND's env at boot — it is already
+    # running by the time a task selects its fixture — so publish it here.
+    env["BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE"] = sms_web_search_fixture_path(stack)
+    # A/B the SMS supervisor against another model with everything else held
+    # fixed. Read from the caller's env so `BENCHMARK_SMS_SUPERVISOR_MODEL=x
+    # scripts/run-bench --local <task>` just works; the backend needs it at boot.
+    for key in ("BENCHMARK_SMS_SUPERVISOR_MODEL", "BENCHMARK_SMS_SUPERVISOR_ROUTE"):
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+
+    if skip_public_tunnel:
+        # No selected task drives a browser or a hosted page, so nothing in this
+        # run needs to be reachable from the public internet. Skip the quick
+        # tunnel (and, with it, the ephemeral-URL publish that would otherwise
+        # have nothing to publish) rather than take a per-IP-rate-limited
+        # external dependency for nothing. See needs_public_tunnel().
+        env["BENCHMARK_SKIP_PUBLIC_TUNNEL"] = "1"
+        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+
     try:
         with open(stack.service_log, "w") as service_log:
             process = subprocess.Popen(
@@ -1000,10 +1283,14 @@ def start_services(
                 start_new_session=True,
             )
         try:
+            service_start_timeout = SERVICE_START_TIMEOUT_SECONDS
+            if stack.isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
+                service_start_timeout = COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
             manifest = wait_for_services(
                 stack.manifest_path,
                 process=process,
                 service_log=stack.service_log,
+                timeout_seconds=service_start_timeout,
             )
         except BaseException:
             # Ownership transfers to the caller only after readiness succeeds.
@@ -1317,19 +1604,49 @@ def diagnostic_commands(agent_id: str, *, task_name: str, port: int) -> list[lis
     ]
 
 
+def diagnostic_log_env(stack: ServiceStack | None) -> dict[str, str]:
+    """
+    Point the file-reading diagnostics at THIS run's logs.
+
+    An isolated stack writes `<context_dir>/logs/backend.log` and one `worker.N.log` per worker
+    process, never the default `agents/navi-worker-log.txt` / `back-end/backend-logs.log`. Without
+    this, `agent_latency.py` and `agent_cache.py` reported "No log lines found" for every failed
+    benchmark and the collected diagnostics were empty — the failure looked undiagnosable.
+    """
+    env = dict(os.environ)
+    if stack is None or not stack.isolated:
+        return env
+    log_dir = stack.context_dir / "logs"
+    if not log_dir.is_dir():
+        return env
+    worker_logs = sorted(str(path) for path in log_dir.glob("worker*.log"))
+    backend_log = log_dir / "backend.log"
+    if worker_logs:
+        env["NAVI_WORKER_LOGS"] = ",".join(worker_logs)
+    if backend_log.exists():
+        env["NAVI_BACKEND_LOGS"] = str(backend_log)
+    return env
+
+
 def run_diagnostics(
     failures: Sequence[FailedTask],
     *,
     port: int,
     result_path: Path,
+    stack: ServiceStack | None = None,
     timeout_seconds: float = 180,
 ) -> Path | None:
     runnable = [failure for failure in failures if failure.agent_id]
     if not runnable:
         return None
     out_root = result_path.with_suffix("")
-    diag_root = out_root.parent / f"{out_root.name}_diagnostics"
+    diag_root = out_root.parent / bounded_path_component(
+        out_root.name,
+        suffix="_diagnostics",
+        identity=result_path.name,
+    )
     diag_root.mkdir(parents=True, exist_ok=True)
+    diag_env = diagnostic_log_env(stack)
     for failure in runnable:
         task_dir = diag_root / f"{failure.name}_{failure.agent_id[:12]}"
         task_dir.mkdir(exist_ok=True)
@@ -1339,7 +1656,7 @@ def run_diagnostics(
             outfile = open(task_dir / f"{label}.txt", "w")
             outfile.write(f"$ {' '.join(command)}\n\n")
             outfile.flush()
-            processes.append((subprocess.Popen(command, cwd=AGENTS_DIR, stdout=outfile, stderr=subprocess.STDOUT), outfile))
+            processes.append((subprocess.Popen(command, cwd=AGENTS_DIR, stdout=outfile, stderr=subprocess.STDOUT, env=diag_env), outfile))
         for process, outfile in processes:
             try:
                 process.wait(timeout=timeout_seconds)
@@ -1621,18 +1938,18 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
         return known_task_names()
     if args.suite:
         if args.suite == "all":
-            selected = [task for task in all_tasks() if task.runner == "agent" and task.status == "ready"]
+            selected = [task for task in all_tasks() if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready"]
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             selected = [
                 task
                 for task in all_tasks()
-                if task.runner == "agent" and task.status == "ready" and task.bench == args.suite
+                if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready" and task.bench == args.suite
             ]
         else:
             selected = [
                 task
                 for task in all_tasks()
-                if task.runner == "agent" and task.status == "ready" and args.suite in task.tags
+                if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready" and args.suite in task.tags
             ]
         if not selected:
             raise ValueError(f"No ready agent benchmark tasks matched suite/tag: {args.suite}")
@@ -1859,6 +2176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 anon_steel_profile=args.anon,
                 simulate=args.simulate,
                 world_model_name=args.world_model_name,
+                tasks=selected_tasks,
             )
         apply_manifest_environment(manifest)
         if stack.isolated:
@@ -1869,6 +2187,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             # database — e.g. the grep fixture's direct agent lookup hits system Postgres
             # instead of the isolated container and fails with "root agent not found".
             os.environ["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
+            # The SMS web_search stub is a two-process contract: the backend was
+            # given this absolute path at boot, and run_benchmark.py must write
+            # the file there. Exporting it to the backend alone leaves the runner
+            # writing somewhere the backend never reads — the fixture no-ops and
+            # the run scores live search. Both sides get the same string.
+            os.environ["BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE"] = sms_web_search_fixture_path(
+                stack
+            )
             ports = manifest.get("ports", {})
             print(
                 "Isolated benchmark stack: "
@@ -1930,7 +2256,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result_paths.append(result_path)
             failures = failed_tasks_from_run(result_path)
             if failures:
-                diag_dir = run_diagnostics(failures, port=port, result_path=result_path)
+                diag_dir = run_diagnostics(
+                    failures, port=port, result_path=result_path, stack=stack
+                )
                 if diag_dir:
                     print(f"Diagnostics saved: {diag_dir}")
         all_failures = [failure for path in result_paths for failure in failed_tasks_from_run(path)]

@@ -60,10 +60,152 @@ if docker_available_for_workspace_db 'victoria-db-another-workspace'; then
 fi
 echo "PASS: a pre-started workspace DB survives a slow docker info probe"
 
+# An isolated benchmark stack creates its DB container later in the same run, so
+# its name cannot already be listed. Requiring it made a healthy-but-slow
+# `docker info` (Docker Desktop routinely answers in ~2s) silently downgrade
+# every isolated benchmark run to the shared system Postgres. The canonical base
+# fixture is published per pg major, so a system PG17/18 host then hard-failed
+# with "canonical base fixture is unavailable" instead of running the benchmark.
+docker_info_quick() {
+    return 1
+}
+docker_ps_ports_quick() {
+    printf '%s\n' 'victoria-db-some-other-workspace'
+}
+if ! docker_available_for_workspace_db 'victoria-db-bench-not-created-yet' true; then
+    echo "FAIL: an isolated benchmark run must keep Docker selected via a responsive docker ps" >&2
+    exit 1
+fi
+if docker_available_for_workspace_db 'victoria-db-bench-not-created-yet'; then
+    echo "FAIL: a non-isolated workspace must still require its own DB container" >&2
+    exit 1
+fi
+docker_ps_ports_quick() {
+    return 1
+}
+if docker_available_for_workspace_db 'victoria-db-bench-not-created-yet' true; then
+    echo "FAIL: an unresponsive Docker daemon must not report the workspace DB as available" >&2
+    exit 1
+fi
+echo "PASS: isolated benchmark runs survive a slow docker info without losing Docker"
+
+# A healthy `docker info` alone must select Docker, with no container-name check.
+# DOCKER_OK is precisely what makes run.sh *create* the workspace DB container
+# (create_db_container), so demanding the container already exist is circular: a
+# first-ever workspace has none, would be denied Docker, and would silently run
+# on the shared system Postgres forever. Do not "harden" the fast path by
+# requiring container_may_not_exist_yet here.
+HEALTHY_DOCKER_PS_CALLS=0
+docker_info_quick() {
+    return 0
+}
+docker_ps_ports_quick() {
+    HEALTHY_DOCKER_PS_CALLS=$((HEALTHY_DOCKER_PS_CALLS + 1))
+    printf '%s\n' 'victoria-db-some-other-workspace'
+}
+if ! docker_available_for_workspace_db 'victoria-db-never-created'; then
+    echo "FAIL: a healthy docker info must select Docker for a not-yet-created workspace DB" >&2
+    exit 1
+fi
+if ! docker_available_for_workspace_db 'victoria-db-never-created' true; then
+    echo "FAIL: a healthy docker info must select Docker for an isolated run too" >&2
+    exit 1
+fi
+[ "$HEALTHY_DOCKER_PS_CALLS" -eq 0 ] || {
+    echo "FAIL: a healthy docker info must not need a container listing" >&2
+    exit 1
+}
+echo "PASS: a healthy docker info selects Docker without requiring an existing container"
+
+DOCKER_COLD_SEED_PROBES=0
+docker_info_quick() {
+    DOCKER_COLD_SEED_PROBES=$((DOCKER_COLD_SEED_PROBES + 1))
+    [ "$DOCKER_COLD_SEED_PROBES" -ge 3 ]
+}
+COLD_SEED_DOCKER_RETRY_DELAY_SECONDS=0
+if ! docker_available_for_cold_seed; then
+    echo "FAIL: a cold isolated seed must retry a transient Docker health miss" >&2
+    exit 1
+fi
+[ "$DOCKER_COLD_SEED_PROBES" -eq 3 ] || {
+    echo "FAIL: cold-seed Docker retry did not stop after daemon recovery" >&2
+    exit 1
+}
+unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
+echo "PASS: cold isolated seed retries transient Docker health misses"
+
+SLEEP_DELAYS=()
+sleep() {
+    SLEEP_DELAYS+=("$1")
+}
+docker_info_quick() {
+    return 1
+}
+for delay_case in invalid -1 999999 0 2.5; do
+    SLEEP_DELAYS=()
+    COLD_SEED_DOCKER_RETRY_DELAY_SECONDS="$delay_case"
+    if docker_available_for_cold_seed; then
+        echo "FAIL: unavailable Docker unexpectedly recovered for delay $delay_case" >&2
+        exit 1
+    fi
+    case "$delay_case" in
+        invalid|-1) expected_delay=1 ;;
+        999999) expected_delay=5 ;;
+        0) expected_delay='' ;;
+        2.5) expected_delay=2.5 ;;
+    esac
+    if [ -z "$expected_delay" ]; then
+        [ "${#SLEEP_DELAYS[@]}" -eq 0 ] || {
+            echo "FAIL: zero cold-seed delay must not sleep" >&2
+            exit 1
+        }
+    else
+        [ "${#SLEEP_DELAYS[@]}" -eq 5 ] || {
+            echo "FAIL: expected five bounded sleeps for delay $delay_case" >&2
+            exit 1
+        }
+        for observed_delay in "${SLEEP_DELAYS[@]}"; do
+            [ "$observed_delay" = "$expected_delay" ] || {
+                echo "FAIL: delay $delay_case normalized to $observed_delay, expected $expected_delay" >&2
+                exit 1
+            }
+        done
+    fi
+done
+unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
+unset -f sleep
+echo "PASS: cold isolated seed validates and caps retry delays"
+
+# Concurrent /deploy structural gates + aborted prior runs leave orphan
+# `python3 -m http.server` listeners in 61000-61999 (observed: 11 orphans
+# blocking find_free_port's lsof check-then-use window → "listener did not
+# start"). Reap only this gate's range before allocating.
+reap_orphan_http_servers() {
+    local pid cmd
+    for pid in $(lsof -tiTCP:61000-61999 -sTCP:LISTEN 2>/dev/null || true); do
+        cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+        case "$cmd" in
+            *'http.server'*) kill "$pid" 2>/dev/null || true ;;
+        esac
+    done
+}
+reap_orphan_http_servers
+
 find_free_port() {
     local port
-    for port in $(seq 61000 62000); do
-        if ! lsof -ti :"$port" >/dev/null 2>&1; then
+    # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
+    # runs concurrently with it, so an inclusive upper bound of 62000 let both
+    # gates hand out the same port. Bind-probe instead of lsof-only so a
+    # concurrent claim between check and use cannot hand out a taken port.
+    for port in $(seq 61000 61999); do
+        if python3 -c 'import socket,sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
             printf "%s" "$port"
             return 0
         fi
@@ -75,8 +217,15 @@ find_free_port() {
 wait_for_port() {
     local port="$1"
     local attempt
-    for attempt in $(seq 1 30); do
-        if lsof -ti :"$port" >/dev/null 2>&1; then
+    for attempt in $(seq 1 50); do
+        if python3 -c 'import socket,sys
+s=socket.socket(); s.settimeout(0.05)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
             return 0
         fi
         sleep 0.1

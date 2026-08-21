@@ -12,6 +12,6 @@ import { prisma } from '../../providers/database';
 export async function findAgentDeletedStatus(agentId: string) {
   return prisma.agent.findUnique({
     where: { id: agentId },
-    select: { deletedAt: true, goal: true, isBenchmark: true },
+    select: { deletedAt: true, goal: true, isBenchmark: true, source: true },
   });
 }

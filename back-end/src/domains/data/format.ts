@@ -11,9 +11,17 @@ import {
   formatSnippet,
   formatTransactionRowSnippet,
   metadataString,
-  pathSegment,
   valueToLine,
 } from './format.snippets';
+import {
+  buildAccountLabel,
+  buildAgentNetworkPath,
+  buildDocumentPath,
+  buildMessagePath,
+  buildNetworkPath,
+  buildTransactionPath,
+  THREAD_SUFFIX,
+} from './path';
 
 function threadName(row: grepRepo.MessageGrepRow): string {
   const fullName = [row.firstName, row.lastName].filter(Boolean).join(' ');
@@ -56,8 +64,8 @@ export function buildMessageMatch(
   row: grepRepo.MessageGrepRow,
   input: ValidatedGrepInput
 ): GrepMatch {
-  const thread = `${threadName(row)}.thread`;
-  const path = `messages/${thread}/${row.id}`;
+  const thread = `${threadName(row)}${THREAD_SUFFIX}`;
+  const path = buildMessagePath(threadName(row), row.id);
   const content = [
     valueToLine('source', 'messages'),
     valueToLine('thread', thread),
@@ -87,7 +95,7 @@ export function buildNetworkMatch(
   input: ValidatedGrepInput
 ): GrepMatch {
   const name = contactName(row);
-  const path = `network/${name}.contact`;
+  const path = buildNetworkPath(name);
   const content = [
     valueToLine('source', 'network'),
     valueToLine('contact_id', row.id),
@@ -119,7 +127,7 @@ export function buildAgentNetworkMatch(
   row: grepRepo.AgentMessageGrepRow,
   input: ValidatedGrepInput
 ): GrepMatch {
-  const path = `agent_network/depth-${row.agentDepth}/${row.agentId}/${row.role}/${row.id}`;
+  const path = buildAgentNetworkPath(row.agentDepth, row.agentId, row.role, row.id);
   const content = [
     valueToLine('source', 'agent_network'),
     valueToLine('agent_id', row.agentId),
@@ -160,15 +168,19 @@ export function buildTransactionMatch(
   input: ValidatedGrepInput
 ): GrepMatch {
   const merchant = firstNonEmpty(row.merchantName, row.name);
-  const accountSuffix =
-    row.accountMask !== null && row.accountMask !== '' ? ` ****${row.accountMask}` : '';
-  const path = `transactions/${row.institutionName ?? 'unknown-institution'}/${row.accountName}${accountSuffix}/${row.plaidTransactionId}`;
+  const accountLabel = buildAccountLabel(row.accountName, row.accountMask);
+  const path = buildTransactionPath(
+    row.institutionName,
+    row.accountName,
+    row.accountMask,
+    row.plaidTransactionId
+  );
   const currency = row.isoCurrencyCode ?? row.unofficialCurrencyCode ?? 'UNKNOWN';
   const content = [
     valueToLine('source', 'transactions'),
     valueToLine('transaction_id', row.plaidTransactionId),
     valueToLine('institution', row.institutionName),
-    valueToLine('account', `${row.accountName}${accountSuffix}`),
+    valueToLine('account', accountLabel),
     valueToLine('date', row.date.toISOString().slice(0, 10)),
     valueToLine(
       'authorized_date',
@@ -225,8 +237,8 @@ export function buildDocumentMatch(
     metadataString(row.metadata, 'path') ?? metadataString(row.metadata, 'relativePath');
   const path =
     row.source === 'obsidian' && vault !== undefined && relativePath !== undefined
-      ? `documents/obsidian/${pathSegment(vault)}/${pathSegment(relativePath)}`
-      : `documents/${row.source}/${pathSegment(row.title)}/${pathSegment(row.externalId)}`;
+      ? buildDocumentPath(row.source, vault, relativePath)
+      : buildDocumentPath(row.source, row.title, row.externalId);
   const timestamp = row.sourceUpdatedAt ?? row.updatedAt;
   const content = [
     valueToLine('source', 'documents'),

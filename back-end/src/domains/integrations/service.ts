@@ -6,7 +6,12 @@
 import { type Prisma, IntegrationType, IntegrationStatus, mergeJson } from './types';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
-import { getAdminPhone, isAnthropicApiKeyConfigured } from './config';
+import {
+  getAdminPhone,
+  isAnthropicApiKeyConfigured,
+  isEmailProviderSlug,
+  isOpenRouterApiKeyConfigured,
+} from './config';
 import {
   fetchClaudeCodeAccessToken,
   fetchPoolToken,
@@ -53,12 +58,15 @@ export {
   processContactsUpload,
   processEmailZipUpload,
   processIMessageUpload,
+  processWhatsAppConnect,
   processWhatsAppUpload,
   processTelegramConnect,
   processTelegramUpload,
   processCookiesUpload,
   processLocalStorageUpload,
   processIndexedDBUpload,
+  ingestIndexedDBUploadJson,
+  decryptCompressedToUtf8,
   processFingerprintUpload,
   processPermissionsUpload,
   processCacheStorageUpload,
@@ -87,6 +95,8 @@ export {
   GmailAuthFailedError,
   ClaudeCodeCredentialsNotFoundError,
   NoTokensAvailableError,
+  IndexedDBUploadPayloadInvalidError,
+  IndexedDBUploadPayloadTooLargeError,
 } from './service.errors';
 
 import {
@@ -105,13 +115,55 @@ import {
 // Integration CRUD
 // ---------------------------------------------------------------------------
 
+/**
+ * Overlay each email integration's connected addresses from its credential rows.
+ *
+ * `config.connectedEmails` is a denormalized copy; the credential table is the
+ * source of truth. Any writer that replaced `config` wholesale (an OAuth start,
+ * a sync) silently dropped that copy and the UI's account chips vanished for a
+ * still-connected account. Deriving here means the response cannot disagree
+ * with reality, and a config that already lost the field self-heals on read.
+ */
+function withDerivedConnectedEmails<
+  T extends { name: string; config: unknown; emailCredentials: Array<{ email: string | null }> },
+>(integrations: T[]): T[] {
+  return integrations.map((integration) => {
+    if (!isEmailProviderSlug(integration.name)) return integration;
+
+    const derived = integration.emailCredentials
+      .map((c) => c.email)
+      .filter((e): e is string => e !== null && e !== '');
+    const base =
+      typeof integration.config === 'object' &&
+      integration.config !== null &&
+      !Array.isArray(integration.config)
+        ? (integration.config as Record<string, unknown>)
+        : {};
+
+    // Keep the previously-recorded primary when that account is still
+    // connected, so the address the user has been seeing does not change
+    // underneath them; otherwise fall back to the oldest credential (the
+    // include is ordered, so this is stable across requests).
+    const configuredPrimary = typeof base.connectedEmail === 'string' ? base.connectedEmail : null;
+    const primary =
+      configuredPrimary !== null && derived.includes(configuredPrimary)
+        ? configuredPrimary
+        : (derived[0] ?? null);
+
+    return {
+      ...integration,
+      config: { ...base, connectedEmail: primary, connectedEmails: derived },
+    };
+  });
+}
+
 export async function getIntegrations(userId: string) {
   const queryStart = Date.now();
   const hasCachedDomains = repo.isAuthDomainsCached(userId);
 
   log.info('Fetching integrations', { userId, domainsCached: hasCachedDomains });
 
-  const integrations = await repo.findIntegrationsByUser(userId);
+  const integrations = withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId));
   log.info('Integrations query done', { durationMs: Date.now() - queryStart });
 
   const authenticatedDomains = await repo.getAuthenticatedDomains(userId);
@@ -449,25 +501,58 @@ export async function sendPasswordRequest(userId: string, request: string) {
 
 export class CredentialEnvelopeError extends Error {}
 
+/**
+ * Effective pool eligibility for a compute credential the account just synced.
+ *
+ * Precedence:
+ *   1. explicit per-integration override (`Integration.poolingEnabledOverride`)
+ *   2. account policy (`User.poolTokensByDefault`) — can only RAISE eligibility
+ *   3. whatever the row already had (fresh rows: not pooled)
+ *
+ * The account policy never lowers an already-pooled token, so the mac-app
+ * pushing a rotated token on every refresh can't silently drain the pool. An
+ * operator who deliberately excludes (or includes) one token sets the override,
+ * which wins over the account policy in both directions.
+ */
+export function resolveSyncedPoolingEnabled(params: {
+  accountDefault: boolean;
+  existing?: { poolingEnabled: boolean; poolingEnabledOverride: boolean | null } | null;
+}): boolean {
+  const override = params.existing?.poolingEnabledOverride;
+  if (override !== null && override !== undefined) return override;
+  if (params.accountDefault) return true;
+  return params.existing?.poolingEnabled ?? false;
+}
+
+async function resolvePoolingForCredentialSync(userId: string, name: string): Promise<boolean> {
+  const [accountDefault, existing] = await Promise.all([
+    repo.findUserPoolTokensByDefault(userId),
+    repo.findIntegrationPoolingState(userId, name),
+  ]);
+  return resolveSyncedPoolingEnabled({ accountDefault, existing });
+}
+
 export async function uploadClaudeCodeCredentials(userId: string, encryptedCredentials: string) {
   const check = verifyCredentialEnvelopeDecryptable(encryptedCredentials);
   if (!check.ok) {
     log.error('Rejecting undecryptable Claude Code credentials', { userId, reason: check.reason });
     throw new CredentialEnvelopeError(check.reason);
   }
-  log.info('Storing Claude Code credentials', { userId });
+  const poolingEnabled = await resolvePoolingForCredentialSync(userId, 'claude_code');
+  log.info('Storing Claude Code credentials', { userId, poolingEnabled });
   await repo.upsertIntegrationRaw({
     userId,
     name: 'claude_code',
     type: IntegrationType.TOOL_SETUP,
     status: IntegrationStatus.CONNECTED,
     isActive: true,
+    poolingEnabled,
     lastSyncAt: new Date(),
     lastSuccessfulSyncAt: new Date(),
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  log.info('Claude Code credentials stored', { userId });
+  log.info('Claude Code credentials stored', { userId, poolingEnabled });
 }
 
 export async function uploadGptCodeCredentials(userId: string, encryptedCredentials: string) {
@@ -476,19 +561,21 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
     log.error('Rejecting undecryptable GPT Code credentials', { userId, reason: check.reason });
     throw new CredentialEnvelopeError(check.reason);
   }
-  log.info('Storing GPT Code credentials', { userId });
+  const poolingEnabled = await resolvePoolingForCredentialSync(userId, 'gpt_code');
+  log.info('Storing GPT Code credentials', { userId, poolingEnabled });
   await repo.upsertIntegrationRaw({
     userId,
     name: 'gpt_code',
     type: IntegrationType.TOOL_SETUP,
     status: IntegrationStatus.CONNECTED,
     isActive: true,
+    poolingEnabled,
     lastSyncAt: new Date(),
     lastSuccessfulSyncAt: new Date(),
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  log.info('GPT Code credentials stored', { userId });
+  log.info('GPT Code credentials stored', { userId, poolingEnabled });
 }
 
 export async function getClaudeCodeToken(
@@ -651,11 +738,14 @@ export async function markComputeTokenRateLimited(
 
 /** Read the running backend's shared ANTHROPIC_API_KEY availability.
  *  Consumers must require both configured=true and onCooldown=false before
- *  selecting the funded-default tier; no secret material leaves the process. */
+ *  selecting the funded-default tier; no secret material leaves the process.
+ *  `openrouterConfigured` lets Claude Code preflight proceed when the shared
+ *  Anthropic org is on cooldown but OpenRouter can back the sandbox. */
 export async function getAnthropicApiKeyCooldown() {
   return {
     configured: isAnthropicApiKeyConfigured(),
     onCooldown: await isAnthropicApiKeyOnCooldown(),
+    openrouterConfigured: isOpenRouterApiKeyConfigured(),
   };
 }
 

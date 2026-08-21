@@ -6,5 +6,9 @@ type SeedEnvironment = Record<string, string | undefined>;
  * is only a compatibility fallback when an environment has no pooled URL.
  */
 export function selectRemoteDatabaseUrl(env: SeedEnvironment): string | undefined {
+  const routedEndpoint = env.SEED_REMOTE_DATABASE_URL?.trim();
+  if (routedEndpoint) {
+    return routedEndpoint;
+  }
   return env.DATABASE_URL || env.DIRECT_DATABASE_URL;
 }

@@ -26,6 +26,21 @@ import {
   CODE_AGENT_ATTACHMENTS_DIR,
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
+import { workDirForGithubRepo } from './e2bWorkDir';
+import { createSandboxWithRetry } from './e2bSandboxCreate';
+import {
+  isRefreshOnlyOauthEnvelope,
+  resolveClaudeCodeAuthEnvs,
+  resolveClaudeCodeSandboxApiKey,
+  resolveClaudeCodeTokenSource,
+  resolveCodexCodeAuthEnvs,
+  shouldEnableClaudeCodeFastMode,
+  shouldIgnoreAnthropicApiKeyCooldownForSandbox,
+  shouldInjectClaudeCodeFastModeProxy,
+  shouldPreferSandboxAnthropicBaseUrlOverFastMode,
+  shouldSkipSandboxAnthropicGatewayForOauth,
+} from './claudeCodeSandboxAuth';
+export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
 export {
   closeClaudeCodeSession,
   connectToSandbox,
@@ -34,6 +49,22 @@ export {
   parseClaudeCodeUsage,
   type ClaudeCodeUsage,
 } from './e2bCloseSession';
+export {
+  CODE_AGENT_CREDENTIALS_UNAVAILABLE,
+  CodeAgentCredentialError,
+  isRefreshOnlyOauthEnvelope,
+  OPENROUTER_ANTHROPIC_COMPAT_BASE_URL,
+  resolveClaudeCodeAuthEnvs,
+  resolveClaudeCodeSandboxApiKey,
+  resolveClaudeCodeTokenSource,
+  resolveCodexCodeAuthEnvs,
+  resolveHostAnthropicBaseUrl,
+  shouldEnableClaudeCodeFastMode,
+  shouldIgnoreAnthropicApiKeyCooldownForSandbox,
+  shouldInjectClaudeCodeFastModeProxy,
+  shouldPreferSandboxAnthropicBaseUrlOverFastMode,
+  shouldSkipSandboxAnthropicGatewayForOauth,
+} from './claudeCodeSandboxAuth';
 
 const log = createLogger('E2B');
 
@@ -59,17 +90,6 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
 const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
-const CODE_AGENT_REPO_WORKDIR = '/home/user/workspace';
-
-function workDirForGithubRepo(githubRepoUrl?: string): string {
-  if (!githubRepoUrl) return '/home/user';
-  try {
-    new URL(githubRepoUrl);
-    return CODE_AGENT_REPO_WORKDIR;
-  } catch {
-    return '/home/user';
-  }
-}
 
 function findLocalClaudeCodeWsServer(): string | null {
   const candidates = [
@@ -137,97 +157,6 @@ async function overlayCodexCodeWsServer(
  * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
-/**
- * Decide which auth env vars the Claude Code CLI sandbox should receive.
- *
- * Preference order (mirrors the Rose completions fallback so the code agent
- * stays usable everywhere an OAuth token would be):
- *   1. A synced/pool Claude OAuth credential → CLAUDE_CODE_CREDENTIALS (+ token).
- *   2. The funded ANTHROPIC_API_KEY (billed) — Claude Code CLI reads it natively
- *      — when no OAuth credential is available and the shared key isn't on its
- *      out-of-credits cooldown.
- *   3. Otherwise throw — nothing usable.
- *
- * Pure + exported so the selection is unit-testable without spinning an E2B
- * sandbox (the real session path isn't otherwise reachable in tests).
- */
-export function resolveClaudeCodeAuthEnvs(
-  credentialMeta: ClaudeCodeCredentialResult | null,
-  anthropicApiKey: string | undefined,
-  anthropicApiKeyOnCooldown: boolean
-): Record<string, string> {
-  const envs: Record<string, string> = {};
-  if (credentialMeta) {
-    if (credentialMeta.credentials) {
-      envs.CLAUDE_CODE_CREDENTIALS = credentialMeta.credentials;
-    }
-    if (credentialMeta.accessToken) {
-      envs.CLAUDE_CODE_OAUTH_TOKEN = credentialMeta.accessToken;
-    }
-    return envs;
-  }
-  if (anthropicApiKey && !anthropicApiKeyOnCooldown) {
-    envs.ANTHROPIC_API_KEY = anthropicApiKey;
-    return envs;
-  }
-  throw new Error(
-    'No Claude Code credentials available: no synced user credentials, no available pool tokens, ' +
-      'and no usable ANTHROPIC_API_KEY fallback (unset or on cooldown)'
-  );
-}
-
-export function resolveClaudeCodeTokenSource(
-  credentialMeta: ClaudeCodeCredentialResult | null
-): 'user' | 'pool' | 'anthropic' {
-  return credentialMeta?.source ?? 'anthropic';
-}
-
-/**
- * Decide which auth env vars the Codex Code CLI sandbox should receive.
- *
- * Mirrors {@link resolveClaudeCodeAuthEnvs} (and the Rose completions fallback)
- * so the Codex code agent stays usable whenever an OAuth token would be:
- *   1. A synced/pool ChatGPT/Codex OAuth credential → CODEX_AUTH_JSON (primary).
- *      When a funded OpenAI key is also configured, it is injected ALONGSIDE the
- *      OAuth token as OPENAI_API_KEY so the sandbox can re-login and retry if the
- *      OAuth token hits `usage_limit_reached` MID-RUN. This is the real failure
- *      mode that stalled deploy: `fetchGptCodeCredentialsWithMeta` only filters
- *      tokens the DB already marked rate-limited, so a token that is over quota
- *      but not yet flagged is returned as valid and only fails at runtime inside
- *      the sandbox — where a null-credential fallback never gets a chance to fire.
- *   2. No OAuth credential (absent, or every pool token DB-rate-limited → null) →
- *      the funded OpenAI API key alone → OPENAI_API_KEY, which the sandbox
- *      ws-server logs in with via `codex login --with-api-key`.
- *   3. Otherwise throw — nothing usable.
- *
- * Pure + exported so the selection is unit-testable without spinning an E2B
- * sandbox (the real session path isn't otherwise reachable in tests).
- */
-export function resolveCodexCodeAuthEnvs(
-  credentialMeta: GptCodeCredentialEnvelopeResult | null,
-  openaiApiKey: string | undefined,
-  openaiApiKeyOnCooldown = false
-): Record<string, string> {
-  const fundedKey =
-    !openaiApiKeyOnCooldown && openaiApiKey !== undefined && openaiApiKey !== ''
-      ? openaiApiKey
-      : undefined;
-  if (credentialMeta) {
-    const envs: Record<string, string> = { CODEX_AUTH_JSON: credentialMeta.credentials };
-    if (fundedKey !== undefined) {
-      envs.OPENAI_API_KEY = fundedKey;
-    }
-    return envs;
-  }
-  if (fundedKey !== undefined) {
-    return { OPENAI_API_KEY: fundedKey };
-  }
-  throw new Error(
-    'No GPT Code credentials available: no synced user credentials, no available pool tokens, ' +
-      'and no usable OPENAI_API_KEY (GPT_API_KEY) fallback configured'
-  );
-}
-
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
@@ -245,7 +174,18 @@ export async function createClaudeCodeSession(
   const taskId = uuidv4();
   const fastModeWriteEnabled =
     fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
-  const codeAgentFastModeActive = fastModeCacheEnabled === true || fastModeWriteEnabled;
+  const codeAgentFastModeActive = shouldEnableClaudeCodeFastMode({
+    openrouterApiKey: process.env.OPENROUTER_API_KEY,
+    fastModeCacheEnabled,
+    fastModeWriteEnabled,
+  });
+  if (
+    !codeAgentFastModeActive &&
+    (fastModeCacheEnabled === true || fastModeWriteEnabled) &&
+    process.env.OPENROUTER_API_KEY?.trim()
+  ) {
+    log.info('OpenRouter configured — skipping Fast Mode tee-proxy/flags for Claude Code session');
+  }
   const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5';
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const templateId = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
@@ -265,42 +205,6 @@ export async function createClaudeCodeSession(
     CLAUDE_CODE_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
   };
-  if (codeAgentFastModeActive) {
-    envs.CLAUDE_CODE_FAST_MODE = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1';
-  }
-
-  // Fast Mode: route the sandbox's Anthropic calls through our tee-proxy so they
-  // record/replay. The CLI's Anthropic SDK honors ANTHROPIC_BASE_URL. Only injected
-  // when Fast Mode is on AND a proxy URL is configured (else direct to Anthropic).
-  const fastModeEnv = buildFastModeAnthropicEnv(
-    goal,
-    fastModeCacheEnabled === true,
-    process.env.FAST_MODE_ANTHROPIC_PROXY_URL,
-    fastModeWriteEnabled,
-    {
-      sessionId: taskId,
-      trace: {
-        goal,
-        systemPrompt,
-        model,
-        codeProvider: 'claude',
-        templateId,
-        runtimeFingerprint,
-        workDir,
-        githubRepoUrl,
-      },
-    }
-  );
-  if (fastModeEnv.ANTHROPIC_BASE_URL !== undefined) {
-    envs.ANTHROPIC_BASE_URL = fastModeEnv.ANTHROPIC_BASE_URL;
-    log.info(`Fast Mode: routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
-  } else if (fastModeWriteEnabled) {
-    log.warn(
-      'Fast Mode cache active but FAST_MODE_ANTHROPIC_PROXY_URL unset — code agent not cached'
-    );
-  }
 
   // Try user's own credentials first, then rotate through the pool. The agent's
   // outer loop already rotates through pool tokens when Anthropic returns 429;
@@ -311,11 +215,127 @@ export async function createClaudeCodeSession(
     credentialMeta = await fetchClaudeCodeCredentialsWithMeta(userId);
   }
 
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-  // Only consult the shared cooldown when we'd actually need the fallback.
+  const sharedAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  // Peek shared cooldown once: drives both OpenRouter auto-fallback and whether
+  // a refresh-only OAuth envelope may be skipped.
+  const sharedKeyOnCooldown = sharedAnthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
+  // When Fast Mode is active, prefer OpenRouter over the tee-proxy even if the
+  // shared Anthropic key is not on cooldown — fleet guests rarely set
+  // ANTHROPIC_BASE_URL, and Fast Mode + Anthropic upstream 403s Claude Code.
+  const sandboxTransport = resolveClaudeCodeSandboxApiKey(
+    process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
+    sharedAnthropicApiKey,
+    {
+      anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
+      openrouterApiKey: process.env.OPENROUTER_API_KEY,
+      sharedKeyOnCooldown,
+      preferOpenRouterGateway: codeAgentFastModeActive,
+    }
+  );
+  const sandboxApiKey = sandboxTransport.apiKey;
+
+  // Attachment fingerprints keep Fast Mode traces distinct across H-02 eras
+  // (corrupted 369851-byte UTF-8 uploads vs intact 207364-byte JPEGs).
+  const attachmentFingerprint =
+    attachments && attachments.length > 0
+      ? attachments
+          .map((fp) => `${fp.original_filename}:${fp.size_bytes}:${fp.storage_path}`)
+          .sort()
+          .join('|')
+      : '';
+
+  // Fast Mode tee-proxy vs funded gateway: resolve transport first. OpenRouter
+  // (or any non-api.anthropic.com base) must not be overwritten by Fast Mode —
+  // the proxy forwards to api.anthropic.com and 403s gateway keys.
+  const preferSandboxBase = shouldPreferSandboxAnthropicBaseUrlOverFastMode(
+    sandboxTransport.baseUrl
+  );
+  // Fast Mode CLI flags + tee-proxy only when opt-in Fast Mode is active and we
+  // are not already on a funded non-Anthropic gateway. Andy write-through alone
+  // must not inject the proxy (k=5 t5 recurrence, 2026-08-21).
+  const injectFastModeProxy = shouldInjectClaudeCodeFastModeProxy({
+    codeAgentFastModeActive,
+    preferSandboxBase,
+  });
+  if (injectFastModeProxy) {
+    envs.CLAUDE_CODE_FAST_MODE = '1';
+    envs.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS = '1';
+    envs.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1';
+  }
+  const fastModeEnv: Record<string, string> = injectFastModeProxy
+    ? buildFastModeAnthropicEnv(
+        goal,
+        fastModeCacheEnabled === true,
+        process.env.FAST_MODE_ANTHROPIC_PROXY_URL,
+        fastModeWriteEnabled,
+        {
+          sessionId: taskId,
+          trace: {
+            goal,
+            systemPrompt,
+            model,
+            codeProvider: 'claude',
+            templateId,
+            runtimeFingerprint: attachmentFingerprint
+              ? `${runtimeFingerprint}|att:${attachmentFingerprint}`
+              : runtimeFingerprint,
+            workDir,
+            githubRepoUrl,
+          },
+        }
+      )
+    : {};
+  const sandboxBaseUrlCandidate = sandboxTransport.baseUrl;
+  const ignoreSharedCooldown = shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey,
+    sharedAnthropicApiKey,
+    sandboxBaseUrl: sandboxBaseUrlCandidate,
+  });
+  // A refreshable OAuth envelope after direct-token auth_error must not block the
+  // funded API-key path when the envelope's refresh_token is also dead
+  // (invalid_grant): Claude Code would 401 in-sandbox instead of using the key.
+  // Resolve this BEFORE choosing ANTHROPIC_BASE_URL so a nulled envelope can
+  // still take the OpenRouter gateway, while a live oauth_token never does.
+  if (credentialMeta && isRefreshOnlyOauthEnvelope(credentialMeta) && sandboxApiKey) {
+    // Dedicated gateway keys / ANTHROPIC_BASE_URL overrides are never gated by
+    // the shared Anthropic-org cooldown (that cooldown tracks api.anthropic.com).
+    const envelopeBlockedBySharedCooldown = !ignoreSharedCooldown && sharedKeyOnCooldown;
+    if (!envelopeBlockedBySharedCooldown) {
+      log.info(
+        `Preferring sandbox Anthropic API key over refresh-only OAuth envelope for agent ${agentId}`
+      );
+      credentialMeta = null;
+    }
+  }
+
+  // OAuth sessions must hit api.anthropic.com. OpenRouter + oauth_token produced
+  // "401 Missing Authentication header" on Pre-Deploy claude-code-agent (2026-08-21).
+  const skipGatewayForOauth = shouldSkipSandboxAnthropicGatewayForOauth(credentialMeta);
+  if (skipGatewayForOauth) {
+    log.info(
+      `Using Claude OAuth for agent ${agentId} — Anthropic default host (sandbox gateway base skipped)`
+    );
+  } else if (preferSandboxBase && sandboxTransport.baseUrl) {
+    envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
+    log.info(
+      `Routing sandbox Anthropic calls via funded gateway ${envs.ANTHROPIC_BASE_URL} (Fast Mode proxy skipped)`
+    );
+  } else if (fastModeEnv.ANTHROPIC_BASE_URL !== undefined) {
+    envs.ANTHROPIC_BASE_URL = fastModeEnv.ANTHROPIC_BASE_URL;
+    log.info(`Fast Mode: routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
+  } else if (sandboxTransport.baseUrl) {
+    envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
+    log.info(`Routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
+  } else if (fastModeWriteEnabled) {
+    log.warn(
+      'Fast Mode cache active but FAST_MODE_ANTHROPIC_PROXY_URL unset — code agent not cached'
+    );
+  }
+  // Only consult the shared Anthropic-org cooldown when the sandbox would use
+  // that same shared key against api.anthropic.com.
   const apiKeyOnCooldown =
-    !credentialMeta && anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
-  Object.assign(envs, resolveClaudeCodeAuthEnvs(credentialMeta, anthropicApiKey, apiKeyOnCooldown));
+    !credentialMeta && sandboxApiKey && !ignoreSharedCooldown ? sharedKeyOnCooldown : false;
+  Object.assign(envs, resolveClaudeCodeAuthEnvs(credentialMeta, sandboxApiKey, apiKeyOnCooldown));
   const claudeTokenSource = resolveClaudeCodeTokenSource(credentialMeta);
 
   if (credentialMeta) {
@@ -323,7 +343,9 @@ export async function createClaudeCodeSession(
       `Using ${credentialMeta.source} Claude Code credentials for agent ${agentId} (integration ${credentialMeta.poolTokenId ?? 'user-owned'}, mode ${credentialMeta.credentialMode})`
     );
   } else {
-    log.info(`Using ANTHROPIC_API_KEY funded fallback for Claude Code agent ${agentId}`);
+    log.info(
+      `Using ${ignoreSharedCooldown ? 'dedicated Claude Code' : 'ANTHROPIC_API_KEY'} funded fallback for agent ${agentId}`
+    );
   }
 
   // Add GitHub config if repo specified
@@ -337,11 +359,15 @@ export async function createClaudeCodeSession(
   }
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts
-  const sandbox = await Sandbox.create(process.env.E2B_CLAUDE_CODE_TEMPLATE_ID, {
-    apiKey: process.env.E2B_API_KEY,
-    timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
-  });
+  const sandbox = await createSandboxWithRetry(
+    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
+    {
+      apiKey: process.env.E2B_API_KEY,
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      envs,
+    },
+    'Claude Code'
+  );
 
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);
@@ -559,11 +585,15 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const sandbox = await Sandbox.create(templateId, {
-    apiKey: process.env.E2B_API_KEY,
-    timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
-  });
+  const sandbox = await createSandboxWithRetry(
+    templateId,
+    {
+      apiKey: process.env.E2B_API_KEY,
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      envs,
+    },
+    'Codex Code'
+  );
 
   log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
   await overlayCodexCodeWsServer(sandbox);

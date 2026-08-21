@@ -19,19 +19,29 @@
 import { randomUUID } from 'node:crypto';
 
 import { prisma } from '../database';
-import { startAgentWorkflow, getTemporalClient } from '../temporal';
-import { executeWebSearch } from '../chat/chatTools';
-import { getAgentUrl } from '../smsTemplates';
+import { getTemporalClient } from '../temporal';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import {
   deleteAgentRecursive,
   resolveAgentPrefix,
   smsIntendsAgentReply,
+  unknownSupervisorToolError,
 } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
+import { commitStartNewAgent, type StartNewAgentArgs } from './supervisorTools.startAgent';
+import type { SupervisorChannel } from './channelDelivery';
+// web_search MUST come from supervisorTools.webSearch: it is the only copy that
+// honours BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE. A fixture-blind copy silently
+// runs a LIVE search underneath a benchmark whose whole purpose is controlling
+// what the model learns, so the run scores a trajectory nobody chose — the
+// closed-store task ordered from a restaurant whose closure it was never shown.
+import { executeWebSearchTool, type WebSearchArgs } from './supervisorTools.webSearch';
 
 const log = createLogger('SmsSupervisorTools');
+
+/** Ceiling for a single agent's price limit; keeps newLimitCents inside Prisma's Int column. */
+const MAX_PRICE_LIMIT_CENTS = 100_000_00;
 
 export { TOOL_SCHEMAS } from './supervisorTools.schemas';
 
@@ -79,15 +89,6 @@ interface KillAgentArgs {
 interface IncreaseBudgetArgs {
   agent_id_or_prefix: string;
   amount_dollars: number;
-}
-
-interface StartNewAgentArgs {
-  goal: string;
-  budget_dollars?: number;
-}
-
-interface WebSearchArgs {
-  query: string;
 }
 
 // ============================================
@@ -184,7 +185,7 @@ export async function dispatchToolCall(
         result = { tool, success: false, result: '', error: 'Environment context unavailable' };
         break;
       default:
-        result = { tool, success: false, result: '', error: `Unknown tool: ${tool}` };
+        result = { tool, success: false, result: '', error: unknownSupervisorToolError(tool) };
     }
 
     log.info('Tool dispatch complete', {
@@ -224,7 +225,8 @@ export async function dispatchToolCall(
  */
 export async function commitPendingWrites(
   pendingWrites: readonly PendingOp[],
-  userId: string
+  userId: string,
+  channel: SupervisorChannel = 'SMS'
 ): Promise<ToolResult[]> {
   const results: ToolResult[] = [];
   for (const op of pendingWrites) {
@@ -242,7 +244,7 @@ export async function commitPendingWrites(
           result = await commitIncreaseBudget(op);
           break;
         case 'start_new_agent':
-          result = await commitStartNewAgent(op, userId);
+          result = await commitStartNewAgent(op, userId, channel);
           break;
       }
       log.info('Pending op committed', {
@@ -299,6 +301,19 @@ async function validateReplyToAgent(
       success: false,
       result: '',
       error: 'Current SMS does not identify this agent task or a matching pending request',
+    };
+  }
+  // A rejection is only expressible as a resolved attention request: without an
+  // `attention_request_id` the commit signals the bare `message`, which
+  // `receive_user_response` reads as ordinary feedback. Accepting this pair
+  // would silently downgrade a "no" into a "here's a comment" and let the
+  // blocked tool proceed as if it had never been refused.
+  if (args.reject === true && args.attention_request_id === undefined) {
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: 'Rejecting requires the attention_request_id of the request being rejected',
     };
   }
   pendingWrites.push({ kind: 'reply_to_agent', args, agentId: agent.id });
@@ -366,6 +381,9 @@ async function validateIncreaseBudget(
   };
 }
 
+/** Agent-run LLM/tool budget ceiling on the SMS surface (not purchase amount). */
+const MAX_SMS_AGENT_RUN_BUDGET_DOLLARS = 2;
+
 function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp[]): ToolResult {
   if (!args.goal || typeof args.goal !== 'string' || args.goal.trim().length === 0) {
     return {
@@ -374,6 +392,27 @@ function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp
       result: '',
       error: 'goal is required and must be a non-empty string',
     };
+  }
+  if (args.budget_dollars !== undefined) {
+    if (!Number.isFinite(args.budget_dollars) || args.budget_dollars <= 0) {
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error: `budget_dollars must be a positive number, got ${args.budget_dollars}`,
+      };
+    }
+    if (args.budget_dollars > MAX_SMS_AGENT_RUN_BUDGET_DOLLARS) {
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error:
+          `budget_dollars is the agent-run LLM/tool budget (default $1, max $${MAX_SMS_AGENT_RUN_BUDGET_DOLLARS}), ` +
+          'NOT the purchase price. Purchases are approved separately via attention requests. ' +
+          `Retry with budget_dollars <= ${MAX_SMS_AGENT_RUN_BUDGET_DOLLARS}.`,
+      };
+    }
   }
   const provisionalId = randomUUID();
   pendingWrites.push({ kind: 'start_new_agent', args, provisionalId });
@@ -446,6 +485,12 @@ async function commitReplyToAgent(
     };
   }
 
+  // ONE canonical response for both sinks. These used to diverge: the signal
+  // sent a bare empty `message` while the row persisted the 'Approved' default,
+  // so on an empty approval the database recorded a decision the workflow never
+  // received.
+  const canonicalUserResponse = reject ? '__REJECTED__' : message || 'Approved';
+
   // 2. Signal the workflow to unblock any waiting tool
   if (agent.temporalWorkflowId) {
     try {
@@ -454,7 +499,7 @@ async function commitReplyToAgent(
       const signalValue = attention_request_id
         ? JSON.stringify({
             request_id: attention_request_id,
-            response: reject ? '__REJECTED__' : message,
+            response: canonicalUserResponse,
           })
         : message;
       await handle.signal('receive_user_response', signalValue);
@@ -476,19 +521,34 @@ async function commitReplyToAgent(
   }
 
   // 3. If resolving an attention request, mark it in DB
+  let attentionResolved = false;
   if (attention_request_id) {
     try {
-      const userResponse = reject ? '__REJECTED__' : message || 'Approved';
-      await prisma.agentAttentionRequest.update({
-        where: { id: attention_request_id },
+      const userResponse = canonicalUserResponse;
+      // Scope by agent AND user, not request id alone. validateReplyToAgent
+      // accepts any attention_request_id when currentSmsMatches is true, so an
+      // id belonging to another agent or user would otherwise be written here.
+      // `userResponse: null` keeps this single-shot. Without it a repeated
+      // reply overwrites an existing decision and reports a fresh
+      // approval/rejection for a request that was already resolved.
+      const resolved = await prisma.agentAttentionRequest.updateMany({
+        where: { id: attention_request_id, agentId: agent.id, userId, userResponse: null },
         data: { userResponse },
       });
-
-      log.info('Resolved attention request', {
-        phase: 'reply',
-        requestId: attention_request_id,
-        reject: !!reject,
-      });
+      attentionResolved = resolved.count > 0;
+      if (!attentionResolved) {
+        log.warn('Attention request not resolved: not owned by this agent/user', {
+          phase: 'reply',
+          requestId: attention_request_id,
+          agentId: agent.id,
+        });
+      } else {
+        log.info('Resolved attention request', {
+          phase: 'reply',
+          requestId: attention_request_id,
+          reject: !!reject,
+        });
+      }
     } catch (error) {
       log.warn('Failed to resolve attention request', {
         phase: 'reply',
@@ -499,11 +559,17 @@ async function commitReplyToAgent(
     }
   }
 
-  const action = attention_request_id
-    ? reject
-      ? 'Rejected request and replied to'
-      : 'Approved request and replied to'
-    : 'Replied to';
+  // Only claim the approve/reject happened when a row actually changed. The
+  // message IS delivered either way, so this stays a success — but reporting
+  // "Approved request" for an unowned or already-resolved id would tell the
+  // operator a decision landed that never did.
+  const action = !attention_request_id
+    ? 'Replied to'
+    : attentionResolved
+      ? reject
+        ? 'Rejected request and replied to'
+        : 'Approved request and replied to'
+      : 'Replied to (request was already resolved or not found for)';
   return {
     tool: 'reply_to_agent',
     success: true,
@@ -563,8 +629,41 @@ async function commitIncreaseBudget(
     };
   }
 
+  // Reject non-finite input FIRST and by name. `Math.round(NaN)` is `NaN` and
+  // `NaN < 1` is false, so a non-numeric or Infinite amount slips past the
+  // sub-cent guard below and is only caught by the safe-integer check further
+  // down — which reports "exceeds the maximum" for an input that was never a
+  // number, sending the user chasing a limit that is not the problem.
+  if (!Number.isFinite(amount_dollars)) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Increase amount must be a number, got ${JSON.stringify(amount_dollars)}`,
+    };
+  }
+
+  // A sub-cent amount rounds to 0 and would report an increase that never
+  // happened; an enormous one overflows the Prisma `Int` column and throws
+  // AFTER the SMS commit gate.
   const addCents = Math.round(amount_dollars * 100);
+  if (addCents < 1) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Increase of $${amount_dollars} rounds to $0.00; use at least $0.01`,
+    };
+  }
   const newLimitCents = agent.priceLimitCents + addCents;
+  if (!Number.isSafeInteger(newLimitCents) || newLimitCents > MAX_PRICE_LIMIT_CENTS) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
+    };
+  }
 
   log.info('Increasing budget', {
     phase: 'budget',
@@ -575,11 +674,46 @@ async function commitIncreaseBudget(
     treeCostCents: agent.treeCostCents,
   });
 
-  // Update the agent's price limit
-  await prisma.agent.update({
-    where: { id: agent.id },
-    data: { priceLimitCents: newLimitCents },
-  });
+  // Atomic conditional increment. A read-then-write loses a concurrent increase:
+  // two commits read the same priceLimitCents and the last update overwrites the
+  // other. `commitPendingWrites` only serializes within one invocation, so the
+  // ceiling check and the increment must happen in the same database write.
+  // `deletedAt: null` must be re-asserted here, not just in the lookup above: a
+  // delete landing between the two would otherwise raise a deleted agent's
+  // budget and report success.
+  // `RETURNING` (rather than updateMany + a follow-up read) so the guard, the
+  // increment, and the value we report all come from ONE statement. Reporting
+  // the pre-read `newLimitCents` would understate the budget whenever a
+  // concurrent increase commits first — and the Temporal signal below would
+  // then resume the workflow on a lower limit than the row actually holds.
+  const bumpedRows = await prisma.$queryRaw<Array<{ priceLimitCents: number }>>`
+    UPDATE "Agent"
+    SET "priceLimitCents" = "priceLimitCents" + ${addCents}
+    WHERE "id" = ${agent.id}
+      AND "deletedAt" IS NULL
+      AND "priceLimitCents" <= ${MAX_PRICE_LIMIT_CENTS - addCents}
+    RETURNING "priceLimitCents"
+  `;
+  if (bumpedRows.length === 0) {
+    // Zero rows means the ceiling predicate OR the liveness predicate failed;
+    // re-read to report the accurate reason instead of always blaming the cap.
+    const current = await prisma.agent.findFirst({
+      where: { id: agent.id, deletedAt: null },
+      select: { id: true },
+    });
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error:
+        current === null
+          ? 'Agent no longer exists'
+          : `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
+    };
+  }
+
+  // The authoritative committed limit, not the pre-read projection.
+  const committedLimitCents = bumpedRows[0].priceLimitCents;
 
   // If agent was cost-limited, signal workflow to resume
   if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
@@ -587,12 +721,12 @@ async function commitIncreaseBudget(
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.signal('price_limit_increased', {
-        new_limit_cents: newLimitCents,
+        new_limit_cents: committedLimitCents,
       });
       log.info('Signaled price_limit_increased', {
         phase: 'budget',
         workflowId: agent.temporalWorkflowId,
-        newLimitCents,
+        newLimitCents: committedLimitCents,
       });
     } catch (error) {
       log.error('Failed to signal workflow', {
@@ -606,157 +740,10 @@ async function commitIncreaseBudget(
   return {
     tool: 'increase_budget',
     success: true,
-    result: `Budget increased to $${(newLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
+    result: `Budget increased to $${(committedLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
   };
 }
 
-async function commitStartNewAgent(
-  op: Extract<PendingOp, { kind: 'start_new_agent' }>,
-  userId: string
-): Promise<ToolResult> {
-  const { args, provisionalId } = op;
-  const { goal, budget_dollars } = args;
-  const priceLimitCents = budget_dollars ? Math.round(budget_dollars * 100) : 100;
-
-  log.info('Starting new agent', {
-    phase: 'start',
-    userId,
-    provisionalId,
-    goal: goal.substring(0, 100),
-    priceLimitCents,
-  });
-
-  let agent;
-  try {
-    agent = await prisma.$transaction(async (tx) => {
-      const newAgent = await tx.agent.create({
-        data: {
-          // Client-supplied UUID makes commit idempotent: a retried commit
-          // would collide on the PK and we catch P2002 below as already-done.
-          id: provisionalId,
-          userId,
-          goal,
-          source: 'SMS',
-          model: 'rose-labs/rose-1-lite',
-          reasoningMaxTokens: 2048,
-          status: 'STARTING_UP',
-          priceLimitCents,
-        },
-      });
-
-      await tx.verifier.create({
-        data: {
-          agentId: newAgent.id,
-          type: 'FLOAT_LLM_JUDGE',
-        },
-      });
-
-      await tx.message.create({
-        data: {
-          agentId: newAgent.id,
-          text: goal,
-          role: 'USER',
-          timestamp: new Date(),
-        },
-      });
-
-      return newAgent;
-    });
-  } catch (error) {
-    // P2002 = unique constraint violation. Means this provisional ID was
-    // already created — a previous commit fired (the seq gate normally
-    // prevents this, but a backend restart mid-flush could rerun us). Treat
-    // as already-committed and report the existing agent.
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      (error as { code: string }).code === 'P2002'
-    ) {
-      log.info('start_new_agent commit already done (PK collision)', { provisionalId });
-      return {
-        tool: 'start_new_agent',
-        success: true,
-        result: `Agent [${provisionalId.substring(0, 6)}] already started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(provisionalId)}`,
-      };
-    }
-    throw error;
-  }
-
-  // Start Temporal workflow
-  try {
-    const workflowId = await startAgentWorkflow({
-      agentId: agent.id,
-      userId,
-      goal,
-      model: 'rose-labs/rose-1-lite',
-      reasoningMaxTokens: 2048,
-      verifier: {
-        type: 'FLOAT_LLM_JUDGE',
-      },
-      priceLimitCents,
-    });
-
-    await prisma.agent.update({
-      where: { id: agent.id },
-      data: { temporalWorkflowId: workflowId },
-    });
-
-    log.info('Agent created and workflow started', {
-      phase: 'start',
-      agentId: agent.id,
-      prefix: agent.id.substring(0, 6),
-      workflowId,
-    });
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    log.error('Failed to start workflow', {
-      phase: 'start',
-      agentId: agent.id,
-      error: errorMsg,
-    });
-
-    await prisma.agent.update({
-      where: { id: agent.id },
-      data: { status: 'FAILED', statusMessage: `Failed to start workflow: ${errorMsg}` },
-    });
-
-    return {
-      tool: 'start_new_agent',
-      success: false,
-      result: '',
-      error: `Failed to start agent workflow: ${errorMsg}`,
-    };
-  }
-
-  return {
-    tool: 'start_new_agent',
-    success: true,
-    result: `Agent [${agent.id.substring(0, 6)}] started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(agent.id)}`,
-  };
-}
-
-async function executeWebSearchTool(args: WebSearchArgs): Promise<ToolResult> {
-  const { query } = args;
-
-  log.info('Executing web search', { phase: 'search', query });
-  const startTime = Date.now();
-
-  const searchResult = await executeWebSearch(query);
-
-  log.info('Search complete', {
-    phase: 'search',
-    query,
-    answerLength: searchResult.answer.length,
-    sourceCount: searchResult.sources.length,
-    durationMs: Date.now() - startTime,
-  });
-
-  return {
-    tool: 'web_search',
-    success: true,
-    result: searchResult.answer,
-  };
-}
+// commitStartNewAgent + executeWebSearchTool live in supervisorTools.startAgent.ts
 
 // deleteAgentRecursive moved to supervisorTools.helpers.ts

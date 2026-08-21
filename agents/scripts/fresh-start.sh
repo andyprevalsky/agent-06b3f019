@@ -89,7 +89,7 @@ get_fresh_token() {
 
 # Check if we have a valid cached token
 if [ -f "$TOKEN_CACHE" ]; then
-    TOKEN_AGE=$(($(date +%s) - $(stat -f %m "$TOKEN_CACHE" 2>/dev/null || stat -c %Y "$TOKEN_CACHE" 2>/dev/null || echo 0)))
+    TOKEN_AGE=$(($(date +%s) - $(stat -c %Y "$TOKEN_CACHE" 2>/dev/null || stat -f %m "$TOKEN_CACHE" 2>/dev/null || echo 0)))
     if [ $TOKEN_AGE -lt $TOKEN_MAX_AGE ]; then
         TOKEN=$(cat "$TOKEN_CACHE")
         echo -e "${GREEN}✓ Using cached token (${TOKEN_AGE}s old)${NC}"

@@ -75,12 +75,21 @@ describe('runGateConnectAction', () => {
     expect(startGmailOAuthApi).not.toHaveBeenCalled();
   });
 
+  it('maps legacy source_connect:sms gates to the iMessage Mac-app deep link', async () => {
+    await runGateConnectAction(sourceGate('sms'), { requestId: 'req-sms', agentId: 'agent-7' });
+
+    const url = assign.mock.calls[0]?.[0] as string;
+    expect(url).toContain('source=imessage');
+    expect(url).not.toContain('source=sms');
+    expect(startGmailOAuthApi).not.toHaveBeenCalled();
+  });
+
   it('opens subscription/kyc checkout links in a new tab (fresh + stable)', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     const gate: GateMetadata = {
       gateKey: 'subscription',
       type: 'subscription',
-      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $20/mo' },
+      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $30/mo' },
       action: { kind: 'link', url: 'https://checkout.stripe.com/c/session' },
     };
 
@@ -101,7 +110,7 @@ describe('runGateConnectAction', () => {
     const gate: GateMetadata = {
       gateKey: 'subscription',
       type: 'subscription',
-      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $20/mo' },
+      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $30/mo' },
       action: { kind: 'link', url: 'https://checkout.stripe.com/c/session' },
     };
 

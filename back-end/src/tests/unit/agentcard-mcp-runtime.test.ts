@@ -13,7 +13,7 @@
 
 import assert from 'node:assert';
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { mcpCallTool, mcpListTools } from '../../providers/agentcard/runtime';
+import { mcpCallTool, mcpListTools, mcpToolTimeoutMs } from '../../providers/agentcard/runtime';
 
 type JsonRpcRequest = {
   jsonrpc: '2.0';
@@ -184,6 +184,19 @@ async function main(): Promise<void> {
       structuredContent?: Record<string, unknown>;
     };
     assert.strictEqual(card.structuredContent?.card_id, 'card_123');
+  });
+
+  await test('rejects setTimeout-overflow MCP tool timeout env values', async () => {
+    const previous = process.env.AGENTCARD_MCP_TOOL_TIMEOUT_MS;
+    try {
+      process.env.AGENTCARD_MCP_TOOL_TIMEOUT_MS = '2147483648';
+      assert.strictEqual(mcpToolTimeoutMs(), 30_000);
+      process.env.AGENTCARD_MCP_TOOL_TIMEOUT_MS = '15000';
+      assert.strictEqual(mcpToolTimeoutMs(), 15_000);
+    } finally {
+      if (previous === undefined) delete process.env.AGENTCARD_MCP_TOOL_TIMEOUT_MS;
+      else process.env.AGENTCARD_MCP_TOOL_TIMEOUT_MS = previous;
+    }
   });
 
   if (failures.length > 0) {

@@ -133,6 +133,9 @@ export interface IPC {
   // Quick query actions
   submitQuickQuery: (payload: string | QuickQueryPayload) => Promise<{ success: boolean }>;
   hideQuickQuery: () => Promise<{ success: boolean }>;
+  resizeQuickQuery: (payload: QuickQueryResizePayload) => Promise<{ success: boolean }>;
+  /** Keep the launcher visible while an OS file-drag is over it (cancels blur-hide). */
+  setQuickQueryFileDrag: (payload: { active: boolean }) => Promise<{ success: boolean }>;
   checkForUpdates: () => Promise<{ success: boolean }>;
   downloadUpdate: () => Promise<{ success: boolean }>;
   restartToUpdate: () => Promise<{ success: boolean }>;
@@ -358,9 +361,24 @@ export interface DirectIMessagePayload {
   message: string;
 }
 
+/** File bytes carried with a quick-query submit (uploaded in the main window). */
+export interface QuickQueryAttachment {
+  name: string;
+  mimeType: string;
+  size: number;
+  /** Raw file bytes — structured-clone / Electron-IPC safe. */
+  data: ArrayBuffer;
+}
+
 export interface QuickQueryPayload {
   query: string;
   submittedAt: number;
+  /** Optional local files; main window uploads these before createAgent. */
+  attachments?: QuickQueryAttachment[];
+}
+
+export interface QuickQueryResizePayload {
+  height: number;
 }
 
 export interface QuickQueryToggleState {

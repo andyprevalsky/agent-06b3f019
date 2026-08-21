@@ -23,7 +23,12 @@ if [ -n "$BOOTSTRAP_FLAG" ] && [ "$BOOTSTRAP_FLAG" != "--bootstrap" ]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Export the caller's isolated port/workspace before run.sh sources .cloud-env.
+# Without BENCHMARK_ISOLATED_RUN=true, .cloud-env would clobber CONDUCTOR_PORT
+# onto the shared Step 5 port and SIGTERM the deploy stack.
+export CONDUCTOR_PORT
 export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$ROOT_DIR")}"
+export BENCHMARK_ISOLATED_RUN=true
 export TEMPORAL_TASK_QUEUE="navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME"
 export ALLOW_TEMPORAL_CLEANUP=true
 # Payment lifecycle tasks must run with the fast-mode LLM cache OFF: cached agent
@@ -55,9 +60,12 @@ export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https
 # cooled-down shared Anthropic fallback.
 export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1
 export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt
-# This stack runs in an isolated database under a synthetic customer identity.
+# This stack runs in an isolated database as the admin account and forces the
+# customer mint path so stripeHold / payment_approval stay reachable.
+export BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1
+export BENCHMARK_AGENT_PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
 # Keep the synced GPT credential owned by the dev user and expose it through the
-# local compute pool; never duplicate that Integration into the synthetic user.
+# local compute pool; never duplicate that Integration into a synthetic user.
 export SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS=1
 # The catalog pins every task accepted by this launcher to
 # requires_claude_code=false. A missing Claude Code integration must not block
@@ -178,7 +186,9 @@ PY
     cd "$ROOT_DIR/back-end"
     DATABASE_URL="$LOCAL_DB_URL?connection_limit=50&pool_timeout=30" \
       DIRECT_URL="$LOCAL_DB_URL" \
-      npx tsx scripts/setup-benchmark-payment.ts
+      BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
+      npx tsx scripts/setup-benchmark-payment.ts \
+      --user-id "${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
   )
 fi
 

@@ -14,11 +14,16 @@ import {
   SteelSessionCleanupError,
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
-  resolveSteelProfileForSession,
-  shouldWriteSteelProfileToBrowserContext,
 } from '../../providers/steel/session';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
+import { testConnectionErrorRetriesOnReplacement } from './steel-fingerprint.connection-retry.behavior';
+import {
+  testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation,
+  testSavedSteelProfilePersistenceByEnvironment,
+  testSavedSteelResolutionDoesNotContaminateAnonymousProfiles,
+} from './steel-fingerprint.saved-profile.behavior';
+import { testFingerprintTimezoneFormatUsesUserLocation as runTimezoneFormatUsesUserLocation } from './steel-fingerprint.timezone.behavior';
 
 function makeFingerprint(): FingerprintData {
   return {
@@ -106,6 +111,10 @@ function testFingerprintScriptDoesNotReferenceBackendLogger(): void {
   );
 }
 
+async function testFingerprintTimezoneFormatUsesUserLocation(): Promise<void> {
+  await runTimezoneFormatUsesUserLocation(makeFingerprint);
+}
+
 function testProxySettingsDropCityFallsBackToStateLevel(): void {
   const prevServer = process.env.STEEL_PROXY_SERVER;
   const prevEnabled = process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
@@ -144,123 +153,6 @@ function testInvalidProxyConfigurationClassification(): void {
     !isInvalidSteelProxyConfiguration(new Error('500 upstream unavailable')),
     'unrelated Steel failures must not alter proxy targeting'
   );
-}
-
-function testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation(): void {
-  const previousIsolated = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
-  const previousProfileEnabled = process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
-  process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'true';
-  process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = 'true';
-  try {
-    const profile = resolveSteelProfileForSession(
-      'agent-1',
-      'shared-browser-context',
-      'steel-auth-profile'
-    );
-
-    assert(
-      profile.profileId === 'steel-auth-profile',
-      'isolated saved auth must load the authenticated Steel snapshot'
-    );
-    assert(
-      profile.profileSource === 'steel_session_auth_read_only',
-      'isolated saved auth must be distinguishable from mutable anonymous profiles'
-    );
-    assert(
-      profile.persistProfile === false,
-      'isolated saved auth sessions must never write back to the shared Steel profile'
-    );
-    assert(
-      !shouldWriteSteelProfileToBrowserContext(profile),
-      'isolated saved auth must not overwrite BrowserContext.contextId'
-    );
-  } finally {
-    if (previousIsolated === undefined) {
-      delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
-    } else {
-      process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolated;
-    }
-    if (previousProfileEnabled === undefined) {
-      delete process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
-    } else {
-      process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = previousProfileEnabled;
-    }
-  }
-}
-
-function testSavedSteelProfilePersistenceByEnvironment(): void {
-  const previousIsolated = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
-  const previousAnon = process.env.BENCHMARK_ANON_STEEL_PROFILE;
-  const previousProfileEnabled = process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
-  process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'false';
-  process.env.BENCHMARK_ANON_STEEL_PROFILE = 'false';
-  process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = 'true';
-  try {
-    const profile = resolveSteelProfileForSession(
-      'agent-prod',
-      'shared-browser-context',
-      'steel-auth-profile'
-    );
-    assert(
-      profile.profileId === 'steel-auth-profile',
-      'production must use the saved Steel profile'
-    );
-    assert(
-      profile.profileSource === 'steel_session_auth',
-      'production source must remain explicit'
-    );
-    assert(
-      profile.persistProfile === true,
-      'normal production must keep profile persistence enabled'
-    );
-  } finally {
-    if (previousIsolated === undefined) delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
-    else process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolated;
-    if (previousAnon === undefined) delete process.env.BENCHMARK_ANON_STEEL_PROFILE;
-    else process.env.BENCHMARK_ANON_STEEL_PROFILE = previousAnon;
-    if (previousProfileEnabled === undefined) {
-      delete process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
-    } else {
-      process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = previousProfileEnabled;
-    }
-  }
-}
-
-function testSavedSteelResolutionDoesNotContaminateAnonymousProfiles(): void {
-  const previousIsolated = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
-  const previousProfileEnabled = process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
-  process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'true';
-  process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = 'true';
-  try {
-    const agentId = `isolation-${Date.now()}`;
-    const saved = resolveSteelProfileForSession(
-      agentId,
-      'shared-browser-context',
-      'steel-auth-profile'
-    );
-    const anonymous = resolveSteelProfileForSession(agentId, 'shared-browser-context');
-
-    assert(saved.persistProfile === false, 'saved snapshot must be read-only');
-    assert(
-      anonymous.profileId === undefined,
-      'loading saved auth must not populate the anonymous per-agent profile map'
-    );
-    assert(
-      anonymous.profileSource === 'benchmark_anon_fresh',
-      'a later anonymous session must still receive a fresh isolated profile'
-    );
-  } finally {
-    if (previousIsolated === undefined) {
-      delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
-    } else {
-      process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolated;
-    }
-    if (previousProfileEnabled === undefined) {
-      delete process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
-    } else {
-      process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = previousProfileEnabled;
-    }
-  }
 }
 
 async function testReplacementRetryDropsRejectedCity(): Promise<void> {
@@ -339,6 +231,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       createInputs.length === 2,
       `expected two Steel create attempts, got ${createInputs.length}`
     );
+
     const firstGeo = (createInputs[0]?.useProxy as { geolocation?: Record<string, string> })
       ?.geolocation;
     const secondGeo = (createInputs[1]?.useProxy as { geolocation?: Record<string, string> })
@@ -401,6 +294,48 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'resume did not preserve the read-only session profile binding'
     );
 
+    const previousIsolatedProfiles = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+    let forceFreshCreateInput: Record<string, unknown> | undefined;
+    try {
+      process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'true';
+      await recreateSession(
+        'replacement-city-retry-task',
+        { forceManagedRotation: false, forceFreshProfile: true },
+        {
+          createSession: async (input) => {
+            forceFreshCreateInput = input as unknown as Record<string, unknown>;
+            return {
+              id: 'steel-force-fresh-new',
+              debugUrl: 'https://steel.example/debug',
+              profileId: 'steel-force-fresh-profile',
+            };
+          },
+          validateConnection: async () => true,
+        }
+      );
+    } finally {
+      if (previousIsolatedProfiles === undefined) {
+        delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+      } else {
+        process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolatedProfiles;
+      }
+    }
+    assert(
+      forceFreshCreateInput?.profileId === undefined,
+      'force-fresh resume reused the session-bound failed Steel profile'
+    );
+    assert(
+      forceFreshCreateInput?.persistProfile === true,
+      'force-fresh resume did not create a persistent isolated replacement profile'
+    );
+    const forceFreshWrite = replacementWrites.at(-1);
+    assert(
+      forceFreshWrite?.providerProfileId === 'steel-force-fresh-profile' &&
+        forceFreshWrite?.providerProfileSource === 'benchmark_anon_fresh',
+      'force-fresh resume did not commit the isolated replacement profile'
+    );
+
+    const replacementWritesBeforeMismatch = replacementWrites.length;
     let mismatchCreateAttempts = 0;
     let mismatchReleaseCount = 0;
     let mismatchFailure: unknown;
@@ -436,7 +371,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'profile mismatch did not release every uncommitted remote session'
     );
     assert(
-      replacementWrites.length === 1,
+      replacementWrites.length === replacementWritesBeforeMismatch,
       'profile mismatch wrote a replacement BrowserSession binding'
     );
 
@@ -522,7 +457,7 @@ async function testSavedUrlNavigationAlwaysClosesBrowser(): Promise<void> {
   };
 
   await navigateToSavedUrl(
-    'wss://connect.steelbrowser.com?sessionId=session-1',
+    'wss://connect.steel.dev?sessionId=session-1',
     'https://example.com/saved',
     async () => browser as unknown as import('playwright').Browser
   );
@@ -538,6 +473,10 @@ async function main(): Promise<void> {
     {
       name: 'fingerprint script does not reference backend logger',
       fn: testFingerprintScriptDoesNotReferenceBackendLogger,
+    },
+    {
+      name: 'fingerprint timezone format uses user location not host TZ',
+      fn: testFingerprintTimezoneFormatUsesUserLocation,
     },
     {
       name: 'proxy settings drop unsupported city and fall back to country+state',
@@ -562,6 +501,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries rejected cities and stops after cleanup failure',
       fn: testReplacementRetryDropsRejectedCity,
+    },
+    {
+      name: 'Steel replacement retries transient Connection error',
+      fn: testConnectionErrorRetriesOnReplacement,
     },
     {
       name: 'saved URL navigation closes its browser after failure',

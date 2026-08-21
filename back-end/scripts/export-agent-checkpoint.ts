@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import { mkdirSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
+import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 
 type Options = {
   agentId: string;
@@ -46,17 +47,10 @@ function parseArgs(argv: string[]): Options {
 
 function assertLocalDatabase() {
   if (process.env.ALLOW_PROD_CHECKPOINT_CLONE === 'true') return;
-  const databaseUrl = process.env.DATABASE_URL || '';
-  if (!databaseUrl) throw new Error('DATABASE_URL is not set');
-  let host = '';
-  try {
-    host = new URL(databaseUrl).hostname;
-  } catch {
-    throw new Error('DATABASE_URL is not a valid URL');
-  }
-  if (!['localhost', '127.0.0.1', '::1'].includes(host)) {
+  const reason = nonLocalDatabaseReason(process.env.DATABASE_URL);
+  if (reason) {
     throw new Error(
-      `Refusing to export checkpoint from non-local database host "${host}". ` +
+      `Refusing to export checkpoint: ${reason}. ` +
         'Set ALLOW_PROD_CHECKPOINT_CLONE=true only if you intend this.'
     );
   }

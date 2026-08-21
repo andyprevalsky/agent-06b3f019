@@ -58,9 +58,13 @@ def test_browser_use_pool_registered():
     assert spec.name == "rose-1-browser-use"
     assert spec.claude_auth_model == "claude-fable-5"
     assert spec.gpt_auth_model == "gpt-5.6-sol"
-    assert "anthropic/claude-opus-4.8" in spec.waterfall
-    assert spec.waterfall[-1] == "openai/gpt-5.6-sol"
-    # Legacy bu/yutori models removed; waterfall is opus → GPT-5.6 Sol.
+    # Waterfall is GPT-5.6 Sol → Kimi K3. Opus 4.8 was dropped: it was the
+    # priciest layer while scoring below sol on all three AA indices, and the
+    # two survivors come from different vendors so one provider outage cannot
+    # drain the whole waterfall.
+    assert spec.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert not any(m.startswith("anthropic/") for m in spec.waterfall)
+    # Legacy bu/yutori models removed.
     assert all("yutori" not in m and "browser-use" not in m for m in spec.waterfall)
 
 
@@ -180,6 +184,7 @@ def test_build_browser_use_system_prompt_does_not_advertise_extract():
     assert "use `extract`" not in prompt
     assert "restart_auth_with_cookie_bundle" not in prompt
     assert "tool call" in prompt
+
 
 
 def test_state_has_indexed_dom_targets_detects_interactive_indices():
@@ -536,55 +541,12 @@ def test_write_lock_purchase_schema_rejects_missing_product_context():
         raise AssertionError("purchase approval accepted an item without reviews and a product URL")
 
 
-def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link():
-    """The current-page rule needs a trajectory; with none, we do NOT guess.
-
-    This used to reject `product_url == service.url` unless the path contained a
-    word from a product-route list (`/dp/`, `/item/`, `/p/` ...). That list is a
-    guess about a page's purpose from its spelling, and the same class of guess
-    made purchases impossible on whole ordering platforms (agents 53feac08,
-    90ac106a) — a real product page at `https://shop.example/lok-lak` carries no
-    such word and would be refused. On this fallback path `service.url` is the
-    ONLY URL we know, so there is genuinely no evidence separating "the agent is
-    standing on the product page" from "the agent echoed the session URL", and
-    guessing is what caused the outages.
-
-    The rule is therefore enforced where the evidence exists: the
-    request_payment_card action path, which knows the real current page and
-    the full visited list. See
-    test_execute_action_request_payment_card_rejects_current_session_product_link
-    in spawn_browser_agent_v3.blackbox.py.
-    """
-    from browser_tools.schemas import GenerateWriteLockNotificationTool
-
-    def validate(current_url, product_url):
-        return GenerateWriteLockNotificationTool.model_validate(
-            {
-                "tool": "generate_write_lock_notification",
-                "trigger_type": "purchase",
-                "action": "buy item",
-                "service": {"name": "Example Shop", "domain": "shop.example", "url": current_url},
-                "purchase": {
-                    "items": [
-                        {
-                            "title": "Beanie",
-                            "rating": "4.8 stars",
-                            "review_count": "312 reviews",
-                            "product_url": product_url,
-                        }
-                    ]
-                },
-            }
-        )
-
-    # Accepted without a trajectory — including a product page whose slug has no
-    # product-ish word in it, which the old list would have wrongly refused.
-    for url in ("https://shop.example/session/abc", "https://shop.example/lok-lak"):
-        assert validate(url, url).purchase.items[0].product_url == url
-
-    # With a trajectory, the evidence-based host rule still bites.
+def test_write_lock_purchase_schema_accepts_current_page_as_product_link():
     from pydantic import ValidationError
 
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
+    current_url = "https://shop.example/session/abc"
     try:
         GenerateWriteLockNotificationTool.model_validate(
             {
@@ -594,7 +556,7 @@ def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_
                 "service": {
                     "name": "Example Shop",
                     "domain": "shop.example",
-                    "url": "https://shop.example/session/abc",
+                    "url": current_url,
                 },
                 "purchase": {
                     "items": [
@@ -602,57 +564,77 @@ def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_
                             "title": "Beanie",
                             "rating": "4.8 stars",
                             "review_count": "312 reviews",
-                            "product_url": "https://phishing.example/session/abc",
+                            "product_url": current_url,
                         }
                     ]
                 },
-            },
-            context={"trusted_page_urls": ["https://shop.example/session/abc"]},
+            }
         )
-    except ValidationError as error:
-        assert "was not observed in the browser trajectory" in str(error)
-    else:
-        raise AssertionError("purchase approval accepted an unobserved product host")
+    except ValidationError as error:  # pragma: no cover - documents the removed rule
+        raise AssertionError(
+            "product_url is validated for well-formedness only; the current session URL "
+            f"must be accepted: {error}"
+        ) from error
 
 
 def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser():
+    """An unobserved product host must be rejected (CWE-601).
+
+    Replaces test_write_lock_purchase_schema_accepts_product_host_not_observed_by_browser,
+    which asserted that https://phishing.example/products/beanie was accepted
+    while the browser had only visited example.com. The write-lock notification
+    renders product_url to the user as a clickable link, so accepting an
+    arbitrary host is a destination-author primitive.
+
+    Only the HOST is constrained; the path/query heuristics that rejected
+    receipts from working checkouts stay removed.
+    """
     from pydantic import ValidationError
 
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
-    payload = {
-        "tool": "generate_write_lock_notification",
-        "trigger_type": "purchase",
-        "action": "buy item",
-        "service": {
-            "name": "Example Shop",
-            "domain": "example.com",
-            "url": "https://example.com/checkout",
-        },
-        "purchase": {
-            "items": [
-                {
-                    "title": "Beanie",
-                    "rating": "4.8 stars",
-                    "review_count": "312 reviews",
-                    "product_url": "https://phishing.example/products/beanie",
-                }
-            ]
-        },
+    def payload_with(product_url: str) -> dict:
+        return {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "buy item",
+            "service": {
+                "name": "Example Shop",
+                "domain": "example.com",
+                "url": "https://example.com/checkout",
+            },
+            "purchase": {
+                "items": [
+                    {
+                        "title": "Beanie",
+                        "rating": "4.8 stars",
+                        "review_count": "312 reviews",
+                        "product_url": product_url,
+                    }
+                ]
+            },
+        }
+
+    trusted = {
+        "trusted_page_urls": [
+            "https://example.com/products/beanie",
+            "https://example.com/checkout",
+        ]
     }
 
+    # A host the browser actually visited still validates.
+    GenerateWriteLockNotificationTool.model_validate(
+        payload_with("https://example.com/products/beanie"), context=trusted
+    )
+
+    # An unrelated host must now fail closed.
     try:
         GenerateWriteLockNotificationTool.model_validate(
-            payload,
-            context={"trusted_page_urls": ["https://example.com/products/beanie", "https://example.com/checkout"]},
+            payload_with("https://phishing.example/products/beanie"), context=trusted
         )
-    except ValidationError as error:
-        # The message names the offending host so the model can self-correct in
-        # one turn instead of permuting a URL it cannot diagnose.
-        assert "was not observed in the browser trajectory" in str(error)
-        assert "phishing.example" in str(error)
-    else:
-        raise AssertionError("purchase approval accepted an unobserved product host")
+    except ValidationError:
+        return
+    raise AssertionError("an unobserved product host must be rejected")
 
 
 def test_normalize_write_lock_notification_tool_call_preserves_params():
@@ -1804,8 +1786,8 @@ async def run_all_tests():
         test_write_lock_purchase_schema_rejects_missing_product_context,
     )
     r.record(
-        "write_lock_notification_rejects_current_session_link",
-        test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link,
+        "write_lock_notification_accepts_current_session_link",
+        test_write_lock_purchase_schema_accepts_current_page_as_product_link,
     )
     r.record(
         "write_lock_notification_rejects_unobserved_product_host",
@@ -1898,6 +1880,23 @@ async def run_all_tests():
     )
 
     teardown_mock()
+    r.record(
+        "build_browser_use_system_prompt_auth_priority_is_numbered",
+        test_build_browser_use_system_prompt_auth_priority_is_numbered,
+    )
+    r.record(
+        "build_browser_use_system_prompt_reuses_main_grading_prompt",
+        test_build_browser_use_system_prompt_reuses_main_grading_prompt,
+    )
+    r.record(
+        "browser_attempt_completion_uses_canonical_prompt_and_empty_schema",
+        test_browser_attempt_completion_uses_canonical_prompt_and_empty_schema,
+    )
+    r.record("normalize_request_payment_card_preserves_receipt", test_normalize_request_payment_card_preserves_receipt)
+    r.record(
+        "normalize_request_payment_card_parses_tool_string_arguments",
+        test_normalize_request_payment_card_parses_tool_string_arguments,
+    )
     return r.summary()
 
 

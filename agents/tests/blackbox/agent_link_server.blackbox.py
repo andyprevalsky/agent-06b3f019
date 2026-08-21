@@ -341,6 +341,9 @@ def test_archive_frontend_startup_error_reaps_real_process_group() -> None:
             with (
                 patch.object(archive_frontend, "configure_archive_handler"),
                 patch.object(archive_frontend.subprocess, "Popen", return_value=frontend),
+                # launch() fail-closes on a dead Vite before the API bind; this
+                # fixture isolates the post-ready API race, so skip that gate.
+                patch.object(archive_frontend, "_require_frontend_started"),
                 patch.object(archive_frontend.signal, "signal"),
                 patch.object(
                     archive_frontend,

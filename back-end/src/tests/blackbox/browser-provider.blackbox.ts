@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
-import { chromium, type Page } from 'playwright';
+import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import {
@@ -14,90 +14,21 @@ import {
 import { retryWithBackoff } from '../../providers/retry';
 import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
 import {
+  assert,
+  type BrowserApiResponse,
+  isRetryableKernelNavigationError,
+  isTransientKernelConnectionError,
+  navigateKernelPage,
+  withProvider,
+} from './browser-provider.helpers';
+import {
   assertFixedRotationLadder,
   deleteKernelResource,
-  runCrossProviderRotationLadder,
+  isSteelCapacityRateLimit,
+  runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
 
-function assert(condition: unknown, message: string): void {
-  if (!condition) throw new Error(message);
-}
-
 const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
-
-function isTransientKernelConnectionError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return (
-    message.includes('proxy connection failed') ||
-    message.includes('context deadline exceeded') ||
-    message.includes('Client.Timeout exceeded')
-  );
-}
-
-function isRetryableKernelNavigationError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return [
-    'net::ERR_CONNECTION_CLOSED',
-    'net::ERR_PROXY_CONNECTION_FAILED',
-    'net::ERR_TUNNEL_CONNECTION_FAILED',
-    'Timeout 30000ms exceeded',
-  ].some((fragment) => message.includes(fragment));
-}
-
-async function navigateKernelPage(page: Page, url: string): Promise<void> {
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-      return;
-    } catch (error) {
-      if (attempt === 3 || !isRetryableKernelNavigationError(error)) throw error;
-      await page.waitForTimeout(attempt * 1_000);
-    }
-  }
-}
-
-interface BrowserMetadataResponse {
-  provider?: string;
-  proxy_source?: string;
-  proxy_location?: { country?: string; state?: string; city?: string };
-  profile_id?: string;
-  steel_profile_id?: string;
-}
-
-interface BrowserApiResponse {
-  session_id?: string;
-  task_id?: string;
-  debug_url?: string;
-  ws_url?: string;
-  saved_url?: string;
-  provider?: string;
-  path?: string;
-  base64_image?: string;
-  same_session_available?: boolean;
-  resized?: boolean;
-  viewport?: { width?: number; height?: number };
-  browser_session_metadata?: BrowserMetadataResponse;
-  // rotate_ip response fields
-  proxy_tier?: string;
-  rotations_used?: number;
-  rotations_remaining?: number;
-  rotation_message?: string;
-  previous_provider?: string;
-  recovery_action?: string;
-  next_recovery?: string;
-}
-
-function withProvider(value: string | undefined, test: () => void): void {
-  const previous = process.env.BROWSER_PROVIDER;
-  if (value === undefined) delete process.env.BROWSER_PROVIDER;
-  else process.env.BROWSER_PROVIDER = value;
-  try {
-    test();
-  } finally {
-    if (previous === undefined) delete process.env.BROWSER_PROVIDER;
-    else process.env.BROWSER_PROVIDER = previous;
-  }
-}
 
 const tests: Array<[string, () => void]> = [
   [
@@ -152,12 +83,37 @@ const tests: Array<[string, () => void]> = [
     },
   ],
   [
-    'Steel API client uses the live steelbrowser.com origin',
-    () => assert(steelUrl === 'https://connect.steelbrowser.com', `stale Steel API: ${steelUrl}`),
+    'Steel API client uses the live api.steel.dev origin',
+    () => assert(steelUrl === 'https://api.steel.dev', `stale Steel API: ${steelUrl}`),
   ],
   [
     'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',
     assertFixedRotationLadder,
+  ],
+  [
+    'live ladder retries only Steel concurrent-capacity 429 responses',
+    () => {
+      assert(
+        isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+          )
+        ),
+        'expected the explicit Steel capacity response to be retryable'
+      );
+      assert(
+        !isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"kernel"}'
+          )
+        ),
+        'another provider rate limit must fail closed'
+      );
+      assert(
+        !isSteelCapacityRateLimit(new Error('/rotate-proxy 403: Steel authentication rejected')),
+        'Steel authentication failures must fail closed'
+      );
+    },
   ],
   [
     'Kernel residential proxies fall back from city to state to country',
@@ -234,6 +190,9 @@ async function runLiveProviderParity(): Promise<void> {
   const userId = `kernel-provider-${randomUUID()}`;
   const agentId = randomUUID();
   let liveSessionId: string | undefined;
+  // Every provider session the cross-provider ladder allocates, so `finally` can
+  // release the ones this scope never learned about (see its loop below).
+  const allocatedSessionIds: string[] = [];
   let profileId: string | undefined;
   let proxyId: string | undefined;
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
@@ -342,11 +301,42 @@ async function runLiveProviderParity(): Promise<void> {
           `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
         );
         const raw = await p.evaluate(() => document.body.innerText);
-        return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
+        // A rented exit node that is not serving yet answers with its own error page
+        // (observed: a body starting "egress-pro…") instead of ipify's JSON. Report
+        // that as a named transient carrying the real body: a bare JSON.parse throw
+        // surfaces `Unexpected token 'e'`, which names neither the proxy nor the
+        // response and is undiagnosable from a CI log.
+        try {
+          return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
+        } catch (error) {
+          throw new Error(
+            `exit-IP probe returned non-JSON body: ${raw
+              .slice(0, 120)
+              .replace(/\s+/g, ' ')} (${error instanceof Error ? error.message : String(error)})`
+          );
+        }
       } finally {
         await b.close();
       }
     };
+    // Same transient tolerance as the post-rotation reads below. This baseline read
+    // was the one unprotected call site, so a single not-ready exit node failed the
+    // whole live-parity domain (seen twice under BLACKBOX_TEST_CONCURRENCY=4 while
+    // the domain passed standalone).
+    const readExitIpWithRetry = (wsUrl: string): Promise<string> =>
+      retryWithBackoff(
+        async () => {
+          const ip = await readExitIp(wsUrl);
+          if (ip === '') throw new Error('proxy returned an empty exit IP');
+          return ip;
+        },
+        {
+          maxRetries: 3,
+          fixedDelays: [500, 1_000, 1_500],
+          isRetryable: () => true,
+          component: 'browser-provider:exit-ip-baseline',
+        }
+      );
     const readDifferentExitIp = (wsUrl: string, previousIp: string): Promise<string> =>
       retryWithBackoff(
         async () => {
@@ -367,7 +357,7 @@ async function runLiveProviderParity(): Promise<void> {
         }
       );
 
-    const ipBefore = await readExitIp(String(init.ws_url));
+    const ipBefore = await readExitIpWithRetry(String(init.ws_url));
     assert(ipBefore !== '', 'could not read exit IP before rotation');
 
     const rotated = await postWithKernelConnectionRetry('/rotate-proxy', { task_id: init.task_id });
@@ -592,7 +582,9 @@ async function runLiveProviderParity(): Promise<void> {
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
     assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
 
-    const crossProvider = await runCrossProviderRotationLadder({
+    // A Steel infra outage returns null (skips the Steel legs) while Kernel is
+    // healthy; real rotation defects still throw. See the wrapper's doc comment.
+    const crossProvider = await runCrossProviderRotationLadderOrSkipOnSteelOutage({
       baseUrl,
       headers,
       taskId: String(init.task_id),
@@ -603,14 +595,13 @@ async function runLiveProviderParity(): Promise<void> {
       retrieveKernelBrowser: (sessionId) =>
         kernel.browsers.retrieve(sessionId, { include_deleted: true }),
       retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
+      allocatedSessionIds,
     });
+    if (crossProvider === null) return;
     liveSessionId = crossProvider.finalSessionId;
 
     console.log(
-      `[rotate_ip repro] complete ladder: Kernel baseline=${ipBefore} ` +
-        `-> Kernel residential=${ipAfter} -> Kernel mobile=${mobileIp} ` +
-        `-> Steel residential=${crossProvider.firstSteelIp} ` +
-        `-> Steel residential=${crossProvider.secondSteelIp}`
+      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}/${crossProvider.secondSteelIp}`
     );
 
     await post('/close', { session_id: liveSessionId, pause: false });
@@ -618,6 +609,15 @@ async function runLiveProviderParity(): Promise<void> {
   } finally {
     if (liveSessionId) {
       await post('/close', { session_id: liveSessionId, pause: false }).catch(() => {});
+    }
+    // Release every session the ladder allocated, not just the one this scope
+    // happens to hold. `liveSessionId` is only advanced to the ladder's final id on
+    // the SUCCESS path, so a mid-ladder throw (Steel 429 on call 4) otherwise leaves
+    // a live, billing Steel session behind with its DB row already deleted below.
+    // Closing an already-closed session is a no-op, so this is safe to repeat.
+    for (const sessionId of allocatedSessionIds) {
+      if (sessionId === liveSessionId) continue;
+      await post('/close', { session_id: sessionId, pause: false }).catch(() => {});
     }
     if (profileId) await deleteKernelResource(`/profiles/${profileId}`).catch(() => {});
     if (proxyId) await deleteKernelResource(`/proxies/${proxyId}`).catch(() => {});

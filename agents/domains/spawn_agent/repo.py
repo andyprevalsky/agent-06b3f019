@@ -35,12 +35,19 @@ async def save_explore_message(
     status: MessageStatus,
     task_id: str,
     tool_call_id: Optional[str] = None,
+    tool_name: Optional[str] = None,
 ) -> None:
     """Save explore agent message directly to DB.
 
     When tool_call_id is provided, the message reuses that ID so the frontend
     deduplicator replaces the previous message with the same toolCallId.
     This is used for progress updates on the init bubble.
+
+    ``tool_name`` must be the name of the tool the message is ABOUT. It defaults
+    to ``spawn_agent`` only for the explore agent's own lifecycle messages. The
+    FE keys a chip by toolCallId, so relabelling a tool's message as
+    ``spawn_agent`` made it collide with — and overwrite — that tool's own chip:
+    docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md
     """
     try:
         config = load_config()
@@ -48,7 +55,7 @@ async def save_explore_message(
 
         metadata: Dict[str, Any] = {
             "toolCallId": unique_tool_call_id,
-            "toolName": "spawn_agent",
+            "toolName": tool_name or "spawn_agent",
             "toolStatus": status.value,
             "title": title,
             "agentType": "explore",

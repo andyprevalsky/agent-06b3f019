@@ -1,7 +1,6 @@
-import path from 'node:path';
 import https from 'node:https';
 import { randomUUID } from 'node:crypto';
-import Kernel, { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
+import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
@@ -9,11 +8,7 @@ import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser, validateSessionConnection } from '../steel/sessionConnection';
 import { browserProviderEnabled } from './config';
-import {
-  kernelCaptchaTelemetryConfig,
-  summarizeKernelCaptchaEvents,
-  type BrowserCaptchaTelemetry,
-} from './captchaTelemetry';
+import { kernelCaptchaTelemetryConfig } from './captchaTelemetry';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import {
   getOrCreateKernelProxy,
@@ -25,11 +20,9 @@ import {
 } from './kernelProxy';
 import {
   BrowserProviderRateLimitError,
-  type BrowserFileInfo,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
   type BrowserSessionHealth,
-  type BrowserViewport,
 } from './types';
 import {
   benchmarkIsolatedBrowserProfilesEnabled,
@@ -43,6 +36,26 @@ import {
   type ProviderProfileBinding,
 } from './profileBinding';
 import { kernelTimeoutSeconds, readOnlyLiveView } from './kernelSessionConfig';
+import { kernelClient } from './kernelClient';
+import {
+  captureKernelScreenshot,
+  ensureKernelSessionFileDirectories,
+  getKernelCaptchaTelemetry,
+  listKernelSessionFiles,
+  readKernelSessionFile,
+  resizeKernelViewport,
+  uploadKernelSessionFile,
+} from './kernelSessionIo';
+
+export {
+  captureKernelScreenshot,
+  ensureKernelSessionFileDirectories,
+  getKernelCaptchaTelemetry,
+  listKernelSessionFiles,
+  readKernelSessionFile,
+  resizeKernelViewport,
+  uploadKernelSessionFile,
+};
 
 const log = createLogger('Kernel');
 
@@ -86,14 +99,10 @@ interface KernelRemoteSessionOptions {
     type: KernelProxyType;
     specificity: KernelRecoveryProxySpecificity;
   };
+  /** Skip managed/shared proxies (used when the target host is provider-blacklisted). */
+  omitManagedProxy?: boolean;
   omitProfile?: boolean;
   boundProfile?: ProviderProfileBinding;
-}
-
-function kernelClient(): Kernel {
-  const apiKey = process.env.KERNEL_API_KEY?.trim();
-  if (!apiKey) throw new Error('KERNEL_API_KEY is required when BROWSER_PROVIDER=kernel');
-  return new Kernel({ apiKey });
 }
 
 export async function releaseKernelRemoteSession(sessionId: string): Promise<void> {
@@ -259,6 +268,7 @@ async function createRemoteSession(
         const validationBrowser = await connectValidatedBrowser(session.cdp_ws_url);
         if (validationBrowser !== null) {
           try {
+            await ensureKernelSessionFileDirectories(session.session_id);
             const closedTabCount = await resetKernelSessionTabs(validationBrowser);
             log.info('Reset restored Kernel profile tabs', {
               sessionId: session.session_id,
@@ -334,6 +344,12 @@ async function createRemoteSession(
   };
 
   try {
+    if (options.omitManagedProxy) {
+      return await createValidatedSession({
+        proxySource: stealth ? 'kernel_stealth' : 'none',
+        proxyLocation,
+      });
+    }
     if (options.exactManagedProxy !== undefined) {
       const exact = kernelProxyCandidates(proxyLocation, options.exactManagedProxy.type).find(
         (candidate) => candidate.source.endsWith(`_${options.exactManagedProxy?.specificity}`)
@@ -439,8 +455,16 @@ export async function createKernelSessionWithContext(
 export async function createKernelRecoverySession(
   agentId: string,
   proxyLocation: ProxyGeoLocation,
-  proxy: { type: KernelProxyType; specificity: KernelRecoveryProxySpecificity }
+  proxy:
+    | { type: KernelProxyType; specificity: KernelRecoveryProxySpecificity }
+    | { omitManagedProxy: true }
 ) {
+  if ('omitManagedProxy' in proxy) {
+    return createRemoteSession('', agentId, proxyLocation, {
+      omitManagedProxy: true,
+      omitProfile: true,
+    });
+  }
   return createRemoteSession('', agentId, proxyLocation, {
     exactManagedProxy: proxy,
     omitProfile: true,
@@ -452,10 +476,12 @@ export async function closeKernelSession(
   pause = false,
   currentUrl?: string
 ): Promise<void> {
+  let releaseError: unknown = null;
   try {
     await releaseKernelRemoteSession(sessionId);
   } catch (error) {
-    log.warn('Failed to delete Kernel session; finalizing local session state', {
+    releaseError = error;
+    log.warn('Failed to delete Kernel session; retaining retryable local session state', {
       sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -464,11 +490,13 @@ export async function closeKernelSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: pause ? 'PAUSED' : 'CLOSED',
-      closedAt: pause ? undefined : new Date(),
+      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      closedAt: releaseError === null && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined,
     },
   });
+
+  if (releaseError !== null) throw releaseError;
 }
 
 /**
@@ -601,79 +629,4 @@ export async function getKernelSessionHealth(sessionId: string): Promise<Browser
     profileId: session.profile?.id ?? null,
     uptimeMs: session.usage?.uptime_ms ?? null,
   };
-}
-
-export async function getKernelCaptchaTelemetry(
-  sessionId: string
-): Promise<BrowserCaptchaTelemetry> {
-  const events: unknown[] = [];
-  for await (const entry of kernelClient().browsers.telemetry.events(sessionId, {
-    category: ['captcha'],
-    order: 'desc',
-  })) {
-    if (entry.event.type === 'captcha_solve_result') {
-      events.push(entry);
-    }
-    if (events.length >= 50) break;
-  }
-  return summarizeKernelCaptchaEvents(events);
-}
-
-export async function resizeKernelViewport(
-  sessionId: string,
-  viewport: BrowserViewport
-): Promise<BrowserViewport> {
-  await kernelClient().browsers.update(sessionId, {
-    viewport: { ...viewport, force: true },
-  });
-  return viewport;
-}
-
-const FILE_DIRECTORIES = ['/tmp/downloads', '/tmp/rose-uploads', '/home/oai/share'];
-
-export async function listKernelSessionFiles(sessionId: string): Promise<BrowserFileInfo[]> {
-  const client = kernelClient();
-  const results = await Promise.all(
-    FILE_DIRECTORIES.map(async (directory) => {
-      try {
-        return await client.browsers.fs.listFiles(sessionId, { path: directory });
-      } catch {
-        return [];
-      }
-    })
-  );
-  const byPath = new Map<string, BrowserFileInfo>();
-  for (const file of results.flat()) {
-    if (!file.is_dir) {
-      byPath.set(file.path, {
-        path: file.path,
-        size: file.size_bytes,
-        lastModified: file.mod_time,
-      });
-    }
-  }
-  return [...byPath.values()];
-}
-
-export async function uploadKernelSessionFile(
-  sessionId: string,
-  fileBuffer: Buffer,
-  filename: string
-): Promise<{ path: string; size: number }> {
-  const client = kernelClient();
-  const directory = '/tmp/rose-uploads';
-  await client.browsers.fs.createDirectory(sessionId, { path: directory }).catch(() => {});
-  const remotePath = `${directory}/${path.basename(filename)}`;
-  await client.browsers.fs.writeFile(sessionId, fileBuffer, { path: remotePath });
-  return { path: remotePath, size: fileBuffer.length };
-}
-
-export async function readKernelSessionFile(sessionId: string, filePath: string): Promise<Buffer> {
-  const response = await kernelClient().browsers.fs.readFile(sessionId, { path: filePath });
-  return Buffer.from(await response.arrayBuffer());
-}
-
-export async function captureKernelScreenshot(sessionId: string): Promise<Buffer> {
-  const response = await kernelClient().browsers.computer.captureScreenshot(sessionId);
-  return Buffer.from(await response.arrayBuffer());
 }

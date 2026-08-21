@@ -85,6 +85,13 @@ function parseLocalImports(filePath: string): string[] {
   for (const regex of [staticRegex, dynamicRegex]) {
     let match;
     while ((match = regex.exec(content)) !== null) {
+      // Statement-level `import type ... from 'x'` / `export type ... from 'x'`
+      // are erased by the compiler and load nothing at runtime, so tracing them
+      // inflates a domain's closure with modules it never executes — one
+      // `import type` of a service barrel dragged every reader implementation
+      // into browser-state-sync. Inline specifiers (`import { type T, fn }`)
+      // still emit a real import and are deliberately still traced.
+      if (/^(?:import|export)\s+type\s/.test(match[0])) continue;
       const resolved = resolveImportPath(match[1], dirname(filePath));
       if (resolved && resolved.startsWith(MAC_APP)) {
         imports.push(resolved);
@@ -207,7 +214,19 @@ function discoverDomains(): DomainInfo[] {
       // Skip pure interface files (IMessageQueueService is an interface, still a domain)
       const domainName = toKebab(name);
       const entryPath = resolve(SERVICES_DIR, file);
-      const files = traceImports(entryPath).map((f) => relative(MAC_APP, f));
+      // Several `services/<name>.ts` files are re-export shims exposing only
+      // part of their domain (passkeyEnroll re-exports config + repo but NOT
+      // the enrollment service, which handlers import directly). Tracing the
+      // shim alone silently truncates the closure and lets a domain-scoped gate
+      // skip the real code path, so union in the matching domain service when
+      // one exists.
+      const domainServicePath = resolve(MAIN, 'domains', domainName, 'service.ts');
+      const entryPoints = existsSync(domainServicePath)
+        ? [entryPath, domainServicePath]
+        : [entryPath];
+      const files = [...new Set(entryPoints.flatMap((entry) => traceImports(entry)))]
+        .map((f) => relative(MAC_APP, f))
+        .sort();
       domains.push({
         domain: domainName,
         type: 'main-service',

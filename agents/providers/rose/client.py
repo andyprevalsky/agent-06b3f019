@@ -809,8 +809,37 @@ class RoseClient:
             anthropic_api_key_tools = direct_auth_tools
         if anthropic_api_key_tools:
             anthropic_api_key_tool_choice = effective_tool_choice or "any"
+        waterfall_tools = tools
+        waterfall_tool_choice = tool_choice
+        if tools is None and direct_auth_tools and not _is_synthetic_output_toolset(direct_auth_tools):
+            # AgentAction response models already have provider-neutral native
+            # tool schemas. Preserve that contract through the OpenRouter
+            # waterfall so Anthropic is not skipped merely because the original
+            # caller supplied a response_model instead of explicit tools.
+            waterfall_tools = direct_auth_tools
+            waterfall_tool_choice = effective_tool_choice or "any"
 
-        if _exclude_anthropic_family and gpt_auth is not None:
+        # OpenRouter's OpenAI providers apply the same strict-schema subset as
+        # the Responses API. Rich AgentAction models can contain intentionally
+        # open JSON values (for example spawn_agent.items), which cannot be
+        # represented by that subset and are rejected before inference. Use the
+        # provider-native function contract for real AgentAction tools on the
+        # waterfall too. The structured-streaming caller already reconstructs
+        # native tool chunks into the AgentAction envelope, exactly as it does
+        # for direct Claude/GPT and funded API-key routes. Plain response models
+        # keep their response_format contract via the synthetic-output guard.
+        waterfall_tools = tools
+        waterfall_tool_choice = effective_tool_choice
+        if waterfall_tools is None and not _is_synthetic_output_toolset(direct_auth_tools):
+            waterfall_tools = direct_auth_tools
+            waterfall_tool_choice = effective_tool_choice or "any"
+
+        if not pool_spec.direct_auth_enabled:
+            # An open-weights-only pool must never reach a proprietary
+            # direct-token provider, or the model guarantee it exists to make
+            # is silently void.
+            direct_auth = None
+        elif _exclude_anthropic_family and gpt_auth is not None:
             direct_auth = gpt_auth
         elif _exclude_anthropic_family:
             direct_auth = None
@@ -1223,7 +1252,10 @@ class RoseClient:
             # After compute tokens (claude/gpt) are exhausted and before the
             # Anthropic/OpenRouter fallbacks: if a funded GPT API key is
             # configured, try the pool's GPT model with priority service tier.
-            openai_api_key = _openai_api_key()
+            # An open-weights-only pool must not reach the funded proprietary
+            # API keys either -- gating only the OAuth routes left this hole,
+            # through which a pinned run could still be served by gpt_auth_model.
+            openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else ""
             if openai_api_key:
                 active_route = "openai_apikey"
                 openai_yielded_any = False
@@ -1298,7 +1330,12 @@ class RoseClient:
             # out-of-credits/bad-key before first content, back it off (shared
             # DB cooldown) and fall through.
             anthropic_api_key = (load_config().anthropic.api_key or "").strip()
-            if not _exclude_anthropic_family and anthropic_api_key and not await _anthropic_api_key_on_cooldown():
+            if (
+                pool_spec.direct_auth_enabled
+                and not _exclude_anthropic_family
+                and anthropic_api_key
+                and not await _anthropic_api_key_on_cooldown()
+            ):
                 active_route = "anthropic_apikey"
                 api_yielded_any = False
                 try:

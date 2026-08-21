@@ -5,6 +5,7 @@
  */
 
 import { createDecipheriv } from '../../providers/crypto';
+import { IndexedDBUploadPayloadTooLargeError } from './types';
 
 // Re-export everything from sub-modules so service.ts imports stay unchanged
 export {
@@ -16,6 +17,7 @@ export {
 
 export {
   processIMessageUpload,
+  processWhatsAppConnect,
   processWhatsAppUpload,
   processTelegramConnect,
   processTelegramUpload,
@@ -31,6 +33,7 @@ export {
   processCookiesUpload,
   processLocalStorageUpload,
   processIndexedDBUpload,
+  ingestIndexedDBUploadJson,
   processFingerprintUpload,
   processPermissionsUpload,
 } from './uploadService.browser';
@@ -62,14 +65,27 @@ export function decryptPayload<T>(data: string, iv: string, key: string): T {
 }
 
 /**
- * Decrypt and optionally decompress AES-256-CBC encrypted payload.
+ * Decrypt and optionally decompress AES-256-CBC encrypted payload to UTF-8
+ * JSON text without parsing it into a V8 object graph.
  */
-export async function decryptCompressedPayload<T>(
+/** Decompressed IndexedDB/local upload ceiling (UTF-8 bytes). Shared with ingest. */
+const MAX_DECOMPRESSED_UPLOAD_BYTES = 64 * 1024 * 1024;
+/** Reject ciphertext that cannot possibly gunzip into the ceiling (hex chars). */
+const MAX_ENCRYPTED_HEX_CHARS = MAX_DECOMPRESSED_UPLOAD_BYTES * 4;
+
+export async function decryptCompressedToUtf8(
   data: string,
   iv: string,
   key: string,
   compressed: string | undefined
-): Promise<T> {
+): Promise<string> {
+  if (typeof data !== 'string' || data.length > MAX_ENCRYPTED_HEX_CHARS) {
+    throw new IndexedDBUploadPayloadTooLargeError(
+      MAX_DECOMPRESSED_UPLOAD_BYTES,
+      Math.ceil((typeof data === 'string' ? data.length : 0) / 2)
+    );
+  }
+
   const decipher = createDecipheriv('aes-256-cbc', Buffer.from(key, 'hex'), Buffer.from(iv, 'hex'));
 
   const decryptedBuffer = Buffer.concat([
@@ -77,16 +93,49 @@ export async function decryptCompressedPayload<T>(
     decipher.final(),
   ]);
 
-  let jsonString: string;
   if (compressed === 'true') {
     const zlib = await import('zlib');
     const { promisify } = await import('util');
     const gunzip = promisify(zlib.gunzip);
-    const decompressed = await gunzip(decryptedBuffer);
-    jsonString = decompressed.toString('utf8');
-  } else {
-    jsonString = decryptedBuffer.toString('utf8');
+    let decompressed: Buffer;
+    try {
+      decompressed = await gunzip(decryptedBuffer, {
+        maxOutputLength: MAX_DECOMPRESSED_UPLOAD_BYTES,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/Cannot create a Buffer larger|maxOutputLength|exceeds|too large|memory/i.test(message)) {
+        throw new IndexedDBUploadPayloadTooLargeError(
+          MAX_DECOMPRESSED_UPLOAD_BYTES,
+          MAX_DECOMPRESSED_UPLOAD_BYTES + 1
+        );
+      }
+      throw err;
+    }
+    return decompressed.toString('utf8');
   }
+  if (decryptedBuffer.length > MAX_DECOMPRESSED_UPLOAD_BYTES) {
+    throw new IndexedDBUploadPayloadTooLargeError(
+      MAX_DECOMPRESSED_UPLOAD_BYTES,
+      decryptedBuffer.length
+    );
+  }
+  return decryptedBuffer.toString('utf8');
+}
 
+/**
+ * Decrypt and optionally decompress AES-256-CBC encrypted payload.
+ *
+ * Avoid this for IndexedDB / other blob-origin uploads — JSON.parse of a
+ * multi-megabyte `databases` field OOMs the process. Use
+ * {@link decryptCompressedToUtf8} + a text/Postgres ingest path instead.
+ */
+export async function decryptCompressedPayload<T>(
+  data: string,
+  iv: string,
+  key: string,
+  compressed: string | undefined
+): Promise<T> {
+  const jsonString = await decryptCompressedToUtf8(data, iv, key, compressed);
   return JSON.parse(jsonString) as T;
 }

@@ -73,6 +73,16 @@ _TOOL_EVIDENCE_METADATA_KEYS = {
     "url",
 }
 
+_SOURCE_GOAL_TERMS = {
+    "email": ("email", "gmail"),
+    "gmail": ("email", "gmail"),
+    "imessage": ("imessage", "i message"),
+    "whatsapp": ("whatsapp", "whats app"),
+    "sms": ("sms", "text message", "text messages"),
+    "transactions": ("transaction", "transactions", "plaid", "bank"),
+    "documents": ("document", "documents", "file", "files", "notes"),
+}
+
 
 def _has_usable_tool_evidence(value: Any) -> bool:
     """Return whether a successful tool result contains non-empty evidence."""
@@ -102,6 +112,22 @@ def _has_usable_tool_evidence(value: Any) -> bool:
     if isinstance(value, (list, tuple, set)):
         return any(_has_usable_tool_evidence(item) for item in value)
     return bool(value)
+
+
+def _unavailable_source_is_required(source: str, goal: str, require_source_access: Any) -> bool:
+    """Distinguish required connector failures from opportunistic probes.
+
+    The explore model may broaden a mixed-source grep beyond the user's request.
+    An explicit ``require_source_access=False`` makes that broadening best-effort,
+    unless the requested source is named in the explore goal itself. Calls with
+    no hint preserve the existing fail-closed connector behavior.
+    """
+    if require_source_access is not False:
+        return True
+    normalized_goal = " ".join(str(goal or "").lower().replace("-", " ").split())
+    normalized_source = str(source or "").lower().replace("-", "_")
+    terms = _SOURCE_GOAL_TERMS.get(normalized_source, (normalized_source.replace("_", " "),))
+    return any(term in normalized_goal for term in terms)
 
 
 # =============================================================================
@@ -271,6 +297,7 @@ async def spawn_explore_agent_activity(
     depth: Optional[str] = None,
     max_iterations: Optional[int] = None,
     world_model_mode: str = "real",
+    local_data_summary: str = "",
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
@@ -314,7 +341,10 @@ async def spawn_explore_agent_activity(
 
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
-    has_usable_tool_evidence = False
+    # The local summary is fetched by a trusted backend activity before this
+    # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
+    # lookup can complete without a redundant grep solely to satisfy the guard.
+    has_usable_tool_evidence = bool(local_data_summary.strip())
 
     # Data sources the explore agent tried to grep but whose connector isn't
     # connected. Surfaced to the parent workflow, which raises one blocking
@@ -360,7 +390,32 @@ async def spawn_explore_agent_activity(
     # already in-process; the post is FE/persistence-only. Backgrounded tasks are
     # drained after run_agent so no message is lost.
     _pending_fe_posts: "list[asyncio.Task]" = []
+    # Tail of the in-flight post chain for each chip, keyed by toolCallId.
+    _fe_post_chain: "dict[str, asyncio.Task]" = {}
     _FE_POST_DRAIN_THRESHOLD = 64
+
+    def _dispatch_fe_post(chain_key: Optional[str], coro_factory) -> None:
+        """Background one FE post, ordered against earlier posts for the same chip.
+
+        Posts for DIFFERENT chips stay fully concurrent — that concurrency is the
+        whole point of backgrounding. Posts that share a toolCallId are chained,
+        because the FE resolves a chip by toolCallId with last write wins: an
+        IN_PROGRESS landing after its own ERROR strands a spinner that
+        `cleanOrphanedInProgress` never reaps (it exempts agentType 'explore').
+        Prod agent a6b8593a persisted ERROR at .959 before IN_PROGRESS at .982.
+        """
+        previous = _fe_post_chain.get(chain_key) if chain_key else None
+
+        async def _ordered():
+            if previous is not None:
+                # Order only; a failed predecessor must not cancel its successor.
+                await asyncio.gather(previous, return_exceptions=True)
+            return await coro_factory()
+
+        task = asyncio.create_task(_ordered())
+        if chain_key:
+            _fe_post_chain[chain_key] = task
+        _pending_fe_posts.append(task)
 
     async def tagged_execute_activity(activity_fn, args=None, **kwargs):
         """Wraps call_temporal_activity_from_activity to tag internal messages with explore taskId.
@@ -370,12 +425,16 @@ async def spawn_explore_agent_activity(
         """
         if activity_fn.__name__ == "post_agent_message" and args and len(args) >= 4:
             metadata = args[3]
+            chain_key: Optional[str] = None
             if isinstance(metadata, dict):
                 metadata["taskId"] = task_id
                 metadata["agentType"] = "explore"
                 metadata["subAgentId"] = task_id
-            _pending_fe_posts.append(
-                asyncio.create_task(call_temporal_activity_from_activity(activity_fn, args=args, **kwargs))
+                tool_call_id = metadata.get("toolCallId")
+                chain_key = str(tool_call_id) if tool_call_id else None
+            _dispatch_fe_post(
+                chain_key,
+                lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),
             )
             return None
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
@@ -396,6 +455,17 @@ async def spawn_explore_agent_activity(
                 pending_count=len(pending),
             ):
                 results = await asyncio.gather(*pending, return_exceptions=True)
+            # Only NOW drop the chain tails, and only those still pointing at a
+            # task we just drained. Clearing them before the gather would publish
+            # "no predecessor" across an await: a concurrent post for the same
+            # toolCallId would then start unchained and could overtake the one
+            # still draining — recreating the very write inversion the chain
+            # exists to prevent. A key whose tail was replaced during the await
+            # belongs to a newer in-flight post and must be left alone.
+            drained = set(pending)
+            for key, task in list(_fe_post_chain.items()):
+                if task in drained:
+                    _fe_post_chain.pop(key, None)
             for result in results:
                 if isinstance(result, BaseException):
                     logger.warning("Explore FE post failed during drain", error=str(result))
@@ -479,9 +549,23 @@ async def spawn_explore_agent_activity(
             )
             if isinstance(result, dict):
                 for st in result.get("unavailable_sources") or []:
-                    key = st.get("source") if isinstance(st, dict) else st
-                    if key and not any(u.get("source") == key for u in unavailable_sources_collected):
-                        unavailable_sources_collected.append(st)
+                    if isinstance(st, dict):
+                        source = st.get("source")
+                        normalized = st
+                    else:
+                        source = str(st) if st else None
+                        normalized = {"source": source} if source else None
+                    if (
+                        source
+                        and normalized
+                        and _unavailable_source_is_required(
+                            source, goal, tool_args.get("require_source_access")
+                        )
+                        and not any(
+                            u.get("source") == source for u in unavailable_sources_collected
+                        )
+                    ):
+                        unavailable_sources_collected.append(normalized)
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
             if not attachment_texts and not has_usable_tool_evidence:
                 return {
@@ -522,6 +606,11 @@ async def spawn_explore_agent_activity(
         message_status = MessageStatus.ERROR if is_tool_error else MessageStatus.FINISHED
         title = str(metadata.get("title")) if metadata and metadata.get("title") else "Explore agent thinking"
         tool_call_id = str(metadata.get("toolCallId")) if metadata and metadata.get("toolCallId") else None
+        # Carry the caller's toolName through. Stamping every explore message
+        # `spawn_agent` made a tool's message collide with that tool's own chip
+        # under the shared toolCallId, and the FE (last write wins) dropped the
+        # tool's formatted chip in favour of this one.
+        tool_name = str(metadata.get("toolName")) if metadata and metadata.get("toolName") else None
         async with span(
             "explore_fe_posts.enqueue",
             agent_id=agent_id,
@@ -530,8 +619,11 @@ async def spawn_explore_agent_activity(
             message_len=len(message or ""),
             pending_count=len(_pending_fe_posts),
         ):
-            _pending_fe_posts.append(
-                asyncio.create_task(
+            # Same chain as the tool managers' posts: both writers can target one
+            # toolCallId, so both must respect that chip's ordering invariant.
+            _dispatch_fe_post(
+                tool_call_id,
+                lambda: (
                     save_explore_message(
                         agent_id=agent_id,
                         title=title,
@@ -539,6 +631,7 @@ async def spawn_explore_agent_activity(
                         status=message_status,
                         task_id=task_id,
                         tool_call_id=tool_call_id,
+                        tool_name=tool_name,
                     )
                 )
             )
@@ -555,6 +648,16 @@ async def spawn_explore_agent_activity(
     resolved_max_iterations = max_iterations or explore_limits_for_depth(effective_depth)[0]
     state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
+    if local_data_summary:
+        initial_user_text = (
+            initial_user_text
+            + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
+            "use these directly and use grep only for missing message-level details). "
+            "A thread label is a valid contact identifier. If it contains only a phone number, "
+            "report that identifier exactly; do not guess or use unrelated web, email, or document "
+            "searches to invent a person's identity. Search only sources relevant to the goal:\n"
+            + local_data_summary
+        )
     if attachment_texts:
         initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
 
@@ -620,11 +723,21 @@ async def spawn_explore_agent_activity(
             f"{joined}"
         )
 
-    # A required data source that isn't connected means the explore could not
-    # do its job — it is FAILED (the parent will raise the connect gate). This
-    # takes precedence over the run's own completed/error status.
+    # Disconnected sources are a gap notice, not a hard explore failure. Grep
+    # already skipped them and the parent still raises source_connect gates;
+    # keep the explore's own completion status so the user-visible result is
+    # not clobbered by "required data source(s) not connected".
     has_unavailable = bool(unavailable_sources_collected)
     unavailable_names = ", ".join(str(u.get("source")) for u in unavailable_sources_collected)
+    notice_marker = "⚠️ Source(s) not connected:"
+    if has_unavailable and notice_marker not in (final_response or ""):
+        notice = (
+            f"\n\n{notice_marker} {unavailable_names}. These were skipped — "
+            "do NOT retry them. A one-time connect request will be sent to the user "
+            "after this exploration finishes when connect gates are enabled."
+        )
+        final_response = f"{(final_response or '').rstrip()}{notice}"
+
     # A tool-free explore completion is not grounded research. Models can
     # occasionally call attempt_completion immediately and claim that search
     # was unavailable even though the tools were present. Treat that as a
@@ -633,23 +746,22 @@ async def spawn_explore_agent_activity(
     # explores may legitimately summarize the supplied content without another
     # tool call, so preserve that path.
     completed_without_tool_evidence = (
-        result.get("status") == "completed" and not has_usable_tool_evidence and not attachment_texts
+        result.get("status") == "completed"
+        and not has_usable_tool_evidence
+        and not attachment_texts
+        and not local_data_summary
     )
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {
-        "status": "error" if has_unavailable else ("completed" if run_completed else "error"),
+        "status": "completed" if run_completed else "error",
         "result": final_response,
         "summary": final_response,
         "final_response": final_response,
         "best_effort_response": result.get("best_effort_response") or final_response,
         "error_reason": (
-            f"required data source(s) not connected: {unavailable_names}"
-            if has_unavailable
-            else (
-                "explore completed without tool evidence"
-                if completed_without_tool_evidence
-                else (None if run_completed else (result.get("message") or result.get("status")))
-            )
+            "explore completed without tool evidence"
+            if completed_without_tool_evidence
+            else (None if run_completed else (result.get("message") or result.get("status")))
         ),
         "unavailable_sources": unavailable_sources_collected,
         "partial_structured_response": result.get("partial_structured_response"),

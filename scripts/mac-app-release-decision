@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# Decide whether a merged PR must ship a new Mac app release.
+#
+# WHY THIS EXISTS
+#   The packaged Mac app bundles the SHARED front-end at build time
+#   (mac-app/vite.config.ts aliases `@` -> front-end/src, and the renderer
+#   routes straight into `@/pages/Terminal` -> Integrations). A release is
+#   produced only by pushing a `v*` tag, and the tag used to be created only
+#   when a human remembered to attach the MAC-APP-RELEASE label. A front-end
+#   PR with no label therefore shipped to roselabs.ai but never reached the
+#   desktop app, which silently kept serving the stale bundle it was built
+#   with. That is exactly how the rose "Connected" integrations treatment
+#   (PR #973) went live on the web while v1.1.132 users still saw the old
+#   emerald/teal chips.
+#
+#   So: any merge that changes the SHIPPED Mac surface tags a release, label
+#   or not. The label remains supported as an explicit override.
+#
+# USAGE
+#   git diff --name-only "$MERGE_SHA^1" "$MERGE_SHA" | scripts/mac-app-release-decision
+#
+#   Reads NUL-free, newline-separated repo-relative paths on stdin.
+#   Env:  MAC_APP_RELEASE_LABEL=true|false  (explicit label override)
+#   Emits GitHub-Actions-style key=value lines on stdout:
+#     ship=true|false
+#     reason=<label|shipped-surface|no-shipped-change>
+#
+set -euo pipefail
+
+label="${MAC_APP_RELEASE_LABEL:-false}"
+
+# Paths that live under a shipped root but cannot change the shipped bundle.
+# Tests, docs, and local tooling must not burn a signed+notarized release.
+is_ignored_path() {
+  case "$1" in
+    *.md) return 0 ;;
+    front-end/src/tests/*) return 0 ;;
+    mac-app/tests/* | mac-app/tests-e2e/*) return 0 ;;
+    mac-app/scripts/* | mac-app/playwright.config.ts | mac-app/vitest.config.ts) return 0 ;;
+    front-end/vitest.config.ts) return 0 ;;
+    # Every test-file suffix the repo actually uses. A missing one here silently
+    # burns a signed + notarized release on a test-only change.
+    *.blackbox.ts | *.blackbox.tsx | *.blackbox.js | *.blackbox.jsx) return 0 ;;
+    *.test.ts | *.test.tsx | *.test.mts | *.test.mjs | *.test.js | *.test.jsx) return 0 ;;
+    *.spec.ts | *.spec.tsx | *.spec.mts | *.spec.mjs | *.spec.js | *.spec.jsx) return 0 ;;
+    front-end/tests-e2e/* | front-end/src/**/__tests__/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Roots whose non-ignored contents are compiled into the shipped app.
+is_shipped_path() {
+  case "$1" in
+    mac-app/* | front-end/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+shipped_change=false
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  is_shipped_path "$path" || continue
+  is_ignored_path "$path" && continue
+  shipped_change=true
+  break
+done
+
+if [ "$label" = true ]; then
+  echo "ship=true"
+  echo "reason=label"
+elif [ "$shipped_change" = true ]; then
+  echo "ship=true"
+  echo "reason=shipped-surface"
+else
+  echo "ship=false"
+  echo "reason=no-shipped-change"
+fi

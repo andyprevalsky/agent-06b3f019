@@ -1,5 +1,8 @@
 export interface UserData {
   name: string;
+  email: string;
+  phone: string;
+  deliveryRecipientName: string;
   addressLine1: string;
   addressLine2: string;
   city: string;

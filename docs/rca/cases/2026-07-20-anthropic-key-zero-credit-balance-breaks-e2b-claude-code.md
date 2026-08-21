@@ -8,10 +8,11 @@ classification: third-party-failure
 problem_class: other
 first_bad_boundary: ANTHROPIC_API_KEY account returned Anthropic 400 "Credit balance is too low"
 symptoms:
-  - '"Credit balance is too low" in worker/backend logs'
-  - claude-code-agent smoke times out at 334s after 6 claude_code re-spawns
-  - browser-biometrics-webdecoy hits COST_LIMIT_REACHED at 124c of 120c
-  - integration-health credential gate reports Anthropic healthy anyway
+  - 'Credit balance is too low'
+  - 'Your credit balance is too low to access the Anthropic API'
+  - 'OAuth access token has been revoked'
+  - 'Timed out after 240s waiting for Claude Code smoke output'
+  - '[Claude result] Credit balance is too low'
 tags:
   - anthropic
   - billing
@@ -19,11 +20,14 @@ tags:
   - e2b
   - claude-code
   - no-fallback
+  - oauth-revoked
 sources:
   - commit d1d5a005c
   - memory:project_anthropic_credit_balance_blocks_deploy
-repro: none-recorded
-status: mitigated
+  - agent bc-019ff52c-1af4-7932-b397-677856e94aac
+  - PR #972
+repro: back-end/src/tests/blackbox/claude-code.blackbox.ts
+status: open
 ---
 
 ## Problem
@@ -75,3 +79,78 @@ When claude-code-agent times out with repeated re-spawns or a browser task hits
 COST_LIMIT, grep the run logs for "Credit balance is too low" before blaming
 code — and never treat an auth-only credential gate as proof a provider key can
 actually bill.
+
+## Recurrence — 2026-08-12 (deploy gate for IndexedDB OOM fix)
+
+**Archive class:** recurrence of this case (same first-bad boundary:
+`ANTHROPIC_API_KEY` returns credit-balance-too-low on the fallback-free Claude
+Code E2B path). Compounded by a dead OAuth pool.
+
+### Evidence (local, this session)
+
+1. Deploy stage `claude-code-e2b-smoke` failed:
+   ```
+   FAIL smoke -- Claude Code answers 2+2 (real E2B sandbox) -- Timed out after 240s
+   Output: [Claude] Session started in /home/user
+   [Claude] Credit balance is too low
+   [Claude result] Credit balance is too low
+   ```
+   Log: `.context/deploy-runs/20260812-090713-20584/logs/claude-code-e2b-smoke-20260812-094803-143112.log`
+   Session agent (cleaned after close): `c9bcb750-a8d7-41b8-987f-52f537efa70d`
+
+2. Direct probe of `ANTHROPIC_API_KEY` (same key in `back-end/.env` /
+   `agents/.env`):
+   ```
+   HTTP 400 {"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. ..."}
+   ```
+
+3. Prod `claude_code` pool: **1** CONNECTED active row; access token probe →
+   `401 OAuth access token has been revoked.` Refresh grant previously
+   returned `invalid_grant`. No second usable OAuth envelope exists in prod.
+
+4. Linux/Cloud has no Keychain path; smoke correctly falls through to
+   `ANTHROPIC_API_KEY` after OAuth is unusable — then hits this case's boundary.
+
+### Why the earlier mitigation did not hold
+
+- Billing was never restored on the shared Anthropic org (status stayed
+  `mitigated`, not `fixed`).
+- The Claude E2B blackbox still **hard-fails after 240s** on credit exhaustion
+  instead of taking the deploy-approved loud funding SKIP that Codex already
+  has (`codex-credit-skip.ts`). It only early-returns on
+  `Invalid authentication credentials`, so "Credit balance is too low" burns
+  the full timeout and blocks infra deploys (here: IndexedDB upload OOM /
+  PR #972) even though credential-health treats Anthropic as warn-only.
+
+### Searches run (Step 0.5)
+
+- `OAuth access token has been revoked`
+- `claude-code Credit balance is too low`
+- `OAuth access token has been revoked claude-code e2b smoke`
+- `indexedDB upload Zone Allocation failed` (separate relative; fixed in
+  `2026-08-12-indexeddb-upload-json-codec-ooms-backend`)
+
+### Resolution (2026-08-12) — real credential path, not a skip
+
+Prod gained a fresh usable `claude_code` OAuth for DEV_USER
+`1f85ff25-…` (access probe HTTP 200; `updatedAt=2026-08-12T11:14:42Z`).
+The previously probed `43c2f6ae-…` row remains revoked. Syncing compute
+tokens from prod into the local DB
+(`SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL=… seed-local.ts --compute-tokens-only`)
+restored the OAuth envelope; `GET /api/integrations/claude-code/credentials/token`
+returned `sk-ant-oat01-…`. Re-ran the unchanged gate:
+
+```
+PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox) (8589ms)
+Results: 52 passed, 0 failed, 52 total
+```
+
+`ANTHROPIC_API_KEY` is still credit-exhausted (HTTP 400) — the smoke passed
+on OAuth, not the API-key fallback. Case status stays `open` for the shared
+API-key billing debt; this recurrence of the E2B gate is closed by restoring
+a live OAuth envelope, not by skipping the gate.
+
+## Human feedback
+
+2026-08-12: Do not treat “compute tokens are out” as a reason to skip Claude/Codex
+and finish deploy — restore a real usable credential and make the gate pass.

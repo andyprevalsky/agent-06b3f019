@@ -198,6 +198,7 @@ read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
 TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
+BENCH_NEEDS_PAYMENT_FIXTURE=0
 TASK_GATE_PYTHON="${CLOUDBENCH_TASK_GATE_PYTHON:-}"
 if [ -z "$TASK_GATE_PYTHON" ] && [ -x "$REPO_DIR/agents/venv/bin/python" ]; then
     TASK_GATE_PYTHON="$REPO_DIR/agents/venv/bin/python"
@@ -230,7 +231,12 @@ case "$task_gate_status" in
 esac
 for task_name in "${BENCH_TASK_LIST[@]}"; do
     case "$task_name" in
-        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
+        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume)
+            BENCH_NEEDS_BUNDLED_FRONTEND=1
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_PAYMENT_FIXTURE=1
+            ;;
+        gate-subscription-card-mint|gate-kyc-card-mint)
             BENCH_NEEDS_BUNDLED_FRONTEND=1
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             ;;
@@ -434,6 +440,7 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
@@ -587,6 +594,7 @@ STACK_ENV=(
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
+    "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "CONDUCTOR_PORT=$BASE_PORT"
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME"
     "BENCHMARK_RUN_ID=$WORKSPACE_NAME"
@@ -605,10 +613,11 @@ STACK_ENV=(
     # workers from there. Prod's default MIN=2 would make an idle bench look like
     # it wants a 2nd machine, so pin the per-bench floor to 1.
     "MIN_MACHINES=1"
-    # Warm-start cache: run.sh restores this /data dump (persists across stop/start
-    # + fork) instead of the ~50s push+seed when the schema is unchanged. First run
-    # on a machine seeds + writes it; later claims restore in seconds.
+    # Canonical base fixture: run.sh restores this /data dump (persists across
+    # stop/start + fork), but validates it against the immutable shared artifact
+    # identity before use. A miss must not silently substitute a prod cold-sync.
     "BENCHMARK_SEED_DUMP=$STACK_SEED_DUMP"
+    "BENCHMARK_REQUIRE_SEED_DUMP=1"
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
@@ -639,11 +648,26 @@ fi
 if [ "$BENCH_NEEDS_AGENTCARD_ONBOARDING" = "1" ]; then
     STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")
 fi
+if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
+    STACK_ENV+=(
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1"
+        "BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30"
+    )
+fi
 if [ -n "$FRONTEND_SUPABASE_URL" ]; then
     STACK_ENV+=("VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL")
 fi
 if [ -n "$FRONTEND_SUPABASE_ANON_KEY" ]; then
     STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")
+fi
+# Resolve catalog target before stack launch. Production-only tasks run with
+# --prod against roselabs.ai — they must not depend on trycloudflare/ngrok for
+# stack health (NXDOMAIN / missing ngrok on clones was killing fleets before
+# the start barrier even though the public tunnel was never used as {frontend_url}).
+BENCH_TARGET_MODE_FOR_STACK=""
+if BENCH_TARGET_PLAN_FOR_STACK="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
+    "$REPO_DIR/agents/benchmarks/tasks.json" "$BASE_PORT" "${BENCH_TASK_LIST[@]}" 2>/dev/null)"; then
+    BENCH_TARGET_MODE_FOR_STACK="$(printf '%s\n' "$BENCH_TARGET_PLAN_FOR_STACK" | head -1)"
 fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
@@ -652,6 +676,12 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
         "BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1"
         "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE=1"
         "WMH_BASE_URL=http://localhost:$WMH_PORT"
+    )
+elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then
+    log "production-only target — skipping public tunnel (frontend is production)"
+    STACK_ENV+=(
+        "BENCHMARK_SKIP_WMH_BUILD=1"
+        "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     )
 else
     STACK_ENV+=(
@@ -758,6 +788,32 @@ if ! $STACK_READY; then
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
+if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
+    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
+    STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
+import json, sys
+from pathlib import Path
+manifest = json.loads(Path(sys.argv[1]).read_text())
+database = manifest.get("database") or {}
+url = (database.get("url") or "").strip()
+if not url:
+    port = database.get("port") or (manifest.get("ports") or {}).get("local_db") or 5432
+    name = database.get("name") or "victoria"
+    url = f"postgresql://postgres:postgres@localhost:{port}/{name}"
+print(url)
+PY
+)"
+    log "seeding isolated payment fixture for $PAYMENT_USER_ID"
+    if ! gosu "$APP_USER" env \
+        DATABASE_URL="$STACK_DB_URL" \
+        DIRECT_URL="$STACK_DB_URL" \
+        BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
+        sh -c 'cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"' \
+          sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID"; then
+        log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID"
+        finish 1
+    fi
+fi
 wait_for_benchmark_frontend_url || finish 1
 
 # Fleet batches hold every task here until every isolated stack is healthy.
@@ -838,6 +894,12 @@ export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'
 export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
 export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
+# run.sh exports this path to the backend, but the benchmark runner is a
+# sibling process launched by this driver and cannot inherit that export.
+# Give both processes the same run-scoped fixture file so SMS tasks stay
+# deterministic in cloud runs instead of failing closed (or using live search).
+export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE='$CONTEXT_DIR/sms-web-search-fixture.json'
+export BENCHMARK_REQUIRE_SEED_DUMP=1
 if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
   export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'
 fi
@@ -866,6 +928,10 @@ if [ '$BENCH_NEEDS_AGENTCARD_ONBOARDING' = '1' ]; then
   export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'
 else
   unset AGENTCARD_ONBOARDING_RETURN_URL
+fi
+if [ '$BENCH_NEEDS_PAYMENT_FIXTURE' = '1' ]; then
+  export BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1
+  export BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30
 fi
 $TASK_WORKER_EXPORTS
 if [ '$BENCH_SIMULATE' = '1' ]; then

@@ -276,46 +276,52 @@ describe('WaitForChip — condition mode', () => {
   });
 
   it('starts the explore thinking carousel from zero even when the llm call is already streaming', () => {
-    render(
-      <WaitForChip
-        title="Waiting"
-        message=""
-        status="IN_PROGRESS"
-        checks={[
-          {
-            title: 'running',
-            status: 'IN_PROGRESS',
-            timestamp: new Date().toISOString(),
-            explore: {
-              title: 'Checking mailbox',
-              fullGoal: 'Check if inbox has the order confirmation email',
-              message: 'exploring',
+    const nowMs = Date.parse('2026-08-03T20:00:00.000Z');
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(nowMs);
+    try {
+      render(
+        <WaitForChip
+          title="Waiting"
+          message=""
+          status="IN_PROGRESS"
+          checks={[
+            {
+              title: 'running',
               status: 'IN_PROGRESS',
-              steps: [
-                {
-                  title: 'Search the web for order confirmation email',
-                  status: 'FINISHED',
-                  toolName: 'web_search',
-                  toolCallId: 'tc-search',
-                  timestamp: new Date(Date.now() - 1_000).toISOString(),
-                  message: 'looked it up',
-                },
-              ],
+              timestamp: new Date(nowMs).toISOString(),
+              explore: {
+                title: 'Checking mailbox',
+                fullGoal: 'Check if inbox has the order confirmation email',
+                message: 'exploring',
+                status: 'IN_PROGRESS',
+                steps: [
+                  {
+                    title: 'Search the web for order confirmation email',
+                    status: 'FINISHED',
+                    toolName: 'web_search',
+                    toolCallId: 'tc-search',
+                    timestamp: new Date(nowMs - 1_000).toISOString(),
+                    message: 'looked it up',
+                  },
+                ],
+              },
             },
-          },
-        ]}
-        thinkingStreamStartedAtMs={Date.now() - 5_000}
-        thinkingStreamTokenCount={500}
-        metadata={{
-          waitForMode: 'condition',
-          condition: 'email arrives',
-          checkIntervalSeconds: 10,
-        }}
-      />,
-    );
+          ]}
+          thinkingStreamStartedAtMs={nowMs - 5_000}
+          thinkingStreamTokenCount={500}
+          metadata={{
+            waitForMode: 'condition',
+            condition: 'email arrives',
+            checkIntervalSeconds: 10,
+          }}
+        />,
+      );
 
-    fireEvent.click(screen.getByText('Waiting for email arrives'));
-    expect(document.body.textContent).toMatch(/0\.0s·0 tokens/);
+      fireEvent.click(screen.getByText('Waiting for email arrives'));
+      expect(document.body.textContent).toMatch(/0\.0s·0 tokens/);
+    } finally {
+      dateNow.mockRestore();
+    }
   });
 
   it('renders finished inline explore with state-only header and result body', async () => {

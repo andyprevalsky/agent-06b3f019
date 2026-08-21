@@ -4,7 +4,7 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { getErrorMessage } from '../../../shared/utils/error';
 import { AuthService } from '../../services/auth';
-import { sessionForLocalMachineData } from '../auth/impersonation';
+import { sessionForLocalMachineData } from '../../base/impersonation';
 import {
   APPLE_NOTES_GROUP_CONTAINER,
   CHATGPT_EXPORT_DIR_ENV,

@@ -21,11 +21,13 @@ import { createLogger } from './logger';
 
 const log = createLogger('ErrorAlert');
 
-export type FailureSource = 'chat' | 'sms' | 'agent_workflow' | 'backend_crash' | 'agent_watchdog';
+export type FailureSource =
+  'chat' | 'sms' | 'whatsapp' | 'agent_workflow' | 'backend_crash' | 'agent_watchdog';
 
 const SOURCE_LABEL: Record<FailureSource, string> = {
   chat: '🔴 Chat loop failed',
   sms: '🔴 SMS agent failed',
+  whatsapp: '🔴 WhatsApp agent failed',
   agent_workflow: '🔴 Agent failed',
   backend_crash: '🔴 Backend crashing',
   agent_watchdog: '🔴 Agent stuck / silently died',

@@ -3,7 +3,7 @@
 import type { Message } from '../api';
 import type { ExploreStep, WaitForCheck } from '../types';
 import { isInternalLivenessTool, removeCancelledThoughtErrors } from './messageCleanup';
-import { extractLineValue, extractMarkdownParam } from './messageTextParsing';
+import { deriveExploreStepTitle } from './exploreStepTitles';
 
 interface ExploreData {
   repMessageId: string;
@@ -31,69 +31,6 @@ function sortByTimestampAsc(a: Message, b: Message): number {
   return getMessageOrderTimestamp(a) - getMessageOrderTimestamp(b);
 }
 
-function formatWebSearchTitle(
-  rawTitle: string,
-  status: ExploreStep['status'],
-  query: string | undefined,
-): string {
-  if (!query) return rawTitle;
-  if (
-    rawTitle !== 'Searching the web' &&
-    rawTitle !== 'Web search completed' &&
-    rawTitle !== '❌ Web search failed'
-  ) {
-    return rawTitle;
-  }
-
-  if (status === 'ERROR') return `Web search failed for ${query}`;
-  if (status === 'FINISHED') return `Searched the web for ${query}`;
-  return `Searching the web for ${query}`;
-}
-
-function formatWebFetchTitle(
-  rawTitle: string,
-  status: ExploreStep['status'],
-  text: string,
-): string {
-  if (
-    rawTitle !== 'Fetching web content' &&
-    rawTitle !== 'Web fetch complete' &&
-    rawTitle !== '❌ Web fetch failed'
-  ) {
-    return rawTitle;
-  }
-
-  const activeMatch = text.match(/^Extracting from\s+([^:]+):\s*(.+)$/im);
-  const url = activeMatch?.[1]?.trim() || extractMarkdownParam(text, 'url');
-  const objective = activeMatch?.[2]?.trim() || extractMarkdownParam(text, 'objective');
-  if (!url && !objective) return rawTitle;
-
-  const target = [url, objective ? `for ${objective}` : ''].filter(Boolean).join(' ');
-  if (status === 'ERROR') return `Web fetch failed for ${target}`;
-  if (status === 'FINISHED') return `Fetched ${target}`;
-  return `Fetching ${target}`;
-}
-
-function deriveExploreStepTitle(m: Message, status: ExploreStep['status']): string {
-  const rawTitle = ((m.metadata?.title as string) || '').trim();
-  const text = m.text || '';
-  const toolName = (m.metadata?.toolName as string) || '';
-
-  if (toolName === 'web_search') {
-    const query =
-      typeof m.metadata?.query === 'string'
-        ? m.metadata.query
-        : extractLineValue(text, 'Query') || extractMarkdownParam(text, 'query');
-    return formatWebSearchTitle(rawTitle, status, query);
-  }
-
-  if (toolName === 'web_fetch') {
-    return formatWebFetchTitle(rawTitle, status, text);
-  }
-
-  return rawTitle;
-}
-
 function collectRawWaitFor(messages: Message[]): Map<string, Message[]> {
   const raw = new Map<string, Message[]>();
   for (const m of messages) {
@@ -105,6 +42,25 @@ function collectRawWaitFor(messages: Message[]): Map<string, Message[]> {
     raw.set(toolCallId, existing);
   }
   return raw;
+}
+
+const TERMINAL_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
+
+function isTerminalTool(message: Message): boolean {
+  return TERMINAL_TOOL_STATUSES.has(String(message.metadata?.toolStatus));
+}
+
+/**
+ * A chip is identified by its tool call AND the tool that owns it.
+ *
+ * toolCallId alone is not an identity: more than one writer posts under a
+ * failing tool's toolCallId (run_agent's explore error post, and
+ * agent_workflow's main-path catch-all), so a plain toolCallId map let one
+ * writer's row silently delete another tool's chip. Keying by both means an
+ * unrelated writer adds a chip instead of destroying one.
+ */
+function chipKey(message: Message): string {
+  return `${String(message.metadata?.toolCallId)}::${String(message.metadata?.toolName ?? '')}`;
 }
 
 function dedupByToolCallId(messages: Message[]): {
@@ -127,19 +83,25 @@ function dedupByToolCallId(messages: Message[]): {
       return;
     }
 
-    const existing = toolMessageMap.get(toolCallId);
+    const key = chipKey(message);
+    const existing = toolMessageMap.get(key);
     if (existing) {
       const isAttention = !!message.metadata?.isUserAttentionMessage;
       const isWaitFor = message.metadata?.toolName === 'wait_for';
-      toolMessageMap.set(toolCallId, {
-        message:
-          isAttention || isWaitFor
+      // Writes can be persisted out of program order (backgrounded posts race),
+      // so a late IN_PROGRESS must not resurrect a chip that already finished —
+      // that strands a spinner cleanOrphanedInProgress never reaps for explore.
+      const wouldUnfinish = isTerminalTool(existing.message) && !isTerminalTool(message);
+      toolMessageMap.set(key, {
+        message: wouldUnfinish
+          ? existing.message
+          : isAttention || isWaitFor
             ? { ...message, message_id: existing.message.message_id }
             : message,
         firstTimestamp: existing.firstTimestamp,
       });
     } else {
-      toolMessageMap.set(toolCallId, {
+      toolMessageMap.set(key, {
         message,
         firstTimestamp: message.timestamp,
       });

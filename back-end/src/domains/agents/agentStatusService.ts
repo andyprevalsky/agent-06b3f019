@@ -1,3 +1,4 @@
+import { releaseAgentBrowserSessions } from '../../providers/agentCleanup';
 import { broadcastAgentUpdate } from '../../providers/chat';
 import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
 import { createLogger } from '../../providers/logger';
@@ -13,9 +14,28 @@ const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 interface UpdateAgentStatusDependencies {
   cleanupPurchaseCards?: (agentId: string) => Promise<void>;
+  releaseBrowserSessions?: (agentId: string) => Promise<number>;
 }
 
-async function runTerminalAgentCleanup(
+async function releaseTerminalBrowserSessions(
+  agentId: string,
+  status: string,
+  dependencies: UpdateAgentStatusDependencies
+): Promise<void> {
+  // Every terminal agent, including children, owns its own browser rentals.
+  // Purchase settlement and trace finalization remain root-only below.
+  try {
+    await (dependencies.releaseBrowserSessions ?? releaseAgentBrowserSessions)(agentId);
+  } catch (error) {
+    log.warn('Terminal browser-session release unavailable', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function runRootTerminalCleanup(
   agentId: string,
   status: string,
   dependencies: UpdateAgentStatusDependencies
@@ -124,10 +144,32 @@ export async function updateAgentStatus(
   const result = await persistStatus(agentId, body, workflowGeneration);
   if (result.agent === null || !result.accepted) return result.agent;
   await broadcastStatus(agentId, body);
-  const firstRootTerminal =
-    TERMINAL_STATUSES.has(body.status) &&
-    before.parentAgentId === null &&
-    !TERMINAL_STATUSES.has(before.status);
-  if (firstRootTerminal) await runTerminalAgentCleanup(agentId, body.status, dependencies);
+  // Platform GMV: any agent (root or child) that completes with a structured
+  // output containing BOTH a USD amount and an order/confirmation id.
+  // Dynamic import keeps agents/purchases domains decoupled for layer-deps.
+  if (body.status === 'COMPLETED' && body.structuredResponse !== undefined) {
+    void import('../purchases/structuredGmv')
+      .then(({ maybeRecordStructuredGmv }) =>
+        maybeRecordStructuredGmv({
+          userId: before.userId,
+          agentId,
+          structured: body.structuredResponse,
+          source: 'agent.structuredResponse',
+        })
+      )
+      .catch((error: unknown) => {
+        log.warn('Structured GMV dynamic import/record failed', {
+          agent_id: agentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+  const firstTerminal = TERMINAL_STATUSES.has(body.status) && !TERMINAL_STATUSES.has(before.status);
+  if (firstTerminal) {
+    await releaseTerminalBrowserSessions(agentId, body.status, dependencies);
+    if (before.parentAgentId === null) {
+      await runRootTerminalCleanup(agentId, body.status, dependencies);
+    }
+  }
   return result.agent;
 }

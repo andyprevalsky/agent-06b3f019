@@ -657,8 +657,15 @@ async def test_no_tool_calls_nudges_then_errors_after_3_consecutive():
     assert "no tool calls" in result["message"].lower()
 
 
-async def test_tool_exception_continues_loop_and_posts_error():
-    """Exception in execute_tool → error message posted, loop continues, max_iterations reached."""
+async def test_tool_exception_continues_loop_without_posting_a_duplicate_chip():
+    """Exception in execute_tool → loop continues; the TOOL owns the error chip.
+
+    This test previously asserted run_agent posts the ERROR chip itself. That
+    was the defect: every tool already posts a formatted terminal chip and then
+    re-raises, so run_agent's row landed second at the same toolCallId and the
+    frontend (last write wins) dropped the formatted one.
+    docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md
+    """
     tool_calls = [{"tool": "web_search", "query": "fail"}]
     detected_tools = [("web_search", "tc-1", 1.0)]
 
@@ -672,10 +679,10 @@ async def test_tool_exception_continues_loop_and_posts_error():
         execute_tool_override=mock_execute_tool,
     )
 
+    # The loop still survives the exception and runs to its iteration budget.
     assert result["status"] == "max_iterations"
     error_posts = [m for m in posted if m["role"] == "TOOL" and (m.get("metadata") or {}).get("toolStatus") == "ERROR"]
-    assert len(error_posts) == 1
-    assert "oops" in error_posts[0]["text"]
+    assert not error_posts, f"run_agent must not post a tool's ERROR chip: {error_posts}"
 
 
 async def test_status_needs_user_help_returned_from_tool():
@@ -695,6 +702,49 @@ async def test_status_needs_user_help_returned_from_tool():
 
     assert result["status"] == "needs_user_help"
     assert result["message"] == "Please log in"
+
+
+async def test_failed_llm_call_does_not_consume_iteration_budget():
+    """A failed LLM call is a retry of the turn, not a turn.
+
+    Regression for agent 16ae3e8f-1e0f-4004-9c58-b74fe34c8a1e: its explore
+    sub-agent completed 18 turns of real work, then two failed structured-output
+    parses consumed iterations 19 and 20 and it died on "Reached max iterations
+    (20)" without ever acting again. `iteration += 1` runs before the LLM call,
+    so a call that produced no assistant turn, no tool call and no context
+    growth still spent a turn.
+
+    With max_iterations=2 and two transient failures ahead of a good response,
+    the agent must still get to execute its tool. Counting the failures leaves
+    zero turns for work.
+    """
+    calls = {"n": 0}
+
+    def factory():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("transient provider failure")
+        return [{"tool": "web_search", "query": "real work"}]
+
+    with patch("loop.run_agent.asyncio.sleep", new=AsyncMock(return_value=None)):
+        result, _posted, executed = await _run_single_iteration(
+            [{"tool": "web_search", "query": "real work"}],
+            [("web_search", "tc-budget-1", 1.0)],
+            skip_verification=True,
+            max_iterations=2,
+            llm_tool_calls_factory=factory,
+        )
+
+    assert calls["n"] > 2, (
+        f"agent never got past the 2 transient failures — only {calls['n']} LLM "
+        "calls made, so the failures consumed the whole iteration budget"
+    )
+    assert executed, (
+        "agent never executed a tool: both iterations were consumed by failed "
+        "LLM calls, leaving no budget for real work"
+    )
+    assert executed[0]["tool_name"] == "web_search"
+    assert result["status"] != "error"
 
 
 async def test_status_completed_from_tool():
@@ -786,19 +836,67 @@ async def test_verifier_score_1_returns_completed():
 
 
 async def test_estimate_tokens():
-    """_estimate_tokens applies the chars/4 × safety-multiplier heuristic."""
-    from loop.run_agent import ESTIMATE_SAFETY_MULTIPLIER, _estimate_tokens
+    """_estimate_tokens counts everything rendered, not just m["text"].
 
-    context = [
+    It is the SAME function the compactor uses (helpers.summarize.
+    estimate_context_tokens). Prod agent e14d5abb (2026-08-03) hard-failed
+    because the two disagreed: this counted only text, so text-empty ASSISTANT
+    rows carrying their whole payload in metadata.tool_calls scored ~0 and
+    dropping them "saved" nothing while the added summary was fully counted —
+    compaction grew the context by 1698 tokens.
+    """
+    from helpers.summarize import estimate_context_tokens
+    from loop.run_agent import _estimate_tokens
+
+    text_only = [
         {"text": "Hello world this is a test message", "metadata": {}},
         {"text": "Another message here with more content", "metadata": {}},
     ]
+    assert _estimate_tokens(text_only) == estimate_context_tokens(text_only) > 0
 
-    result = _estimate_tokens(context)
+    # Production-shaped rows: empty text, payload entirely in metadata. These
+    # must carry real weight, not ~0.
+    metadata_only = [
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "metadata": {
+                "tool_calls": [{"tool": "spawn_agent", "tool_call_id": "tc-1", "goal": "find a phone number " * 50}]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolName": "grep",
+                "structured_response": {"matches": [{"path": "network/contact.contact"}] * 20},
+            },
+        },
+    ]
+    assert _estimate_tokens(metadata_only) > 100
+    assert _estimate_tokens(metadata_only) == estimate_context_tokens(metadata_only)
 
-    total_text = "\n".join([m["text"] for m in context])
-    expected = int((len(total_text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
-    assert result == expected
+
+async def test_compress_context_rejects_non_shrinking_result():
+    """A "compaction" that returns a LARGER context is a failure, not a success.
+
+    Adopting it guarantees the overflow trigger fires again on the next check —
+    the loop that killed prod agent e14d5abb. The activity runs out-of-process
+    (possibly on an older build), so the caller re-checks rather than trusting
+    success=True.
+    """
+    from loop.run_agent import _compress_context
+
+    context = [{"role": "USER", "text": "original body " * 100}]
+    grown = [{"role": "USER", "text": "summary that is somehow even longer " * 100}]
+
+    async def mock_execute_activity(fn, args=None, **kwargs):
+        return {"context": grown, "usage": {}, "success": True}
+
+    result_ctx, success = await _compress_context(mock_execute_activity, context, "rose-lite")
+
+    assert success is False
+    assert result_ctx is context
 
 
 async def test_compress_context_returns_new_context_on_success():
@@ -821,7 +919,9 @@ async def test_compress_context_returns_new_context_on_success():
     async def on_tokens(in_, out_, model, **kwargs):
         tokens_recorded.append((in_, out_, model, kwargs))
 
-    context = [{"role": "USER", "text": "hi"}]
+    # Input must genuinely exceed the compacted output: _compress_context
+    # rejects a result that does not shrink the context.
+    context = [{"role": "USER", "text": "hi there, this is the pre-compaction body. " * 20}]
     result_ctx, success = await _compress_context(
         mock_execute_activity,
         context,
@@ -1043,8 +1143,12 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
             goal_text="stable fast cache goal",
         )
 
-    assert len(llm_calls) == 2
-    assert cache_steps == [1, 1]
+    # 3 calls: the failed attempt is retried without spending an iteration
+    # (see failed_llm_call_does_not_consume_iteration_budget), so both of
+    # max_iterations=2's turns remain available for real work.
+    assert len(llm_calls) == 3
+    # The invariant under test: the retry reuses the SAME fast-cache step.
+    assert cache_steps[:2] == [1, 1]
     assert result["status"] in {"max_iterations", "error"}
 
 
@@ -1098,7 +1202,8 @@ async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
             skip_status_updates=True,
         )
 
-    assert len(llm_calls) == 2
+    # 3 calls: the refused attempt is retried without spending an iteration.
+    assert len(llm_calls) == 3
     assert llm_calls[0]["_exclude_anthropic_family"] is False
     assert llm_calls[1]["_exclude_anthropic_family"] is True
     assert not any(call.args == (2,) for call in sleep_mock.await_args_list)
@@ -1168,7 +1273,14 @@ async def test_compress_context_activity_exception_preserves_original():
 
 
 async def test_run_agent_errors_when_compaction_still_over_trigger():
-    """Successful but ineffective compaction should not continue_as_new or call the LLM."""
+    """Successful but ineffective compaction should not continue_as_new or call the LLM.
+
+    ``_compress_context`` is patched out here, so this covers the loop-level
+    contract only: a compaction that lands at or above the trigger returns
+    status=error. The producer-side guard (reject a compaction that does not
+    shrink the context at all) is covered by
+    ``test_compress_context_rejects_non_shrinking_result``.
+    """
     import loop.run_agent as run_mod
 
     async def system_prompt():
@@ -1210,6 +1322,58 @@ async def test_run_agent_errors_when_compaction_still_over_trigger():
 
     assert result["status"] == "error"
     assert "Context compression ineffective" in result["message"]
+    assert result["context"] == initial_context
+
+
+async def test_run_agent_errors_when_compactor_breaker_open_over_trigger():
+    """An open compactor circuit breaker must fail loudly, not send an oversized context.
+
+    The breaker guard at the top of the loop used to only *skip* compaction, so
+    after MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES the loop fell through and shipped
+    an over-window context to the provider on every remaining iteration — a
+    length error that says nothing about compaction.
+    """
+    import loop.run_agent as run_mod
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def fail_llm(**kwargs):
+        raise AssertionError("LLM must not be called with an un-compactable oversized context")
+
+    async def fail_compress(**kwargs):
+        raise AssertionError("compaction must not be attempted while the breaker is open")
+
+    initial_context = [{"role": "USER", "text": "x" * 400, "timestamp": "2024-01-01T00:00:00Z"}]
+
+    with (
+        patch.object(run_mod, "EFFECTIVE_OUTPUT_RESERVATION", 0),
+        patch.object(run_mod, "AUTOCOMPACT_BUFFER_TOKENS", 10),
+        patch.object(run_mod, "MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES", 0),  # breaker already open
+        patch.object(run_mod, "_compress_context", new=AsyncMock(side_effect=fail_compress)),
+        patch.object(run_mod, "call_llm_structured_streaming", new=AsyncMock(side_effect=fail_llm)),
+    ):
+        result = await run_mod.run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=initial_context,
+            is_inside_temporal_activity=True,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=1,
+            max_context_tokens=100,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert result["status"] == "error"
+    assert "Context compression unavailable" in result["message"]
     assert result["context"] == initial_context
 
 
@@ -1776,6 +1940,47 @@ async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
     assert not llm_called, "LLM must never run while the agent is paused"
 
 
+async def test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context():
+    """The tool layer owns a failed tool's chip; run_agent must not post a second.
+
+    Every tool posts its own formatted terminal ERROR chip (params, elapsed,
+    cost) and then re-raises — domains/web_fetch/handler.py:319,
+    domains/grep/service.py:317, tools/web_search/handler.py:180,
+    tools/people_search/handler.py:177. run_agent posting another row at the SAME
+    toolCallId is not extra visibility: the FE resolves a chip by toolCallId with
+    last write wins, so the second row DELETED the formatted chip and left the
+    user a bare exception string attributed to the sub-agent.
+    docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md
+
+    The agent's own error feedback is the local context.append, which is
+    independent of the FE post — asserted here so this can never be "fixed"
+    by silencing the model's error feedback as well.
+    """
+
+    async def failing_execute_tool(tool_name, tool_args, tool_call_id):
+        raise RuntimeError("WebFetchProvidersFailed: web_fetch cannot fetch 'documents/generic/x'")
+
+    tool_calls = [{"tool": "web_fetch", "url": "documents/generic/x", "objective": "y"}]
+    detected = [("web_fetch", "10a6cbd0-346e-437f-af57-14c0a2c8b0d6", 1.0)]
+
+    _, posted, _ = await _run_single_iteration(
+        tool_calls,
+        detected,
+        execute_tool_override=failing_execute_tool,
+        is_inside_temporal_activity=True,
+    )
+
+    duplicate_chips = [
+        p
+        for p in posted
+        if p["role"] == "TOOL" and (p.get("metadata") or {}).get("toolStatus") == "ERROR"
+    ]
+    assert not duplicate_chips, (
+        "run_agent posted a duplicate ERROR chip for a failed tool; it collides "
+        f"with the tool's own chip at the same toolCallId: {duplicate_chips}"
+    )
+
+
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
@@ -1834,7 +2039,12 @@ async def run_all_tests():
         test_no_tool_calls_nudges_then_errors_after_3_consecutive,
     )
     await r.record_async(
-        "tool_exception_continues_loop_and_posts_error", test_tool_exception_continues_loop_and_posts_error
+        "tool_exception_continues_loop_no_duplicate_chip",
+        test_tool_exception_continues_loop_without_posting_a_duplicate_chip,
+    )
+    await r.record_async(
+        "failed_llm_call_does_not_consume_iteration_budget",
+        test_failed_llm_call_does_not_consume_iteration_budget,
     )
     await r.record_async("status_needs_user_help_returned_from_tool", test_status_needs_user_help_returned_from_tool)
     await r.record_async("status_completed_from_tool", test_status_completed_from_tool)
@@ -1845,6 +2055,9 @@ async def run_all_tests():
     await r.record_async("estimate_tokens", test_estimate_tokens)
     await r.record_async(
         "compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success
+    )
+    await r.record_async(
+        "compress_context_rejects_non_shrinking_result", test_compress_context_rejects_non_shrinking_result
     )
     await r.record_async(
         "compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context
@@ -1878,6 +2091,10 @@ async def run_all_tests():
         test_run_agent_errors_when_compaction_still_over_trigger,
     )
     await r.record_async(
+        "run_agent_errors_when_compactor_breaker_open_over_trigger",
+        test_run_agent_errors_when_compactor_breaker_open_over_trigger,
+    )
+    await r.record_async(
         "run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished
     )
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
@@ -1899,6 +2116,10 @@ async def run_all_tests():
     await r.record_async(
         "paused_agent_does_not_busy_spin_and_yields_to_cold_handler",
         test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler,
+    )
+    await r.record_async(
+        "failed_tool_posts_no_duplicate_chip",
+        test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context,
     )
     teardown_mock()
     return r.summary()

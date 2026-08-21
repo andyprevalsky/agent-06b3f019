@@ -94,7 +94,18 @@ function hasUsableClaudePoolEnvelope(credentialsJson: string): boolean {
     const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
     const accessToken = typeof oauth?.accessToken === 'string' ? oauth.accessToken : '';
     const refreshToken = typeof oauth?.refreshToken === 'string' ? oauth.refreshToken : '';
-    return accessToken.startsWith('sk-ant-oat') && refreshToken.length > 0;
+    const expiresAt = typeof oauth?.expiresAt === 'number' ? oauth.expiresAt : 0;
+    const scopes = Array.isArray(oauth?.scopes) ? oauth.scopes : [];
+    // Legacy browser OAuth envelopes can refresh. New cloud-minted Claude
+    // setup-tokens deliberately cannot: they are year-long inference grants and
+    // carry an empty refreshToken. Rejecting every empty refresh token silently
+    // made those healthy, explicitly-pooled accounts invisible to the pool.
+    const refreshable = refreshToken.length > 0;
+    const liveSetupToken =
+      refreshToken === '' &&
+      expiresAt > Date.now() &&
+      scopes.some((scope) => scope === 'user:inference');
+    return accessToken.startsWith('sk-ant-oat') && (refreshable || liveSetupToken);
   } catch {
     return false;
   }
@@ -106,8 +117,13 @@ function parseGptEnvelope(credentialsJson: string) {
     if (parsed.auth_mode !== 'chatgpt') return null;
     const tokens = parsed.tokens as Record<string, unknown> | undefined;
     const accessToken = typeof tokens?.access_token === 'string' ? tokens.access_token : '';
-    const refreshToken = typeof tokens?.refresh_token === 'string' ? tokens.refresh_token : '';
-    if (accessToken.length === 0 || refreshToken.length === 0) return null;
+    // This selector only hands an access token to Rose/SMS workers. Cloud-minted
+    // grants intentionally omit the refresh lineage, while legacy synced
+    // auth.json envelopes still include it. Requiring refresh_token here made a
+    // healthy access-only grant invisible even though this path never uses it.
+    // The Codex CLI sandbox reader remains strict in gptCredentials.ts because
+    // that surface receives and persists the complete auth.json envelope.
+    if (accessToken.length === 0) return null;
     const accountId = typeof tokens?.account_id === 'string' ? tokens.account_id : undefined;
     return { accessToken, accountId };
   } catch {
@@ -524,11 +540,24 @@ export async function releaseComputeTokenLineage(lineageKey: string) {
   return { ok: result.count > 0, updated: result.count };
 }
 
+/**
+ * Back a compute token off after a failure.
+ *
+ * `rateLimitedUntil` is the PROVIDER's own reset time (from
+ * `anthropic-ratelimit-*-reset` / `retry-after` / the error body). Pass it
+ * whenever the provider supplied one: omitting it makes the cooldown fall back
+ * to a synthetic 5-minute default, which is exactly how a real usage window got
+ * destroyed in prod on 2026-07-28 — a header-derived `2026-07-30T22:00Z` was
+ * overwritten 15s later by an uninformed `+5m` from this path. The synthetic
+ * default is only correct when the provider genuinely told us nothing.
+ */
 export async function markComputeTokenUnavailable(
   token: ComputeCodeCredentialResult,
-  reason: 'auth_error' | 'rate_limit'
+  reason: 'auth_error' | 'rate_limit',
+  rateLimitedUntil?: string
 ): Promise<void> {
   const failureReason = reason === 'auth_error' ? 'auth_error' : undefined;
+  const options = { failureReason, rateLimitedUntil };
 
   if (token.source === 'pool') {
     if (!token.poolTokenId) {
@@ -540,18 +569,18 @@ export async function markComputeTokenUnavailable(
       return;
     }
     if (token.type === 'claude') {
-      await markPoolTokenRateLimited(token.poolTokenId, { failureReason });
+      await markPoolTokenRateLimited(token.poolTokenId, options);
       return;
     }
-    await markGptPoolTokenRateLimited(token.poolTokenId, { failureReason });
+    await markGptPoolTokenRateLimited(token.poolTokenId, options);
     return;
   }
 
   if (token.type === 'claude') {
-    await markUserTokenRateLimited(token.userId, { failureReason });
+    await markUserTokenRateLimited(token.userId, options);
     return;
   }
-  await markGptUserTokenRateLimited(token.userId, { failureReason });
+  await markGptUserTokenRateLimited(token.userId, options);
 }
 
 // ── Shared Anthropic API-key cooldown ──────────────────────────────────────
@@ -586,9 +615,10 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
   lastCooldownDbCheckMs = now;
   const row = await prisma.integration.findUnique({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
         name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     select: { rateLimitedUntil: true },
@@ -603,9 +633,10 @@ export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<voi
   cachedCooldownUntilMs = until.getTime();
   await prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
         name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     create: {

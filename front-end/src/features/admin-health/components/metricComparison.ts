@@ -2,10 +2,12 @@ import type { AdminHealthData, AdminHealthFunnelStep, AdminHealthTimeSlice } fro
 
 export type SeriesMetricKey =
   | 'revenueCents'
+  | 'gmvCents'
   | 'waitlistSignups'
   | 'userCount'
   | 'tasksIssuedPerUser'
   | 'outputTokensPerTask'
+  | 'gmvPerTask'
   | 'taskCompletionRate'
   | 'andyLinearPoints'
   | 'githubCommits'

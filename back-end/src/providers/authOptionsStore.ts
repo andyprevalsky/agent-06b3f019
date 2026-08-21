@@ -1,4 +1,7 @@
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
+import { canonicalAuthRealm } from './authRealm';
+import { SSO_REALMS } from './browserCookies';
+import { INVALIDATED_STEEL_PROFILE_SOURCE } from './browser/profileBinding';
 
 export async function findSteelSessionAuth(
   userId: string,
@@ -34,9 +37,22 @@ export async function findBrowserPasswords(userId: string) {
   });
 }
 
-export async function findPasskeys(userId: string, authRealm: string) {
+export async function findPasskeys(
+  userId: string,
+  authRealm: string,
+  { includeSso = false }: { includeSso?: boolean } = {}
+) {
+  // SSO passkeys are opt-in. The browser AGENT path seeds per realm transition,
+  // so it gets a "Sign in with Google" passkey when it actually lands on
+  // google.com -- no need to eagerly load every SSO passkey into every agent
+  // session. The CONNECT flow, by contrast, stays on the target realm while the
+  // IdP opens in a separate popup, so it must load the SSO union up front and
+  // passes includeSso: true.
+  const realms = includeSso
+    ? [...new Set([canonicalAuthRealm(authRealm), ...SSO_REALMS])]
+    : [canonicalAuthRealm(authRealm)];
   return prisma.passkeyCredential.findMany({
-    where: { userId, authRealm },
+    where: { userId, authRealm: { in: realms } },
   });
 }
 
@@ -134,14 +150,33 @@ export async function freshestCookieUtcForBundle(params: {
 export async function markSteelSessionAuthFailed(
   userId: string,
   steelSessionAuthId: string,
-  reason: string
+  reason: string,
+  preserveBrowserSessionId?: string
 ) {
-  return prisma.$transaction(async (tx) => {
+  // runTransactionWithRetry, not a raw $transaction: it applies the shared
+  // timeout and retries only a transaction that failed to START, so a partially
+  // executed body is never replayed. Migrated off the hash-pinned legacy
+  // exception, which went stale the moment this function was edited.
+  return runTransactionWithRetry(async (tx) => {
     const auth = await tx.steelSessionAuth.findFirst({
       where: { id: steelSessionAuthId, userId },
       select: { id: true, contextId: true, authRealm: true },
     });
     if (auth === null) return null;
+    if (preserveBrowserSessionId !== undefined) {
+      const preserved = await tx.browserSession.findFirst({
+        where: {
+          id: preserveBrowserSessionId,
+          provider: 'steel',
+          providerProfileId: auth.contextId,
+          context: { userId },
+        },
+        select: { id: true },
+      });
+      if (preserved === null) {
+        throw new Error('Preserved browser session is not bound to the failed Steel profile');
+      }
+    }
 
     const now = new Date();
     await tx.steelSessionAuth.update({
@@ -154,6 +189,23 @@ export async function markSteelSessionAuthFailed(
     await tx.browserContext.updateMany({
       where: { userId, contextId: auth.contextId },
       data: { contextId: null },
+    });
+    await tx.browserProviderProfile.deleteMany({
+      where: {
+        provider: 'steel',
+        profileId: auth.contextId,
+        context: { userId },
+      },
+    });
+    await tx.browserSession.updateMany({
+      where: {
+        provider: 'steel',
+        providerProfileId: auth.contextId,
+        context: { userId },
+      },
+      data: {
+        providerProfileSource: INVALIDATED_STEEL_PROFILE_SOURCE,
+      },
     });
 
     return {

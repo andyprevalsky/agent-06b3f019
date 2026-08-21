@@ -1,4 +1,9 @@
-import { callOrgTool, type AgentCardOrgToolCaller } from '../agentcard/org-runtime';
+import { orgPollWaitsMs } from '../agentcard/org-poll-schedule';
+import {
+  callOrgTool,
+  orgRetryDeadlineAtMs,
+  type AgentCardOrgToolCaller,
+} from '../agentcard/org-runtime';
 import { createLogger } from '../logger';
 import { AgentCardProviderError } from './errors';
 import type {
@@ -219,6 +224,43 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isCardholderNotFoundMessage(message: string): boolean {
+  return /\bcardholder not found\b/i.test(message);
+}
+
+function isCardCreationFailedMessage(message: string): boolean {
+  return /\bcard_creation_failed\b/i.test(message);
+}
+
+function throwIfCardholderNotFound(message: string): void {
+  if (!isCardholderNotFoundMessage(message)) return;
+  // Deterministic pre-commit rejection: keep the typed safe code so
+  // classifyFundingResumeFailure does not rewrite providerCallStarted + untyped
+  // errors as ambiguous funding and loop forever on "Cardholder not found".
+  throw new AgentCardProviderError(message, 409, undefined, 'agentcard_cardholder_not_found', {
+    agentcardStatus: 'cardholder_not_found',
+  });
+}
+
+function throwIfCardCreationFailed(message: string): void {
+  if (!isCardCreationFailedMessage(message)) return;
+  // AgentCard stores this under the create_card idempotency key: every replay of
+  // the same purchase:{id} key returns the same terminal failure. Keep a typed
+  // safe code so classifyFundingResumeFailure fail-closes instead of rewriting
+  // into a silent funding-in-progress retry loop.
+  throw new AgentCardProviderError(message, 409, undefined, 'agentcard_card_creation_failed', {
+    agentcardStatus: 'card_creation_failed',
+  });
+}
+
+function providerErrorFromUnknown(error: unknown): AgentCardProviderError {
+  if (error instanceof AgentCardProviderError) return error;
+  const message = errorMessage(error);
+  throwIfCardholderNotFound(message);
+  throwIfCardCreationFailed(message);
+  return new AgentCardProviderError(message);
+}
+
 function isTimeoutError(error: unknown): boolean {
   const message = errorMessage(error);
   const name = error instanceof Error ? error.name : '';
@@ -342,9 +384,11 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   const status = optionalString(record, ['status'])?.toLowerCase();
   const hasExplicitError = (result as McpResult).isError === true || status === 'error';
   if (hasExplicitError) {
-    throw new AgentCardProviderError(
-      optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed')
-    );
+    const failureMessage =
+      optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed');
+    throwIfCardholderNotFound(failureMessage);
+    throwIfCardCreationFailed(failureMessage);
+    throw new AgentCardProviderError(failureMessage);
   }
 }
 
@@ -444,6 +488,11 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       // get_card_details is the current source of truth on an idempotency replay. create_card may
       // still say "created" even if a prior attempt closed the returned card.
       status: details.status,
+      // Thread secrets so mintCaptureAndIssue does not re-call get_card_details (a second call has
+      // hung the HTTP mint for 15+ minutes while CHARGING blocked same-fingerprint retries).
+      pan: details.pan,
+      cvv: details.cvv,
+      balanceCents: details.balanceCents,
       ...(transferId !== undefined ? { providerTransferId: transferId, metadata: record } : {}),
     };
   }
@@ -453,9 +502,12 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     request: CardProviderMintRequest
   ): Promise<unknown> {
     const maxAttempts = request.idempotencyKey === undefined ? 1 : CREATE_CARD_TIMEOUT_MAX_ATTEMPTS;
+    // One shared rate-limit retry budget across the timeout retries, so two attempts cannot each
+    // arm their own and double the delay this mint can absorb.
+    const retryDeadlineAtMs = orgRetryDeadlineAtMs();
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await this.toolCaller('create_card', args);
+        return await this.toolCaller('create_card', args, retryDeadlineAtMs);
       } catch (error) {
         const canRetry = isTimeoutError(error) && attempt < maxAttempts;
         if (!canRetry) {
@@ -468,7 +520,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
               { attempts: attempt }
             );
           }
-          throw error;
+          throw providerErrorFromUnknown(error);
         }
         log.warn('AgentCard Organization MCP create_card timed out; retrying', {
           cardholder_id: maskId(this.cardholderId),
@@ -490,10 +542,19 @@ export class AgentCardOrgMcpProvider implements CardProvider {
   }
 
   private async findCompanyTransferId(cardId: string): Promise<string | undefined> {
-    for (let attempt = 1; attempt <= this.transferLookup.attempts; attempt += 1) {
+    // Each attempt costs TWO organization-MCP reads, so the old fixed 500ms cadence spent 40
+    // requests of the org-wide 120-per-minute window on a single mint. Exponential backoff waits
+    // for exactly as long overall while issuing 12.
+    const waits = orgPollWaitsMs(this.transferLookup.attempts, this.transferLookup.delayMs);
+    const observations = waits.length + 1;
+    // ONE rate-limit retry budget for the WHOLE visibility poll. The org runtime's budget bounds a
+    // single `callTool`, so re-arming it per read would let these 12 reads accumulate 12 budgets
+    // (12 x 30s = 360s) and turn a ~10s poll into a multi-minute mint.
+    const retryDeadlineAtMs = orgRetryDeadlineAtMs();
+    for (let attempt = 1; attempt <= observations; attempt += 1) {
       let observedTransferCount = 0;
       for (const args of [{ status: 'consumed', limit: 100 }, { limit: 100 }]) {
-        const result = await this.toolCaller('list_transfers', args);
+        const result = await this.toolCaller('list_transfers', args, retryDeadlineAtMs);
         const record = resultRecord(result);
         throwForGate(record, result);
         const transfers = recordArray(record, ['transfers']);
@@ -514,14 +575,14 @@ export class AgentCardOrgMcpProvider implements CardProvider {
           return transferId;
         }
       }
-      if (attempt < this.transferLookup.attempts) {
+      if (attempt < observations) {
         if (attempt === 1) {
           log.info('Waiting for AgentCard organization transfer visibility', {
             card_id: maskId(cardId),
             observed_transfer_count: observedTransferCount,
           });
         }
-        await delay(this.transferLookup.delayMs);
+        await delay(waits[attempt - 1]);
       }
     }
     return undefined;

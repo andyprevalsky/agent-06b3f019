@@ -13,6 +13,8 @@ import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 import claudeIcon from '@/assets/claude-color.svg';
+import ComputeAccountChips, { ComputeConnectModal } from './ComputeAccountsSection';
+import { useComputeAccounts } from '../hooks/useComputeAccounts';
 import geminiIcon from '@/assets/gemini-icon.png';
 
 import DropdownIconFrame, {
@@ -69,16 +71,15 @@ function ClaudeRow({
   isAvailable,
   synced,
   loading,
-  onSync,
 }: {
   isAvailable: boolean;
   synced: boolean;
   loading: boolean;
-  onSync: () => void;
 }) {
+  const accounts = useComputeAccounts('claude');
   if (isAvailable) {
     return (
-      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+      <div className="px-4 py-2 flex flex-wrap items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
           <DropdownIconFrame {...DropdownIconPreset.claude} isSynced={synced}>
             <img src={claudeIcon} alt="Claude" className={dropdownIconImageClassName} />
@@ -87,7 +88,15 @@ function ClaudeRow({
             <span className="truncate text-sm">Claude Subscription</span>
           </div>
         </div>
-        <SyncItemButton isLoading={loading} isSynced={synced} onClick={onSync} />
+        {/* The existing "+" is the connect affordance -- a connected compute
+            account belongs in this row, exactly like a Gmail account chip. */}
+        <SyncItemButton
+          isLoading={loading || accounts.isConnecting}
+          isSynced={synced}
+          onClick={() => void accounts.connect()}
+        />
+        <ComputeAccountChips state={accounts} />
+        <ComputeConnectModal state={accounts} providerLabel="Claude" />
       </div>
     );
   }
@@ -117,16 +126,15 @@ function GptRow({
   isAvailable,
   synced,
   loading,
-  onSync,
 }: {
   isAvailable: boolean;
   synced: boolean;
   loading: boolean;
-  onSync: () => void;
 }) {
+  const accounts = useComputeAccounts('codex');
   if (isAvailable) {
     return (
-      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+      <div className="px-4 py-2 flex flex-wrap items-center justify-between border-b border-border/50">
         <div className="flex items-center gap-3">
           <DropdownIconFrame {...DropdownIconPreset.chatgpt} isSynced={synced}>
             <ChatGPTIcon />
@@ -135,7 +143,13 @@ function GptRow({
             <span className="truncate text-sm">ChatGPT Subscription</span>
           </div>
         </div>
-        <SyncItemButton isLoading={loading} isSynced={synced} onClick={onSync} />
+        <SyncItemButton
+          isLoading={loading || accounts.isConnecting}
+          isSynced={synced}
+          onClick={() => void accounts.connect()}
+        />
+        <ComputeAccountChips state={accounts} />
+        <ComputeConnectModal state={accounts} providerLabel="ChatGPT" />
       </div>
     );
   }
@@ -171,8 +185,6 @@ export default function ComputeSection({
   claudeCodeSyncLoading,
   gptCodeSyncLoading,
   claudeCodeStatus,
-  onClaudeCodeSync,
-  onGptCodeSync,
 }: ComputeSectionProps) {
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
@@ -189,7 +201,11 @@ export default function ComputeSection({
             <span className="text-xs text-muted-foreground">Connect AI subscriptions</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={claudeCodeSynced || gptCodeSynced} onClick={onToggle} />
+        <SectionToggleButton
+          isConnected={claudeCodeSynced || gptCodeSynced}
+          onClick={onToggle}
+          sectionLabel="Compute"
+        />
       </div>
       {claudeCodeSyncLoading && claudeCodeStatus && (
         <div className="px-4 py-2 flex items-center gap-2 border-t border-border/50">
@@ -203,13 +219,11 @@ export default function ComputeSection({
             isAvailable={isClaudeCodeAvailable}
             synced={claudeCodeSynced}
             loading={claudeCodeSyncLoading}
-            onSync={onClaudeCodeSync}
           />
           <GptRow
             isAvailable={isGptCodeAvailable}
             synced={gptCodeSynced}
             loading={gptCodeSyncLoading}
-            onSync={onGptCodeSync}
           />
           <div className="px-4 py-2 flex items-center justify-between">
             <div className="flex items-center gap-3">

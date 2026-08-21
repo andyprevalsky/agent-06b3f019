@@ -14,6 +14,7 @@ export async function upsertSubscription(params: {
   subscriptionTier: number;
   stripeSubscriptionId: string;
   stripeCustomerId: string;
+  stripeLivemode: boolean;
   currentPeriodEnd: Date;
 }) {
   return prisma.subscription.upsert({
@@ -23,11 +24,14 @@ export async function upsertSubscription(params: {
       subscriptionTier: params.subscriptionTier,
       stripeSubscriptionId: params.stripeSubscriptionId,
       stripeCustomerId: params.stripeCustomerId,
+      stripeLivemode: params.stripeLivemode,
       currentPeriodEnd: params.currentPeriodEnd,
     },
     update: {
       subscriptionTier: params.subscriptionTier,
       stripeSubscriptionId: params.stripeSubscriptionId,
+      stripeCustomerId: params.stripeCustomerId,
+      stripeLivemode: params.stripeLivemode,
       currentPeriodEnd: params.currentPeriodEnd,
     },
   });

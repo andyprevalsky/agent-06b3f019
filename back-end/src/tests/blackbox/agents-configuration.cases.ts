@@ -187,7 +187,26 @@ test('POST /:id/messages — system message via internal auth', async () => {
 
 test('POST /:id/start-agent — happy path (no Temporal)', async () => {
   const session = await createAnonymousSession('start-agent');
-  const agentId = await createTestAgent(session.user.id, 'Start agent test');
+
+  // Create the exact pre-escalation state. createTestAgent starts a background
+  // chat handler that can independently escalate before this request runs.
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-start-agent', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Start agent test',
+        status: 'ACTIVE',
+        busId: agentId,
+        verifier: {
+          create: { type: 'FLOAT_LLM_JUDGE' },
+        },
+      },
+    });
+  });
+
   const res = await request(`${BASE_URL}/api/agents/${agentId}/start-agent`, {
     method: 'POST',
     headers: apiKeyHeaders(session.user.id),

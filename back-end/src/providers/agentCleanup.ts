@@ -1,10 +1,265 @@
+import { randomUUID } from 'node:crypto';
 import { Sandbox } from 'e2b';
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
 
 const log = createLogger('Cleanup');
+
+export interface BrowserSessionReleaseDependencies {
+  findActiveSessions: (agentId: string) => Promise<Array<{ sessionId: string }>>;
+  closeSession: (sessionId: string, pause: boolean) => Promise<void>;
+}
+
+export interface TerminalBrowserReleaseDependencies {
+  findTerminalAgentIds: (batchSize: number) => Promise<string[]>;
+  releaseBrowserSessions: typeof releaseAgentBrowserSessions;
+}
+
+export interface TerminalBrowserReleaseOptions {
+  batchSize?: number;
+  deadlineAtMs?: number;
+}
+
+export interface TerminalBrowserReleaseSummary {
+  discovered: number;
+  released: number;
+  failed: number;
+}
+
+export type TerminalBrowserReleaseLeasedResult =
+  { acquired: false; summary: null } | { acquired: true; summary: TerminalBrowserReleaseSummary };
+
+interface TerminalBrowserReleaseLeaseDependencies {
+  acquireLease: (ownerId: string) => Promise<boolean>;
+  releaseLease: (ownerId: string) => Promise<void>;
+  reconcile: typeof reconcileTerminalAgentBrowserSessions;
+}
+
+export const TERMINAL_BROWSER_RELEASE_LEASE_KEY = 'scheduled-job:terminal-browser-release';
+const TERMINAL_BROWSER_RELEASE_LEASE_TYPE = 'TERMINAL_BROWSER_RELEASE_JOB_LEASE';
+const TERMINAL_BROWSER_RELEASE_LEASE_MS = 5 * 60 * 1000;
+const TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE = 500;
+const TERMINAL_BROWSER_RELEASE_MAX_RUN_MS = 50_000;
+
+function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies {
+  return {
+    findActiveSessions: async (agentId: string) =>
+      prisma.browserSession.findMany({
+        where: {
+          agentId,
+          // ERROR is the durable retry marker written when a provider release
+          // fails. Excluding it would turn the first transient provider outage
+          // into a permanent paid-browser leak.
+          status: { in: ['ACTIVE', 'PAUSED', 'ERROR'] },
+        },
+        select: { sessionId: true },
+      }),
+    closeSession,
+  };
+}
+
+function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencies {
+  return {
+    findTerminalAgentIds: async (batchSize) => {
+      const agents = await prisma.$queryRaw<Array<{ agentId: string }>>(Prisma.sql`
+        SELECT DISTINCT browser_session."agentId" AS "agentId"
+        FROM "BrowserSession" AS browser_session
+        INNER JOIN "Agent" AS agent ON agent.id = browser_session."agentId"
+        WHERE browser_session.status::text IN ('ACTIVE', 'PAUSED', 'ERROR')
+          AND agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
+        ORDER BY browser_session."agentId" ASC
+        LIMIT ${batchSize}
+      `);
+      return agents.map((agent) => agent.agentId);
+    },
+    releaseBrowserSessions: releaseAgentBrowserSessions,
+  };
+}
+
+/**
+ * Retry browser releases for terminal agents independently of workflow liveness.
+ * COMPLETED and FAILED agents are intentionally absent from liveness scans, so a
+ * failed terminal-transition release needs its own durable retry path.
+ */
+export async function reconcileTerminalAgentBrowserSessions(
+  overrides: Partial<TerminalBrowserReleaseDependencies> = {},
+  options: TerminalBrowserReleaseOptions = {}
+): Promise<TerminalBrowserReleaseSummary> {
+  const dependencies = { ...terminalBrowserReleaseDependencies(), ...overrides };
+  const startedAtMs = Date.now();
+  const batchSize = Math.min(
+    TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE,
+    Math.max(1, Math.floor(options.batchSize ?? 100))
+  );
+  const deadlineAtMs = Math.min(
+    options.deadlineAtMs ?? startedAtMs + TERMINAL_BROWSER_RELEASE_MAX_RUN_MS,
+    startedAtMs + TERMINAL_BROWSER_RELEASE_MAX_RUN_MS
+  );
+  const agentIds = await dependencies.findTerminalAgentIds(batchSize);
+  let released = 0;
+  let failed = 0;
+  let next = 0;
+  const workerCount = Math.min(8, agentIds.length);
+
+  const workerResults = await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      let workerReleased = 0;
+      let workerFailed = 0;
+      while (next < agentIds.length && Date.now() < deadlineAtMs) {
+        const agentId = agentIds[next++];
+        try {
+          workerReleased += await dependencies.releaseBrowserSessions(agentId);
+        } catch (error) {
+          workerFailed += 1;
+          log.warn(`Failed to retry browser release for terminal agent ${agentId}`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      return { released: workerReleased, failed: workerFailed };
+    })
+  );
+  for (const result of workerResults) {
+    released += result.released;
+    failed += result.failed;
+  }
+
+  return { discovered: agentIds.length, released, failed };
+}
+
+async function acquireTerminalBrowserReleaseLease(ownerId: string): Promise<boolean> {
+  const now = new Date();
+  const liveCutoff = new Date(now.getTime() - TERMINAL_BROWSER_RELEASE_LEASE_MS);
+  const expiresAt = new Date(now.getTime() + TERMINAL_BROWSER_RELEASE_LEASE_MS);
+  const rows = await prisma.$queryRaw<Array<{ externalId: string }>>(Prisma.sql`
+    INSERT INTO "ToolSideEffect"
+      (id, "operationKey", "operationType", status, "externalId", request, "createdAt", "updatedAt")
+    VALUES
+      (${randomUUID()}, ${TERMINAL_BROWSER_RELEASE_LEASE_KEY},
+       ${TERMINAL_BROWSER_RELEASE_LEASE_TYPE}, 'STARTED', ${ownerId},
+       ${JSON.stringify({ expiresAt: expiresAt.toISOString() })}::jsonb, ${now}, ${now})
+    ON CONFLICT ("operationKey") DO UPDATE SET
+      "operationType" = EXCLUDED."operationType",
+      status = 'STARTED',
+      "externalId" = EXCLUDED."externalId",
+      request = EXCLUDED.request,
+      response = NULL,
+      error = NULL,
+      "updatedAt" = EXCLUDED."updatedAt"
+    WHERE "ToolSideEffect".status <> 'STARTED'
+       OR "ToolSideEffect"."updatedAt" <= ${liveCutoff}
+    RETURNING "externalId"
+  `);
+  return rows[0]?.externalId === ownerId;
+}
+
+async function releaseTerminalBrowserReleaseLease(ownerId: string): Promise<void> {
+  await prisma.toolSideEffect.updateMany({
+    where: {
+      operationKey: TERMINAL_BROWSER_RELEASE_LEASE_KEY,
+      operationType: TERMINAL_BROWSER_RELEASE_LEASE_TYPE,
+      status: 'STARTED',
+      externalId: ownerId,
+    },
+    data: {
+      status: 'RELEASED',
+      response: { releasedAt: new Date().toISOString() },
+    },
+  });
+}
+
+function terminalBrowserReleaseLeaseDependencies(): TerminalBrowserReleaseLeaseDependencies {
+  return {
+    acquireLease: acquireTerminalBrowserReleaseLease,
+    releaseLease: releaseTerminalBrowserReleaseLease,
+    reconcile: reconcileTerminalAgentBrowserSessions,
+  };
+}
+
+export async function runTerminalAgentBrowserReleaseReconcileWithLease(
+  options: TerminalBrowserReleaseOptions = {},
+  overrides: Partial<TerminalBrowserReleaseLeaseDependencies> = {}
+): Promise<TerminalBrowserReleaseLeasedResult> {
+  const dependencies = { ...terminalBrowserReleaseLeaseDependencies(), ...overrides };
+  const ownerId = randomUUID();
+  if (!(await dependencies.acquireLease(ownerId))) {
+    return { acquired: false, summary: null };
+  }
+  try {
+    return { acquired: true, summary: await dependencies.reconcile({}, options) };
+  } finally {
+    try {
+      await dependencies.releaseLease(ownerId);
+    } catch (error) {
+      log.error('Failed to release terminal browser reconciliation lease', {
+        ownerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+/**
+ * Release every browser session an agent still holds — the remote Steel/Kernel
+ * browser as well as the DB row.
+ *
+ * This must run whenever an agent stops running, not only when a user deletes it.
+ * Deletion is an action most agents never receive, so hanging release off deletion
+ * alone left a rented browser running for every agent that merely finished: 12 prod
+ * rows were still `ACTIVE / closedAt NULL` across COMPLETED, COST_LIMIT_REACHED and
+ * FAILED agents, the oldest from 2026-07-24 (agent
+ * bfcfc074-0e61-41ef-b072-23376583b85a among them).
+ *
+ * Every session is attempted before failures are reported. Terminal callers catch
+ * the aggregate so a provider outage cannot block the status transition, while the
+ * provider keeps an ERROR row and terminal-browser reconciliation retries instead
+ * of falsely considering a leaked rental fully cleaned up.
+ */
+export async function releaseAgentBrowserSessions(
+  agentId: string,
+  overrides: Partial<BrowserSessionReleaseDependencies> = {}
+): Promise<number> {
+  const dependencies = { ...browserSessionReleaseDependencies(), ...overrides };
+  let released = 0;
+  const failures: unknown[] = [];
+  let activeBrowserSessions: Array<{ sessionId: string }>;
+  try {
+    activeBrowserSessions = await dependencies.findActiveSessions(agentId);
+  } catch (error) {
+    log.warn(`Failed to query browser sessions for agent ${agentId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+
+  if (activeBrowserSessions.length > 0) {
+    log.info(`Closing ${activeBrowserSessions.length} browser session(s) for agent ${agentId}`);
+  }
+
+  for (const session of activeBrowserSessions) {
+    try {
+      await dependencies.closeSession(session.sessionId, false);
+      released += 1;
+      log.info(`Closed browser session ${session.sessionId}`);
+    } catch (error) {
+      failures.push(error);
+      log.warn(`Failed to close browser session ${session.sessionId}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `Failed to close ${failures.length} browser session(s) for agent ${agentId}`
+    );
+  }
+  return released;
+}
 
 /**
  * Clean up all active E2B sandboxes and browser sessions for an agent.
@@ -19,32 +274,10 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
   }
 
-  // --- Browser sessions ---
   try {
-    const activeBrowserSessions = await prisma.browserSession.findMany({
-      where: {
-        agentId,
-        status: { in: ['ACTIVE', 'PAUSED'] },
-      },
-      select: { sessionId: true },
-    });
-
-    if (activeBrowserSessions.length > 0) {
-      log.info(`Closing ${activeBrowserSessions.length} browser session(s) for agent ${agentId}`);
-    }
-
-    for (const session of activeBrowserSessions) {
-      try {
-        await closeSession(session.sessionId, false);
-        log.info(`Closed browser session ${session.sessionId}`);
-      } catch (error) {
-        log.warn(`Failed to close browser session ${session.sessionId}`, {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+    await releaseAgentBrowserSessions(agentId);
   } catch (error) {
-    log.warn(`Failed to query browser sessions for agent ${agentId}`, {
+    log.warn(`Failed to release browser sessions for agent ${agentId}`, {
       error: error instanceof Error ? error.message : String(error),
     });
   }

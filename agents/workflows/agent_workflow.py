@@ -1269,6 +1269,7 @@ class AgentWorkflow:
                         [self.fast_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
+                        True,
                     ],
                     start_to_close_timeout=timedelta(seconds=90),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -3554,16 +3555,43 @@ class AgentWorkflow:
                 workflow.logger.warning(f"Failed to broadcast tree tokens: {e}")
 
     async def _check_cost_limit(self) -> None:
-        """Check if subtree cost exceeds limit. Only root calls this."""
+        """Check if subtree cost exceeds limit. Only root calls this.
+
+        The limit authorizes *future* spend. Once the terminal flag is latched
+        there is no future spend to stop, so pausing here can only corrupt an
+        already-decided lifecycle state: `_mark_complete` latches `_is_finished`
+        and then tracks the completion summary's own LLM cost, and a sub-agent's
+        final `child_cost_update` signal lands on this same path. Without this
+        guard either one rewrites a verifier-100% root as COST_LIMIT_REACHED —
+        a terminal status for every poller — and cascades a spurious pause to
+        its children.
+        """
         if self.parent_workflow_id is not None:
             return  # Only root checks limit
+
+        if self._is_finished:
+            return  # No further work to authorize; see docstring.
 
         if self.subtree_cost_cents >= self.price_limit_cents and not self._cost_limit_reached:
             workflow.logger.warning(f"💰 Cost limit exceeded: {self.subtree_cost_cents}c >= {self.price_limit_cents}c")
             self._cost_limit_reached = True
             self.is_paused = True
 
-            # Update status to COST_LIMIT_REACHED
+            # Flush the tree cost that just tripped the limit. The caller's
+            # persist is debounced to one emit per 3s and this transition is
+            # terminal — the agent pauses immediately after — so a suppressed
+            # emit leaves the pre-trip value (typically 0) as the last number
+            # written. Every downstream consumer then reads a cost-limited run
+            # as costing 0c: the agent row, the FE cost display, and the
+            # benchmark's cost_cents/stop_metadata, which is what made the
+            # 50c-cap trip on agent a67ef234-e1d8-4e72-adda-020cdcab6059
+            # unreconcilable from its own run record.
+            await self._persist_tree_cost()
+
+            # Update status to COST_LIMIT_REACHED. The decision inputs go in the
+            # status message so the reason survives into the agent row, every
+            # realtime broadcast, and the benchmark run record — worker logs are
+            # not retained long enough to reconstruct this after the fact.
             try:
                 await workflow.execute_activity(
                     update_agent_status,
@@ -3571,7 +3599,11 @@ class AgentWorkflow:
                         self.agent_id,
                         "COST_LIMIT_REACHED",
                         0.0,
-                        "Cost limit reached",
+                        (
+                            f"Cost limit reached: {self.subtree_cost_cents:.1f}c >= "
+                            f"{self.price_limit_cents}c (own {self.own_cost_cents:.1f}c + "
+                            f"children {sum(self.children_cost_cents.values()):.1f}c)"
+                        ),
                         self.token_count,
                         self.context_size,
                         self.message_count,
@@ -4033,9 +4065,14 @@ class AgentWorkflow:
         self._is_finished = True
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
-        # stale) value is corrected to the exact terminal cost. Recalc first; do
-        # NOT route through _update_cost_and_signal_parent here (its cost-limit
-        # check could flip a just-completed root to COST_LIMIT_REACHED).
+        # stale) value is corrected to the exact terminal cost. Recalc first, then
+        # persist DIRECTLY — never via _update_cost_and_signal_parent. That path
+        # stamps `_last_tree_cost_emit_at`, which would then debounce away the
+        # persist triggered by the completion summary's own `_track_llm_cost`
+        # below, silently under-reporting the run to the agent row, the FE cost
+        # display, and the benchmark's `cost_cents`. Letting a verified agent
+        # resolve must never make its spend disappear. Cemented by
+        # wf_mark_complete_persists_summary_cost.
         self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
         await self._persist_tree_cost()
 
@@ -4066,6 +4103,7 @@ class AgentWorkflow:
 
         tool_counts = {}
         summary = ""
+        summary_error: Optional[str] = None
         tool_call_id = str(workflow.uuid4())
 
         try:
@@ -4081,37 +4119,60 @@ class AgentWorkflow:
                 },
             )
 
-            # Generate summary - pass structured_response, output_schema, and child_tool_counts
-            summary_result = await workflow.execute_activity(
-                generate_completion_summary,
-                args=[
-                    context,
-                    # Persisted-row goal: the summary prompt labels this "ORIGINAL
-                    # GOAL" and it doubles as the Fast Mode cache namespace.
-                    self.fast_cache_goal,
-                    self.model,
-                    structured_response,
-                    self.output_schema,
-                    self.child_tool_counts,
-                    self._active_claude_token(),
-                    self._active_claude_source(),
-                    self._active_claude_pool_id(),
-                    self.user_id,
-                    self._active_gpt_token(),
-                    self._active_gpt_account_id(),
-                    self._active_gpt_source(),
-                    self._active_gpt_pool_id(),
-                    self.user_id,
-                    self.agent_id,
-                    self.compute_token_lineage_key,
-                    self.compute_token_fast_cache_affinity_key,
-                    self.fast_mode_cache_enabled,
-                    0,  # Fast Mode step — one completion summary per agent
-                ],
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+            # Generate summary - pass structured_response, output_schema, and child_tool_counts.
+            # The summary is presentation, not part of the completion contract:
+            # the verifier already scored this run complete. A failure here is
+            # surfaced (logged + carried on the final message) but must never
+            # abort the durable terminal transition below, otherwise a
+            # fully-verified agent is discarded — see
+            # docs/rca/cases/2026-07-11-completion-gated-behind-final-summary-message-post.md
+            try:
+                summary_result = await workflow.execute_activity(
+                    generate_completion_summary,
+                    args=[
+                        context,
+                        # Persisted-row goal: the summary prompt labels this "ORIGINAL
+                        # GOAL" and it doubles as the Fast Mode cache namespace.
+                        self.fast_cache_goal,
+                        self.model,
+                        structured_response,
+                        self.output_schema,
+                        self.child_tool_counts,
+                        self._active_claude_token(),
+                        self._active_claude_source(),
+                        self._active_claude_pool_id(),
+                        self.user_id,
+                        self._active_gpt_token(),
+                        self._active_gpt_account_id(),
+                        self._active_gpt_source(),
+                        self._active_gpt_pool_id(),
+                        self.user_id,
+                        self.agent_id,
+                        self.compute_token_lineage_key,
+                        self.compute_token_fast_cache_affinity_key,
+                        self.fast_mode_cache_enabled,
+                        0,  # Fast Mode step — one completion summary per agent
+                    ],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                summary_result = summary_result or {}
+            except Exception as summary_exc:
+                summary_error = str(summary_exc)
+                summary_result = {}
+                workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
+
             summary = summary_result.get("summary", "")
+            if not summary and summary_error:
+                # Two consumers treat an empty summary as "nothing happened":
+                # the root completion SMS is gated on `summary` being truthy,
+                # and the parent's child_completed handler falls back to a goal
+                # restatement. Restate the goal here — the same shape
+                # helpers/child_results.py:_best_effort_text already uses — so
+                # the degradation is a missing narration, never a lost
+                # notification. No findings are invented; the verified outputs
+                # ride along in completionSummary.outputs / structured_response.
+                summary = f"Completed: {self.goal}" if self.goal else "Completed."
             tool_counts = summary_result.get("tool_counts", {})
             # Track completion summary LLM cost (doesn't go through run_agent)
             await self._track_llm_cost(
@@ -4161,6 +4222,10 @@ class AgentWorkflow:
                         "totalToolCalls": total_tool_calls,
                         "durationSeconds": duration_seconds,
                         "costDollars": round(cost_dollars, 4),
+                        # Present only when the summary LLM call failed. The run
+                        # still completes on its verified outputs; nothing is
+                        # invented in its place, and the failure stays visible.
+                        **({"summaryError": summary_error} if summary_error else {}),
                     },
                 },
                 update_tree=False,

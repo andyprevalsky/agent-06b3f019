@@ -27,6 +27,9 @@ import {
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
 import { ROSE_AGENT_CARD_ID } from '../../providers/card-provider/static-card';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 // Test-only Rose Agent Card credentials, injected via env (never a real card).
 const STATIC_CARD_ENV = {
@@ -60,6 +63,24 @@ class TransferlessFundingInProgressCardProvider extends FakeCardProvider {
       );
     }
     return super.mintCard(request);
+  }
+}
+
+/** Org-style mint: secrets already resolved during mintCard — charge must not re-getDetails. */
+class MintWithSecretsCardProvider extends FakeCardProvider {
+  async mintCard(request: CardProviderMintRequest) {
+    const minted = await super.mintCard(request);
+    return {
+      ...minted,
+      pan: this.pan,
+      cvv: this.cvv,
+      balanceCents: request.amountCents,
+    };
+  }
+
+  async getDetails(cardId: string) {
+    this.detailCalls += 1;
+    throw new Error(`getDetails must not run when mint returned secrets (card=${cardId})`);
   }
 }
 
@@ -134,6 +155,17 @@ async function main(): Promise<void> {
     assert.equal(result.cardId, provider.cardId);
     assert.equal(result.pan, provider.pan);
     assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.HELD);
+  });
+
+  await test('mintPurchaseCard reuses mint secrets and skips a second getDetails', async () => {
+    const userId = await seedSubscribedUser();
+    const provider = new MintWithSecretsCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId);
+    const result = await withFakeStripe(async () => mintPurchaseCard(input, provider, wallet));
+    assert.equal(result.status, PurchaseSpendStatus.HELD);
+    assert.equal(result.pan, provider.pan);
+    assert.equal(provider.detailCalls, 0, 'mint-provided secrets must not trigger getDetails');
   });
 
   await test('mintPurchaseCard reclaims and cancels when pre-capture card details fail', async () => {
@@ -265,6 +297,60 @@ async function main(): Promise<void> {
     assert.equal(provider.closeCalls, 1, 'durably persisted card must be closed');
     assert.equal(wallet.reclaimCalls.length, 1, 'durably persisted transfer must be reclaimed');
     assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.FAILED);
+  });
+
+  await test('mintPurchaseCard does not reuse another agent HELD fingerprint', async () => {
+    const userId = await seedSubscribedUser();
+    const fingerprint = `fp-${randomUUID()}`;
+    const orphanAgent = await prisma.agent.create({
+      data: { userId, goal: 'orphaned held purchase agent' },
+    });
+    const nextAgent = await prisma.agent.create({
+      data: { userId, goal: 'fresh mint agent' },
+    });
+    const orphan = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId: orphanAgent.id,
+        fingerprint,
+        canonicalFingerprint: fingerprint,
+        merchant: 'Rose Labs Test Payment',
+        lineItemsJson: {
+          fees: [],
+          currency: 'USD',
+          lineItems: [{ name: 'Agent Card Lifecycle Probe', quantity: 1, unitPriceCents: 100 }],
+          totalCents: 100,
+          subtotalCents: 100,
+        },
+        totalCents: 100,
+        status: PurchaseSpendStatus.HELD,
+        cardId: `card-${randomUUID()}`,
+        provider: 'agentcard',
+      },
+    });
+    const provider = new FakeCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId, {
+      agentId: nextAgent.id,
+      fingerprint,
+      merchant: 'Rose Labs Test Payment',
+      lineItems: [{ label: 'Agent Card Lifecycle Probe', amountCents: 100 }],
+      fees: [],
+      subtotalCents: 100,
+      totalCents: 100,
+    });
+    const result = await withFakeStripe(async () => mintPurchaseCard(input, provider, wallet));
+    assert.notEqual(result.purchaseId, orphan.id, 'must open a fresh purchase for the new agent');
+    assert.equal(result.status, PurchaseSpendStatus.HELD);
+    const nextPurchase = await prisma.purchaseSpend.findUnique({
+      where: { id: result.purchaseId },
+    });
+    assert.equal(nextPurchase?.agentId, nextAgent.id);
+    assert.equal(
+      (await prisma.purchaseSpend.findUnique({ where: { id: orphan.id } }))?.status,
+      PurchaseSpendStatus.HELD,
+      'orphan HELD row must remain untouched'
+    );
   });
 
   await test('mintPurchaseCard validates its inputs before touching Stripe', async () => {
@@ -420,6 +506,29 @@ async function main(): Promise<void> {
         else process.env[name] = value;
       }
     }
+  });
+
+  await test('redacts pan/cvv from mint archive payload', async () => {
+    const { mintResponseForArchive } = await import('../../domains/purchases/chargeHelpers');
+    const safe = mintResponseForArchive({
+      cardId: 'card-archive',
+      last4: '1111',
+      expiry: '12/30',
+      spendLimitCents: 1000,
+      status: 'ACTIVE',
+      pan: '4111111111111111',
+      cvv: '123',
+      balanceCents: 1000,
+    });
+    assert.equal('pan' in safe, false);
+    assert.equal('cvv' in safe, false);
+    assert.equal(safe.cardId, 'card-archive');
+    const chargePath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../../domains/purchases/charge.ts'
+    );
+    const source = readFileSync(chargePath, 'utf8');
+    assert.match(source, /mint_response:\s*mintResponseForArchive\(minted\)/);
   });
 
   process.stdout.write(

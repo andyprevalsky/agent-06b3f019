@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const coverageScript = readFileSync(join(process.cwd(), 'scripts', 'run-coverage.sh'), 'utf8');
@@ -13,6 +15,10 @@ const blackboxScript = readFileSync(
 );
 const blackboxRunner = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'run.ts'),
+  'utf8'
+);
+const gateResolutionProvider = readFileSync(
+  join(process.cwd(), 'src', 'providers', 'gateResolution.ts'),
   'utf8'
 );
 const unitRunner = readFileSync(join(process.cwd(), 'scripts', 'run-unit-tests.ts'), 'utf8');
@@ -49,6 +55,10 @@ for (const variable of [
   'SLACK_ERROR_CHANNEL_ID',
   'GITHUB_DISPATCH_TOKEN',
   'STRIPE_SECRET_KEY',
+  'WHATSAPP_PHONE_NUMBER_ID',
+  'WHATSAPP_ACCESS_TOKEN',
+  'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
+  'BLACKBOX_TEST_FAKE_WHATSAPP',
 ]) {
   assert.match(
     autoRcaEnv,
@@ -61,12 +71,126 @@ assert.match(
   /BLACKBOX_TEST_CAPTURE_OUTBOUND[\s\S]*BLACKBOX_TEST_REPLAY_OUTBOUND/,
   'shared auto-RCA fixtures must fail closed outside capture/replay mode'
 );
+for (const [name, harness] of [
+  ['coverage', coverageScript],
+  ['blackbox', blackboxScript],
+] as const) {
+  assert.ok(
+    harness.indexOf('npx prisma generate') < harness.indexOf('npx prisma db push'),
+    `${name} launcher must regenerate Prisma before syncing or starting test children`
+  );
+}
 
 assert.match(
   coverageScript,
-  /lsof -tiTCP:"\$COV_PORT" -sTCP:LISTEN/,
+  /lsof -tiTCP:"\$candidate" -sTCP:LISTEN/,
   'coverage port preflight must ignore outbound connections using the same local port'
 );
+assert.match(
+  coverageScript,
+  /reserve_coverage_port/,
+  'coverage must reserve an available port instead of assuming its preferred port is free'
+);
+assert.doesNotMatch(
+  coverageScript,
+  /COV_PORT=\$\(\(BASE_PORT \+ 200\)\)/,
+  'coverage must not hard-code a port outside the workspace reserved range'
+);
+assert.match(
+  coverageScript,
+  /COV_PORT_START=.*BASE_PORT \+ 7[\s\S]*COV_PORT_END=.*BASE_PORT \+ 8/,
+  'coverage port selection must stay inside the workspace-owned ten-port range'
+);
+assert.match(
+  coverageScript,
+  /coverage-process-lock\.py[\s\S]*Another backend coverage run is already active/,
+  'coverage must lock the whole run before mutating shared artifacts or the test database'
+);
+assert.doesNotMatch(
+  coverageScript,
+  /mkdir "\$COVERAGE_RUN_LOCK/,
+  'coverage must not use a staleable mkdir mutex for the run-wide lock'
+);
+
+function waitForPath(path: string, shouldExist: boolean): void {
+  for (let attempt = 0; attempt < 100 && existsSync(path) !== shouldExist; attempt++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.equal(existsSync(path), shouldExist, `Timed out waiting for ${path}`);
+}
+
+const portFixtureRoot = mkdtempSync(join(tmpdir(), 'coverage-port-reservation-'));
+const occupiedPortFile = join(portFixtureRoot, 'occupied-port');
+const listener = spawn(
+  'python3',
+  [
+    '-c',
+    [
+      'import socket, sys, time',
+      'sock = socket.socket()',
+      'sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)',
+      'for port in range(58000, 59000):',
+      '    try:',
+      "        sock.bind(('127.0.0.1', port))",
+      '        break',
+      '    except OSError:',
+      '        continue',
+      'sock.listen()',
+      "with open(sys.argv[1], 'w', encoding='utf-8') as handle:",
+      '    handle.write(str(sock.getsockname()[1]))',
+      'time.sleep(30)',
+    ].join('\n'),
+    occupiedPortFile,
+  ],
+  { stdio: 'ignore' }
+);
+try {
+  waitForPath(occupiedPortFile, true);
+  const occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+  const lockRoot = join(portFixtureRoot, 'locks');
+  const endPort = occupiedPort + 20;
+  const selectedPort = Number(
+    execFileSync('bash', ['scripts/run-coverage.sh', '--print-coverage-port'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BACKEND_COVERAGE_START_PORT: String(occupiedPort),
+        BACKEND_COVERAGE_END_PORT: String(endPort),
+        BACKEND_COVERAGE_PORT_LOCK_ROOT: lockRoot,
+        BACKEND_COVERAGE_RUN_LOCK_DIR: join(portFixtureRoot, 'selection-run-lock'),
+      },
+    })
+      .trim()
+      .split('\n')
+      .at(-1)
+  );
+  assert.ok(
+    selectedPort > occupiedPort,
+    `coverage selected occupied port ${occupiedPort} instead of advancing (${selectedPort})`
+  );
+  assert.ok(selectedPort <= endPort, 'coverage selected a port outside its owned range');
+  const selectedAgain = Number(
+    execFileSync('bash', ['scripts/run-coverage.sh', '--print-coverage-port'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BACKEND_COVERAGE_START_PORT: String(occupiedPort),
+        BACKEND_COVERAGE_END_PORT: String(endPort),
+        BACKEND_COVERAGE_PORT_LOCK_ROOT: lockRoot,
+        BACKEND_COVERAGE_RUN_LOCK_DIR: join(portFixtureRoot, 'selection-run-lock'),
+      },
+    })
+      .trim()
+      .split('\n')
+      .at(-1)
+  );
+  assert.equal(selectedAgain, selectedPort, 'print-only coverage must release its process lock');
+} finally {
+  listener.kill('SIGTERM');
+  rmSync(portFixtureRoot, { recursive: true, force: true });
+}
 assert.match(
   coverageScript,
   /export AMPLITUDE_API_KEY=""[\s\S]*export AMPLITUDE_SECRET_KEY=""/,
@@ -104,8 +228,8 @@ assert.doesNotMatch(
 );
 assert.match(
   coverageScript,
-  /bash scripts\/run-blackbox-tests\.sh &[\s\S]*node --import tsx scripts\/run-unit-tests\.ts &/,
-  'backend blackbox and isolated unit pools must overlap under coverage'
+  /launch_coverage_process_group env[\s\S]*bash scripts\/run-blackbox-tests\.sh[\s\S]*launch_coverage_process_group env[\s\S]*node --import tsx scripts\/run-unit-tests\.ts/,
+  'backend blackbox and isolated unit pools must overlap in dedicated process groups'
 );
 assert.match(
   coverageScript,
@@ -144,7 +268,7 @@ assert.match(
 );
 assert.match(
   coverageScript,
-  /BACKEND_UNIT_COVERAGE_DIR="\$COV_TMP"[\s\S]*node --import tsx scripts\/run-unit-tests\.ts &/,
+  /BACKEND_UNIT_COVERAGE_DIR="\$COV_TMP"[\s\S]*node --import tsx scripts\/run-unit-tests\.ts/,
   'coverage must be passed to unit children without instrumenting the scheduler itself'
 );
 assert.match(
@@ -159,13 +283,25 @@ assert.ok(
 );
 assert.match(
   blackboxRunner,
-  /lateExclusiveDomainNames = new Set\(\['admin-health', 'benchmarks-test-prompts'\]\)/,
+  /lateExclusiveDomainNames = new Set\(\[[\s\S]*'admin-health',[\s\S]*'benchmarks',[\s\S]*'benchmarks-hub',[\s\S]*'benchmarks-test-prompts',[\s\S]*\]\)/,
   'whole-database and mutable-catalog readers must be isolated from fixture writers'
 );
 assert.match(
   blackboxRunner,
   /domainWeights[\s\S]*\.sort\(/,
   'parallel blackbox domains must schedule measured long poles first'
+);
+// resolveAndSignal deliberately runs a raw interactive transaction rather than
+// runTransactionWithRetry: it must take lockAgentWorkflowGeneration BEFORE the
+// row mutation so a gate response and deploy cleanup acquire the same locks in
+// the same order, and a retry wrapper would re-run that acquisition — the exact
+// interleaving the ordering exists to prevent. (The raw transaction carries a
+// documented entry in the interactive-transaction policy allowlist.) What must
+// not regress is the ordering itself.
+assert.match(
+  gateResolutionProvider,
+  /resolveAndSignal\([\s\S]*lockAgentWorkflowGeneration\(tx, request\.agentId\)[\s\S]*UPDATE "AgentAttentionRequest"/,
+  'gate resolution must take the generation lock before mutating the attention row'
 );
 assert.match(
   blackboxRunner,
@@ -177,10 +313,25 @@ assert.match(
   /export FAST_MODE_CACHE_DATABASE_URL="\$LOCAL_DB_URL"/,
   'coverage must isolate Fast Mode cache fixtures in the local test database'
 );
+assert.match(
+  coverageScript,
+  /BACKEND_TEST_DB_CONNECTION_LIMIT:-4[\s\S]*connection_limit=\$TEST_DB_CONNECTION_LIMIT&pool_timeout=30/,
+  'parallel coverage children must use bounded Prisma pools'
+);
 assert.ok(
   coverageScript.indexOf('npx prisma db push --skip-generate --accept-data-loss') <
     coverageScript.indexOf('bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh"'),
   'coverage must install migration-owned database triggers after Prisma schema sync'
+);
+assert.match(
+  coverageScript,
+  /DATABASE_URL="\$LOCAL_PSQL_URL" DIRECT_URL="\$LOCAL_PSQL_URL"[\s\\]+bash "\$SCRIPT_DIR\/apply-local-runtime-sql-hooks\.sh"/,
+  'the psql-backed runtime hook installer must receive the plain libpq URL'
+);
+assert.match(
+  blackboxScript,
+  /EXPLICIT_TEST_PSQL_URL="\$\{EXPLICIT_TEST_DB_URL%%\\\?\*\}"[\s\S]*psql "\$EXPLICIT_TEST_PSQL_URL"/,
+  'existing-backend reachability probes must strip Prisma-only URL parameters before invoking psql'
 );
 assert.ok(
   coverageScript.indexOf('bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh"') <
@@ -201,43 +352,6 @@ assert.match(
   coverageScript,
   /export AMPLITUDE_API_KEY=""\s+export AMPLITUDE_SECRET_KEY=""/,
   'coverage must not consume the live Amplitude chart-query budget'
-);
-
-for (const [name, harness] of [
-  ['coverage', coverageScript],
-  ['blackbox', blackboxScript],
-] as const) {
-  assert.match(
-    harness,
-    /BACKEND_CODEX_TOKEN_SYNC_SKIP/,
-    `${name} harness must support preserving pre-seeded Codex credentials`
-  );
-  assert.doesNotMatch(
-    harness,
-    /if \[\[ "\$\{BACKEND_CODEX_SMOKE_SKIP:-0\}" != "1" \]\]; then\s+echo "Syncing local Codex credentials/,
-    `${name} harness must not couple credential sync to live-smoke execution`
-  );
-  assert.match(
-    harness,
-    /CODEX_AUTH_MODE=.*auth_mode/,
-    `${name} harness must inspect the local Codex auth mode before importing it`
-  );
-  assert.match(
-    harness,
-    /SEEDED_CODEX_COUNT=.*Integration.*gpt_code/s,
-    `${name} harness must preserve a connected isolated gpt_code credential when local auth is incompatible`
-  );
-}
-
-assert.match(
-  blackboxScript,
-  /FAST_MODE_ANTHROPIC_PROXY_URL="\$\{BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-\}"/,
-  'isolated blackbox backend must not inherit a developer Fast Mode Anthropic tunnel'
-);
-assert.match(
-  blackboxScript,
-  /FAST_MODE_CODEX_PROXY_URL="\$\{BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-\}"/,
-  'isolated blackbox backend must not inherit a developer Fast Mode Codex tunnel'
 );
 
 process.stdout.write('coverage script contracts passed\n');

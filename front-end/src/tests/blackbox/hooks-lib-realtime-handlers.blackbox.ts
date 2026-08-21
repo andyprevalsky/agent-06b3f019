@@ -186,6 +186,7 @@ describe('realtimeHandlers', () => {
   it('handleUpdateAgent: merges partial updates and toggles chat mode', () => {
     const s = mkSetters();
     s.state.agent = {
+      title: null,
       progress: 0,
       status: 'ACTIVE',
       temporal_workflow_id: 'wf-old',
@@ -193,6 +194,7 @@ describe('realtimeHandlers', () => {
     const onLoad = vi.fn();
     handleUpdateAgent(
       {
+        title: 'Generated Agent Title',
         progress: 0.5,
         status: 'COMPLETED',
         temporalWorkflowId: null,
@@ -203,6 +205,7 @@ describe('realtimeHandlers', () => {
     );
     expect(s.state.agent.progress).toBe(0.5);
     expect(s.state.agent.status).toBe('COMPLETED');
+    expect(s.state.agent.title).toBe('Generated Agent Title');
     expect(s.state.isChatMode).toBe(true);
     expect(onLoad).toHaveBeenCalled();
   });

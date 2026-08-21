@@ -1,18 +1,34 @@
 export type AdminHealthTimeSlice = 'weekly' | 'monthly' | 'quarterly' | 'yearly';
 
+export interface AdminHealthTaskCostPerTask {
+  zeroLlmCostDollars: number | null;
+  apiRateDollars: number | null;
+  computeTokenRateDollars: number | null;
+  sampleSize: number;
+  /**
+   * LLM tokens from models with no known API rate and no recorded cost. They
+   * contribute $0 to apiRateDollars, so a non-zero value means the repriced
+   * figures understate real usage.
+   */
+  unpricedUsageTokens: number;
+}
+
 export interface AdminHealthSeriesPoint {
   key: string;
   label: string;
   start: string;
   end: string;
   revenueCents: number | null;
+  gmvCents: number;
   waitlistSignups: number;
   userCount: number;
   newUsers: number;
   taskCount: number;
   tasksIssuedPerUser: number;
   outputTokensPerTask: number;
+  gmvPerTask: number;
   taskCompletionRate: number;
+  costPerTask: AdminHealthTaskCostPerTask;
   andyLinearPoints: number | null;
   githubCommits: number | null;
   tamaraLinearPoints: number | null;
@@ -84,12 +100,15 @@ export interface AdminHealthData {
   };
   summary: {
     revenueCents: number | null;
+    gmvCents: number;
     waitlistSignups: number;
     userCount: number;
     taskCount: number;
     tasksIssuedPerUser: number;
     outputTokensPerTask: number;
+    gmvPerTask: number;
     taskCompletionRate: number;
+    costPerTask: AdminHealthTaskCostPerTask;
   };
   series: AdminHealthSeriesPoint[];
   retentionCohorts: AdminHealthRetentionCohort[];

@@ -120,9 +120,47 @@ def test_pool_for_model_fuzzy():
     assert pool_for_model("rose-labs/something-ultra-new") == "rose-1-ultra"
     assert pool_for_model("rose-labs/something-mini") == "rose-1-mini"
     assert pool_for_model("rose-labs/new-browser-use") == "rose-1-browser-use"
+    assert pool_for_model("rose-labs/rose-1-oss") == "rose-1-oss"
+    assert pool_for_model("rose-labs/something-oss") == "rose-1-oss"
     assert pool_for_model("rose-labs/something-else") == "rose-1-lite"
     assert pool_for_model("openai/gpt-4") is None
     assert pool_for_model("") is None
+
+
+def test_oss_pool_is_open_weights_only():
+    """rose-1-oss must serve ONLY its open-weights waterfall.
+
+    The pool exists so a task whose prompt the frontier primaries decline can be
+    pinned to an open-source model. If a direct-token (claudeAuth / gptAuth)
+    route could serve it, that pin would silently resolve back to the very model
+    that declined, and the pool would be decorative.
+    """
+    oss = POOL_REGISTRY["rose-1-oss"]
+    assert oss.direct_auth_enabled is False
+    assert oss.waterfall == ("moonshotai/kimi-k3",)
+    assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
+    # Every other pool keeps direct-token routing.
+    for name, spec in POOL_REGISTRY.items():
+        if name != "rose-1-oss":
+            assert spec.direct_auth_enabled is True, f"{name} lost direct auth"
+
+    # EVERY proprietary route must consult the flag -- not just the OAuth ones.
+    # Gating only OAuth left the funded ANTHROPIC_API_KEY / OPENAI_API_KEY
+    # routes reachable, so a pinned run could still be served by a proprietary
+    # model while the pool claimed otherwise.
+    client_src = (
+        Path(__file__).resolve().parents[2] / "providers" / "rose" / "client.py"
+    ).read_text()
+    for marker in (
+        "openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else \"\"",
+        "pool_spec.direct_auth_enabled",
+    ):
+        assert marker in client_src, f"missing direct_auth_enabled gate: {marker}"
+    # The Anthropic funded-key branch must be gated too.
+    anthropic_branch = client_src.split("anthropic_api_key = (load_config()")[1][:400]
+    assert "pool_spec.direct_auth_enabled" in anthropic_branch, (
+        "ANTHROPIC_API_KEY route is not gated by direct_auth_enabled"
+    )
 
 
 def test_claude_auth_from_token_returns_none_when_falsy():
@@ -179,9 +217,35 @@ def test_pool_registry_lookup():
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
     assert ultra.gpt_auth_model == "gpt-5.6-sol"
+    # Anthropic dropped: sol leads (cheaper AND higher-scoring than opus-4.8),
+    # kimi-k3 backs it from a different vendor.
+    assert ultra.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
     assert browser_use.gpt_auth_model == "gpt-5.6-sol"
-    assert browser_use.waterfall[-1] == "openai/gpt-5.6-sol"
+    assert browser_use.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
+    assert not any(m.startswith("anthropic/") for m in browser_use.waterfall)
     assert lite.waterfall != ultra.waterfall
+
+
+def test_every_waterfall_model_is_vision_capable():
+    """Every pool waterfall model must be in VISION_MODELS.
+
+    `transform_messages_for_vision` only runs when `is_vision_capable(model)`
+    is True; a waterfall model missing from the allowlist SILENTLY DROPS the
+    screenshot rather than raising, so a browser agent would fly blind on that
+    fallback layer with no error to trace. This invariant caught
+    moonshotai/kimi-k3, google/gemini-3.6-flash and google/gemini-3-flash-preview
+    all missing while already sitting in live waterfalls.
+    """
+    from providers.rose.transforms import VISION_MODELS
+
+    missing = [
+        (name, model)
+        for name, spec in POOL_REGISTRY.items()
+        for model in spec.waterfall
+        if model not in VISION_MODELS
+    ]
+    assert missing == [], f"waterfall models absent from VISION_MODELS: {missing}"
 
 
 def test_all_pool_names_matches_registry():
@@ -787,7 +851,15 @@ def test_is_vision_capable_membership():
     assert is_vision_capable("openai/gpt-5.6-terra")
     assert is_vision_capable("openai/gpt-5.6-sol")
     assert is_vision_capable("anthropic/claude-sonnet-4.5")
-    assert not is_vision_capable("google/gemini-3-flash-preview")
+    # Every live waterfall layer must be vision-capable. gemini-3-flash-preview
+    # was previously asserted NON-vision here while sitting in rose-1-mini's
+    # waterfall — OpenRouter reports it as text+image+file+audio+video->text,
+    # so the old assertion was stale and that layer silently dropped screenshots.
+    assert is_vision_capable("google/gemini-3-flash-preview")
+    assert is_vision_capable("google/gemini-3.6-flash")
+    assert is_vision_capable("moonshotai/kimi-k3")
+    # gpt-oss-20b is genuinely text->text on OpenRouter.
+    assert not is_vision_capable("openai/gpt-oss-20b")
     assert not is_vision_capable("rose-labs/rose-1-lite")
 
 
@@ -827,8 +899,8 @@ def test_get_messages_for_model_routes_by_vision():
     # Vision-capable → expanded
     out_vision = get_messages_for_model(msgs, "openai/gpt-4o")
     assert len(out_vision) == 2
-    # Non-vision → passthrough
-    out_no = get_messages_for_model(msgs, "google/gemini-3-flash-preview")
+    # Non-vision → passthrough (gpt-oss-20b is text->text on OpenRouter)
+    out_no = get_messages_for_model(msgs, "openai/gpt-oss-20b")
     assert out_no == msgs
 
 
@@ -956,6 +1028,40 @@ def test_transform_messages_for_openai_strips_boundary_from_later_system_message
     ]
     assert out[1]["content"] == [{"type": "text", "text": "dynamic instructions"}]
     assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in json.dumps(out)
+
+
+def test_transform_messages_for_openai_normalizes_tool_result_name():
+    """Tool results must use the assistant-declared name for Gemini/OpenRouter.
+
+    Internal metadata can retain a concrete executor name such as
+    ``spawn_browser_agent`` even when the model declared the generic
+    ``spawn_agent`` tool. Gemini rejects that mismatched pair as an invalid
+    request despite the matching tool-call ID.
+    """
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "spawn-1",
+                    "type": "function",
+                    "function": {"name": "spawn_agent", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "spawn-1",
+            "name": "spawn_browser_agent",
+            "content": "Browser task complete",
+        },
+    ]
+
+    out = transform_messages_for_openai(msgs)
+
+    assert out[1]["name"] == "spawn_agent"
+    assert msgs[1]["name"] == "spawn_browser_agent"
 
 
 # =====================================================================
@@ -2743,6 +2849,193 @@ def test_build_openrouter_body_includes_optionals():
     assert body["seed"] == 7
 
 
+TOOL_HISTORY_MESSAGES = [
+    {"role": "system", "content": "you are helpful"},
+    {"role": "user", "content": "open example.com"},
+    {
+        "role": "assistant",
+        "content": "working on it",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "spawn_agent", "arguments": '{"goal":"open it"}'},
+            }
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": '{"main_heading_text":"Example Domain"}'},
+]
+
+
+def test_openrouter_body_without_tools_flattens_tool_history():
+    """Regression: Google 400s on functionCall/functionResponse with no functionDeclarations.
+
+    client.py sends `response_format=None if tools else response_format`, so a
+    structured-output waterfall step drops `tools` while the conversation still
+    carries assistant tool_calls + role:"tool". Reproduced in benchmark agent
+    64fe48c1 (browser-smoke): the identical request passed on Gemini at 5
+    system/user messages, then failed 10/10 at 8 messages with tool history.
+    """
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=TOOL_HISTORY_MESSAGES,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    assert "tools" not in body, "precondition: this request declares no tools"
+
+    roles = [m.get("role") for m in body["messages"]]
+    assert "tool" not in roles, f"role:'tool' survived without declared tools: {roles}"
+    for m in body["messages"]:
+        assert "tool_calls" not in m, f"tool_calls survived without declared tools: {m}"
+
+    # The tool result must be preserved as readable text, not dropped.
+    blob = json.dumps(body["messages"])
+    assert "Example Domain" in blob, "tool result content was lost"
+    assert "spawn_agent" in blob, "tool call name was lost"
+
+
+def test_openrouter_body_without_tools_preserves_structured_tool_result_blocks():
+    """Non-text content blocks remain meaningful after tool history is flattened."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_structured",
+                    "type": "function",
+                    "function": {"name": "inspect_page", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_structured",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": {"main_heading_text": "Structured Example Domain"},
+                },
+                {"type": "image", "source": {"url": "https://example.com/screenshot.png"}},
+            ],
+        },
+    ]
+
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    blob = json.dumps(body["messages"])
+    assert "Structured Example Domain" in blob, "structured tool-result content was dropped"
+    assert "screenshot.png" in blob, "unsupported provider content block was dropped"
+    result = next(message for message in body["messages"] if message.get("role") == "user")
+    assert result["content"] != "[Result of inspect_page]", "tool result became an empty user message"
+
+
+def test_openrouter_body_without_tools_stringifies_non_json_structured_tool_result():
+    """Direct structured results must not block a no-tools retry when JSON encoding fails."""
+
+    class ProviderValue:
+        def __str__(self) -> str:
+            return "provider-specific-value"
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_provider_value",
+                    "type": "function",
+                    "function": {"name": "inspect_provider", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_provider_value",
+            "content": {"z": ProviderValue(), "a": "first"},
+        },
+    ]
+
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+
+    result = next(message for message in body["messages"] if message.get("role") == "user")
+    assert "provider-specific-value" in result["content"]
+    assert result["content"].index('"a"') < result["content"].index('"z"')
+
+
+def test_openrouter_body_with_tools_preserves_tool_history():
+    """The flattening must apply ONLY when no tools are declared."""
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=TOOL_HISTORY_MESSAGES,
+        tools=[{"type": "function", "function": {"name": "spawn_agent"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    assert "tools" in body, "precondition: this request declares tools"
+    roles = [m.get("role") for m in body["messages"]]
+    assert "tool" in roles, "native tool history must be preserved when tools are declared"
+    assert any("tool_calls" in m for m in body["messages"]), "assistant tool_calls must survive"
+
+def test_named_tool_choice_degrades_only_for_google_routes():
+    """Google AI Studio 400s on the OpenAI named-function `tool_choice` form.
+
+    A forced tool reaching a Google model used to fail the whole call with
+    INVALID_ARGUMENT, which killed the agent outright when Google was the last
+    reachable waterfall step. Google must receive "required" instead; every
+    other provider must keep the exact named form. The required-tool contract
+    is still enforced after the response in helpers/llm.py, so this only
+    changes the wire form, never what the caller accepts.
+    """
+    forced = {"name": "attempt_completion"}
+    tools = [{"type": "function", "function": {"name": "attempt_completion"}}]
+    common = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": tools,
+        "response_format": None,
+        "temperature": None,
+        "max_tokens": None,
+        "seed": None,
+    }
+
+    google = build_openrouter_body(model="google/gemini-3.1-pro-preview", tool_choice=forced, **common)
+    assert google["tool_choice"] == "required", (
+        "Google routes must not receive the named tool_choice form they reject"
+    )
+
+    for model in ("openai/gpt-5.6-terra", "moonshotai/kimi-k2.5", "zai-glm-4.7"):
+        other = build_openrouter_body(model=model, tool_choice=forced, **common)
+        assert other["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "attempt_completion"},
+        }, f"{model} must keep the exact named tool_choice"
+
+
 def test_build_openrouter_body_provider_fast_mode():
     body = build_openrouter_body(
         model="anthropic/claude-opus-4.8",
@@ -2838,7 +3131,10 @@ async def test_waterfall_skips_anthropic_for_response_format():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            pool_spec=get_pool("rose-1-ultra"),
+            # rose-1-mini, not ultra: ultra's waterfall no longer contains an
+            # Anthropic layer, so it cannot exercise the skip. mini still leads
+            # with anthropic/claude-haiku-4.5.
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "hi"}],
             response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
             openrouter_key="ork-test",
@@ -2846,7 +3142,7 @@ async def test_waterfall_skips_anthropic_for_response_format():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert models_seen == ["google/gemini-3-flash-preview"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -2886,7 +3182,9 @@ async def test_waterfall_uses_anthropic_with_native_tools():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            pool_spec=get_pool("rose-1-ultra"),
+            # rose-1-mini leads with anthropic/claude-haiku-4.5 — the only
+            # remaining pool with an Anthropic waterfall layer.
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "finish"}],
             tools=[
                 {
@@ -2901,7 +3199,7 @@ async def test_waterfall_uses_anthropic_with_native_tools():
         )
     )
 
-    assert [body["model"] for body in bodies] == ["anthropic/claude-opus-4.8"]
+    assert [body["model"] for body in bodies] == ["anthropic/claude-haiku-4.5"]
     assert "response_format" not in bodies[0]
     assert bodies[0]["tool_choice"] == {
         "type": "function",
@@ -2929,7 +3227,9 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            pool_spec=get_pool("rose-1-ultra"),
+            # rose-1-mini: the only pool that still has an Anthropic waterfall
+            # layer to exclude (ultra/browser-use are now Anthropic-free).
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "hi"}],
             openrouter_key="ork-test",
             request_id="r-exclude-anthropic",
@@ -2937,7 +3237,53 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert models_seen == ["google/gemini-3-flash-preview"]
+    assert any(c.kind == "content" for c in chunks)
+
+
+async def test_ultra_structured_output_falls_through_second_layer_invalid_request():
+    """The ultra pool retains a structured-output-capable fallback after its 2nd layer 400s.
+
+    Named for the SLOT, not the model: this pinned `google/gemini-3.1-pro-preview` until that
+    model was dropped from the waterfall for 400ing, at which point the test kept passing
+    against a model the pool no longer tries. Derive the models from the registry instead.
+    """
+    ultra_waterfall = [
+        model for model in get_pool("rose-1-ultra").waterfall if not model.startswith("anthropic/")
+    ]
+    second_layer, third_layer = ultra_waterfall[0], ultra_waterfall[1]
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": '{"ok":true}'}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    models_seen: list[str] = []
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        models_seen.append(body["model"])
+        if body["model"] == second_layer:
+            return httpx.Response(400, text="invalid structured-output argument")
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    chunks = await _drain(
+        waterfall_complete(
+            pool_spec=get_pool("rose-1-ultra"),
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+            openrouter_key="ork-test",
+            request_id="r-ultra-structured-fallback",
+            exclude_anthropic_family=True,
+        )
+    )
+
+    # A third layer must exist and be reached: a 2-model ultra waterfall would leave structured
+    # output with no fallback at all once the second layer rejects the request.
+    assert models_seen == [second_layer, third_layer]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3501,7 +3847,8 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
     try:
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-ultra",
+                # rose-1-mini: still has an Anthropic waterfall layer to skip.
+                pool="rose-1-mini",
                 messages=[{"role": "user", "content": "hi"}],
                 _exclude_anthropic_family=True,
             )
@@ -3514,7 +3861,7 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert seen["openrouter_models"] == ["google/gemini-3-flash-preview"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3552,7 +3899,8 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     ):
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-ultra",
+                # rose-1-mini: still has an Anthropic waterfall layer to skip.
+                pool="rose-1-mini",
                 messages=[{"role": "user", "content": "hi"}],
                 claude_auth=ClaudeAuthContext(
                     token="sk-ant-oat01-test",
@@ -3564,7 +3912,7 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert seen["openrouter_models"] == ["google/gemini-3-flash-preview"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3594,7 +3942,7 @@ async def test_client_collect_waterfall_only_path():
         call_site="test-collect",
     )
     assert resp.content == "hello"
-    assert resp.actual_model == "google/gemini-3.5-flash"
+    assert resp.actual_model == get_pool("rose-1-lite").waterfall[0]
     assert resp.usage.get("total_tokens") == 6
 
 
@@ -4334,6 +4682,47 @@ async def test_client_rotation_preserves_native_tool_contract_across_provider_ty
     assert captured_gpt_request["tool_choice"] == "any"
 
 
+async def test_client_waterfall_preserves_native_agent_action_tools():
+    """OpenRouter must not receive AgentAction as an incompatible strict schema."""
+    AgentAction = create_agent_action_model(["spawn_agent", "attempt_completion"])
+    captured_waterfall_request = {}
+
+    async def successful_waterfall(**kwargs):
+        captured_waterfall_request.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "openai/gpt-5.6-sol"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "attempt_completion", "arguments": "{}", "id": "call-complete"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    with (
+        patch("providers.rose.client._openai_api_key", return_value=""),
+        patch("providers.rose.client.waterfall_complete", successful_waterfall),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "Finish the task"}],
+                response_model=AgentAction,
+                call_site="execute_loop",
+                _exclude_anthropic_family=True,
+            )
+        )
+
+    assert any(chunk.kind == "tool_call" for chunk in chunks)
+    assert captured_waterfall_request["response_format"] is None
+    assert {tool["name"] for tool in captured_waterfall_request["tools"]} == {
+        "spawn_agent",
+        "attempt_completion",
+    }
+    assert captured_waterfall_request["tool_choice"] == "any"
+
+
 async def test_client_splits_pydantic_model_to_claude_native_tools():
     AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
 
@@ -4828,10 +5217,20 @@ async def test_client_normalizes_inclusive_cache_usage_for_downstream_costing():
 def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization():
     """Replay the complete LLM usage from failed parallel-tool-calls agent 58a04e8d.
 
-    Three native-tool explore leaves completed successfully, but legacy accounting
-    reported 113.57c and paused the root before synthesis. OpenAI's prompt counter
-    already contained both cache buckets; normalizing it restores the actual 62.65c
-    trace cost without weakening the benchmark's 100c product limit.
+    Three native-tool explore leaves completed successfully, but legacy
+    accounting double-counted the cache buckets and paused the root before
+    synthesis. OpenAI's prompt counter already contains both buckets, so adding
+    them again inflates the trace ~2.04x; normalizing it restores the real cost.
+
+    Figures updated 2026-08-19. Every call here carries the `-openai` suffix
+    (the DIRECT OpenAI API route), and the direct terra/luna rates were stale on
+    the high side -- $2.50/$15 and $1.00/$6.00 against actual $2/$12 and
+    $0.20/$1.20. Under corrected rates the same trace costs 87.89c legacy, i.e.
+    it would NOT have crossed the 100c product limit; the historical 113.57c
+    pause was therefore part real cache double-counting and part over-pricing.
+    The double-counting is still real and still worth guarding, which is why the
+    2.04x inflation ratio is asserted alongside the absolute figures -- the
+    ratio is rate-table independent and keeps testing the defect itself.
     """
     # model suffix, inclusive prompt, completion, cache read, cache write
     captured_usage = [
@@ -4889,10 +5288,15 @@ def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization
     legacy_trace_cost = legacy_llm_cost + service_cost_cents
     normalized_trace_cost = normalized_llm_cost + service_cost_cents
 
-    assert abs(legacy_trace_cost - 113.567325) < 0.000001
-    assert legacy_trace_cost > 100
-    assert abs(normalized_trace_cost - 62.648575) < 0.000001
+    assert abs(legacy_trace_cost - 87.890300) < 0.000001
+    assert abs(normalized_trace_cost - 48.911800) < 0.000001
     assert normalized_trace_cost < 100
+    # The defect itself: double-counted cache buckets inflate the LLM spend.
+    # Asserted as a ratio because it is rate-table independent -- the absolute
+    # figures above move whenever provider pricing is corrected, and an
+    # absolute-limit assertion silently stops testing anything when they do.
+    assert normalized_llm_cost < legacy_llm_cost
+    assert abs(legacy_llm_cost / normalized_llm_cost - 2.0426) < 0.001
 
 
 async def test_claude_auth_stream_reports_cache_hit_rate():
@@ -5336,6 +5740,62 @@ async def test_rose_client_synthesizes_native_tools_for_api_key_without_oauth():
     assert tool_names == {"web_fetch", "attempt_completion"}
 
 
+async def test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth():
+    """AgentAction tools must survive through the OpenRouter waterfall."""
+    from pydantic import BaseModel
+    from typing import Literal
+
+    class _SpawnAgentTool(BaseModel):
+        tool: Literal["spawn_agent"]
+        goal: str
+
+    class _AttemptCompletionTool(BaseModel):
+        tool: Literal["attempt_completion"]
+
+    class _AgentAction(BaseModel):
+        response: str = ""
+        tool_calls: list[_SpawnAgentTool | _AttemptCompletionTool] = []
+
+    captured: dict = {}
+
+    async def _fake_waterfall_complete(**kwargs):
+        captured.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "anthropic/claude-opus-4.8"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "spawn_agent", "arguments": '{"goal":"browse"}', "id": "call-spawn"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    async def _always_on_cooldown():
+        return True
+
+    with (
+        patch("providers.rose.client._openai_api_key", return_value=""),
+        patch("providers.rose.client._anthropic_api_key_on_cooldown", _always_on_cooldown),
+        patch("providers.rose.client.waterfall_complete", _fake_waterfall_complete),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-test").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "Use a browser child"}],
+                response_model=_AgentAction,
+            )
+        )
+
+    assert any(chunk.kind == "tool_call" for chunk in chunks)
+    assert captured["response_format"] is None
+    assert captured["tool_choice"] == "any"
+    assert {tool["name"] for tool in captured["tools"]} == {
+        "spawn_agent",
+        "attempt_completion",
+    }
+
+
 async def test_rose_client_preserves_native_tools_for_waterfall():
     """The final OpenRouter fallback must keep AgentAction as native tools.
 
@@ -5406,6 +5866,7 @@ async def run_all_tests():
 
     r.record("is_rose_model_variants", test_is_rose_model_variants)
     r.record("pool_for_model_fuzzy", test_pool_for_model_fuzzy)
+    r.record("oss_pool_is_open_weights_only", test_oss_pool_is_open_weights_only)
     r.record("claude_auth_from_token_none", test_claude_auth_from_token_returns_none_when_falsy)
     r.record("claude_auth_from_token_builds", test_claude_auth_from_token_builds_context)
     r.record("gpt_auth_from_token_builds", test_gpt_auth_from_token_builds_context)
@@ -5414,6 +5875,10 @@ async def run_all_tests():
     r.record("pool_registry_lookup", test_pool_registry_lookup)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
+    r.record(
+        "every_waterfall_model_is_vision_capable",
+        test_every_waterfall_model_is_vision_capable,
+    )
 
     r.record("is_anthropic_model", test_is_anthropic_model_substring)
     r.record("transform_block_passthrough", test_transform_content_block_passthrough_for_text)
@@ -5480,6 +5945,10 @@ async def run_all_tests():
     r.record(
         "openai_messages_later_system_boundary_stripped",
         test_transform_messages_for_openai_strips_boundary_from_later_system_messages,
+    )
+    r.record(
+        "openai_messages_normalize_tool_result_name",
+        test_transform_messages_for_openai_normalizes_tool_result_name,
     )
 
     r.record("anthropic_body_identity_cache", test_build_anthropic_body_identity_and_cache_block)
@@ -5565,14 +6034,38 @@ async def run_all_tests():
     )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
+    r.record(
+        "named_tool_choice_degrades_only_for_google",
+        test_named_tool_choice_degrades_only_for_google_routes,
+    )
     r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
+    r.record(
+        "openrouter_body_no_tools_flattens_tool_history",
+        test_openrouter_body_without_tools_flattens_tool_history,
+    )
+    r.record(
+        "openrouter_body_no_tools_preserves_structured_tool_results",
+        test_openrouter_body_without_tools_preserves_structured_tool_result_blocks,
+    )
+    r.record(
+        "openrouter_body_no_tools_stringifies_non_json_structured_result",
+        test_openrouter_body_without_tools_stringifies_non_json_structured_tool_result,
+    )
+    r.record(
+        "openrouter_body_with_tools_keeps_tool_history",
+        test_openrouter_body_with_tools_preserves_tool_history,
+    )
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
     await r.record_async(
         "waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format
     )
     await r.record_async("waterfall_uses_anthropic_native_tools", test_waterfall_uses_anthropic_with_native_tools)
     await r.record_async("waterfall_excludes_anthropic_family", test_waterfall_excludes_anthropic_family_when_requested)
+    await r.record_async(
+        "ultra_structured_output_falls_through_second_layer_invalid_request",
+        test_ultra_structured_output_falls_through_second_layer_invalid_request,
+    )
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
     await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
 
@@ -5657,6 +6150,10 @@ async def run_all_tests():
         "client_rotation_preserves_native_tool_contract",
         test_client_rotation_preserves_native_tool_contract_across_provider_types,
     )
+    await r.record_async(
+        "client_waterfall_preserves_native_agent_action_tools",
+        test_client_waterfall_preserves_native_agent_action_tools,
+    )
     await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
     await r.record_async(
         "client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools
@@ -5716,6 +6213,10 @@ async def run_all_tests():
     await r.record_async(
         "rose_client_synthesizes_api_key_tools_without_oauth",
         test_rose_client_synthesizes_native_tools_for_api_key_without_oauth,
+    )
+    await r.record_async(
+        "rose_client_synthesizes_waterfall_tools_without_oauth",
+        test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth,
     )
     await r.record_async(
         "rose_client_preserves_native_tools_for_waterfall",

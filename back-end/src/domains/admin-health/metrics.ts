@@ -1,18 +1,18 @@
 import { createLogger } from '../../providers/logger';
 import { getVerifiedStripeMetricsClient } from '../../providers/stripe';
 import type { AmplitudeFunnelResult, AmplitudeFunnelStepId } from './amplitude';
-import { dedupeInternalRepeatTasks } from './benchmarkDedup';
 import { STRIPE_REVENUE_EXCLUDED_CHARGE_IDS } from './config';
 import type * as repo from './repo';
-import type { SubscriberSeriesPoint } from './subscriberMetrics';
 import { findPeriodIndex, formatPeriodLabel, startOfWeek } from './time';
 import type {
   AdminHealthFunnelStep,
   AdminHealthPeriod,
   AdminHealthResponse,
   AdminHealthRetentionCohort,
-  AdminHealthSeriesPoint,
 } from './types';
+
+export { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
+export { buildSeries } from './series';
 
 const log = createLogger('AdminHealth');
 
@@ -61,22 +61,6 @@ export async function fetchStripeRevenueByPeriod(
     return periods.map(() => ({ revenueCents: null }));
   }
   return buckets;
-}
-
-export function averageOutputTokens(tasks: repo.RootTaskRecord[]): number {
-  if (tasks.length === 0) return 0;
-  return Math.round(tasks.reduce((sum, task) => sum + task.tokensOut, 0) / tasks.length);
-}
-
-export function tasksIssuedPerUser(tasks: repo.RootTaskRecord[], userCount: number): number {
-  if (userCount === 0) return 0;
-  return Number((tasks.length / userCount).toFixed(4));
-}
-
-export function taskCompletionRate(tasks: repo.RootTaskRecord[]): number {
-  if (tasks.length === 0) return 0;
-  const completed = tasks.filter((task) => task.status === 'COMPLETED').length;
-  return Number((completed / tasks.length).toFixed(4));
 }
 
 export function buildRetentionCohorts(
@@ -272,47 +256,4 @@ export function compareFunnelSteps(
       conversionRateChange: relativeChange(currentEndToEnd, previousEndToEnd),
     },
   };
-}
-
-export function buildSeries(
-  periods: AdminHealthPeriod[],
-  tasks: repo.RootTaskRecord[],
-  waitlistSignups: repo.WaitlistSignupRecord[],
-  subscribers: SubscriberSeriesPoint[],
-  revenue: Array<{ revenueCents: number | null }>,
-  velocity: Array<{
-    andyLinearPoints: number | null;
-    githubCommits: number | null;
-    tamaraLinearPoints: number | null;
-  }>
-): AdminHealthSeriesPoint[] {
-  const tasksByPeriod = periods.map(() => [] as repo.RootTaskRecord[]);
-  const waitlistSignupsByPeriod = periods.map(() => 0);
-  for (const task of tasks) {
-    const index = findPeriodIndex(periods, task.createdAt);
-    if (index >= 0) tasksByPeriod[index].push(task);
-  }
-  for (const signup of waitlistSignups) {
-    const index = findPeriodIndex(periods, signup.createdAt);
-    if (index >= 0) waitlistSignupsByPeriod[index] += 1;
-  }
-  const emptySubscriber: SubscriberSeriesPoint = { userCount: 0, newUsers: 0, userIds: new Set() };
-  return periods.map((period, index) => {
-    const subscriberPoint = subscribers[index] ?? emptySubscriber;
-    const periodTasks = dedupeInternalRepeatTasks(
-      tasksByPeriod[index].filter((task) => subscriberPoint.userIds.has(task.userId))
-    );
-    return {
-      ...period,
-      ...revenue[index],
-      ...velocity[index],
-      waitlistSignups: waitlistSignupsByPeriod[index],
-      userCount: subscriberPoint.userCount,
-      newUsers: subscriberPoint.newUsers,
-      taskCount: periodTasks.length,
-      tasksIssuedPerUser: tasksIssuedPerUser(periodTasks, subscriberPoint.userCount),
-      outputTokensPerTask: averageOutputTokens(periodTasks),
-      taskCompletionRate: taskCompletionRate(periodTasks),
-    };
-  });
 }

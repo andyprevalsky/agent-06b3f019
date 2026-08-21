@@ -23,6 +23,9 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
   "export BENCHMARK_SEED_DUMP='\$STACK_SEED_DUMP'" \
   "cloud benchmark process must receive the configured seed-dump freshness proof"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  "export BENCHMARK_REQUIRE_SEED_DUMP=1" \
+  "cloud benchmarks must fail closed instead of replacing the canonical base"
 # shellcheck source=../lib/cloudbench-env.sh
 source "$HELPER_SRC"
 
@@ -47,6 +50,20 @@ cloudbench_verify_env_file "$agents_env" "$agents_digest" agents >/dev/null
 if cloudbench_verify_env_file "$agents_env" "$backend_digest" agents >/dev/null 2>&1; then
   fail "a mismatched injected env digest must fail closed"
 fi
+
+# Stale BACKEND_ENV_B64 without AgentCard Organization OAuth must fail closed
+# before guests burn a full stack on 502 Missing AGENTCARD_ORG_OAUTH_CLIENT_ID.
+if cloudbench_require_agentcard_org_oauth "$backend_env" >/dev/null 2>&1; then
+  fail "backend env without AgentCard org OAuth must fail closed"
+fi
+printf 'AGENTCARD_ORG_OAUTH_CLIENT_ID=01234567890123456789\nAGENTCARD_ORG_OAUTH_CLIENT_SECRET=abcdefghijklmnopqrstuvwxyz012345\n' >> "$backend_env"
+cloudbench_require_agentcard_org_oauth "$backend_env" >/dev/null
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env"' \
+  "cloudbench-run must require AgentCard org OAuth after decoding BACKEND_ENV_B64"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_require_agentcard_org_oauth back-end/.env' \
+  "run-bench-cloud must refuse to stage a BACKEND_ENV_B64 without AgentCard org OAuth"
 
 retry_attempts=0
 fail_twice_then_succeed() {
@@ -639,6 +656,42 @@ if cloudbench_wait_machine_startable read_machine_state machine-2 3 0 >/dev/null
   fail "a destroyed provisioning clone must fail closed"
 fi
 
+# Warm-source fleet gate: transitional donor states must wait for stopped, not
+# abort (observed: state=started / replacing → immediate fleet INFRA fail).
+printf 'replacing\nstopping\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-1 5 0 ||
+  fail "warm source wait must tolerate replacing→stopping→stopped"
+[ ! -s "$machine_states" ] || fail "the stopped-state wait must consume the transition sequence"
+
+printf 'creating\nupdating\nrestarting\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-2 5 0 ||
+  fail "warm source wait must tolerate creating/updating/restarting as transitional"
+[ ! -s "$machine_states" ] || fail "creating/updating/restarting wait must consume the sequence"
+
+printf 'started\nstarted\nstarted\n' > "$machine_states"
+if cloudbench_wait_machine_stopped read_machine_state warm-stuck 3 0 >/dev/null 2>&1; then
+  fail "warm source wait must fail closed when the donor never stops"
+fi
+
+printf 'started\ndestroyed\n' > "$machine_states"
+if cloudbench_wait_machine_stopped read_machine_state warm-gone 3 0 >/dev/null 2>&1; then
+  fail "warm source wait must fail closed when the donor is destroyed"
+fi
+
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID"' \
+  "fleet must wait for the shared warm source to stop before cloning"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'stopping|replacing|starting)' \
+  "machine start must wait out Fly stopping/replacing before request_machine_start"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'build_controller_authenticated_git_sync_cmd' \
+  "controller authenticated git-sync helper must remain available for stdin/SFTP delivery"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec_controller_git_sync' \
+  "controller git-sync must deliver the auth header via stdin, not argv"
+
+
 cloudbench_validate_fresh_clone_id clone-2 warm-1 clone-1 ||
   fail "a unique non-source clone id must be accepted"
 if cloudbench_validate_fresh_clone_id warm-1 warm-1 clone-1; then
@@ -745,6 +798,34 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"' \
+  "environment preflight must require GITHUB_TOKEN for on-box private-repo git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "token resolution must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'warm_source_fetch_ref' \
+  "refresh-deps/wmh must sync via warm_source_fetch_ref (controller token + fetch-ref.sh)"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_github_token' \
+  "warm-source git-sync must Contents-validate via resolve_github_token"
+
+# Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
+# the only auth path for refresh-deps. warm_source_fetch_ref uses the controller
+# token + cloudbench-fetch-ref.sh (same as guest drivers).
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench-fetch-ref.sh' \
+  "refresh-deps SSH sync must use cloudbench-fetch-ref.sh with a controller token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' \
+  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
@@ -802,5 +883,825 @@ require_text "$HELPER_SRC" \
 require_text "$ROOT_DIR/scripts/run-bench-hub-poller" \
   'exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE' \
   "hub requests must retry only the typed capacity-busy runner status"
+
+# ── Ledger-only unpushed HEAD must not abort a fleet launch ──────────────────
+# RCA (2026-07-27): /descend commits its append-only timing ledger before every
+# sync, so a descent starting from a clean branch has exactly one unpushed
+# commit touching only agents/benchmarks/history/*.jsonl. run-bench-fleet gated
+# patch creation on "local HEAD != fetchable base", but create-worktree-patch.sh
+# deliberately EXCLUDES those union-merge ledgers, so it emitted an empty patch
+# and the controller treated empty as fatal:
+#   "❌ could not create the fleet local workspace patch" → exit 1, zero benches.
+# The gate and the patch content must share one definition of "shippable delta",
+# and "nothing to ship" must run the base ref instead of aborting.
+patch_repo="$TMP_ROOT/ledger-only-repo"
+mkdir -p "$patch_repo/agents/benchmarks/history"
+git -C "$patch_repo" init -q
+git -C "$patch_repo" config user.email "bench@example.com"
+git -C "$patch_repo" config user.name "Bench"
+printf 'print("under test")\n' > "$patch_repo/service.py"
+printf '{"run":"a"}\n' > "$patch_repo/agents/benchmarks/history/descend_steps.jsonl"
+git -C "$patch_repo" add -A
+git -C "$patch_repo" commit -qm "base"
+ledger_base="$(git -C "$patch_repo" rev-parse HEAD)"
+
+# The one unpushed commit a /descend run always makes before syncing.
+printf '{"run":"b"}\n' >> "$patch_repo/agents/benchmarks/history/descend_steps.jsonl"
+git -C "$patch_repo" add -A
+git -C "$patch_repo" commit -qm "chore(descend): timing ledger rows"
+
+# Pre-condition: the patch generator itself succeeds but has nothing to ship.
+ledger_patch="$TMP_ROOT/ledger-only.patch"
+bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$patch_repo" "$ledger_base" > "$ledger_patch" \
+  || fail "create-worktree-patch.sh must succeed for a ledger-only delta"
+if [ -s "$ledger_patch" ]; then
+  fail "ledger-only delta must produce an empty patch (the excluded-ledger contract)"
+fi
+
+# A ledger-only delta must be reported as "no shippable delta", not as failure.
+prepared_patch="$TMP_ROOT/prepared.patch"
+prepare_rc=0
+cloudbench_prepare_workspace_patch "$patch_repo" "$ledger_base" "$prepared_patch" \
+  "$ROOT_DIR/scripts/create-worktree-patch.sh" || prepare_rc=$?
+if [ "$prepare_rc" -ne "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+  fail "ledger-only unpushed HEAD must report no-shippable-delta (rc=$CLOUDBENCH_PATCH_NO_DELTA), got rc=$prepare_rc"
+fi
+if [ -s "$prepared_patch" ]; then
+  fail "no-shippable-delta must not leave a declared patch payload behind"
+fi
+
+# A real source change on top of the same ledger commit must still ship.
+printf 'print("changed")\n' > "$patch_repo/service.py"
+prepare_rc=0
+cloudbench_prepare_workspace_patch "$patch_repo" "$ledger_base" "$prepared_patch" \
+  "$ROOT_DIR/scripts/create-worktree-patch.sh" || prepare_rc=$?
+[ "$prepare_rc" -eq 0 ] \
+  || fail "a real worktree change must still produce a shippable patch (rc=$prepare_rc)"
+[ -s "$prepared_patch" ] \
+  || fail "a real worktree change must produce a non-empty patch payload"
+grep -Fq 'service.py' "$prepared_patch" \
+  || fail "the shippable patch must carry the changed source file"
+if grep -Fq 'descend_steps.jsonl' "$prepared_patch"; then
+  fail "the shippable patch must still exclude append-only history ledgers"
+fi
+
+# A commit that exists only on a pushed feature branch is NOT guest-fetchable.
+# Fly guests authenticate through the controller token helper; treating any
+# origin/* containment as "already fetchable" made --refresh-deps fetch a
+# feature SHA over unauthenticated HTTPS and abort the fleet
+# (could not read Username for 'https://github.com').
+feature_repo="$TMP_ROOT/fetchable-ref"
+git init -q "$feature_repo"
+git -C "$feature_repo" config user.email cloudbench-test@example.com
+git -C "$feature_repo" config user.name cloudbench-test
+printf 'main\n' > "$feature_repo/payload.txt"
+git -C "$feature_repo" add payload.txt
+git -C "$feature_repo" commit -qm main
+git -C "$feature_repo" branch -M main
+git init -q --bare "$TMP_ROOT/fetchable-origin.git"
+git -C "$feature_repo" remote add origin "$TMP_ROOT/fetchable-origin.git"
+git -C "$feature_repo" push -q origin HEAD:main
+main_sha="$(git -C "$feature_repo" rev-parse HEAD)"
+git -C "$feature_repo" checkout -q -b cursor/example-53b6
+printf 'feature\n' >> "$feature_repo/payload.txt"
+git -C "$feature_repo" commit -qam feature
+git -C "$feature_repo" push -q origin HEAD:cursor/example-53b6
+feature_sha="$(git -C "$feature_repo" rev-parse HEAD)"
+git -C "$feature_repo" fetch -q origin
+resolved="$(cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1)"
+[ "$resolved" = "$main_sha" ] \
+  || fail "fetchable_ref must use origin/main for a feature-only SHA (got $resolved, want $main_sha)"
+if ! cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1 >/dev/null 2>"$TMP_ROOT/fetchable.err"; then
+  fail "allow-local-patch must succeed by falling back to origin/main"
+fi
+grep -Fq 'not on origin' "$TMP_ROOT/fetchable.err" \
+  || fail "fetchable_ref must explain that a feature-only SHA is not guest-fetchable"
+
+# A genuinely broken generation (unresolvable base ref) stays a hard failure.
+prepare_rc=0
+cloudbench_prepare_workspace_patch "$patch_repo" "definitely-not-a-ref" "$prepared_patch" \
+  "$ROOT_DIR/scripts/create-worktree-patch.sh" >/dev/null 2>&1 || prepare_rc=$?
+if [ "$prepare_rc" -ne 1 ]; then
+  fail "an unresolvable base ref must stay a hard patch-generation failure (rc=$prepare_rc)"
+fi
+
+# Both cloud controllers must route through the shared helper so the launch gate
+# can never again disagree with what the patch generator actually emits.
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_prepare_workspace_patch' \
+  "fleet controller must prepare its patch through the shared helper"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_prepare_workspace_patch' \
+  "cloud controller must prepare its patch through the shared helper"
+
+
+# ── Machine readiness must fail closed (descend antibot, epoch 4) ────────────
+# A whole 7-bench fleet run aborted before provisioning ANY task machine:
+#   ▶️  Starting machine 683e47df5094d8 ...
+#   ✅ Machine started
+#   ⚠️  SSH did not become reachable on 683e47df5094d8 — proceeding (...)
+#   🔄 git-syncing /data/repo → f56705fec ...
+#      Error: app navi-whisper-lux-bench has no started VMs.
+#   ❌ exact remote checkout failed
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Both readiness gates returned SUCCESS after exhausting their budgets, so the
+# controller exec'd into a machine that was not up and the real constraint
+# surfaced as an unrelated-looking checkout error. Readiness must fail closed.
+readiness_function() {
+  awk -v function_name="$1" '
+    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud"
+}
+
+readiness_failures=0
+
+# The shared warm source is durable provider state and can retain a stale or
+# malformed init command across workstreams. Every maintenance resize must
+# restore the known keepalive before start; otherwise Fly reports "started" and
+# the VM exits cleanly seconds later.
+(
+  function_body="$(readiness_function resize_stopped_warm_source)"
+  [ -n "$function_body" ] || fail "could not load production resize_stopped_warm_source"
+  eval "$function_body"
+  APP="cloudbench-readiness-regression"
+  resize_args="$TMP_ROOT/warm-resize.args"
+  machine_state() { echo stopped; }
+  FLY() { printf '%s\n' "$*" > "$resize_args"; }
+  resize_stopped_warm_source warm-1 shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "warm-source maintenance resize must succeed"
+  grep -Fq -- '--command sleep infinity' "$resize_args" ||
+    fail "warm-source resize must normalize the durable keepalive command"
+) || readiness_failures=$((readiness_failures + 1))
+
+(
+  function_body="$(readiness_function wait_for_ssh)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
+  eval "$function_body"
+  APP="cloudbench-readiness-regression"
+  CLOUDBENCH_SSH_WAIT_ATTEMPTS=2
+  CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS=0
+  CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS=1
+  probe_calls=0
+  raw_fly_calls=0
+  ssh_ready() {
+    probe_calls=$((probe_calls + 1))
+    return 1
+  }
+  FLY() {
+    raw_fly_calls=$((raw_fly_calls + 1))
+    return 1
+  }
+  machine_state() { echo started; }
+  sleep() { :; }               # keep the pre-fix reproduction fast
+  rc=0
+  wait_for_ssh mach-never-ssh >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "wait_for_ssh must fail closed when SSH never answers (rc=$rc)"
+  [ "$probe_calls" -eq 2 ] ||
+    fail "wait_for_ssh must use the bounded ssh_ready probe exactly once per attempt"
+  [ "$raw_fly_calls" -eq 0 ] ||
+    fail "wait_for_ssh must not bypass the bounded SSH timeout path"
+) || readiness_failures=$((readiness_failures + 1))
+
+(
+  function_body="$(readiness_function start_machine)"
+  [ -n "$function_body" ] || fail "could not load production start_machine"
+  eval "$function_body"
+  CLOUDBENCH_MACHINE_START_ATTEMPTS=2
+  CLOUDBENCH_MACHINE_START_SLEEP_SECONDS=0
+  machine_state() { echo stopped; }        # never reaches started
+  machine_storage_ready() { return 0; }
+  request_machine_start() { return 0; }
+  sleep() { :; }               # keep the pre-fix reproduction fast
+  rc=0
+  start_machine mach-never-starts >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "start_machine must fail closed when the machine never reaches started (rc=$rc)"
+) || readiness_failures=$((readiness_failures + 1))
+
+# A recoverable started→stopped race must re-assert start (after waiting out
+# Fly stopping/replacing), then accept the bounded readiness proof.
+(
+  function_body="$(readiness_function wait_for_ssh)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
+  eval "$function_body"
+  CLOUDBENCH_SSH_WAIT_ATTEMPTS=2
+  CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS=0
+  current_state=stopped
+  restart_calls=0
+  ssh_ready() { [ "$current_state" = "started" ]; }
+  machine_state() { echo "$current_state"; }
+  request_machine_start() {
+    restart_calls=$((restart_calls + 1))
+    current_state=started
+  }
+  date() { echo 1000; }
+  sleep() { :; }
+  wait_for_ssh mach-recovers >/dev/null 2>&1 ||
+    fail "wait_for_ssh must recover one stopped→started transition"
+  [ "$restart_calls" -eq 1 ] ||
+    fail "wait_for_ssh must re-assert a regressed machine start (calls=$restart_calls)"
+) || readiness_failures=$((readiness_failures + 1))
+
+# If the machine is still stopping when SSH probes, wait — do not fire a bare
+# start into Fly's failed_precondition window (files-in-sub-agents fleet log).
+(
+  function_body="$(readiness_function wait_for_ssh)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
+  eval "$function_body"
+  CLOUDBENCH_SSH_WAIT_ATTEMPTS=5
+  CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS=0
+  # machine_state runs in $(...), so the cursor must live on disk — a shell
+  # variable would reset every probe and never leave "stopping".
+  # Timeline: stopping → stopping → stopped → (start issued) → started
+  idx_file="$TMP_ROOT/wait-ssh-stopping-idx"
+  echo 0 > "$idx_file"
+  states_file="$TMP_ROOT/wait-ssh-stopping-states"
+  printf '%s\n' stopping stopping stopped started started > "$states_file"
+  restart_file="$TMP_ROOT/wait-ssh-stopping-restarts"
+  echo 0 > "$restart_file"
+  current_state() {
+    local idx
+    idx="$(cat "$idx_file")"
+    sed -n "$((idx + 1))p" "$states_file"
+  }
+  advance_state() {
+    local idx
+    idx="$(cat "$idx_file")"
+    if [ "$idx" -lt 4 ]; then
+      echo $((idx + 1)) > "$idx_file"
+    fi
+  }
+  ssh_ready() {
+    [ "$(current_state)" = "started" ]
+  }
+  machine_state() {
+    local s
+    s="$(current_state)"
+    advance_state
+    echo "$s"
+  }
+  request_machine_start() {
+    echo $(( $(cat "$restart_file") + 1 )) > "$restart_file"
+  }
+  date() { echo 1000; }
+  sleep() { :; }
+  wait_for_ssh mach-stopping-race >/dev/null 2>&1 ||
+    fail "wait_for_ssh must survive stopping→stopped→started before SSH ready"
+  [ "$(cat "$restart_file")" -eq 1 ] ||
+    fail "wait_for_ssh must start exactly once after stopping clears (calls=$(cat "$restart_file"))"
+) || readiness_failures=$((readiness_failures + 1))
+
+# Exercise the maintenance gate itself: a failed start cannot reach the SSH
+# probe, and a failed SSH proof cannot let the caller execute remote work.
+(
+  function_body="$(readiness_function require_machine_ready)"
+  [ -n "$function_body" ] || fail "could not load production require_machine_ready"
+  eval "$function_body"
+  start_calls=0
+  wait_calls=0
+  start_machine() {
+    start_calls=$((start_calls + 1))
+    return 1
+  }
+  wait_for_ssh() {
+    wait_calls=$((wait_calls + 1))
+    return 0
+  }
+  rc=0
+  require_machine_ready mach-never-starts >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "maintenance readiness must propagate start failure"
+  [ "$start_calls" -eq 1 ] && [ "$wait_calls" -eq 0 ] ||
+    fail "maintenance readiness must not probe SSH after start failure"
+
+  start_machine() {
+    start_calls=$((start_calls + 1))
+    return 0
+  }
+  wait_for_ssh() {
+    wait_calls=$((wait_calls + 1))
+    return 1
+  }
+  remote_exec_marker="$TMP_ROOT/readiness-remote-exec"
+  if require_machine_ready mach-never-ssh >/dev/null 2>&1; then
+    : > "$remote_exec_marker"
+  fi
+  [ ! -e "$remote_exec_marker" ] ||
+    fail "maintenance work executed after readiness failure"
+) || readiness_failures=$((readiness_failures + 1))
+
+# A readiness helper that fails closed is useless if a caller bypasses it. All
+# three maintenance paths must use the combined gate, leaving the component
+# start and SSH calls reachable only inside that gate.
+readiness_call_sites="$(grep -c '^[[:space:]]*require_machine_ready "\$mid" || exit 1$' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+[ "$readiness_call_sites" = "3" ] ||
+  fail "all 3 maintenance paths must propagate the combined readiness gate (found=$readiness_call_sites)"
+start_call_sites="$(grep -c '^[[:space:]]*start_machine "' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+[ "$start_call_sites" = "1" ] && [ "$wait_call_sites" = "1" ] ||
+  fail "start/SSH component calls must remain encapsulated by the readiness gate"
+
+[ "$readiness_failures" -eq 0 ] ||
+  fail "$readiness_failures machine-readiness regression case(s) failed"
+
+# ── warm-source resize must retry Fly rate limits (descend I-02) ─────────────
+# Epoch-2 fleet abort during --refresh-deps:
+#   🧮 sizing warm source for maintenance: shared-cpu-4x/8192MB
+#   Error: could not get machine … resource_exhausted: rate limit exceeded
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Relative of 2026-07-15 clone rate-limit RCAs: resize_stopped_warm_source was
+# single-shot, so a transient org limiter abort killed the whole slice before
+# any task machine existed.
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  [ -n "$function_body" ] || fail "could not load resize_stopped_warm_source"
+  eval "$function_body"
+  APP="cloudbench-resize-rate-limit"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  # FLY runs inside $(...), so a shell variable counter cannot cross attempts.
+  call_file="$TMP_ROOT/warm-resize-calls"
+  echo 0 > "$call_file"
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    local c
+    c="$(cat "$call_file")"
+    c=$((c + 1))
+    echo "$c" > "$call_file"
+    if [ "$c" -lt 3 ]; then
+      echo "Error: could not get machine $3: resource_exhausted: rate limit exceeded" >&2
+      return 1
+    fi
+    return 0
+  }
+  resize_stopped_warm_source mid-rl shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "resize_stopped_warm_source must succeed after rate-limit retries"
+  [ "$(cat "$call_file")" -eq 3 ] ||
+    fail "resize_stopped_warm_source must retry rate limits until success (calls=$(cat "$call_file"))"
+) || fail "warm-source resize rate-limit retry regression failed"
+
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$function_body"
+  APP="cloudbench-resize-rate-limit"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=2
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    echo "Error: could not get machine $3: resource_exhausted: rate limit exceeded" >&2
+    return 1
+  }
+  rc=0
+  resize_stopped_warm_source mid-rl shared-cpu-4x 8192 maintenance >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "resize_stopped_warm_source must fail closed after exhausting rate-limit retries"
+) || fail "warm-source resize rate-limit exhaustion regression failed"
+
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$function_body"
+  APP="cloudbench-resize-concurrent"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  call_file="$TMP_ROOT/warm-resize-concurrent-calls"
+  echo 0 > "$call_file"
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    local c
+    c="$(cat "$call_file")"
+    c=$((c + 1))
+    echo "$c" > "$call_file"
+    if [ "$c" -lt 3 ]; then
+      echo "Error: aborted: machine version changed: concurrent update in progress" >&2
+      return 1
+    fi
+    return 0
+  }
+  resize_stopped_warm_source mid-cu shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "resize_stopped_warm_source must retry concurrent-update aborts"
+  [ "$(cat "$call_file")" -eq 3 ] ||
+    fail "concurrent-update retries must reach success (calls=$(cat "$call_file"))"
+) || fail "warm-source resize concurrent-update retry regression failed"
+
+# ── refresh-deps / refresh-wmh git-sync must use controller token (descend I-01) ──
+# Observed fleet abort before any task machine was provisioned:
+#   🔄 git-syncing /data/repo → <sha> ...
+#      fatal: could not read Username for 'https://github.com': No such device or address
+#      Error: ssh shell: Process exited with status 128
+#   ❌ exact remote checkout failed
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Root cause: --refresh-deps built AUTH_HDR from optional box-side GITHUB_TOKEN
+# (`[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=...`). When the warm machine secret was
+# missing, AUTH_HDR stayed empty and git prompted for a Username on a non-TTY.
+# Boot-launch already injects CLOUDBENCH_GITHUB_TOKEN_B64 from the controller;
+# maintenance git-sync must fail closed the same way and never allow empty auth.
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps/wmh controller-token git-sync contract failed"
+import pathlib, re, subprocess, sys, textwrap
+
+src_path = pathlib.Path(sys.argv[1])
+src = src_path.read_text()
+
+def mode_block(mode: str) -> str:
+    marker = f'if [ "$MODE" = "{mode}" ]; then'
+    start = src.find(marker)
+    if start < 0:
+        raise SystemExit(f"missing {mode} mode block")
+    # Take until the matching top-level fi after the mode banner — stop at next MODE block or EOF.
+    rest = src[start:]
+    next_mode = re.search(r'\nif \[ "\$MODE" = "', rest[1:])
+    end = (next_mode.start() + 1) if next_mode else len(rest)
+    return rest[:end]
+
+deps = mode_block("refresh-deps")
+wmh = mode_block("refresh-wmh")
+# refresh-deps + refresh-wmh: shared SHA-pinned warm_source_fetch_ref (fail-closed).
+for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
+    if "warm_source_fetch_ref" not in block:
+        raise SystemExit(f"{name} must call warm_source_fetch_ref")
+    for line in block.splitlines():
+        if "warm_source_fetch_ref" in line and "|| true" in line:
+            raise SystemExit(f"{name} must not mask warm_source_fetch_ref failures")
+    if "GITHUB_TOKEN:-" in block and "build_controller_authenticated_git_sync_cmd" in block:
+        raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
+
+def extract_bash_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.find(marker)
+    if start < 0:
+        # Allow a comment between ) and {
+        import re as _re
+        m = _re.search(rf"^{name}\(\)[^\n]*\n\{{", source, flags=_re.M)
+        if not m:
+            raise SystemExit(f"{name} helper is missing")
+        start = m.start()
+        brace_at = source.find("{", m.start())
+    else:
+        brace_at = source.find("{", start)
+    depth = 0
+    for idx in range(brace_at, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise SystemExit(f"{name} helper is missing closing brace")
+
+# warm_source_fetch_ref must Contents-validate via resolve_github_token (not
+# unvalidated cloudbench_controller_github_token).
+warm_fn = extract_bash_function(src, "warm_source_fetch_ref")
+if "resolve_github_token" not in warm_fn:
+    raise SystemExit("warm_source_fetch_ref must use resolve_github_token")
+if "cloudbench_controller_github_token" in warm_fn:
+    raise SystemExit("warm_source_fetch_ref must not use unvalidated cloudbench_controller_github_token")
+
+# --setup clone: keep AUTH_HDR off git argv; use GIT_CONFIG_GLOBAL; wipe remotes
+# on partial SFTP failure so a lone token file cannot linger.
+clone_start = src.find("SETUP_GITHUB_TOKEN=")
+clone_end = src.find("park_warm_source", clone_start)
+if clone_start < 0 or clone_end < 0:
+    raise SystemExit("--setup clone block missing")
+clone = src[clone_start:clone_end]
+if "GIT_CONFIG_GLOBAL" not in clone:
+    raise SystemExit("--setup clone must use GIT_CONFIG_GLOBAL for http.extraheader")
+if "-c http.extraheader=" in clone:
+    raise SystemExit("--setup clone must not put AUTH_HDR on git -c argv")
+if "rm -f '$remote_setup_token' '$remote_setup_cmd'" not in clone:
+    raise SystemExit("--setup must rm remote token/cmd on SFTP failure")
+# Existing-repo fetch must reset origin to the trusted URL BEFORE git_auth so a
+# retained/altered remote cannot receive the controller token.
+fetch_idx = clone.find("repo already present")
+if fetch_idx < 0:
+    raise SystemExit("--setup existing-repo fetch branch missing")
+fetch_branch = clone[fetch_idx : clone.find("else", fetch_idx)]
+set_url_at = fetch_branch.find("remote set-url origin")
+fetch_at = fetch_branch.find("fetch --quiet origin")
+if set_url_at < 0 or fetch_at < 0 or set_url_at > fetch_at:
+    raise SystemExit("--setup must set trusted origin before authenticated fetch")
+
+helper = extract_bash_function(src, "build_controller_authenticated_git_sync_cmd")
+
+auth_bits = [
+    extract_bash_function(src, name)
+    for name in (
+        "token_to_git_auth_header",
+        "resolve_durable_github_token",
+        "resolve_github_token",
+        "resolve_controller_git_auth_header",
+    )
+]
+auth_helper = "\n".join(auth_bits)
+
+deliver = extract_bash_function(src, "ssh_exec_controller_git_sync")
+if "AUTH_HDR_DURABLE" not in deliver:
+    raise SystemExit("stdin delivery must support durable AUTH_HDR_DURABLE retry")
+if "resolve_durable_github_token" not in deliver:
+    raise SystemExit("stdin delivery must resolve a durable fallback token")
+if "sftp put" not in deliver:
+    raise SystemExit("git-sync delivery must SFTP credentials (fly ssh -C does not forward stdin)")
+if "Authorization: Basic" in deliver.split("-C", 1)[-1]:
+    raise SystemExit("AUTH_HDR must not appear in the fly ssh -C argument")
+if "remote_auth" not in deliver and "cloudbench-git-sync-auth" not in deliver:
+    raise SystemExit("git-sync delivery must stage a remote auth file path")
+
+# Fail closed with no token.
+script = auth_helper + "\n" + helper + textwrap.dedent(
+    """
+    resolve_github_token() { echo ""; }
+    resolve_durable_github_token() { echo ""; }
+    gh() { return 1; }
+    build_controller_authenticated_git_sync_cmd /data/repo abcdef
+    """
+)
+# Run via a tempfile — bash -c mangles the nested quotes inside the multi-line
+# helper body (syntax error EOF). File execution preserves the source exactly.
+import tempfile, os
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    fail_path = fh.name
+try:
+    proc = subprocess.run(["bash", fail_path], capture_output=True, text=True)
+finally:
+    os.unlink(fail_path)
+if proc.returncode == 0:
+    raise SystemExit("helper must fail closed when no controller GitHub token is available")
+if "No controller GitHub token" not in (proc.stderr + proc.stdout):
+    raise SystemExit("helper must name the missing controller GitHub token")
+
+# With a token, emit a script that consumes AUTH_HDR via GIT_CONFIG_* — never
+# embed the Basic auth header in the returned command (argv leak via fly -C).
+script = auth_helper + "\n" + helper + textwrap.dedent(
+    """
+    resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    resolve_durable_github_token() { echo "ghp_durable_token_for_sync_cmd"; }
+    gh() { return 1; }
+    build_controller_authenticated_git_sync_cmd /data/repo abcdef0123456789
+    """
+)
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    ok_path = fh.name
+try:
+    proc = subprocess.run(["bash", ok_path], capture_output=True, text=True)
+finally:
+    os.unlink(ok_path)
+if proc.returncode != 0:
+    raise SystemExit(f"helper must succeed with a controller token: {proc.stderr}")
+cmd = proc.stdout
+if "_try_fetch" not in cmd:
+    raise SystemExit("authenticated sync cmd must use _try_fetch for primary→durable retry")
+if "GIT_CONFIG_KEY_0=http.extraheader" not in cmd:
+    raise SystemExit("authenticated sync cmd must set http.extraheader via GIT_CONFIG_*")
+if "primary GitHub token auth failed; retrying with durable fallback" not in cmd:
+    raise SystemExit("authenticated sync cmd must retry with durable AUTH_HDR_DURABLE")
+if "GITHUB_TOKEN:-" in cmd:
+    raise SystemExit("authenticated sync cmd must not optionally clear AUTH_HDR")
+if "Authorization: Basic" in cmd or "x-access-token:" in cmd or "ghp_test_token" in cmd:
+    raise SystemExit("authenticated sync cmd must not embed the controller token/header")
+if "AUTH_HDR" not in cmd:
+    raise SystemExit("authenticated sync cmd must require AUTH_HDR from the delivery path")
+if "rev-parse FETCH_HEAD" not in cmd or 'checkout -f "$FETCHED_REF"' not in cmd:
+    raise SystemExit("authenticated sync cmd must check out FETCH_HEAD, not a stale local ref")
+if "checkout -f $ref_q" in cmd or "checkout -f \"$ref_q\"" in cmd:
+    raise SystemExit("authenticated sync cmd must not check out the possibly-stale local ref name")
+
+# Auth header resolver must produce x-access-token Basic payload separately.
+script = auth_helper + textwrap.dedent(
+    """
+    resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    resolve_durable_github_token() { echo "ghp_durable_token_for_sync_cmd"; }
+    gh() { return 1; }
+    resolve_controller_git_auth_header
+    """
+)
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    hdr_path = fh.name
+try:
+    proc = subprocess.run(["bash", hdr_path], capture_output=True, text=True)
+finally:
+    os.unlink(hdr_path)
+if proc.returncode != 0:
+    raise SystemExit(f"auth header helper must succeed with a controller token: {proc.stderr}")
+hdr = proc.stdout.strip()
+if not hdr.startswith("Authorization: Basic "):
+    raise SystemExit(f"auth header must be Authorization: Basic …, got {hdr!r}")
+import base64
+payload = base64.b64decode(hdr.split(" ", 2)[2]).decode()
+if payload != "x-access-token:ghp_test_token_for_sync_cmd":
+    raise SystemExit(f"AUTH_HDR payload must be x-access-token:…, got {payload!r}")
+print("controller-token git-sync contract ok")
+PY
+
+# ── ssh_exec must controller-bound flyctl (descend I-07) ──
+# Guest timeout alone is insufficient: flyctl ssh hung after warm machine stop.
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "ssh_exec controller-side timeout contract failed"
+import pathlib, re, subprocess, sys, textwrap, time
+
+src = pathlib.Path(sys.argv[1]).read_text()
+
+def extract_bash_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.find(marker)
+    if start < 0:
+        m = re.search(rf"^{name}\(\)[^\n]*\n\{{", source, flags=re.M)
+        if not m:
+            raise SystemExit(f"{name} helper is missing")
+        start = m.start()
+        brace_at = source.find("{", m.start())
+    else:
+        brace_at = source.find("{", start)
+    depth = 0
+    for idx in range(brace_at, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise SystemExit(f"{name} helper is missing closing brace")
+
+ssh_exec = extract_bash_function(src, "ssh_exec")
+if "_with_timeout" not in ssh_exec:
+    raise SystemExit("ssh_exec must wrap flyctl ssh via _with_timeout")
+if "FLY ssh console" in ssh_exec:
+    raise SystemExit("ssh_exec must call flyctl directly (Popen cannot resolve FLY wrapper)")
+if "flyctl ssh console" not in ssh_exec:
+    raise SystemExit("ssh_exec must invoke flyctl ssh console")
+
+ws = extract_bash_function(src, "warm_source_fetch_ref")
+if "CLOUDBENCH_GIT_SYNC_TIMEOUT" not in ws and "GIT_SYNC_TO" not in ws:
+    raise SystemExit("warm_source_fetch_ref must pass an explicit git-sync ssh_exec timeout")
+if '"$GIT_SYNC_TO"' not in ws:
+    raise SystemExit("warm_source_fetch_ref must call ssh_exec with GIT_SYNC_TO")
+
+fetch_ref = (pathlib.Path(sys.argv[1]).parent / "cloudbench-fetch-ref.sh").read_text()
+if "already-at" not in fetch_ref:
+    raise SystemExit("cloudbench-fetch-ref.sh must short-circuit when HEAD already matches SHA")
+
+wt = extract_bash_function(src, "_with_timeout")
+script = wt + textwrap.dedent(
+    """
+    _with_timeout 2 sleep 30
+    exit $?
+    """
+)
+t0 = time.time()
+proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+elapsed = time.time() - t0
+if proc.returncode != 124:
+    raise SystemExit(f"_with_timeout must exit 124 on overrun, got rc={proc.returncode}")
+if elapsed > 8 or elapsed < 1.5:
+    raise SystemExit(f"_with_timeout wall {elapsed:.1f}s not ~2s")
+print("ssh_exec controller-side timeout contract ok")
+PY
+
+# An unprovisioned worktree (plain `git worktree add`, no credentials copied)
+# used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
+# required" line that named neither the file it read nor the provisioning step.
+hub_key_guard="$(sed -n '/^require_in_app_hub_visibility()/,/^}/p' "$ROOT_DIR/scripts/run-bench-fleet")"
+printf '%s' "$hub_key_guard" | grep -q 'looked in:' ||
+  fail "the in-app Hub key failure must name every source it searched"
+printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
+  fail "the in-app Hub key failure must distinguish a missing .env from an empty key"
+printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
+  fail "the in-app Hub key failure must name the provisioning command that fixes it"
+
+# ── Validated GitHub token for private-repo git-sync (descend I-01 + #1034) ──
+# Fleet run 20260820-202356-7298 aborted before any task machine on a stale
+# ambient GITHUB_TOKEN. Merged with #1034 durable/ephemeral split: ephemeral
+# resolve_github_token validates Contents access; Fly secrets use durable tokens;
+# refresh-deps retries durable fallback after primary auth failure.
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'github_token_can_fetch_repo()' \
+  "cloudbench must validate GitHub tokens against the private rose repo"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'api.github.com/repos/Rose-Ai-Labs/rose/contents' \
+  "token validation must require Contents access (not metadata-only GET /repos)"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'set_args+=("GITHUB_TOKEN=$gh_token")' \
+  "Fly secret staging must always set GITHUB_TOKEN (empty clears a stale staged credential)"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com' \
+  "token resolver must ignore ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST when reading gh auth"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'build_controller_authenticated_git_sync_cmd' \
+  "controller authenticated git-sync helper must remain for stdin/SFTP delivery paths"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'primary GitHub token auth failed; retrying with durable fallback' \
+  "authenticated git-sync must retry git fetch with the durable token after primary auth failure"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_try_fetch' \
+  "authenticated git-sync must try controller primary token then durable fallback via _try_fetch"
+# Prove the live resolver rejects the ambient stale GITHUB_TOKEN and still
+# returns a credential with Contents access (requires network).
+resolve_snippet="$(mktemp)"
+awk '
+  /^github_token_can_fetch_repo\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^resolve_render_env_value\(\)/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud" | sed '$d' > "$resolve_snippet"
+resolve_trimmed="${resolve_snippet}.trimmed"
+sed '/^resolve_render_env_value()/,$d' "$resolve_snippet" > "$resolve_trimmed"
+mv "$resolve_trimmed" "$resolve_snippet"
+(
+  set -euo pipefail
+  # shellcheck disable=SC1090
+  source "$resolve_snippet"
+  tok="$(resolve_github_token)"
+  [ -n "$tok" ] || fail "resolve_github_token returned empty despite available controller credentials"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+    -H "Authorization: Bearer ${tok}" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: cloudbench-env-test' \
+    'https://api.github.com/repos/Rose-Ai-Labs/rose/contents')"
+  [ "$code" = "200" ] || fail "resolve_github_token returned a token without Contents access to rose (HTTP $code)"
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    stale_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'User-Agent: cloudbench-env-test' \
+      'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' || true)"
+    if [ "$stale_code" != "200" ] && [ "$tok" = "$GITHUB_TOKEN" ]; then
+      fail "resolve_github_token returned the ambient stale GITHUB_TOKEN"
+    fi
+  fi
+) || fail "validated GitHub token resolver regression failed"
+rm -f "$resolve_snippet"
+
+
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'CLOUDBENCH_SSH_EXEC_TIMEOUT' \
+  "ssh_exec must honor an optional timeout so hung refresh-deps sessions fail closed"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec timed out after' \
+  "ssh_exec must report timeout distinctly from auth/checkout failures"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'CLOUDBENCH_SSH_EXEC_TIMEOUT="$SYNC_SSH_TIMEOUT"' \
+  "refresh-deps must bound warm_source_fetch_ref via CLOUDBENCH_SSH_EXEC_TIMEOUT"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'return "$sync_rc"' \
+  "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
+
+# --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
+# (cloudbench-multi scenario 14) and cement ordering vs the production-only
+# classifier so a missing tasks.json never swallows the parallel-safety message.
+python3 - "$ROOT_DIR/scripts/run-bench" <<'PY' || fail "run-bench --single-box must precede production-only classifier"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+sb = text.find('[[ "${1:-}" == "--single-box" ]]')
+prod = text.find("cloudbench-production-only-tasks.py")
+if sb < 0 or prod < 0 or not (sb < prod):
+    raise SystemExit(f"single-box at {sb}, production-only at {prod}")
+PY
+single_box_root="$TMP_ROOT/scripts-only-sandbox"
+mkdir -p "$single_box_root"
+cp -R "$ROOT_DIR/scripts" "$single_box_root/scripts"
+single_box_log="$TMP_ROOT/single-box.log"
+set +e
+bash "$single_box_root/scripts/run-bench" --single-box some-bench >"$single_box_log" 2>&1
+single_box_ec=$?
+set -e
+[ "$single_box_ec" -ne 0 ] || fail "--single-box must be rejected in a scripts-only sandbox"
+grep -qiF "parallel-safe" "$single_box_log" ||
+  fail "--single-box rejection must explain the parallel-safety hazard without requiring agents/"
 
 echo "All cloud benchmark environment checks passed."

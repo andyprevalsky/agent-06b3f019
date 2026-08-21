@@ -141,7 +141,11 @@ if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
     echo "❌ BLACKBOX_TEST_DATABASE_URL must point at localhost for fixture safety."
     exit 1
   fi
-  if psql "$EXPLICIT_TEST_DB_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+  # Prisma accepts connection-pool tuning in the URL query string, but libpq
+  # rejects those Prisma-only parameters. Probe the same local database with
+  # the plain URL while preserving the bounded URL for Prisma test children.
+  EXPLICIT_TEST_PSQL_URL="${EXPLICIT_TEST_DB_URL%%\?*}"
+  if psql "$EXPLICIT_TEST_PSQL_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
     DB_FOUND=true
     SELECTED_DB_URL="$EXPLICIT_TEST_DB_URL"
     echo "Using database explicitly provided by the existing backend launcher"
@@ -209,14 +213,23 @@ if ! $STACK_DB_EXPECTED && docker_info_quick; then
   fi
 fi
 
-# Fall back to system Postgres
+# Fall back to system Postgres. Prefer the Conductor-derived local DB port
+# (CONDUCTOR_PORT+5) so cloud/native Postgres installs that follow run.sh's
+# port layout are found before the generic 5432 default.
 if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
-  SYSTEM_PG_PORT=5432
-  if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
-    LOCAL_DB_PORT="$SYSTEM_PG_PORT"
-    DB_FOUND=true
-    echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+  SYSTEM_PG_CANDIDATES=()
+  if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
+    SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
   fi
+  SYSTEM_PG_CANDIDATES+=(5432)
+  for SYSTEM_PG_PORT in "${SYSTEM_PG_CANDIDATES[@]}"; do
+    if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+      LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+      DB_FOUND=true
+      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+      break
+    fi
+  done
 fi
 
 if $STACK_DB_EXPECTED && ! $DB_FOUND; then
@@ -255,6 +268,7 @@ END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
+    npx prisma generate >/dev/null
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
@@ -379,6 +393,8 @@ BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT
 export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
 export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
+export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"

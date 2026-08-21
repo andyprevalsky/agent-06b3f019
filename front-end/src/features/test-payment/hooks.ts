@@ -1,1 +1,6 @@
-export { confirmTestPayment, fetchTestPaymentItems } from './api';
+export {
+  confirmTestPayment,
+  fetchTestPaymentItems,
+  settleTestPaymentCheckout,
+  startTestPaymentCheckout,
+} from './api';

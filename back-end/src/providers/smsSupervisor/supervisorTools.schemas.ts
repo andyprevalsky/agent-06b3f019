@@ -74,7 +74,7 @@ export const TOOL_SCHEMAS = [
   {
     name: 'start_new_agent',
     description:
-      'Spawn an autonomous agent that decomposes a goal and runs sub-agents in parallel. Use for work that cannot finish inside this SMS round-trip — multi-step research, persistent execution, or follow-ups after web_search returns thin or stale results.',
+      "Spawn an autonomous agent that decomposes a goal and runs sub-agents in parallel. Use for work that cannot finish inside this SMS round-trip — multi-step research, purchases/orders, persistent execution, or follow-ups after web_search returns thin or stale results. This is the SMS-surface equivalent of the main agent's spawn_agent — call start_new_agent here; do not invent progress in send_user_message without calling it.",
     parameters: {
       type: 'object' as const,
       properties: {
@@ -223,7 +223,7 @@ Returns:
   {
     name: 'send_user_message',
     description:
-      'Send an SMS to the user now. This does not end the run: continue using tools if more work or a later result is needed, then call attempt_completion when the run is actually complete.',
+      'Deliver a real SMS to the user immediately. This is not a draft and cannot be undone. Sending does not end the run: continue using tools if more work or a later result is needed, then call attempt_completion when the run is actually complete.',
     parameters: {
       type: 'object' as const,
       properties: {

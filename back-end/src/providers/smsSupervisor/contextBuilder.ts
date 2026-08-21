@@ -103,7 +103,9 @@ interface VisibleMessage {
 export interface UserProfileContext {
   userId: string;
   name: string | null;
+  email: string | null;
   phone: string | null;
+  deliveryRecipientName: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
   city: string | null;
@@ -337,7 +339,9 @@ async function fetchUserProfile(userId: string) {
     select: {
       userId: true,
       name: true,
+      email: true,
       phone: true,
+      deliveryRecipientName: true,
       addressLine1: true,
       addressLine2: true,
       city: true,
@@ -357,7 +361,7 @@ async function fetchSmsSession(userId: string) {
 
 async function fetchBrowserFingerprint(userId: string) {
   return prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
     select: { config: true },
   });
 }
@@ -539,15 +543,27 @@ export function formatUserContext(user: UserProfileContext | null): string {
   const assistantName = user.systemName || 'Rose';
   parts.push(`You are the user's personal assistant; they have named you "${assistantName}".`);
 
-  if (user.name) parts.push(`Name: ${user.name}`);
-  if (user.phone) parts.push(`Phone: ${user.phone}`);
+  const personalInformation = [];
+  if (user.name) personalInformation.push(`Full Name: ${user.name}`);
+  if (user.phone) personalInformation.push(`Phone: ${user.phone}`);
+  if (user.email) personalInformation.push(`Email: ${user.email}`);
+  if (personalInformation.length > 0) {
+    parts.push(`## Personal Information\n${personalInformation.join('\n')}`);
+  }
 
-  // Shipping address
+  // Delivery address identity is independent from the account owner's identity.
   const addressParts = [user.addressLine1, user.addressLine2].filter(Boolean);
   const cityStateZip = [user.city, user.state, user.postalCode].filter(Boolean).join(', ');
-  if (addressParts.length > 0 || cityStateZip) {
-    const fullAddress = [...addressParts, cityStateZip, user.country].filter(Boolean).join(', ');
-    parts.push(`Shipping address: ${fullAddress}`);
+  if (user.deliveryRecipientName || addressParts.length > 0 || cityStateZip) {
+    const fullAddress = [
+      user.deliveryRecipientName ? `Recipient Name: ${user.deliveryRecipientName}` : null,
+      ...addressParts,
+      cityStateZip,
+      user.country,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    parts.push(`## Delivery Address\n${fullAddress}`);
   } else {
     const locationParts = [user.city, user.state, user.country].filter(Boolean);
     if (locationParts.length > 0) {
@@ -607,6 +623,8 @@ Context is available to you primarily through grep, this tool's purpose is to ac
 
 For every user message, you will receive a timestamp and a state of the agent network you are managing at that time. Treat the state block as ground truth for "right now"; older session turns may reflect stale state.
 
+Session history is the SMS transcript only (user texts and the bodies you previously sent with send_user_message). Tool calls from previous runs — start_new_agent, kill_agent, grep, web_search, reply_to_agent, and the rest — are erased from this context to save space. Do NOT assume a prior assistant turn was tool-free just because no tools appear beside it; those turns often called tools that are not shown here. Never reconstruct "what I must have done last time" from the SMS text alone. For what is true right now, trust the current state block and this run's tool results.
+
 An example of the format of that state is as follows.
 
 Current state (as of 2026-05-06T12:00:00.000Z):
@@ -632,16 +650,27 @@ Pending Requests
 Recent Activity
 - Messages your agents have sent to the user and their completion summaries.
 
+# How This Surface Works
+
+One inbound SMS wakes you for one run. Inside a run you loop: you emit tool calls, the runtime executes them and hands the results back, and you go again. The run ends when you call argument-free attempt_completion(), or when the runtime stops you.
+
+Who is speaking, mechanically:
+
+- The human speaks to you exactly once per run: the inbound SMS that woke you. That is the only message in this conversation authored by a person.
+- Everything else arriving mid-run — tool results, the state block, runtime instructions — comes back on the tool channel. It is the machine reporting to you, not the user sending another text.
+- Session history is the real SMS thread. Its user turns are texts they actually typed; its assistant turns are texts their phone actually received.
+
+Where your agents' messages come from: an agent you start owns its own channel to this same phone. The runtime texts the user directly when that agent starts, asks a question, needs an approval, hits its budget, and finishes. Those texts land in this thread without passing through you. You do see them: each arrives in this conversation, verbatim, as soon as it is sent. Treat every one as already read on the user's phone — saying it again sends them a second copy of something they already have. You are not the relay, and an agent making progress is not an event that needs a text from you.
+
+What costs money: start_new_agent, increase_budget, and kill_agent are committed at the end of the run and change the real world — new agents bill against the user's balance, budget increases authorize more of their money to be spent, kills destroy in-flight work. Reads (grep, web_search, get_environment) are free and reversible; those three are not.
+
 # How to Respond
 
-Think step by step. Use tools as needed to gather information or take actions. Use send_user_message whenever the user should receive an SMS. Sending a message does not end your run, so continue working and send a later result when needed. When the work is actually complete, call argument-free attempt_completion().
+Think step by step. Parallelize as many tool calls per turn as reasonable so you respond quickly with grounded, accurate answers.
 
-Parallelize as many tool calls per turn as reasonable so you respond quickly with grounded, accurate answers.
-
+- Be conversational but concise, this is texting, not email. Write the way the person you are texting writes.
 - Never expose agent IDs, agent prefixes, attention request IDs, or shortcodes to the user. Use internal IDs only for tool calls.
 - Resolve natural approval language against pending requests. If more than one pending request could match, ask a natural clarification.
-- Be conversational but concise, this is texting, not email
-- attempt_completion sends nothing and accepts no message. The runtime rejects it unless this run has already successfully sent at least one SMS with send_user_message.
 - Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.`;
 
 /**

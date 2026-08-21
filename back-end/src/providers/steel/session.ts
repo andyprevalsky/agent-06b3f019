@@ -12,15 +12,27 @@ import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
 import {
-  summarizeSteelCaptchaStatus,
-  type BrowserCaptchaTelemetry,
-} from '../browser/captchaTelemetry';
-import {
   envEnabled,
   rememberBenchmarkAnonSteelProfile,
   resolveSteelProfileForSession,
   shouldWriteSteelProfileToBrowserContext,
 } from './profileBinding';
+import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
+import {
+  buildSteelProxySettings,
+  isInvalidSteelProxyConfiguration,
+  isKnownRejectedProxyCity,
+  rememberRejectedProxyCity,
+} from './sessionProxy';
+export {
+  buildSteelProxySettings,
+  isInvalidSteelProxyConfiguration,
+  isKnownRejectedProxyCity,
+  proxyCityKey,
+  rememberRejectedProxyCity,
+  type SteelProxyConfig,
+  type SteelProxySettings,
+} from './sessionProxy';
 export { resumeSession } from './sessionResume';
 export {
   envEnabled,
@@ -38,14 +50,12 @@ export {
   steelSessionFileUrl,
   steelPublicCdpUrl,
 } from './urls';
+export { MAX_SESSION_RETRIES } from './sessionRetry';
 
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
   baseURL: STEEL_API_BASE_URL,
 });
-
-// Max retries when session validation fails
-export const MAX_SESSION_RETRIES = 3;
 
 export class SteelSessionCleanupError extends Error {
   constructor(sessionId: string, cause: unknown) {
@@ -61,150 +71,6 @@ interface SteelSessionResult {
   debugUrl: string;
   profileId?: string | null;
   proxySource?: string | null;
-}
-
-interface SteelSessionHealth {
-  sessionId: string;
-  status: string | null;
-  createdAt: string | null;
-  timeoutMs: number | null;
-  expiresAt: string | null;
-  ttlMs: number | null;
-  profileId: string | null;
-}
-
-interface SteelSessionCookieSummary {
-  sessionId: string;
-  authRealm: string;
-  cookieCount: number;
-  checkedAt: string;
-}
-
-export type SteelProxyConfig =
-  | false
-  | { server: string }
-  // Steel Dedicated IPs: { type: 'fixed' } lets Steel pick one of our leased
-  // IPs and — with persistProfile — pin it to the profile, so each user keeps a
-  // stable egress IP across sessions. An explicit id pins a specific IP.
-  | { type: 'fixed'; id?: string }
-  | {
-      geolocation: {
-        country: string;
-        state?: string;
-        city?: string;
-      };
-    };
-
-export type SteelProxySettings = {
-  config: SteelProxyConfig;
-  source: 'none' | 'steel' | 'byop' | 'dedicated';
-};
-
-function redactProxyServerForLog(server: string): string {
-  try {
-    const url = new URL(server);
-    if (url.username || url.password) {
-      url.username = '***';
-      url.password = '***';
-    }
-    return url.toString();
-  } catch {
-    return '<invalid proxy URL>';
-  }
-}
-
-// Cities Steel has already rejected with "400 Invalid proxy configuration".
-// Steel only has residential proxies in a subset of cities; without this cache
-// every session for an affected user burns ~0.5-4s on a guaranteed-failing
-// create attempt before the dropCity retry succeeds. The cache is per-process
-// (re-learned after each deploy), so known-bad cities can be seeded via
-// STEEL_REJECTED_PROXY_CITIES="US|CA|SAN FRANCISCO,US|NY|NEW YORK" to skip
-// even the first-request penalty. Advisory only — it never drops country/state.
-const rejectedProxyCities = new Set<string>(
-  (process.env.STEEL_REJECTED_PROXY_CITIES ?? '')
-    .split(',')
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry.split('|').length === 3 && entry.split('|')[2] !== '')
-);
-
-export function proxyCityKey(geolocation: ProxyGeoLocation): string {
-  return `${geolocation.country}|${geolocation.state ?? ''}|${geolocation.city ?? ''}`.toLowerCase();
-}
-
-export function isKnownRejectedProxyCity(geolocation: ProxyGeoLocation): boolean {
-  return geolocation.city !== undefined && rejectedProxyCities.has(proxyCityKey(geolocation));
-}
-
-export function rememberRejectedProxyCity(geolocation: ProxyGeoLocation): void {
-  if (geolocation.city === undefined || geolocation.city === '') return;
-  rejectedProxyCities.add(proxyCityKey(geolocation));
-  log.info(`  🌎 Remembering unsupported proxy city: ${proxyCityKey(geolocation)}`);
-}
-
-export function isInvalidSteelProxyConfiguration(error: unknown): boolean {
-  const status =
-    (error as Record<string, unknown>)?.status ?? (error as Record<string, unknown>)?.statusCode;
-  const message =
-    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-  return status === 400 || message.includes('invalid proxy configuration');
-}
-
-export function buildSteelProxySettings(
-  geolocation: ProxyGeoLocation,
-  dropCity = false,
-  forceManagedRotation = false,
-  forcedMode?: 'managed' | 'fixed'
-): SteelProxySettings {
-  const byopProxyServer = process.env.STEEL_PROXY_SERVER?.trim();
-  if (byopProxyServer && !forceManagedRotation && forcedMode === undefined) {
-    log.info(`  Using BYOP proxy server: ${redactProxyServerForLog(byopProxyServer)}`);
-    return { config: { server: byopProxyServer }, source: 'byop' };
-  }
-
-  // Dedicated IPs: route through our leased Steel IP pool. With persistProfile +
-  // a per-user profileId, Steel pins one IP to each user's profile on first use,
-  // giving every user a stable egress identity (and making cf_clearance reuse
-  // work). An explicit STEEL_DEDICATED_IP_ID pins one shared IP instead.
-  if (
-    forcedMode === 'fixed' ||
-    (!forceManagedRotation &&
-      forcedMode === undefined &&
-      envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false))
-  ) {
-    const pinnedId = process.env.STEEL_DEDICATED_IP_ID?.trim();
-    log.info(
-      `  Using Steel dedicated IP${pinnedId ? ` (pinned ${pinnedId})` : ' (auto-pin to profile)'}`
-    );
-    return {
-      config: { type: 'fixed', ...(pinnedId ? { id: pinnedId } : {}) },
-      source: 'dedicated',
-    };
-  }
-
-  const useSteelProxy =
-    forceManagedRotation ||
-    forcedMode === 'managed' ||
-    envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
-  if (!useSteelProxy) {
-    return { config: false, source: 'none' };
-  }
-
-  return {
-    config: {
-      geolocation: {
-        country: geolocation.country,
-        // Steel only supports state for US proxies
-        ...(geolocation.country === 'US' && geolocation.state && { state: geolocation.state }),
-        // City-level targeting is best-effort: Steel only has residential
-        // proxies in a subset of cities and 400s ("Invalid proxy configuration")
-        // for unsupported ones (e.g. SAN FRANCISCO). dropCity is set by the
-        // session-create retry loop after such a rejection so we fall back to
-        // country+state, which Steel always supports.
-        ...(!dropCity && geolocation.city && { city: geolocation.city }),
-      },
-    },
-    source: 'steel',
-  };
 }
 
 /**
@@ -291,7 +157,13 @@ export async function createSessionWithContext(
 
   // Fetch user's fingerprint to get their User-Agent for Steel session
   const fingerprint = await prisma.integration.findUnique({
-    where: { userId_name: { userId: dbContext.userId, name: 'browser_fingerprint' } },
+    where: {
+      userId_name_accountId: {
+        userId: dbContext.userId,
+        name: 'browser_fingerprint',
+        accountId: '',
+      },
+    },
   });
   const fp = (fingerprint?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
   const userAgent = fp?.navigator?.userAgent;
@@ -396,6 +268,9 @@ export async function createSessionWithContext(
           throw new SteelSessionCleanupError(session.id, releaseErr);
         }
         lastError = new Error(`Session validation failed on attempt ${attempt}`);
+        if (attempt < MAX_SESSION_RETRIES) {
+          await sleepBeforeSteelRetry(attempt);
+        }
         continue; // Retry
       }
 
@@ -432,6 +307,9 @@ export async function createSessionWithContext(
             lastError = new Error(
               'Concurrent Steel profile initialization; retrying with persisted profile'
             );
+            if (attempt < MAX_SESSION_RETRIES) {
+              await sleepBeforeSteelRetry(attempt);
+            }
             continue;
           }
         } else {
@@ -512,6 +390,9 @@ export async function createSessionWithContext(
         rememberRejectedProxyCity(geolocation);
         log.info('  🌎 Dropping unsupported proxy city; retrying with country+state only');
       }
+      if (attempt < MAX_SESSION_RETRIES) {
+        await sleepBeforeSteelRetry(attempt);
+      }
     }
   }
 
@@ -519,60 +400,6 @@ export async function createSessionWithContext(
   throw new Error(
     `Failed to create valid Steel session after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`
   );
-}
-
-/** Create a solver-enabled, profile-free Steel candidate for challenge search. */
-export function buildSteelRecoveryBrowserOptions(input: {
-  proxy: SteelProxyConfig;
-  userAgent?: string;
-}) {
-  return {
-    persistProfile: false,
-    userAgent: input.userAgent,
-    useProxy: input.proxy,
-    solveCaptcha: true,
-    debugConfig: { systemCursor: false },
-    stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-    timeout: 900000,
-    dimensions: { width: 1288, height: 891 },
-  };
-}
-
-export async function createSteelRecoverySession(input: {
-  proxyLocation: ProxyGeoLocation;
-  proxyMode: 'managed' | 'fixed';
-  userAgent?: string;
-}) {
-  const proxySettings = buildSteelProxySettings(
-    input.proxyLocation,
-    input.proxyMode === 'managed' && isKnownRejectedProxyCity(input.proxyLocation),
-    false,
-    input.proxyMode
-  );
-  // Challenge search must never bypass the provider-native auto solver, even
-  // when normal sessions have it disabled for a local experiment.
-  const session = (await steel.sessions.create(
-    buildSteelRecoveryBrowserOptions({
-      proxy: proxySettings.config,
-      userAgent: input.userAgent,
-    })
-  )) as SteelSessionResult;
-  const wsUrl = steelCdpUrl(session.id);
-  const validationBrowser = await connectValidatedBrowser(wsUrl);
-  if (validationBrowser === null) {
-    await releaseSteelRemoteSession(session.id).catch(() => {});
-    throw new Error(`Steel recovery candidate ${session.id} failed CDP validation`);
-  }
-  return {
-    sessionId: session.id,
-    debugUrl: steelDebugUrl(session.debugUrl),
-    wsUrl,
-    proxySource: session.proxySource ?? proxySettings.source,
-    proxyLocation: input.proxyLocation,
-    profileId: null,
-    profileSource: 'challenge_candidate_ephemeral',
-    validationBrowser,
-  };
 }
 
 /**
@@ -587,14 +414,15 @@ export async function closeSession(
 ): Promise<void> {
   log.info(`${pause ? 'Pausing' : 'Closing'} Steel session ${sessionId}...`);
 
+  let releaseError: unknown = null;
   try {
     // Release the Steel session
     await releaseSteelRemoteSession(sessionId);
   } catch (error) {
+    releaseError = error;
     log.error('Failed to close session in Steel', {
       error: error instanceof Error ? error.message : String(error),
     });
-    // Continue to update DB even if Steel call fails
   }
 
   // Update DB
@@ -602,11 +430,15 @@ export async function closeSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: pause ? 'PAUSED' : 'CLOSED',
-      closedAt: pause ? undefined : new Date(),
+      // ERROR means remote release is still owed. Terminal-agent reconciliation
+      // will retry it; CLOSED must only mean billing is known to have stopped.
+      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      closedAt: releaseError === null && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined,
     },
   });
+
+  if (releaseError !== null) throw releaseError;
 
   log.info(`✓ Session ${pause ? 'paused (resumable)' : 'closed (terminal)'}`);
   if (currentUrl) {
@@ -618,6 +450,10 @@ export async function closeSession(
 
 /** Release only the remote Steel browser without mutating BrowserSession. */
 export async function releaseSteelRemoteSession(sessionId: string): Promise<void> {
+  // Local benchmark/browser sessions have no rented Steel resource to release.
+  // Treating their synthetic IDs as remote turns a successful local close into
+  // a permanent retry obligation.
+  if (sessionId.startsWith('local-')) return;
   await retryWithBackoff(
     async () => {
       try {
@@ -637,113 +473,4 @@ export async function releaseSteelRemoteSession(sessionId: string): Promise<void
       component: 'Steel session release',
     }
   );
-}
-
-/**
- * Resume a paused browser session by creating a NEW session with the same profile.
- * Validates the WebSocket connection works before returning.
- * If validation fails, retries up to MAX_SESSION_RETRIES times.
- *
- * @param taskId - The stable task ID (BrowserSession.id)
- * @returns Session info including saved URL to navigate back to
- */
-/**
- * Get session info from database.
- */
-export async function getSession(sessionId: string) {
-  return await prisma.browserSession.findUnique({
-    where: { sessionId },
-    include: { context: true },
-  });
-}
-
-export async function getSteelSessionHealth(sessionId: string): Promise<SteelSessionHealth> {
-  const remote = (await steel.sessions.retrieve(sessionId)) as {
-    id?: string;
-    status?: string;
-    createdAt?: string;
-    timeout?: number;
-    profileId?: string | null;
-  };
-  const createdAtMs =
-    remote.createdAt !== undefined ? new Date(remote.createdAt).getTime() : Number.NaN;
-  const timeoutMs = typeof remote.timeout === 'number' ? remote.timeout : null;
-  const expiresAtMs =
-    Number.isFinite(createdAtMs) && timeoutMs !== null ? createdAtMs + timeoutMs : Number.NaN;
-  return {
-    sessionId: remote.id ?? sessionId,
-    status: remote.status ?? null,
-    createdAt: remote.createdAt ?? null,
-    timeoutMs,
-    expiresAt: Number.isFinite(expiresAtMs) ? new Date(expiresAtMs).toISOString() : null,
-    ttlMs: Number.isFinite(expiresAtMs) ? Math.max(0, expiresAtMs - Date.now()) : null,
-    profileId: remote.profileId ?? null,
-  };
-}
-
-export async function getSteelCaptchaTelemetry(
-  sessionId: string
-): Promise<BrowserCaptchaTelemetry> {
-  const statuses = await steel.sessions.captchas.status(sessionId);
-  return summarizeSteelCaptchaStatus(statuses);
-}
-
-export async function getSteelSessionCookieSummary(
-  sessionId: string,
-  authRealm: string
-): Promise<SteelSessionCookieSummary> {
-  const context = (await steel.sessions.context(sessionId)) as {
-    cookies?: Array<{ domain?: string; expires?: number }>;
-  };
-  const normalizedRealm = authRealm.toLowerCase().replace(/^\./, '');
-  const nowSeconds = Date.now() / 1000;
-  const cookieCount = (context.cookies ?? []).filter((cookie) => {
-    const domain = (cookie.domain ?? '').toLowerCase().replace(/^\./, '');
-    const domainMatches = domain === normalizedRealm || domain.endsWith(`.${normalizedRealm}`);
-    const expires = cookie.expires;
-    const live = expires === undefined || expires <= 0 || expires > nowSeconds;
-    return domainMatches && live;
-  }).length;
-  return {
-    sessionId,
-    authRealm: normalizedRealm,
-    cookieCount,
-    checkedAt: new Date().toISOString(),
-  };
-}
-
-/**
- * Close all active browser sessions (for cleanup).
- */
-export async function closeAllActiveSessions(): Promise<number> {
-  log.info('🌐 Finding all active browser sessions...');
-
-  const activeSessions = await prisma.browserSession.findMany({
-    where: { status: 'ACTIVE' },
-    select: { sessionId: true, agentId: true },
-  });
-
-  log.info(`   Found ${activeSessions.length} active session(s)`);
-
-  if (activeSessions.length === 0) {
-    return 0;
-  }
-
-  let closedCount = 0;
-
-  for (const session of activeSessions) {
-    try {
-      log.info(`   Closing session ${session.sessionId} (agent: ${session.agentId})...`);
-      await closeSession(session.sessionId);
-      closedCount++;
-    } catch (error) {
-      log.error(`Failed to close session ${session.sessionId}`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  log.info(`✅ Closed ${closedCount}/${activeSessions.length} session(s)`);
-
-  return closedCount;
 }

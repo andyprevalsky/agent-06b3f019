@@ -41,7 +41,9 @@ export function serializePasswords(
 export function toUserSettings(
   user: {
     name: string | null;
+    email: string | null;
     phone: string | null;
+    deliveryRecipientName: string | null;
     addressLine1: string | null;
     addressLine2: string | null;
     city: string | null;
@@ -57,7 +59,9 @@ export function toUserSettings(
   if (user === null) return null;
   return {
     name: user.name,
+    email: user.email,
     phone: user.phone,
+    deliveryRecipientName: user.deliveryRecipientName,
     addressLine1: user.addressLine1,
     addressLine2: user.addressLine2,
     city: user.city,

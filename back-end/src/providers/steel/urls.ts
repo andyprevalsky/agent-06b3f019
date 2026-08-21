@@ -1,9 +1,25 @@
-export const STEEL_API_BASE_URL = (
-  process.env.STEEL_BASE_URL ?? 'https://connect.steelbrowser.com'
-).replace(/\/+$/, '');
+/**
+ * Steel host split (2026):
+ * - REST API: api.steel.dev
+ * - CDP / live-view: connect.steel.dev
+ *
+ * Legacy connect.steelbrowser.com currently fails TLS from our runners
+ * (SSL_ERROR_SYSCALL) and must not be the REST default — that caused
+ * Kernel→Steel rotate-proxy to fail with "Connection error" under coverage.
+ */
+
+export const STEEL_API_BASE_URL = (process.env.STEEL_BASE_URL ?? 'https://api.steel.dev').replace(
+  /\/+$/,
+  ''
+);
 
 export const STEEL_CDP_BASE_URL = (
-  process.env.STEEL_CONNECT_URL ?? 'wss://connect.steelbrowser.com'
+  process.env.STEEL_CONNECT_URL ?? 'wss://connect.steel.dev'
+).replace(/\/+$/, '');
+
+/** HTTPS origin for Steel session player / live-view URLs. */
+export const STEEL_LIVE_VIEW_BASE_URL = (
+  process.env.STEEL_LIVE_VIEW_BASE_URL ?? 'https://connect.steel.dev'
 ).replace(/\/+$/, '');
 
 const STEEL_CDP_HOST = new URL(STEEL_CDP_BASE_URL).host;
@@ -65,8 +81,18 @@ export function steelCdpConnectionUrl(wsUrl: string): string {
 
 export function steelDebugUrl(debugUrl: string): string {
   const url = new URL(debugUrl);
-  if (url.hostname === 'api.steel.dev' || url.hostname === 'connect.steel.dev') {
-    const liveOrigin = new URL(STEEL_API_BASE_URL);
+  const apiHost = new URL(STEEL_API_BASE_URL).hostname;
+  const liveViewExplicitlyConfigured = Boolean(process.env.STEEL_LIVE_VIEW_BASE_URL?.trim());
+  // Normalize public API / legacy hosts onto the live-view origin. Custom
+  // STEEL_BASE_URL hosts only rewrite when STEEL_LIVE_VIEW_BASE_URL is set —
+  // otherwise keep the custom host (do not invent public connect.steel.dev).
+  const shouldRewriteToLiveView =
+    url.hostname === 'api.steel.dev' ||
+    url.hostname === 'connect.steel.dev' ||
+    url.hostname === 'connect.steelbrowser.com' ||
+    (url.hostname === apiHost && (apiHost === 'api.steel.dev' || liveViewExplicitlyConfigured));
+  if (shouldRewriteToLiveView) {
+    const liveOrigin = new URL(STEEL_LIVE_VIEW_BASE_URL);
     url.protocol = liveOrigin.protocol;
     url.host = liveOrigin.host;
   }

@@ -15,6 +15,7 @@ import {
   compareFunnelSteps,
   fetchStripeRevenueByPeriod,
 } from './metrics';
+import * as costRepo from './costRepo';
 import * as repo from './repo';
 import { fetchStripeSubscribersByPeriod } from './stripeSubscribers';
 import { buildPeriods, startOfNextUtcDay, startOfWeek, utcDayKey } from './time';
@@ -101,6 +102,8 @@ async function fetchInputs(
     );
   const [
     tasks,
+    rootAgentRuns,
+    rootAgentRunUsage,
     firstTasks,
     waitlistSignups,
     verifiedUsers,
@@ -110,8 +113,11 @@ async function fetchInputs(
     currentAmplitude,
     previousAmplitude,
     connectedConnectors,
+    gmvRecords,
   ] = await Promise.all([
     repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd),
+    costRepo.findRootAgentRunsBetween(historyStart, historyEnd),
+    costRepo.findRootAgentRunUsageBetween(historyStart, historyEnd),
     repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
     repo.findWaitlistSignupsBetween(historyStart, historyEnd),
     repo.findVerifiedUsersCreatedBefore(historyEnd, Array.from(ADMIN_USER_IDS)),
@@ -125,9 +131,12 @@ async function fetchInputs(
       ? fetchAmplitudeFunnel(new Date(previous.start), new Date(previous.end))
       : Promise.resolve(blackboxOfflineAmplitude()),
     repo.findConnectedConnectors(),
+    repo.findClearedGmvBetween(historyStart, historyEnd),
   ]);
   return {
     tasks,
+    rootAgentRuns,
+    rootAgentRunUsage,
     firstTasks,
     waitlistSignups,
     verifiedUsers,
@@ -137,6 +146,7 @@ async function fetchInputs(
     currentAmplitude,
     previousAmplitude,
     connectedConnectors,
+    gmvRecords,
   };
 }
 
@@ -155,7 +165,10 @@ async function loadAdminHealth(
     input.waitlistSignups,
     input.subscribers,
     input.revenue,
-    input.velocity.buckets
+    input.velocity.buckets,
+    input.gmvRecords,
+    input.rootAgentRuns,
+    input.rootAgentRunUsage
   );
   const latest = series[series.length - 1];
   const currentCohort = buildSignupCohort(input.verifiedUsers, input.tasks, currentPeriod);
@@ -185,12 +198,15 @@ async function loadAdminHealth(
     historyRange: { start: periods[0].start, end: currentPeriod.end },
     summary: {
       revenueCents: latest.revenueCents,
+      gmvCents: latest.gmvCents,
       waitlistSignups: latest.waitlistSignups,
       userCount: latest.userCount,
       taskCount: latest.taskCount,
       tasksIssuedPerUser: latest.tasksIssuedPerUser,
       outputTokensPerTask: latest.outputTokensPerTask,
+      gmvPerTask: latest.gmvPerTask,
       taskCompletionRate: latest.taskCompletionRate,
+      costPerTask: latest.costPerTask,
     },
     series,
     retentionCohorts: buildRetentionCohorts(retentionFirstTasks, retentionTasks, retentionThrough),

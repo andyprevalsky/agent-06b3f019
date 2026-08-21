@@ -9,6 +9,7 @@
 import { createSignupBonusCredit, createInitialCredit } from '../../providers/credits';
 import { sendSms, sendMms } from '../../providers/smsQueue';
 import { SMS_TEMPLATES, getPersonalizedVcardUrl } from '../../providers/smsTemplates';
+import { mirrorOnboardingWelcomeToWhatsApp } from '../../providers/whatsappOnboarding';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import type { SessionTokens, AnonymousSessionResult } from './types';
@@ -353,7 +354,16 @@ export async function completeOnboarding(userId: string): Promise<
           error: error instanceof Error ? error.message : String(error),
         });
       });
-    log.info('Sending welcome SMS + vCard', { user_id: userId });
+    // Mirror the welcome to WhatsApp via an approved template (the only way to
+    // reach a user business-initiated, outside the 24h session window). Skipped
+    // when WhatsApp is unconfigured or the number is known not to be on WhatsApp.
+    mirrorOnboardingWelcomeToWhatsApp(userId, userPhone, firstName).catch((error: unknown) => {
+      log.error('Failed to mirror onboarding welcome to WhatsApp', {
+        user_id: userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    log.info('Sending welcome SMS + vCard (+ WhatsApp mirror)', { user_id: userId });
   }
 
   return {

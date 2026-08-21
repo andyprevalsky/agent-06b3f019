@@ -24,7 +24,7 @@ describe('ConnectedAccountChip', () => {
       </div>,
     );
 
-    expect(screen.getByText('Synced').parentElement).toHaveClass('bg-emerald-500/10');
+    expect(screen.getByText('Synced').parentElement).toHaveClass('bg-rose-500/10');
     expect(screen.getByText('Syncing').parentElement).toHaveClass('bg-sky-500/10');
     expect(screen.getByText('Warning').parentElement).toHaveClass('bg-amber-500/10');
     expect(screen.getByText('Error').parentElement).toHaveClass('bg-destructive/10');
@@ -63,5 +63,90 @@ describe('ConnectedAccountChip', () => {
     const chip = screen.getByRole('button', { name: 'Disconnect Chase' });
     expect(chip).toBeDisabled();
     expect(chip.querySelector('.animate-spin')).toBeInTheDocument();
+  });
+
+  describe('damaged account (split layout)', () => {
+    it('exposes repair and removal as two separate controls', async () => {
+      const user = userEvent.setup();
+      const onResync = vi.fn();
+      const onRemove = vi.fn();
+      render(
+        <ConnectedAccountChip
+          label="broken@gmail.com"
+          detail="Needs Reconnection"
+          tone="warning"
+          onResync={onResync}
+          resyncLabel="Reconnect broken@gmail.com"
+          onRemove={onRemove}
+          removeLabel="Disconnect broken@gmail.com"
+        />,
+      );
+
+      // Two actions cannot live inside one <button>; the chip must split.
+      const resync = screen.getByRole('button', { name: 'Reconnect broken@gmail.com' });
+      const remove = screen.getByRole('button', { name: 'Disconnect broken@gmail.com' });
+      expect(resync).not.toBe(remove);
+
+      await user.click(resync);
+      expect(onResync).toHaveBeenCalledTimes(1);
+      expect(onRemove).not.toHaveBeenCalled();
+
+      await user.click(remove);
+      expect(onRemove).toHaveBeenCalledTimes(1);
+      expect(onResync).toHaveBeenCalledTimes(1);
+    });
+
+    it('renders the amber tone, the label, and a warning icon', () => {
+      render(
+        <ConnectedAccountChip
+          label="broken@gmail.com"
+          detail="Needs Reconnection"
+          tone="warning"
+          onResync={() => {}}
+          resyncLabel="Reconnect broken@gmail.com"
+        />,
+      );
+
+      const chip = screen.getByText('broken@gmail.com').parentElement!;
+      expect(chip).toHaveClass('bg-amber-500/10');
+      expect(chip).toHaveTextContent('broken@gmail.com / Needs Reconnection');
+      // The warning glyph is decorative, so it is found by shape not by role.
+      expect(chip.querySelector('svg.lucide-triangle-alert')).toBeInTheDocument();
+    });
+
+    it('omits the warning icon when the split chip is not in a damaged tone', () => {
+      render(
+        <ConnectedAccountChip
+          label="ok@gmail.com"
+          tone="synced"
+          onResync={() => {}}
+          resyncLabel="Resync ok@gmail.com"
+        />,
+      );
+
+      const chip = screen.getByText('ok@gmail.com').parentElement!;
+      expect(chip.querySelector('svg.lucide-triangle-alert')).not.toBeInTheDocument();
+    });
+
+    it('locks both controls while a repair is in flight', () => {
+      render(
+        <ConnectedAccountChip
+          label="broken@gmail.com"
+          tone="warning"
+          onResync={() => {}}
+          resyncLabel="Reconnect broken@gmail.com"
+          resyncing={true}
+          onRemove={() => {}}
+          removeLabel="Disconnect broken@gmail.com"
+        />,
+      );
+
+      const resync = screen.getByRole('button', { name: 'Reconnect broken@gmail.com' });
+      const remove = screen.getByRole('button', { name: 'Disconnect broken@gmail.com' });
+      expect(resync).toBeDisabled();
+      // Removing an account mid-repair would race the reconnect it is running.
+      expect(remove).toBeDisabled();
+      expect(resync.querySelector('.animate-spin')).toBeInTheDocument();
+    });
   });
 });

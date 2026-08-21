@@ -4,12 +4,11 @@ import { createLogger } from '../logger';
 import {
   closeSession as closeSteelSession,
   createSessionWithContext as createSteelSessionWithContext,
-  getSteelSessionHealth,
-  getSteelCaptchaTelemetry,
   resumeSession as resumeSteelSession,
   steelApiUrl,
   steelSessionFileUrl,
 } from '../steel/session';
+import { getSteelCaptchaTelemetry, getSteelSessionHealth } from '../steel/sessionInspect';
 import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
 import { injectUserData } from '../steel/injection';
@@ -220,11 +219,14 @@ export async function closeSession(
   await closeSteelSession(sessionId, pause, currentUrl);
 }
 
-export async function resumeSession(taskId: string): Promise<BrowserProviderResumeSession> {
+export async function resumeSession(
+  taskId: string,
+  options: { forceFreshProfile?: boolean } = {}
+): Promise<BrowserProviderResumeSession> {
   const provider = await providerForTask(taskId);
   if (provider === 'kernel') return resumeKernelSession(taskId);
 
-  const replacement = await resumeSteelSession(taskId);
+  const replacement = await resumeSteelSession(taskId, options);
   const { previousSessionId, previousProvider, ...session } = replacement;
   await releaseSupersededBrowser({
     taskId,
@@ -348,11 +350,13 @@ export async function uploadSessionFile(
   sessionId: string,
   fileBuffer: Buffer,
   filename: string,
-  mimeType = 'application/octet-stream'
+  mimeType = 'application/octet-stream',
+  options: { directory?: string } = {}
 ): Promise<{ path: string; size: number }> {
   const provider = await providerForSession(sessionId);
+  // Steel's Files API owns /files; directory overrides only apply to Kernel.
   return provider === 'kernel'
-    ? uploadKernelSessionFile(sessionId, fileBuffer, filename)
+    ? uploadKernelSessionFile(sessionId, fileBuffer, filename, options)
     : uploadFileToSession(sessionId, fileBuffer, filename, mimeType);
 }
 

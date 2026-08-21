@@ -1,0 +1,137 @@
+/**
+ * Steel challenge-recovery session factory (profile-free, solver-enabled).
+ * Kept out of session.ts so max-lines stays under the lint budget.
+ */
+
+import type { Browser } from 'playwright';
+import type { ProxyGeoLocation } from '../geoip';
+import { connectValidatedBrowser } from './sessionConnection';
+import {
+  buildSteelProxySettings,
+  isInvalidSteelProxyConfiguration,
+  isKnownRejectedProxyCity,
+  rememberRejectedProxyCity,
+  releaseSteelRemoteSession,
+  steel,
+  type SteelProxyConfig,
+} from './session';
+import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
+import { log } from './types';
+import { steelCdpUrl, steelDebugUrl } from './urls';
+
+interface SteelSessionResult {
+  id: string;
+  debugUrl: string;
+  profileId?: string | null;
+  proxySource?: string | null;
+}
+
+/** Create a solver-enabled, profile-free Steel candidate for challenge search. */
+export function buildSteelRecoveryBrowserOptions(input: {
+  proxy: SteelProxyConfig;
+  userAgent?: string;
+}) {
+  return {
+    persistProfile: false,
+    userAgent: input.userAgent,
+    useProxy: input.proxy,
+    solveCaptcha: true,
+    debugConfig: { systemCursor: false },
+    stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
+    timeout: 900000,
+    dimensions: { width: 1288, height: 891 },
+  };
+}
+
+export async function createSteelRecoverySession(
+  input: {
+    proxyLocation: ProxyGeoLocation;
+    proxyMode: 'managed' | 'fixed';
+    userAgent?: string;
+  },
+  deps?: {
+    createSession?: (options: ReturnType<typeof buildSteelRecoveryBrowserOptions>) => Promise<{
+      id: string;
+      debugUrl: string;
+      profileId?: string | null;
+      proxySource?: string | null;
+    }>;
+    connectValidatedBrowser?: typeof connectValidatedBrowser;
+    releaseRemoteSession?: typeof releaseSteelRemoteSession;
+  }
+) {
+  // Match createSessionWithContext: Steel 400s "Invalid proxy configuration" on
+  // unsupported city-level residential targets. Challenge recovery used a single
+  // create with no city-drop retry, so Stripe (preferSteel → steel_managed) failed
+  // closed whenever the live session geo city was unsupported (prod: DALLAS).
+  let dropProxyCity =
+    input.proxyMode === 'managed' && isKnownRejectedProxyCity(input.proxyLocation);
+  let lastError: Error | null = null;
+  const createSession = deps?.createSession ?? ((options) => steel.sessions.create(options));
+  const connectBrowser = deps?.connectValidatedBrowser ?? connectValidatedBrowser;
+  const releaseRemote = deps?.releaseRemoteSession ?? releaseSteelRemoteSession;
+
+  for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
+    const proxySettings = buildSteelProxySettings(
+      input.proxyLocation,
+      dropProxyCity,
+      false,
+      input.proxyMode
+    );
+    let validationBrowser: Browser | null = null;
+    try {
+      // Challenge search must never bypass the provider-native auto solver, even
+      // when normal sessions have it disabled for a local experiment.
+      const session = (await createSession(
+        buildSteelRecoveryBrowserOptions({
+          proxy: proxySettings.config,
+          userAgent: input.userAgent,
+        })
+      )) as SteelSessionResult;
+      const wsUrl = steelCdpUrl(session.id);
+      validationBrowser = await connectBrowser(wsUrl);
+      if (validationBrowser === null) {
+        await releaseRemote(session.id).catch(() => {});
+        lastError = new Error(`Steel recovery candidate ${session.id} failed CDP validation`);
+        if (attempt < MAX_SESSION_RETRIES) {
+          await sleepBeforeSteelRetry(attempt);
+        }
+        continue;
+      }
+      return {
+        sessionId: session.id,
+        debugUrl: steelDebugUrl(session.debugUrl),
+        wsUrl,
+        proxySource: session.proxySource ?? proxySettings.source,
+        proxyLocation: input.proxyLocation,
+        profileId: null,
+        profileSource: 'challenge_candidate_ephemeral',
+        validationBrowser,
+      };
+    } catch (error) {
+      if (validationBrowser !== null) {
+        await validationBrowser.close().catch(() => {});
+      }
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (
+        input.proxyMode === 'managed' &&
+        !dropProxyCity &&
+        isInvalidSteelProxyConfiguration(error)
+      ) {
+        dropProxyCity = true;
+        rememberRejectedProxyCity(input.proxyLocation);
+        log.info(
+          '  🌎 Dropping unsupported proxy city on recovery candidate; retrying with country+state only'
+        );
+      }
+      if (attempt < MAX_SESSION_RETRIES) {
+        await sleepBeforeSteelRetry(attempt);
+        continue;
+      }
+    }
+  }
+
+  throw new Error(
+    `Failed to create Steel recovery session after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`
+  );
+}

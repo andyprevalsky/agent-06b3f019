@@ -6,7 +6,7 @@
  * System context:
  *   Integrations dropdown row -> DropdownIconFrame -> consistent 32px icon art
  *     inside a 1px diagonal border shared by row icons and parent dropdown icons.
- *     Synced rows keep their original icon and signal status with a static teal glow.
+ *     Synced rows keep their original icon and signal status with a static rose glow.
  */
 
 import type { CSSProperties, ReactNode } from 'react';
@@ -17,18 +17,23 @@ interface DropdownIconFrameProps {
   iconFit?: 'contain' | 'cover' | 'fill';
   iconScale?: number;
   isSynced?: boolean;
-  /** Override the synced glow gradient (defaults to the teal integrations glow). */
+  /** Override the synced glow gradient (defaults to the rose integrations glow). */
   glowGradient?: string;
 }
 
 export const dropdownIconImageClassName = 'h-8 w-8 object-cover';
 
-const connectedTealGlowGradient =
-  'linear-gradient(to bottom left, rgba(45, 212, 191, 0.5), rgba(20, 184, 166, 0.42), rgba(15, 118, 110, 0.46))';
-
-/** Rose variant used by the mac-app onboarding ring (ROSE_GRADIENT tints). */
+/** Rose glow (ROSE_GRADIENT tints) used for synced integrations and the mac-app onboarding ring. */
 export const connectedRoseGlowGradient =
   'linear-gradient(to bottom left, rgba(254, 117, 3, 0.5), rgba(252, 88, 92, 0.45), rgba(224, 98, 204, 0.45), rgba(122, 107, 236, 0.5))';
+
+/**
+ * Amber glow for a connected-but-damaged integration. Same shape and opacity as
+ * the rose glow so the row reads as "still connected, needs attention" rather
+ * than as a different kind of element; only the hue changes.
+ */
+export const warningGlowGradient =
+  'linear-gradient(to bottom left, rgba(245, 158, 11, 0.5), rgba(251, 191, 36, 0.45), rgba(252, 211, 77, 0.45), rgba(245, 158, 11, 0.5))';
 
 export const DropdownIconPreset = {
   browserMain: { iconScale: 62, iconFit: 'contain' },
@@ -94,7 +99,7 @@ export default function DropdownIconFrame({
   iconFit = 'cover',
   iconScale = 100,
   isSynced = false,
-  glowGradient = connectedTealGlowGradient,
+  glowGradient = connectedRoseGlowGradient,
 }: DropdownIconFrameProps): JSX.Element {
   return (
     <div className="relative h-[34px] w-[34px] shrink-0">

@@ -32,6 +32,9 @@ function installSettingsHandlers(overrides?: {
       return HttpResponse.json(
         overrides?.userSettings ?? {
           name: 'Test User',
+          email: 'test@example.com',
+          phone: '+15551234567',
+          deliveryRecipientName: 'Delivery Person',
           addressLine1: '123 Main St',
           addressLine2: '',
           city: 'New York',
@@ -178,8 +181,12 @@ describe('Settings page', () => {
       await user.click(screen.getByRole('tab', { name: /personal info/i }));
 
       await waitFor(() => {
-        expect(screen.getByLabelText('Full Name')).toHaveValue('Test User');
+        expect(screen.getByLabelText('Personal Full Name')).toHaveValue('Test User');
       });
+      expect(screen.getByLabelText('Email')).toHaveValue('test@example.com');
+      expect(screen.getByLabelText('Verified Phone')).toHaveValue('+15551234567');
+      expect(screen.getByLabelText('Verified Phone')).toBeDisabled();
+      expect(screen.getByLabelText('Recipient Full Name')).toHaveValue('Delivery Person');
       expect(screen.getByLabelText('Address Line 1')).toHaveValue('123 Main St');
       expect(screen.getByLabelText('City')).toHaveValue('New York');
       expect(screen.getByLabelText('State')).toHaveValue('NY');
@@ -247,13 +254,16 @@ describe('Settings page', () => {
 
       await user.click(screen.getByRole('tab', { name: /personal info/i }));
       await waitFor(() => {
-        expect(screen.getByLabelText('Full Name')).toBeInTheDocument();
+        expect(screen.getByLabelText('Personal Full Name')).toBeInTheDocument();
       });
 
-      // Modify the name
-      const nameInput = screen.getByLabelText('Full Name');
+      // Modify the personal and delivery names independently.
+      const nameInput = screen.getByLabelText('Personal Full Name');
       await user.clear(nameInput);
       await user.type(nameInput, 'Updated User');
+      const recipientInput = screen.getByLabelText('Recipient Full Name');
+      await user.clear(recipientInput);
+      await user.type(recipientInput, 'Updated Recipient');
 
       // Click save
       await user.click(screen.getByRole('button', { name: /save settings/i }));
@@ -265,6 +275,11 @@ describe('Settings page', () => {
         );
         expect(putReq).toBeDefined();
         expect((putReq!.body as Record<string, unknown>).name).toBe('Updated User');
+        expect((putReq!.body as Record<string, unknown>).email).toBe('test@example.com');
+        expect((putReq!.body as Record<string, unknown>).deliveryRecipientName).toBe(
+          'Updated Recipient',
+        );
+        expect((putReq!.body as Record<string, unknown>).phone).toBeUndefined();
       });
     });
 

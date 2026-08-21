@@ -16,17 +16,23 @@ const log = createLogger('Retry');
 
 // ── Types ──
 
-export interface RetryOptions {
+export interface RetryOptions<T = unknown> {
   /** Maximum number of attempts (default: 3) */
   maxRetries?: number;
   /** Initial backoff delay in ms (default: 1000). Doubles each attempt. */
   initialBackoffMs?: number;
   /** Fixed backoff delays per attempt. Overrides exponential if provided. */
   fixedDelays?: number[];
+  /** Dynamic delay for an error, such as an API-provided absolute retry timestamp. */
+  getBackoffDelayMs?: (error: unknown, attempt: number) => number;
   /** HTTP status codes that should trigger a retry (default: 408, 429, 502, 503, 504) */
   retryableStatusCodes?: Set<number>;
   /** Predicate to decide if an error is retryable. Overrides default behavior if provided. */
   isRetryable?: (error: unknown) => boolean;
+  /** Predicate to retry a resolved result, such as a transient HTTP response. */
+  shouldRetryResult?: (result: T) => boolean | Promise<boolean>;
+  /** Cleanup performed before retrying a resolved result, such as draining a response body. */
+  beforeRetryResult?: (result: T) => void | Promise<void>;
   /** Component name for log messages (default: 'Retry') */
   component?: string;
 }
@@ -52,12 +58,45 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getBackoffDelay(attempt: number, opts: RetryOptions): number {
-  if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
-    return opts.fixedDelays[attempt - 1];
+/**
+ * Node stores a timer delay in a signed 32-bit int. Anything larger (or NaN, or
+ * non-finite) silently collapses to a 1ms timer, which would turn a long
+ * rate-limit backoff into a hot retry loop.
+ */
+export const MAX_BACKOFF_DELAY_MS = 2_147_483_647;
+
+/** Bound a candidate delay to a finite, non-negative, timer-safe value. `null` if unusable. */
+function normalizeDelayMs(value: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.min(Math.max(0, value), MAX_BACKOFF_DELAY_MS);
+}
+
+function getBackoffDelay<T>(error: unknown, attempt: number, opts: RetryOptions<T>): number {
+  if (opts.getBackoffDelayMs) {
+    const dynamic = normalizeDelayMs(opts.getBackoffDelayMs(error, attempt));
+    if (dynamic !== null) return dynamic;
+    log.warn(
+      `${opts.component ?? 'Retry'}: discarding non-finite dynamic backoff delay on attempt ${attempt}, falling back to exponential backoff`
+    );
+  } else {
+    return errorlessBackoffDelay(attempt, opts);
   }
-  const base = opts.initialBackoffMs ?? 1000;
-  return base * Math.pow(2, attempt - 1);
+  return errorlessBackoffDelay(attempt, opts);
+}
+
+/**
+ * The delay schedule that does not depend on an error: `fixedDelays` when the
+ * caller configured one, else exponential backoff. Shared by the error and
+ * result retry paths so a caller's `fixedDelays` contract cannot apply to one
+ * and not the other.
+ */
+function errorlessBackoffDelay<T>(attempt: number, opts: RetryOptions<T>): number {
+  if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
+    const fixed = normalizeDelayMs(opts.fixedDelays[attempt - 1]);
+    if (fixed !== null) return fixed;
+  }
+  const base = normalizeDelayMs(opts.initialBackoffMs ?? 1000) ?? 1000;
+  return Math.min(base * Math.pow(2, attempt - 1), MAX_BACKOFF_DELAY_MS);
 }
 
 function defaultIsRetryable(error: unknown): boolean {
@@ -83,7 +122,7 @@ function defaultIsRetryable(error: unknown): boolean {
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  opts: RetryOptions = {}
+  opts: RetryOptions<T> = {}
 ): Promise<T> {
   const maxRetries = opts.maxRetries ?? 3;
   const component = opts.component ?? 'Retry';
@@ -92,19 +131,18 @@ export async function retryWithBackoff<T>(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Only the operation itself belongs in this try. Result-path callbacks run
+    // after it so a bug in `shouldRetryResult`/`beforeRetryResult` surfaces as
+    // itself instead of being caught below and reclassified as an operation
+    // failure (which would discard an already-resolved result).
+    let result: T;
     try {
-      const result = await fn();
-
-      if (attempt > 1) {
-        log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
-      }
-
-      return result;
+      result = await fn();
     } catch (error) {
       lastError = error;
 
       if (attempt < maxRetries && isRetryable(error)) {
-        const delay = getBackoffDelay(attempt, opts);
+        const delay = getBackoffDelay(error, attempt, opts);
         log.warn(`${component}: attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms`, {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -114,6 +152,28 @@ export async function retryWithBackoff<T>(
 
       throw error;
     }
+
+    const retryableResult = opts.shouldRetryResult && (await opts.shouldRetryResult(result));
+
+    if (retryableResult && attempt < maxRetries) {
+      await opts.beforeRetryResult?.(result);
+      // There is no error on the result path, so the dynamic `getBackoffDelayMs`
+      // hook is deliberately skipped rather than invoked with `undefined` -- but
+      // `fixedDelays` still applies, so share the errorless schedule instead of
+      // recomputing only the exponential branch.
+      const delay = errorlessBackoffDelay(attempt, opts);
+      log.warn(
+        `${component}: attempt ${attempt}/${maxRetries} returned a retryable result, retrying in ${delay}ms`
+      );
+      await sleep(delay);
+      continue;
+    }
+
+    if (!retryableResult && attempt > 1) {
+      log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
+    }
+
+    return result;
   }
 
   throw lastError;
