@@ -1131,7 +1131,10 @@ warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
     fi
     rm -f "$token_local"
     sync_log="$(mktemp)"
-    # -C argv names only remote paths — never the token bytes.
+    # Controller-side bound must outlast guest fetch work but still fail closed
+    # when flyctl hangs after a mid-sync machine stop (descend I-07).
+    # -C argv names only remote paths — never the token bytes (main).
+    GIT_SYNC_TO="${CLOUDBENCH_GIT_SYNC_TIMEOUT:-240}"
     local sync_rc=0
     set +e
     ssh_exec "$mid" "set -e
@@ -1141,12 +1144,12 @@ export CLOUDBENCH_APP_USER=rose
 bash /data/cloudbench-fetch-ref.sh '$REMOTE_REPO' '$sha'
 REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
 echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
-echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" 2>&1 | grep -av '^Connecting to' | tee "$sync_log" | sed 's/^/   /'
+echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" "$GIT_SYNC_TO" 2>&1 | grep -av '^Connecting to' | tee "$sync_log" | sed 's/^/   /'
     sync_rc=${PIPESTATUS[0]}
     set -e
     if [ "$sync_rc" -ne 0 ]; then
         rm -f "$sync_log"
-        echo "❌ exact remote checkout failed" >&2
+        echo "❌ exact remote checkout failed (ssh_exec timed out or remote error; bound=${GIT_SYNC_TO}s)" >&2
         return "$sync_rc"
     fi
     remote_ref="$(sed -n 's/^::CLOUDBENCH-REF:://p' "$sync_log" | tail -1)"
@@ -1158,32 +1161,24 @@ echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" 2>&1 | grep -av '^Connecting to' | tee 
     return 0
 }
 
-# SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
-ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
+# SSH-exec a shell snippet on the machine, streaming output.
+# $1 = machine id, $2 = remote shell command, $3 = optional timeout seconds
+# (default CLOUDBENCH_SSH_EXEC_TIMEOUT or 1800). Always bound via _with_timeout:
+# unbounded `flyctl ssh console` hung 10+ minutes after warm stop mid git-sync
+# (descend wait-for-trigger I-07).
+ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command> [timeout_secs]
     # base64 the command instead of printf %q: a multi-line command quotes to
     # $'set -e\n...', which the remote `-C` shell (not guaranteed bash) does not
     # expand — the literal $'...' reaches `bash -lc` and fails (observed: heal
     # git-sync/sync-deps SSH commands failing while the same commands run fine
     # by hand). base64 has no shell-special bytes, so it survives any shell.
+    local id="$1" cmd="$2" to="${3:-${CLOUDBENCH_SSH_EXEC_TIMEOUT:-1800}}"
     local b64
-    b64="$(printf '%s' "$2" | base64 | tr -d '\n')"
-    local -a ssh_cmd=(flyctl ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\"")
-    # Optional bound for hung sessions (dead tunnel / rate-limit). refresh-deps
-    # sets CLOUDBENCH_SSH_EXEC_TIMEOUT so a stalled git-sync cannot block fleets
-    # indefinitely (descend I-02).
-    if [ -n "${CLOUDBENCH_SSH_EXEC_TIMEOUT:-}" ]; then
-        local ssh_rc=0
-        set +e
-        _with_timeout "$CLOUDBENCH_SSH_EXEC_TIMEOUT" "${ssh_cmd[@]}"
-        ssh_rc=$?
-        set -e
-        if [ "$ssh_rc" -eq 124 ]; then
-            echo "❌ ssh_exec timed out after ${CLOUDBENCH_SSH_EXEC_TIMEOUT}s" >&2
-            return 124
-        fi
-        return "$ssh_rc"
-    fi
-    "${ssh_cmd[@]}"
+    b64="$(printf '%s' "$cmd" | base64 | tr -d '\n')"
+    # Always bound (descend I-07). Use flyctl not FLY: _with_timeout/Popen
+    # cannot resolve shell functions/aliases.
+    _with_timeout "$to" flyctl ssh console -a "$APP" --machine "$id" \
+        -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\""
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until

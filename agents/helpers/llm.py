@@ -333,6 +333,25 @@ Given a goal, return JSON with:
 Output JSON only. Do not include prose outside the JSON envelope."""
 
 
+_RESPONSE_SCHEMA_TITLE_INSTRUCTION = """
+
+This is the initial schema for a top-level agent. In the SAME JSON response, also return:
+  - title: a short sidebar label for the goal.
+
+Title rules:
+  - 2 to 5 words in Title Case.
+  - No trailing punctuation, quotes, or markdown.
+  - At most 48 characters.
+  - Name the concrete subject of the task, not the act of doing it.
+  - Never use generic labels such as Task, Agent Run, User Request, Doing Research, or Handling It.
+
+Title examples:
+  - "find and book a sushi restaurant in Soho" -> "Soho Sushi Reservation"
+  - "the browser agent stalls on Cloudflare Turnstile" -> "Browser Agent Stall"
+  - "what is 2+2" -> "Simple Arithmetic"
+"""
+
+
 _SchemaFieldType = Literal[
     "str",
     "int",
@@ -387,6 +406,14 @@ class _GeneratedResponseSchema(BaseModel):
     fields: List[_GeneratedResponseSchemaField] = Field(
         min_length=1,
         description="List of MUST-HAVE output fields. At least one field is required.",
+    )
+
+
+class _GeneratedResponseSchemaWithTitle(_GeneratedResponseSchema):
+    title: str = Field(
+        min_length=1,
+        max_length=80,
+        description="A specific 2-5 word Title Case sidebar label for this top-level agent goal.",
     )
 
 
@@ -616,6 +643,14 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
     return {"fields": fields}
 
 
+def _normalize_generated_agent_title(raw: str) -> Optional[str]:
+    """Normalize the title bundled into the structured schema response."""
+    first_line = raw.strip().splitlines()[0] if raw.strip() else ""
+    cleaned = re.sub(r"^\s*(?:label|title)\s*:\s*", "", first_line, flags=re.IGNORECASE)
+    cleaned = cleaned.strip("\"'`").rstrip(".,;:!").strip()
+    return cleaned[:80].rstrip() or None
+
+
 _PURCHASE_GOAL_MARKERS = (
     "buy me",
     "purchase",
@@ -686,10 +721,13 @@ async def _generate_response_schema_with_rose(
     *,
     agent_id: str,
     compute_auth: Optional[Dict[str, Any]] = None,
-) -> Tuple[Dict[str, Any], Dict[str, int]]:
+    include_title: bool = False,
+) -> Tuple[Dict[str, Any], Optional[str], Dict[str, int]]:
     claude_auth_context, gpt_auth_context = _build_compute_auth_context_from_payload(compute_auth)
+    response_model = _GeneratedResponseSchemaWithTitle if include_title else _GeneratedResponseSchema
+    system_prompt = _RESPONSE_SCHEMA_SYSTEM_PROMPT + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else "")
     messages = [
-        {"role": "system", "content": _RESPONSE_SCHEMA_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"Goal: {goal}"},
     ]
     client = RoseClient()
@@ -702,7 +740,7 @@ async def _generate_response_schema_with_rose(
                 response = await client.collect(
                     pool="rose-1-lite",
                     messages=messages,
-                    response_model=_GeneratedResponseSchema,
+                    response_model=response_model,
                     temperature=0.3,
                     max_tokens=max_tokens,
                     skip_cache_write=True,
@@ -723,21 +761,29 @@ async def _generate_response_schema_with_rose(
                     continue
 
                 content = (
-                    _content_from_structured_rose_response(response.tool_calls, _GeneratedResponseSchema)
-                    or response.content
+                    _content_from_structured_rose_response(response.tool_calls, response_model) or response.content
                 )
                 if not content:
                     raise ValueError("LLM returned no response schema content")
-                generated = _GeneratedResponseSchema.model_validate_json(content)
+                generated = response_model.model_validate_json(content)
                 prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
                 completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                 total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
                 schema = _normalize_response_schema_for_goal(goal, _schema_from_generated_model(generated))
-                return schema, {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens or prompt_tokens + completion_tokens,
-                }
+                title = (
+                    _normalize_generated_agent_title(generated.title)
+                    if isinstance(generated, _GeneratedResponseSchemaWithTitle)
+                    else None
+                )
+                return (
+                    schema,
+                    title,
+                    {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens or prompt_tokens + completion_tokens,
+                    },
+                )
             except RoseError as exc:
                 last_error = exc
                 break
@@ -5745,6 +5791,7 @@ async def set_response_schema_activity(
     user_messages: List[str],
     compute_auth: Optional[Dict[str, Any]] = None,
     fast_mode_cache_enabled: bool = False,
+    include_title: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """
     Generate and save a structured response schema for an agent.
@@ -5756,6 +5803,8 @@ async def set_response_schema_activity(
         agent_id: Agent ID to generate schema for
         user_messages: List of user message texts from conversation context
         compute_auth: Optional selected compute token from the workflow cache
+        include_title: Generate a sidebar title in the same LLM response. This is
+            true only for the initial schema of a top-level agent.
 
     Returns:
         The generated schema dict with 'fields' array, or None on failure
@@ -5779,7 +5828,9 @@ async def set_response_schema_activity(
         logger.error("No user messages provided for schema generation", agent_id=agent_id)
         return None
 
-    _safe_heartbeat("Generating response schema via Rose")
+    _safe_heartbeat(
+        "Generating response schema and title via Rose" if include_title else "Generating response schema via Rose"
+    )
     logger.info(f"[TIMING] Starting response schema generation for agent {agent_id}")
 
     # Fast Mode: the schema is deterministic given the goal + schema prompt/settings,
@@ -5805,9 +5856,12 @@ async def set_response_schema_activity(
             "response_schema",
             {
                 "pool": "rose-1-lite",
-                "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT,
+                "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
+                + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
                 "user": f"Goal: {goal}",
-                "response_model": "_GeneratedResponseSchema",
+                "response_model": (
+                    "_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"
+                ),
                 "temperature": 0.3,
                 "max_tokens": [2000, 4000],
             },
@@ -5823,19 +5877,24 @@ async def set_response_schema_activity(
             generate_start = time.perf_counter()
             if _fc_cached is not None:
                 schema = _fc_cached.get("schema", {})
+                title = _fc_cached.get("title") if include_title else None
                 usage = _fc_cached.get("usage", {})
             else:
-                schema, usage = await _generate_response_schema_with_rose(
+                schema, title, usage = await _generate_response_schema_with_rose(
                     goal,
                     agent_id=agent_id,
                     compute_auth=compute_auth,
+                    include_title=include_title,
                 )
                 if _fc_key is not None:
                     from providers.fast_cache import client as _fc_client
                     from providers.fast_cache import normalize as _fc_norm
 
                     await _fc_client.cache_set(
-                        _fc_key, "llm", _fc_norm.goal_hash(goal), {"schema": schema, "usage": usage}
+                        _fc_key,
+                        "llm",
+                        _fc_norm.goal_hash(goal),
+                        {"schema": schema, "title": title, "usage": usage},
                     )
             generate_elapsed = time.perf_counter() - generate_start
             logger.info(
@@ -5862,7 +5921,10 @@ async def set_response_schema_activity(
                         **backend_api_headers(api_key),
                         **workflow_generation_headers(),
                     },
-                    json={"response_schema": schema},
+                    json={
+                        "response_schema": schema,
+                        **({"generated_title": title} if title else {}),
+                    },
                 )
             except httpx.HTTPError as e:
                 raise ResponseSchemaPersistenceError(
@@ -5887,6 +5949,7 @@ async def set_response_schema_activity(
             )
             return {
                 "schema": schema,
+                "title": title,
                 "usage": {
                     "prompt_tokens": tokens_in,
                     "completion_tokens": tokens_out,

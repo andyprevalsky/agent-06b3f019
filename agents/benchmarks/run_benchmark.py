@@ -5809,29 +5809,25 @@ async def _refresh_local_compute_tokens_for_run(
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    # Claude-Code-required tasks must not inherit the Anthropic API-key
-    # tolerance — spawn_claude_code_agent cannot use that fallback.
-    tolerate_missing_claude = False
+    #
+    # Claude Code sessions DO use the shared ANTHROPIC_API_KEY when no OAuth
+    # envelope is available (see resolveClaudeCodeAuthEnvs). Tolerate a missing
+    # claude_code sync only when that funded-key path is confirmed healthy —
+    # otherwise require_claude_code tasks would start, discover an unfunded key
+    # mid-run, and burn the suite. Never pair this with credential-skip-as-PASS.
+    has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
+    tolerate_missing_claude = has_anthropic_key_fallback
     required_token_types: tuple[str, ...] | None = None
-    # Probed at most ONCE per run and reused for the cost warning below. Asking
-    # again is a second live HTTP round-trip and breaks the awaited-once contract
-    # its tests pin.
-    has_anthropic_key_fallback = False
-    if require_claude_code:
+    if require_claude_code and not has_anthropic_key_fallback:
         required_token_types = ("claude",)
-    else:
-        has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
-        tolerate_missing_claude = has_anthropic_key_fallback
+        tolerate_missing_claude = False
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
         required_token_types=required_token_types,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
-    # Only meaningful on the tolerant path: a `require_claude_code` run hard-gates
-    # on a real claude token above, so it always has a claudeAuth path and this
-    # warning would be false.
-    if not require_claude_code and not has_anthropic_key_fallback:
+    if not has_anthropic_key_fallback:
         print(
             "    ⚠️  No claudeAuth compute path (expired/rate-limited claude_code and no funded "
             "Anthropic key): this run bills the paid waterfall. Cost figures are NOT comparable "
@@ -7093,6 +7089,72 @@ def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     return scores[-1]
 
 
+def _webdecoy_parse_score_value(raw_score: object) -> Optional[float]:
+    """Parse a structured FCaptcha risk score (numeric or numeric string)."""
+    if isinstance(raw_score, bool):
+        return None
+    if isinstance(raw_score, (int, float)):
+        return float(raw_score)
+    if isinstance(raw_score, str):
+        match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*", raw_score)
+        if match is not None:
+            return float(match.group(1))
+    return None
+
+
+def _webdecoy_structured_score(data: dict) -> Optional[float]:
+    """Read the terminal browser task's grounded FCaptcha score."""
+    scores: List[float] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") != "spawn_browser_agent"
+            or metadata.get("toolStatus") != "FINISHED"
+            or metadata.get("action_type") != "task_complete"
+        ):
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        # Schema field is fcaptcha_risk_score; risk_score kept for older fixtures.
+        raw_score = structured.get("fcaptcha_risk_score")
+        if raw_score is None:
+            raw_score = structured.get("risk_score")
+        parsed = _webdecoy_parse_score_value(raw_score)
+        if parsed is not None:
+            scores.append(parsed)
+    if not scores:
+        return None
+    return scores[-1]
+
+
+def _webdecoy_visible_risk_scores(text: str) -> list[float]:
+    """Extract visible FCaptcha risk scores from agent transcript text.
+
+    Rejects numbered-list false positives like "(3) Risk score: ..." where the
+    list ordinal would otherwise become scores[-1] and fail the ratchet gate.
+    """
+    score_patterns = (
+        # "Risk Score (lower = human): 0.00" / "risk score:** 0.09"
+        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
+        # "0.09 risk score" — require a decimal so list ordinals ("3) Risk score")
+        # cannot match.
+        r"([0-9]+\.[0-9]+)\s*[^a-z0-9]{0,12}risk\s*score",
+    )
+    scores: list[float] = []
+    for pattern in score_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            try:
+                scores.append(float(match.group(1)))
+            except ValueError:
+                continue
+    return scores
+
+
 def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str]]:
     text = _agent_data_search_text(data)
     if "webdecoy.com/product/fcaptcha-demo" not in text and "fcaptcha" not in text:
@@ -7102,24 +7164,22 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     if not any(marker in text for marker in ("benchmark-human@example.com", "invisible mode", "submit")):
         return False, "No grounded evidence of invisible-mode form interaction"
 
-    score_patterns = (
-        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
-        r"([0-9]+(?:\.[0-9]+)?)\s*[^a-z0-9]{0,12}risk\s*score",
-    )
-    scores: list[float] = []
-    for pattern in score_patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            try:
-                scores.append(float(match.group(1)))
-            except ValueError:
-                continue
+    scores = _webdecoy_visible_risk_scores(text)
 
     exact_score = _webdecoy_exact_score_from_recordings(data)
-    if exact_score is None and not scores:
+    structured_score = _webdecoy_structured_score(data)
+    if exact_score is None and structured_score is None and not scores:
         return False, "No FCaptcha risk score was reported"
 
-    final_score = exact_score if exact_score is not None else scores[-1]
-    score_source = "captured API" if exact_score is not None else "visible"
+    if exact_score is not None:
+        final_score = exact_score
+        score_source = "captured API"
+    elif structured_score is not None:
+        final_score = structured_score
+        score_source = "structured output"
+    else:
+        final_score = scores[-1]
+        score_source = "visible"
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
@@ -7881,7 +7941,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8061,6 +8121,67 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
+    """Join transcript + metadata error surfaces for intermediate-failure classifiers.
+
+    Agent GET payloads use `text` (see `extract_message_transcript`); archived
+    run JSON often remaps that to `message`. Read both so live eval and offline
+    replay classify the same ERROR rows.
+    """
+    parts: list[str] = []
+    if isinstance(message, dict):
+        parts.append(
+            str(
+                message.get("text")
+                or message.get("message")
+                or message.get("content")
+                or ""
+            )
+        )
+    for key in ("error", "title", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """Stale DOM indexes / invalid CDP backendNodeIds ERROR then the browser agent retries.
+
+    SPA remounts (Amazon checkout re-auth, etc.) invalidate selector-map indexes. Humanize
+    then refuses click/TypeTextEvent with `Cannot humanize … no coordinates available`
+    (CDP often reports `No node found for given backend id` underneath). The browser
+    agent is expected to re-observe and retry; counting those rows in `no_tool_failures`
+    / `no_browser_agent_failures` fails closed on expected retry noise after a later
+    grounded write-lock / payment boundary.
+    """
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    is_browser = tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+    if not is_browser:
+        return False
+    blob = _message_failure_text(message, candidate).lower()
+    if "cannot humanize" in blob and "no coordinates available" in blob:
+        return True
+    return (
+        "no node found for given backend id" in blob
+        or "no node with given id found" in blob
+    )
+
+
+def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """True when a browser-agent ERROR is expected recovery / retry noise."""
+    return _is_intermediate_challenge_recovery_failure(candidate) or _is_intermediate_stale_dom_node_failure(
+        candidate, message
+    )
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -8075,7 +8196,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
                 continue
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -9848,9 +9969,10 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
     """Mirror the backend's funded-fallback selection without probing the key.
 
     Credential health owns the live Anthropic request. The benchmark preflight
-    owns runtime selection: the key must be configured and the backend's shared
-    out-of-credits circuit breaker must be clear. Any unavailable check fails
-    closed and leaves Claude OAuth mandatory.
+    owns runtime selection: either the shared ANTHROPIC_API_KEY is configured
+    and clear of its out-of-credits cooldown, OR OpenRouter is configured so
+    Claude Code can use the Anthropic-compatible gateway (same path as
+    resolveClaudeCodeSandboxApiKey when the shared org is on cooldown).
     """
     try:
         headers = await _api_headers()
@@ -9863,11 +9985,11 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
         if response.status_code != 200:
             return False
         availability = response.json()
-        return (
-            isinstance(availability, dict)
-            and availability.get("configured") is True
-            and availability.get("onCooldown") is False
-        )
+        if not isinstance(availability, dict):
+            return False
+        if availability.get("configured") is True and availability.get("onCooldown") is False:
+            return True
+        return availability.get("openrouterConfigured") is True
     except Exception:
         return False
 
@@ -9903,13 +10025,11 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
     """Check whether Claude Code can actually create a code session.
 
     A GPT/Codex compute token is not sufficient for a task that explicitly calls
-    ``spawn_claude_code_agent``. The runtime may have valid GPT credentials for
-    ordinary agent turns while Claude Code still has no user token or pool token.
-    Do not treat the shared Anthropic API-key fallback as sufficient here:
-    credential-health is the live funded-key probe, and Anthropic failures are
-    intentionally warn-only. This smoke gate is skippable when there is no real
-    Claude Code credential, so it should not launch a task that may discover an
-    unfunded or cooled-down fallback only after the benchmark starts.
+    ``spawn_claude_code_agent``. Prefer a live OAuth access token when present.
+    When OAuth is absent, accept the shared ANTHROPIC_API_KEY only if the
+    backend reports it configured and not on cooldown — that is the same funded
+    fallback ``resolveClaudeCodeAuthEnvs`` uses inside E2B. Do not launch when
+    both are missing; discovering an unfunded key mid-run burns the suite.
     """
     try:
         headers = await _api_headers()
@@ -9921,8 +10041,9 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return bool(data.get("accessToken"))
-        return False
+                if bool(data.get("accessToken")):
+                    return True
+        return await _has_usable_anthropic_api_key_fallback(base_url)
     except Exception:
         return False
 
