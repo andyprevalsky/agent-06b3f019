@@ -159,22 +159,25 @@ async function main(): Promise<void> {
     }
   );
 
-  await testAsync('probePaymentCdnReachable marks fetch failure for unreachable hosts', async () => {
-    const page = {
-      evaluate: async <T, A>(fn: (arg: A) => Promise<T> | T, arg: A): Promise<T> => fn(arg),
-    } as unknown as Page;
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => {
-      throw new Error('network down');
-    }) as typeof fetch;
-    try {
-      const result = await probePaymentCdnReachable(page, 'https://cdn.example/asset.bin');
-      assert.equal(result.paymentCdnOk, false);
-      assert.equal(result.paymentCdnHosts['cdn.example'], false);
-    } finally {
-      globalThis.fetch = originalFetch;
+  await testAsync(
+    'probePaymentCdnReachable marks fetch failure for unreachable hosts',
+    async () => {
+      const page = {
+        evaluate: async <T, A>(fn: (arg: A) => Promise<T> | T, arg: A): Promise<T> => fn(arg),
+      } as unknown as Page;
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () => {
+        throw new Error('network down');
+      }) as typeof fetch;
+      try {
+        const result = await probePaymentCdnReachable(page, 'https://cdn.example/asset.bin');
+        assert.equal(result.paymentCdnOk, false);
+        assert.equal(result.paymentCdnHosts['cdn.example'], false);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     }
-  });
+  );
 
   console.log('log-and-payment-cdn-probe: all tests passed');
 }
