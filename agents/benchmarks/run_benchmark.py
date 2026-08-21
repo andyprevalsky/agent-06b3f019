@@ -7857,10 +7857,12 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     """Return distinct browser attempts and grounded failed lifecycle events."""
     failures: list[str] = []
-    for message in data.get("messages", []) or []:
+    messages = data.get("messages", []) or []
+    for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = str(message.get("message") or "")
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -7882,6 +7884,13 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_url")
             )
             if _is_intermediate_challenge_recovery_failure(candidate):
+                continue
+            if _is_recoverable_browser_element_miss_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8061,13 +8070,87 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+_ELEMENT_INDEX_NOT_FOUND_RE = re.compile(
+    r"^Element with index \d+ not found\.?$",
+    re.IGNORECASE,
+)
+
+
+def _browser_tool_candidate(candidate: dict) -> bool:
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    return tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+
+
+def _is_browser_element_index_miss(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when a browser action failed only because a DOM index was stale."""
+    if not _browser_tool_candidate(candidate):
+        return False
+    texts = [str(message_text or "").strip()]
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    err = event_data.get("error")
+    if err is not None:
+        texts.append(str(err).strip())
+    return any(bool(text) and _ELEMENT_INDEX_NOT_FOUND_RE.fullmatch(text) for text in texts)
+
+
+def _has_later_browser_recovery(messages: list, start_index: int) -> bool:
+    """True when a later browser event proves the session continued usefully."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if not _browser_tool_candidate(metadata):
+            continue
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        action_type = str(metadata.get("action_type") or metadata.get("actionType") or "")
+        if action_type in {"request_payment_card", "requestPaymentCard"} and status in {
+            "FINISHED",
+            "IN_PROGRESS",
+        }:
+            return True
+        if status == "FINISHED" and action_type not in {"", "error"}:
+            return True
+    return False
+
+
+def _is_recoverable_browser_element_miss_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Stale DOM index ERRORs often happen mid-run; recovered ones are not tool failures.
+
+    Browser agents frequently hit `Element with index N not found` after a DOM refresh,
+    then continue (scroll/click/payment). Counting those recovered ERRORs in
+    `no_tool_failures` / `no_browser_agent_failures` fails closed payment-terminal benches
+    that still reach `requestPaymentCard`. Unrecovered terminal misses still count.
+    """
+    if not _is_browser_element_index_miss(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
-    for message in data.get("messages", []) or []:
+    messages = data.get("messages", []) or []
+    for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = str(message.get("message") or "")
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -8076,6 +8159,13 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             if not tool_name:
                 continue
             if _is_intermediate_challenge_recovery_failure(candidate):
+                continue
+            if _is_recoverable_browser_element_miss_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
