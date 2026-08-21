@@ -83,7 +83,7 @@ recovery so k=5 navigations remount Vite before model wait loops burn the budget
 
 ## Human feedback
 
-None recorded.
+User asked how much time was wasted and for a separate /rca of that waste. Clarified the timeout PAUSE was a consequence of ~213s blank-SPA budget burn before card request; ultimate why `main.tsx` did not mount remains an capture gap (network recordings omit Document/Script).
 
 ## Reusable lesson
 
