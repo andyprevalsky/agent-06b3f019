@@ -13999,6 +13999,8 @@ async def run_all_tests():
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",
         test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
+    )
+    r.record(
         "admin_bypass_gate_fixture_reseeds_org_managed_agentcard",
         test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard,
     )
