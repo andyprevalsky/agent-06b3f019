@@ -139,3 +139,7 @@ text) + blackbox `guest_path_commits_clean_all_target`. Exact
 Status remains **open** — owning-boundary fix landed but did not clear the
 exact benchmark outcome; next boundary is post-first-success recovery
 escalation / repeated hotels.com challenge after config promote.
+
+## Follow-up (2026-08-21, agent 2da69edc)
+
+Guest-cookie commit landed; bench still failed. New first-bad is classifier network summary omitting HTTP soft-block status — see `2026-08-21-hotels-com-classifier-network-summary-omits-http-status`.
