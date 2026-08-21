@@ -267,7 +267,19 @@ export async function reconcileWorkflowLiveness(
     const normalized = temporalStatus.replace(/^WORKFLOW_EXECUTION_STATUS_/, '').toUpperCase();
     if (normalized !== 'NOT_FOUND' && !CLOSED_TEMPORAL_STATUSES.has(normalized)) return;
 
-    if (await sealAgent(candidate, normalized, deps)) sealed++;
+    try {
+      if (await sealAgent(candidate, normalized, deps)) sealed++;
+    } catch (error) {
+      // One provider/tool cleanup failure must not reject the shared worker and
+      // abandon every later candidate in its cursor. `sealAgent` has already
+      // restored this row so a later quiet-window scan can retry it.
+      inconclusive++;
+      log.warn('Liveness terminal cleanup inconclusive; restored agent for retry', {
+        agentId: candidate.agentId,
+        workflowId: candidate.workflowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   if (sealed > 0 || inconclusive > 0) {

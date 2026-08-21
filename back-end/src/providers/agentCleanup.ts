@@ -6,6 +6,25 @@ import { closeSession } from './browser';
 
 const log = createLogger('Cleanup');
 
+export interface BrowserSessionReleaseDependencies {
+  findActiveSessions: (agentId: string) => Promise<Array<{ sessionId: string }>>;
+  closeSession: (sessionId: string, pause: boolean) => Promise<void>;
+}
+
+function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies {
+  return {
+    findActiveSessions: async (agentId: string) =>
+      prisma.browserSession.findMany({
+        where: {
+          agentId,
+          status: { in: ['ACTIVE', 'PAUSED'] },
+        },
+        select: { sessionId: true },
+      }),
+    closeSession,
+  };
+}
+
 /**
  * Release every browser session an agent still holds — the remote Steel/Kernel
  * browser as well as the DB row.
@@ -17,39 +36,50 @@ const log = createLogger('Cleanup');
  * FAILED agents, the oldest from 2026-07-24 (agent
  * bfcfc074-0e61-41ef-b072-23376583b85a among them).
  *
- * Best-effort: errors are logged, never thrown, so a provider outage can never block
- * an agent from reaching its terminal state.
+ * Every session is attempted before failures are reported. Terminal callers catch
+ * the aggregate so a provider outage cannot block the status transition, while the
+ * liveness reconciler can restore the row and retry instead of falsely considering
+ * a leaked rental fully cleaned up.
  */
-export async function releaseAgentBrowserSessions(agentId: string): Promise<number> {
+export async function releaseAgentBrowserSessions(
+  agentId: string,
+  overrides: Partial<BrowserSessionReleaseDependencies> = {}
+): Promise<number> {
+  const dependencies = { ...browserSessionReleaseDependencies(), ...overrides };
   let released = 0;
+  const failures: unknown[] = [];
+  let activeBrowserSessions: Array<{ sessionId: string }>;
   try {
-    const activeBrowserSessions = await prisma.browserSession.findMany({
-      where: {
-        agentId,
-        status: { in: ['ACTIVE', 'PAUSED'] },
-      },
-      select: { sessionId: true },
-    });
-
-    if (activeBrowserSessions.length > 0) {
-      log.info(`Closing ${activeBrowserSessions.length} browser session(s) for agent ${agentId}`);
-    }
-
-    for (const session of activeBrowserSessions) {
-      try {
-        await closeSession(session.sessionId, false);
-        released += 1;
-        log.info(`Closed browser session ${session.sessionId}`);
-      } catch (error) {
-        log.warn(`Failed to close browser session ${session.sessionId}`, {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+    activeBrowserSessions = await dependencies.findActiveSessions(agentId);
   } catch (error) {
     log.warn(`Failed to query browser sessions for agent ${agentId}`, {
       error: error instanceof Error ? error.message : String(error),
     });
+    throw error;
+  }
+
+  if (activeBrowserSessions.length > 0) {
+    log.info(`Closing ${activeBrowserSessions.length} browser session(s) for agent ${agentId}`);
+  }
+
+  for (const session of activeBrowserSessions) {
+    try {
+      await dependencies.closeSession(session.sessionId, false);
+      released += 1;
+      log.info(`Closed browser session ${session.sessionId}`);
+    } catch (error) {
+      failures.push(error);
+      log.warn(`Failed to close browser session ${session.sessionId}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `Failed to close ${failures.length} browser session(s) for agent ${agentId}`
+    );
   }
   return released;
 }
@@ -67,7 +97,13 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
   }
 
-  await releaseAgentBrowserSessions(agentId);
+  try {
+    await releaseAgentBrowserSessions(agentId);
+  } catch (error) {
+    log.warn(`Failed to release browser sessions for agent ${agentId}`, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   // --- E2B Claude Code sessions ---
   try {

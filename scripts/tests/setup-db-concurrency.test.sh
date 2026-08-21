@@ -323,4 +323,17 @@ else
   echo "case 6: skipped (could not observe a live seed child on this host)" >&2
 fi
 
+# ── Case 7: force cleanup must keep discovering late descendants ─────────────
+# A TERM-resistant wrapper can fork after the first KILL target snapshot. The
+# force window must rescan inside every iteration; a one-time pre-loop scan can
+# release the DB lock while that late child is still writing.
+force_loop="$({
+  sed -n '/while \[ \$((SECONDS - force_started)) -lt 2 \]; do/,/^[[:space:]]*done$/p' \
+    "$SETUP_DB"
+} 2>/dev/null)"
+printf '%s\n' "$force_loop" | grep -q 'setup_db_child_pids' || fail \
+  "case 7: force-cleanup loop does not rescan descendants before releasing the DB lock"
+printf '%s\n' "$force_loop" | grep -q 'kill -KILL' || fail \
+  "case 7: force-cleanup loop discovers descendants but does not stop late arrivals"
+
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"

@@ -3,7 +3,7 @@ import { resumeAgentWorkflow } from './agentResume';
 import { createMessage } from './messages';
 import { createLogger } from './logger';
 import { getTemporalClient } from './temporal';
-import { DEPLOY_INTERRUPTED_TOOL_MESSAGE } from './workflowGeneration';
+import { DEPLOY_INTERRUPTED_TOOL_MESSAGE, lockAgentWorkflowGeneration } from './workflowGeneration';
 
 export const AUTH_ASSISTANCE_COMPLETED_RESPONSE = '__AUTH_ASSISTANCE_COMPLETED__';
 
@@ -230,6 +230,12 @@ export async function completeAuthAssistanceForUser(
     }
 
     await deps.beforeCompletionClaim();
+    // Serialize the completion claim with deployment cleanup. Without the same
+    // generation lock used by `finalizeInterruptedWorkflowTools`, completion can
+    // claim `completedAt` while cleanup owns the agent and then race its attention
+    // CAS, producing a committed credential whose resume path observed the wrong
+    // generation boundary.
+    await lockAgentWorkflowGeneration(tx, request.agentId);
     const completionClaim = await tx.userAuthAssistanceRequest.updateMany({
       where: { id, completedAt: null },
       data: { completedAt: now },
@@ -315,7 +321,18 @@ export async function completeAuthAssistanceForUser(
     } else {
       await deps.signalCompleted(result.workflowId, result.request.agentId, result.request.id);
     }
-    await deps.resumeAgent(result.request.agentId);
+    try {
+      await deps.resumeAgent(result.request.agentId);
+    } catch (error) {
+      // The completion transaction is already committed. Resume is retryable via
+      // the already-completed path, so do not turn a successful credential capture
+      // into a misleading 500 response.
+      log.warn('Failed to resume completed auth assistance request', {
+        request_id: result.request.id,
+        agent_id: result.request.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   if (result.status === 'already_completed') {

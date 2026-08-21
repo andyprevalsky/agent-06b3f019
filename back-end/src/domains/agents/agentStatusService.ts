@@ -17,7 +17,25 @@ interface UpdateAgentStatusDependencies {
   releaseBrowserSessions?: (agentId: string) => Promise<number>;
 }
 
-async function runTerminalAgentCleanup(
+async function releaseTerminalBrowserSessions(
+  agentId: string,
+  status: string,
+  dependencies: UpdateAgentStatusDependencies
+): Promise<void> {
+  // Every terminal agent, including children, owns its own browser rentals.
+  // Purchase settlement and trace finalization remain root-only below.
+  try {
+    await (dependencies.releaseBrowserSessions ?? releaseAgentBrowserSessions)(agentId);
+  } catch (error) {
+    log.warn('Terminal browser-session release unavailable', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function runRootTerminalCleanup(
   agentId: string,
   status: string,
   dependencies: UpdateAgentStatusDependencies
@@ -26,18 +44,6 @@ async function runTerminalAgentCleanup(
     await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
   } catch (error) {
     log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
-      agent_id: agentId,
-      status,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  // A terminal agent is not running a browser any more; release the rented remote
-  // session with the same certainty we release its purchase cards. Hanging this off
-  // agent DELETION alone leaked one provider browser per finished agent.
-  try {
-    await (dependencies.releaseBrowserSessions ?? releaseAgentBrowserSessions)(agentId);
-  } catch (error) {
-    log.warn('Terminal browser-session release unavailable', {
       agent_id: agentId,
       status,
       error: error instanceof Error ? error.message : String(error),
@@ -158,10 +164,12 @@ export async function updateAgentStatus(
         });
       });
   }
-  const firstRootTerminal =
-    TERMINAL_STATUSES.has(body.status) &&
-    before.parentAgentId === null &&
-    !TERMINAL_STATUSES.has(before.status);
-  if (firstRootTerminal) await runTerminalAgentCleanup(agentId, body.status, dependencies);
+  const firstTerminal = TERMINAL_STATUSES.has(body.status) && !TERMINAL_STATUSES.has(before.status);
+  if (firstTerminal) {
+    await releaseTerminalBrowserSessions(agentId, body.status, dependencies);
+    if (before.parentAgentId === null) {
+      await runRootTerminalCleanup(agentId, body.status, dependencies);
+    }
+  }
   return result.agent;
 }
