@@ -311,6 +311,90 @@ def get_domain_from_url(url: str) -> str:
         return ""
 
 
+_BLANK_SPA_MOUNT_DIAGNOSTICS_JS = """() => {
+    const scripts = Array.from(document.scripts).map((el) => ({
+        type: el.type || '',
+        src: el.src || '',
+        async: !!el.async,
+        defer: !!el.defer,
+        hasContent: !!(el.textContent || '').trim(),
+    }));
+    const preloads = Array.from(document.querySelectorAll('link[rel="preload"]')).map((el) => ({
+        as: el.getAttribute('as') || '',
+        href: el.href || '',
+    }));
+    const resources = (performance.getEntriesByType('resource') || []).map((entry) => ({
+        name: entry.name,
+        initiatorType: entry.initiatorType,
+        transferSize: entry.transferSize,
+        encodedBodySize: entry.encodedBodySize,
+        durationMs: Math.round(entry.duration),
+        responseEndMs: Math.round(entry.responseEnd),
+    }));
+    const scriptResources = resources.filter(
+        (entry) =>
+            entry.initiatorType === 'script' ||
+            /\\.(m?js)(\\?|$)/i.test(entry.name) ||
+            entry.name.includes('/src/main.') ||
+            entry.name.includes('/@vite/') ||
+            entry.name.includes('/node_modules/'),
+    );
+    const preloadResources = resources.filter((entry) =>
+        preloads.some((preload) => preload.href && entry.name.startsWith(preload.href.split('?')[0])),
+    );
+    const mainScript = scripts.find((script) => script.src.includes('/src/main.')) || null;
+    const mainResource =
+        scriptResources.find((entry) => entry.name.includes('/src/main.')) ||
+        resources.find((entry) => entry.name.includes('/src/main.')) ||
+        null;
+    return {
+        href: location.href,
+        readyState: document.readyState,
+        rootChildren: (document.getElementById('root') || {}).children
+            ? document.getElementById('root').children.length
+            : -1,
+        scriptCount: scripts.length,
+        scripts,
+        preloadCount: preloads.length,
+        preloads,
+        resourceCount: resources.length,
+        scriptResourceCount: scriptResources.length,
+        scriptResources: scriptResources.slice(0, 40),
+        preloadResources: preloadResources.slice(0, 20),
+        mainScript,
+        mainResource,
+        largestPreloadBytes: preloadResources.reduce(
+            (max, entry) => Math.max(max, entry.transferSize || entry.encodedBodySize || 0),
+            0,
+        ),
+    };
+}"""
+
+
+async def _diagnose_blank_spa_mount(page: Any, *, url: str, phase: str) -> Dict[str, Any]:
+    """Capture script/preload/performance evidence when a SPA shell stays empty."""
+    evaluate = getattr(page, "evaluate", None)
+    if not evaluate:
+        return {"phase": phase, "url": url, "reason": "no_page_evaluate"}
+    try:
+        result = evaluate(_BLANK_SPA_MOUNT_DIAGNOSTICS_JS)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, str):
+            with suppress(Exception):
+                result = json.loads(result)
+        diagnostics = result if isinstance(result, dict) else {"raw": result}
+    except Exception as exc:
+        diagnostics = {"phase": phase, "url": url, "error": str(exc)}
+    logger.warning(
+        "Blank SPA mount diagnostics",
+        url=url,
+        phase=phase,
+        diagnostics=diagnostics,
+    )
+    return diagnostics
+
+
 async def _wait_for_navigation_content(page: Any, deadline: float) -> Dict[str, Any]:
     last_state: Dict[str, Any] = {}
     while time_module.monotonic() < deadline:
@@ -420,6 +504,7 @@ async def wait_for_navigation_ready(
         logger.warning("Navigation stayed on an empty loading document; reloading once", url=url, state=state)
     else:
         logger.warning("Navigation produced blank SPA shell; reloading once", url=url, state=state)
+        await _diagnose_blank_spa_mount(page, url=url, phase="before_reload")
     try:
         goto = getattr(page, "goto", None)
         reload_page = getattr(page, "reload", None)
@@ -438,6 +523,9 @@ async def wait_for_navigation_ready(
     second = await _wait_for_navigation_content(page, time_module.monotonic() + timeout_seconds)
     if not second.get("ready"):
         logger.warning("Page still lacked usable content after reload", url=url, state=second.get("state"))
+        second_state = second.get("state") if isinstance(second.get("state"), dict) else {}
+        if second_state.get("blankSpaShell") or stuck_loading_shell:
+            await _diagnose_blank_spa_mount(page, url=url, phase="after_reload")
     return second
 
 
