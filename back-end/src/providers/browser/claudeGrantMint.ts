@@ -282,7 +282,8 @@ export async function exchangeAuthorizationCode(
       expires_in: SETUP_TOKEN_EXPIRES_IN,
     }),
   });
-  if (!res.ok) throw new Error(`exchange failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok)
+    throw new Error(`exchange failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const body = (await res.json()) as {
     access_token: string;
     expires_in: number;

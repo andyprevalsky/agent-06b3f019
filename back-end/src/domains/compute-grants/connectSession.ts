@@ -25,26 +25,13 @@ import { randomUUID } from 'node:crypto';
 import { createLogger } from '../../providers/logger';
 import { openComputeGrantBrowser } from './browserProvider';
 import { seedForIntent } from './connectSession.seeding';
-import { upsertAccountConnection } from './repo';
-import {
-  persistFirstGrant,
-  seedConnectPasskeys,
-  waitForAuthorizePage,
-} from './connectSession.grant';
+import { seedConnectPasskeys, waitForAuthorizePage } from './connectSession.grant';
 
-import {
-  READ_CODE,
-  buildAuthorizeUrl,
-  exchangeAuthorizationCode,
-} from '../../providers/browser/claudeGrantMint';
-import {
-  READ_CODEX_CALLBACK,
-  buildCodexAuthorizeUrl,
-  exchangeCodexAuthorizationCode,
-  parseCodexCallbackUrl,
-} from '../../providers/browser/codexGrantMint';
+import { buildAuthorizeUrl } from '../../providers/browser/claudeGrantMint';
+import { buildCodexAuthorizeUrl } from '../../providers/browser/codexGrantMint';
 import { type CdpClient, attachCdp } from './cdp';
-import { finish, releaseBrowser } from './connectSession.lifecycle';
+import { finish } from './connectSession.lifecycle';
+import { startSignInWatcher } from './connectSession.watcher';
 import type { PasskeySeed } from './cdp.passkeys';
 
 const log = createLogger('ComputeGrants');
@@ -53,16 +40,15 @@ const SIGN_IN_POLL_MS = 2000; // how often the server checks the remote browser 
 const CONNECT_SESSION_TTL_MS = 10 * 60 * 1000; // sign-in abandoned > completed; never bill past this.
 
 /** Where each provider's session lives, and how we recognise "signed in". */
-const PROVIDER_CONFIG: Record<
-  string,
-  {
-    loginUrl: string;
-    cookieUrls: string[];
-    sessionCookie: string;
-    profileUrl: string;
-    authRealm: string;
-  }
-> = {
+export interface ConnectProviderConfig {
+  loginUrl: string;
+  cookieUrls: string[];
+  sessionCookie: string;
+  profileUrl: string;
+  authRealm: string;
+}
+
+const PROVIDER_CONFIG: Record<string, ConnectProviderConfig> = {
   claude: {
     loginUrl: 'https://claude.ai/login',
     cookieUrls: ['https://claude.ai', 'https://platform.claude.com'],
@@ -149,16 +135,13 @@ export interface StartConnectOptions {
   accountId?: string;
 }
 
-export async function startConnectSession(
+function createPendingConnect(
   userId: string,
   provider: string,
-  options: StartConnectOptions = {}
-): Promise<ConnectSessionHandle> {
-  const cfg = providerConfig(provider);
-  const connectId = `${provider}-${randomUUID()}`;
-  const deadline = Date.now() + CONNECT_SESSION_TTL_MS;
-
-  const entry: PendingConnect = {
+  connectId: string,
+  deadline: number
+): PendingConnect {
+  return {
     connectId,
     userId,
     provider,
@@ -171,6 +154,17 @@ export async function startConnectSession(
     stage: 'creating_browser',
     done: false,
   };
+}
+
+export async function startConnectSession(
+  userId: string,
+  provider: string,
+  options: StartConnectOptions = {}
+): Promise<ConnectSessionHandle> {
+  const cfg = providerConfig(provider);
+  const connectId = `${provider}-${randomUUID()}`;
+  const deadline = Date.now() + CONNECT_SESSION_TTL_MS;
+  const entry = createPendingConnect(userId, provider, connectId, deadline);
   pending.set(connectId, entry);
 
   // Provision, seed and navigate entirely OFF the request path.
@@ -240,7 +234,7 @@ export async function startConnectSession(
       }
       await waitForAuthorizePage(cdp, entry.connectId, entry.provider);
       entry.stage = 'awaiting_human';
-      startSignInWatcher(entry);
+      startSignInWatcher(entry, cfg, SIGN_IN_POLL_MS);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.warn('connect.setup_failed', { provider, connect_id: connectId, error: message });
@@ -285,173 +279,6 @@ export interface ConnectPollResult {
   accountEmail?: string;
   accountId?: string;
   reason?: string;
-}
-
-/**
- * Has the user finished signing in?
- *
- * On success this captures the cookies, stores the connection, and releases the
- * browser -- so a completed connect never keeps billing.
- */
-/**
- * Watch for sign-in and finish the connection.
- *
- * ALL remote-browser I/O lives here, deliberately. Doing it inside the HTTP poll
- * meant every client tick opened a CDP call to a remote browser; measured, those
- * calls hung and the endpoint stopped responding entirely -- the server logged 2
- * requests while the client saw repeated 30s timeouts. The HTTP poll is now a
- * pure in-memory read (~1ms) and this loop owns the browser.
- */
-
-function startSignInWatcher(entry: PendingConnect): void {
-  const cfg = providerConfig(entry.provider);
-  // A provider code is single-use. setInterval does not wait for an async tick,
-  // so without this guard a slow exchange starts twice and the second request
-  // reports invalid_grant even while the first one is succeeding.
-  let pollInFlight = false;
-  const timer = setInterval(() => {
-    if (pollInFlight) return;
-    pollInFlight = true;
-    void (async () => {
-      try {
-        if (entry.done || entry.failed !== undefined) {
-          clearInterval(timer);
-          return;
-        }
-        if (Date.now() > entry.deadline) {
-          clearInterval(timer);
-          entry.failed = 'sign-in window elapsed';
-          await finish(entry);
-          return;
-        }
-        const cdp = entry.cdp;
-        if (cdp === null || entry.cdpBase === null) return;
-
-        // Watch for the CODE the user's own Authorize click produces. We
-        // navigated to the consent screen with entry.authVerifier, so the code
-        // on screen belongs to that PKCE pair -- re-minting here would mint a
-        // fresh pair and strand it.
-        if (entry.accountEmail === undefined) {
-          // claude.ai renders "Logged in as <email>" on the consent screen.
-          const seen = await cdp.evaluate<string>(
-            `(document.body.innerText.match(/[\\w.+-]+@[\\w.-]+\\.\\w+/)||[''])[0]`
-          );
-          if (seen !== undefined && seen.length > 0) entry.accountEmail = seen;
-        }
-
-        let minted: {
-          accessToken: string;
-          expiresIn: number;
-          accountId?: string;
-          accountEmail?: string;
-          idToken?: string;
-          refreshToken?: string;
-        };
-        if (entry.provider === 'claude') {
-          // The code can land on a different window than we attached to (a
-          // "Continue with Google" sign-in), so scan every page target.
-          const code = await cdp.evaluateAnyTarget<string>(READ_CODE);
-          if (code === undefined || code.length === 0) return;
-          entry.stage = 'capturing';
-          minted = await exchangeAuthorizationCode(
-            code,
-            entry.authVerifier ?? '',
-            entry.authState ?? ''
-          );
-        } else {
-          // The Codex CLI redirect is localhost. In a remote browser that request
-          // cannot connect, but CDP still exposes the requested target URL. Read
-          // both the document and TargetInfo so Chromium's error page cannot hide
-          // the one-time code.
-          let callbackUrl = cdp.getCapturedCodexCallbackUrl();
-          if (callbackUrl === undefined || callbackUrl.length === 0) {
-            callbackUrl = await cdp.evaluateAnyTarget<string>(READ_CODEX_CALLBACK);
-          }
-          if (callbackUrl === undefined || callbackUrl.length === 0) {
-            callbackUrl = (await cdp.getPageUrls()).find((url) =>
-              /^http:\/\/localhost:(1455|1457)\/auth\/callback(?:\?|$)/.test(url)
-            );
-          }
-          if (callbackUrl === undefined || callbackUrl.length === 0) return;
-          entry.stage = 'capturing';
-          const code = parseCodexCallbackUrl(callbackUrl, entry.authState ?? '');
-          // The registered Codex CLI redirect is localhost. A cloud browser has
-          // no listener there, so replace Chromium's connection-refused page as
-          // soon as we have safely captured the one-time code. Presentation is
-          // best-effort and must never delay or invalidate the token exchange.
-          void cdp.showFinishingPage(callbackUrl).catch((error: unknown) => {
-            log.warn('connect.callback_page_failed', {
-              connect_id: entry.connectId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-          minted = await exchangeCodexAuthorizationCode(
-            code,
-            entry.authVerifier ?? '',
-            entry.authRedirectUri
-          );
-        }
-
-        entry.stage = 'minting';
-        const cookies = await cdp.getCookies(cfg.cookieUrls);
-        const email = minted.accountEmail ?? entry.accountEmail;
-        const accountId = minted.accountId;
-        if (accountId === undefined || accountId.length === 0) {
-          throw new Error(`${entry.provider} OAuth response did not identify the account`);
-        }
-        const sessionCookie = cookies.find((c) => c.name === cfg.sessionCookie);
-        const expires =
-          sessionCookie?.expires !== undefined && sessionCookie.expires > 0
-            ? new Date(sessionCookie.expires * 1000)
-            : undefined;
-
-        const connection = await upsertAccountConnection({
-          userId: entry.userId,
-          provider: entry.provider,
-          accountId,
-          accountEmail: email !== undefined && email.length > 0 ? email : undefined,
-          session: JSON.stringify(cookies),
-          sessionExpiresAt: expires,
-        });
-
-        await persistFirstGrant({
-          userId: entry.userId,
-          provider: entry.provider === 'claude' ? 'claude' : 'codex',
-          accountId,
-          email,
-          mintedToken: minted.accessToken,
-          mintedExpiresIn: minted.expiresIn,
-          idToken: minted.idToken,
-          refreshToken: minted.refreshToken,
-          poolingEnabled: connection.poolingEnabled,
-          poolingEnabledOverride: connection.poolingEnabledOverride,
-        });
-
-        entry.accountId = accountId;
-        entry.accountEmail = email;
-        entry.stage = 'connected';
-        entry.done = true;
-        clearInterval(timer);
-        log.info('connect.completed', {
-          provider: entry.provider,
-          account_id: accountId,
-          session_expires_at: expires?.toISOString(),
-        });
-        // Release the browser (stop billing) but KEEP the entry so the FE's next
-        // poll sees `connected`. Deleting it here -- as finish() does -- made the
-        // poll return `unknown`, which the FE showed as "Sign-in window closed"
-        // even though the connect had succeeded.
-        await releaseBrowser(entry);
-      } catch (err) {
-        log.warn('connect.watch_failed', {
-          connect_id: entry.connectId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      } finally {
-        pollInFlight = false;
-      }
-    })();
-  }, SIGN_IN_POLL_MS);
 }
 
 /**

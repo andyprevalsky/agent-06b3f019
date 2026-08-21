@@ -17,10 +17,17 @@ import {
 
 const tests: Array<{ name: string; fn: () => void }> = [];
 const test = (name: string, fn: () => void) => tests.push({ name, fn });
-function assert(c: unknown, m: string): asserts c { if (!c) throw new Error(m); }
+function assert(c: unknown, m: string): asserts c {
+  if (!c) throw new Error(m);
+}
 
 const base: CdpCookieInput = {
-  name: 'x', value: 'v', domain: '.google.com', path: '/foo', secure: false, httpOnly: false,
+  name: 'x',
+  value: 'v',
+  domain: '.google.com',
+  path: '/foo',
+  secure: false,
+  httpOnly: false,
 };
 
 test('__Host- cookies must be sent with NO domain', () => {
@@ -47,7 +54,10 @@ test('SameSite=None implies Secure', () => {
 
 test('ordinary cookies are passed through untouched', () => {
   const out = normaliseCookieForChrome({ ...base, name: 'ACCOUNT_CHOOSER', secure: true });
-  assert(out.domain === '.google.com' && out.path === '/foo', 'plain cookies must not be rewritten');
+  assert(
+    out.domain === '.google.com' && out.path === '/foo',
+    'plain cookies must not be rewritten'
+  );
 });
 
 test('REGRESSION: accepted count reflects the browser, not the send', () => {
@@ -61,7 +71,13 @@ test('REGRESSION: accepted count reflects the browser, not the send', () => {
 });
 
 test('REGRESSION: a fully rejected batch reports zero', () => {
-  const n = countAccepted([{ ...base, name: 'a' }, { ...base, name: 'b' }], []);
+  const n = countAccepted(
+    [
+      { ...base, name: 'a' },
+      { ...base, name: 'b' },
+    ],
+    []
+  );
   assert(n === 0, `a rejected batch must report 0, got ${n}`);
 });
 
@@ -120,11 +136,18 @@ test('picking a profile never invents or drops everything', () => {
   assert(pickSingleProfile([]).rows.length === 0, 'empty input stays empty');
 });
 
-let passed = 0; const failures: string[] = [];
+let passed = 0;
+const failures: string[] = [];
 console.log('\ncookie normalisation for Chrome acceptance\n');
 for (const t of tests) {
-  try { t.fn(); passed += 1; console.log(`  PASS  ${t.name}`); }
-  catch (e) { failures.push(t.name); console.log(`  FAIL  ${t.name}\n        ${e instanceof Error ? e.message : e}`); }
+  try {
+    t.fn();
+    passed += 1;
+    console.log(`  PASS  ${t.name}`);
+  } catch (e) {
+    failures.push(t.name);
+    console.log(`  FAIL  ${t.name}\n        ${e instanceof Error ? e.message : e}`);
+  }
 }
 console.log(`\nRESULTS: ${passed}/${tests.length} passed`);
 if (failures.length > 0) process.exit(1);

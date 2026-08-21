@@ -49,4 +49,3 @@ export async function seedForIntent(
   }
   return seedLocalCookies(cdp, entry.userId, entry.provider, cookieUrls);
 }
-

@@ -23,7 +23,6 @@ import {
   isInvalidSteelProxyConfiguration,
   isKnownRejectedProxyCity,
   rememberRejectedProxyCity,
-  type SteelProxyConfig,
 } from './sessionProxy';
 export {
   buildSteelProxySettings,
