@@ -104,7 +104,7 @@ export async function parseWhatsAppData(
   }
 
   const integration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'whatsapp' } },
+    where: { userId_name_accountId: { userId, name: 'whatsapp', accountId: '' } },
   });
 
   if (!integration) {

@@ -130,6 +130,10 @@ async function handleExistingEmail(
     expiresAt,
     scopes: tokenResult.scopes,
     metadata: mergeJson(existingMetadata ?? null, tokenResult.metadata),
+    // This is the reconnect path: re-consent is exactly what clears a
+    // needs_reconnect account, so the health state must reset with the tokens.
+    state: 'connected',
+    lastErrorReason: null,
   });
 
   await repo.updateIntegrationStatus(existingIntegrationId, IntegrationStatus.CONNECTED, {
@@ -173,6 +177,8 @@ async function finalizeNewCredential(
     metadata: mergeJson(credential.metadata ?? null, tokenResult.metadata),
     pkceVerifier: null,
     stateToken: null,
+    state: 'connected',
+    lastErrorReason: null,
   });
 
   const allCredentials = await repo.findConnectedEmailCredentials(credential.userId, provider);
