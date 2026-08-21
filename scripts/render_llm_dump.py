@@ -84,9 +84,12 @@ def image_extension(mime: str) -> str:
     return ".png"
 
 
+def sibling_assets_dir(html_path: Path) -> Path:
+    return html_path.parent / f"{html_path.stem}_assets"
+
+
 def write_image_asset(output_path: Path, name: str, image: str) -> Path | str:
-    assets_dir = output_path.with_suffix("")
-    assets_dir = assets_dir.parent / f"{assets_dir.name}_assets"
+    assets_dir = sibling_assets_dir(output_path)
     assets_dir.mkdir(parents=True, exist_ok=True)
     mime, image_bytes = split_image_data(image)
     image_path = assets_dir / f"{slug(name)}{image_extension(mime)}"
@@ -612,7 +615,10 @@ def discover_browser_recording_manifest(
     if not manifests:
         return None
     if len(manifests) == 1:
-        return manifests[0]
+        score, _mtime = score_recording_manifest(data, manifests[0])
+        # Require an identity match (task_id/session_id/url) so we never attach a
+        # random sibling recording just because it was the only file on disk.
+        return manifests[0] if score >= 60 else None
 
     scored = sorted(
         ((score_recording_manifest(data, manifest), manifest) for manifest in manifests),
@@ -620,7 +626,7 @@ def discover_browser_recording_manifest(
         reverse=True,
     )
     best_score, best_manifest = scored[0]
-    if best_score[0] < 0:
+    if best_score[0] < 60:
         return None
     return best_manifest
 
@@ -635,7 +641,8 @@ def browser_recording_manifest_path(
         path = str(Path(str(extra["browser_recording_path"])).with_name("manifest.json"))
     if not path:
         return discover_browser_recording_manifest(data, source_path)
-    return Path(str(path)).expanduser()
+    candidate = Path(str(path)).expanduser()
+    return candidate if candidate.exists() else None
 
 
 def select_recording_default_index(
@@ -669,7 +676,50 @@ def select_recording_default_index(
     return 0
 
 
-def load_recording_frames(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
+def recording_frame_is_usable(src_path: Path) -> bool:
+    """Reject missing/empty frame files so we never attach a dead recording player."""
+    try:
+        return src_path.is_file() and src_path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def materialize_recording_asset(
+    src_path: Path,
+    *,
+    output_path: Path | None,
+    player_seed: str,
+    relative_name: str,
+) -> str | None:
+    """Copy a recording file into the HTML `_assets` sidecar and return a relative URL.
+
+    Remote reviewers open published dumps from `/opt/cursor/artifacts`. Absolute
+    `file://` URLs only resolve on the render machine and show as broken
+    recordings after publish — never emit them.
+    """
+    if not recording_frame_is_usable(src_path):
+        return None
+    if output_path is None:
+        # In-memory/unit render paths: embed bytes so the HTML stays self-contained.
+        raw = src_path.read_bytes()
+        suffix = src_path.suffix.lower()
+        mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png" if suffix == ".png" else "application/octet-stream"
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    assets_dir = sibling_assets_dir(output_path) / f"recording-{slug(player_seed) or 'player'}"
+    dest = assets_dir / relative_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        shutil.copy2(src_path, dest)
+    return dest.relative_to(output_path.parent).as_posix()
+
+
+def load_recording_frames(
+    manifest_path: Path,
+    *,
+    output_path: Path | None = None,
+    player_seed: str = "",
+) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
     if not manifest_path.exists():
         return {}, [], f"Recording manifest was not found: {manifest_path}"
 
@@ -680,16 +730,29 @@ def load_recording_frames(manifest_path: Path) -> tuple[dict[str, Any], list[dic
 
     raw_frames = manifest.get("frames")
     if not isinstance(raw_frames, list) or not raw_frames:
-        return manifest, [], None
+        return manifest, [], "Recording manifest has no frames"
 
     frames: list[dict[str, Any]] = []
-    for frame in raw_frames:
+    for index, frame in enumerate(raw_frames):
         if not isinstance(frame, dict) or not frame.get("src"):
             continue
+        src_path = (manifest_path.parent / str(frame["src"])).resolve()
+        relative_name = Path(str(frame["src"])).name
+        if not relative_name or relative_name in {".", ".."}:
+            relative_name = f"frame_{index:05d}{src_path.suffix or '.jpg'}"
+        portable_src = materialize_recording_asset(
+            src_path,
+            output_path=output_path,
+            player_seed=player_seed,
+            relative_name=relative_name,
+        )
+        if portable_src is None:
+            continue
         cloned = dict(frame)
-        src_path = manifest_path.parent / str(frame["src"])
-        cloned["src"] = src_path.resolve().as_uri()
+        cloned["src"] = portable_src
         frames.append(cloned)
+    if not frames:
+        return manifest, [], "Recording frames were missing or empty"
     return manifest, frames, None
 
 
@@ -733,16 +796,16 @@ def render_browser_recording_player_from_manifest(
     section_class: str = "output-primary browser-recording",
     default_to_last: bool = False,
     browser_session_metadata: Any = None,
+    output_path: Path | None = None,
 ) -> str:
-    manifest, frames, error = load_recording_frames(manifest_path)
-    if error:
-        return (
-            f'<section class="{escape(section_class)}">'
-            "<h3>Browser Recording</h3>"
-            f'<p class="muted">{escape(error)}</p>'
-            "</section>"
-        )
-    if not frames:
+    # Never attach an invalid/broken recording section: missing manifests, empty
+    # frames, or unreadable frame files must omit the player entirely.
+    manifest, frames, error = load_recording_frames(
+        manifest_path,
+        output_path=output_path,
+        player_seed=player_seed,
+    )
+    if error or not frames:
         return ""
 
     default_index = select_recording_default_index(frames, action_name=action_name, iteration=iteration)
@@ -757,13 +820,26 @@ def render_browser_recording_player_from_manifest(
     metadata_html = render_browser_session_metadata(
         browser_session_metadata or manifest.get("browser_session_metadata")
     )
+    standalone_href = ""
+    index_path = manifest_index_path(manifest_path)
+    if index_path.exists() and output_path is not None:
+        portable_index = materialize_recording_asset(
+            index_path,
+            output_path=output_path,
+            player_seed=player_seed,
+            relative_name="index.html",
+        )
+        if portable_index:
+            standalone_href = (
+                f' Full replay: <a href="{escape(portable_index)}" target="_blank" rel="noreferrer">'
+                "open standalone</a>"
+            )
 
     return f"""
       <section class="{escape(section_class)}">
         <h3>Browser Recording</h3>
         <p class="section-summary">
-          Defaulted to {escape(action_label)} for {escape(iteration_label)} at {default_ts:.1f}s.
-          Full local replay: <a href="{escape((manifest_path.parent / 'index.html').resolve().as_uri())}" target="_blank" rel="noreferrer">open standalone</a>
+          Defaulted to {escape(action_label)} for {escape(iteration_label)} at {default_ts:.1f}s.{standalone_href}
         </p>
         {metadata_html}
         <div class="recording-player" id="{escape(player_id)}">
@@ -873,7 +949,11 @@ def render_browser_recording_player_from_manifest(
     """
 
 
-def render_browser_recording_player(data: dict[str, Any], source_path: Path | None = None) -> str:
+def render_browser_recording_player(
+    data: dict[str, Any],
+    source_path: Path | None = None,
+    output_path: Path | None = None,
+) -> str:
     manifest_path = browser_recording_manifest_path(data, source_path)
     if not manifest_path:
         return ""
@@ -884,6 +964,7 @@ def render_browser_recording_player(data: dict[str, Any], source_path: Path | No
         iteration=output_iteration(data),
         player_seed=str(data.get("call_site") or ""),
         browser_session_metadata=extra.get("browser_session_metadata"),
+        output_path=output_path,
     )
 
 
@@ -968,6 +1049,7 @@ def render_browser_recording_for_tool_message(
     data: dict[str, Any],
     source_path: Path | None = None,
     message_index: int | None = None,
+    output_path: Path | None = None,
 ) -> str:
     if message.get("role") != "tool":
         return ""
@@ -990,10 +1072,15 @@ def render_browser_recording_for_tool_message(
         section_class="message-recording browser-recording",
         default_to_last=True,
         browser_session_metadata=(message.get("metadata") or {}).get("browser_session_metadata"),
+        output_path=output_path,
     )
 
 
-def render_output_section(data: dict[str, Any], source_path: Path | None = None) -> str:
+def render_output_section(
+    data: dict[str, Any],
+    source_path: Path | None = None,
+    output_path: Path | None = None,
+) -> str:
     extra = data.get("extra") or {}
     candidates = [
         ("Output", extra.get("output")),
@@ -1013,7 +1100,7 @@ def render_output_section(data: dict[str, Any], source_path: Path | None = None)
         body = render_output_value(value)
         if index == 0:
             sections.append(f'<section class="output-primary"><h3>{escape(label)}</h3>{body}</section>')
-            recording_player = render_browser_recording_player(data, source_path)
+            recording_player = render_browser_recording_player(data, source_path, output_path)
             if recording_player:
                 sections.append(recording_player)
         else:
@@ -1696,7 +1783,7 @@ def render_message_sequence(
         reasoning_html = render_reasoning_fields(message, output_path, index)
         tool_calls_html = render_tool_calls(message.get("tool_calls"))
         browser_recording_html = render_browser_recording_for_tool_message(
-            message, data, source_path, index
+            message, data, source_path, index, output_path
         )
         message_content_html = (
             f'<div class="message-content"><div class="markdown readable-content">{content_html}</div></div>'
@@ -2390,15 +2477,11 @@ def build_html(data: dict[str, Any], source_path: Path, output_path: Path) -> st
 
     {collapsible_section(title_with_tokens("Messages", token_counts.get("messages")), render_message_sequence(messages, data, output_path, source_path), False)}
 
-    {collapsible_section("Output", render_output_section(data, source_path), False)}
+    {collapsible_section("Output", render_output_section(data, source_path, output_path), False)}
   </main>
 </body>
 </html>
 """
-
-
-def sibling_assets_dir(html_path: Path) -> Path:
-    return html_path.parent / f"{html_path.stem}_assets"
 
 
 def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) -> Path | None:
