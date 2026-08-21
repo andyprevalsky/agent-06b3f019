@@ -1283,6 +1283,14 @@ async function testReject_missingAgentWithMessageCharacterizesFailure() {
     agentId: fixture.missingAgentId,
   });
 
+  // Missing-agent rows are hidden from list/count (same as archived agents) so
+  // the inbox never prompts for a run the user cannot open. Creating one must
+  // not bump the unanswered badge.
+  assert(
+    (await getCount(fixture.ownerToken)) === countBefore,
+    'Unanswered count must ignore attention rows whose agent does not exist'
+  );
+
   const res = await request(`${BASE_URL}/api/attention-requests/${created.id}/reject`, {
     method: 'POST',
     headers: authHeaders(fixture.ownerToken),
@@ -1297,10 +1305,13 @@ async function testReject_missingAgentWithMessageCharacterizesFailure() {
     'Failed rejection should leave the request unanswered'
   );
 
-  const countAfter = await getCount(fixture.ownerToken);
+  const row = await withTransientDbRetry('reject-missing-agent-row', async () => {
+    return prisma.agentAttentionRequest.findUnique({ where: { id: created.id } });
+  });
+  assert(row?.userResponse === null, 'Failed rejection must leave the DB row pending');
   assert(
-    countAfter === countBefore + 1,
-    `Failed rejection should keep unanswered count at ${countBefore + 1}, got ${countAfter}`
+    (await getCount(fixture.ownerToken)) === countBefore,
+    'Failed rejection must not surface a missing-agent request in the inbox count'
   );
 }
 
