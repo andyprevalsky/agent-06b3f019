@@ -17,7 +17,7 @@ export async function saveTokenConfig(
 ): Promise<void> {
   const config = tokenConfig as Prisma.InputJsonObject;
   await prisma.integration.upsert({
-    where: { userId_name: { userId, name: AGENTCARD_INTEGRATION_NAME } },
+    where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
     create: {
       userId,
       name: AGENTCARD_INTEGRATION_NAME,
@@ -37,7 +37,7 @@ export async function saveTokenConfig(
 
 export async function findTokenConfig(userId: string): Promise<unknown | undefined> {
   const row = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: AGENTCARD_INTEGRATION_NAME } },
+    where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
     select: { config: true },
   });
   return row === null ? undefined : row.config;
@@ -45,7 +45,7 @@ export async function findTokenConfig(userId: string): Promise<unknown | undefin
 
 export async function findConnectedConfig(userId: string): Promise<unknown | undefined> {
   const row = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: AGENTCARD_INTEGRATION_NAME } },
+    where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
     select: { config: true, status: true, isActive: true },
   });
   return row?.status === IntegrationStatus.CONNECTED && row.isActive ? row.config : undefined;
@@ -57,7 +57,7 @@ export async function saveIntegrationConfig(
   connected: boolean
 ): Promise<void> {
   await prisma.integration.upsert({
-    where: { userId_name: { userId, name: AGENTCARD_INTEGRATION_NAME } },
+    where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
     create: {
       userId,
       name: AGENTCARD_INTEGRATION_NAME,
@@ -78,7 +78,7 @@ export async function saveIntegrationConfig(
 export async function clearToken(userId: string): Promise<void> {
   await prisma.integration
     .update({
-      where: { userId_name: { userId, name: AGENTCARD_INTEGRATION_NAME } },
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
       data: { status: IntegrationStatus.NOT_CONNECTED, isActive: false, config: {} },
     })
     .catch(() => {

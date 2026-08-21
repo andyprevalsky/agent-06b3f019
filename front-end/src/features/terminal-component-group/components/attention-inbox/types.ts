@@ -12,7 +12,6 @@ export type { AttentionRequest };
 /** Top-level props for the AttentionInbox component. */
 export interface AttentionInboxProps {
   onSelectAgent?: (agentId: string) => void;
-  realtimeReady?: boolean;
 }
 
 /**

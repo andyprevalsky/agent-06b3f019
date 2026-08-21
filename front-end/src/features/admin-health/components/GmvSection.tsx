@@ -47,7 +47,11 @@ function SectionPanel({
   children: React.ReactNode;
 }) {
   return (
-    <section className={cn('rounded-xl border border-border/50 bg-background/85 p-5 shadow-sm backdrop-blur-md')}>
+    <section
+      className={cn(
+        'rounded-xl border border-border/50 bg-background/85 p-5 shadow-sm backdrop-blur-md',
+      )}
+    >
       <div className="mb-4">
         {eyebrow && (
           <p className="text-xs font-medium uppercase tracking-normal text-muted-foreground">
@@ -84,11 +88,7 @@ export default function GmvSection({ data }: { data: AdminHealthData }) {
                 <stop offset="100%" stopColor="#0f766e" stopOpacity={0.02} />
               </linearGradient>
             </defs>
-            <CartesianGrid
-              strokeDasharray="3 3"
-              vertical={false}
-              stroke="rgba(148,163,184,0.32)"
-            />
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(148,163,184,0.32)" />
             <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
             <YAxis tickFormatter={moneyTick} tickLine={false} axisLine={false} fontSize={12} />
             <Tooltip

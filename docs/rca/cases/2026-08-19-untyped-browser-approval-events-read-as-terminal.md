@@ -37,7 +37,7 @@ showed the browser agent as **completed** and the live browser panel vanished,
 so the run read as stalled.
 
 The browser task was in fact still running. Runtime evidence from
-`GET /api/agents/<id>` plus `CLICKHOUSE_DATABASE.CLICKHOUSE_TABLE`:
+`GET /api/agents/<id>` plus `observability.fly_logs`:
 
 | time (Z) | evidence |
 | --- | --- |

@@ -54,7 +54,7 @@ async function main() {
   console.log("User ID:", user.id);
 
   const fp = await prisma.integration.findUnique({
-    where: { userId_name: { userId: user.id, name: "browser_fingerprint" } }
+    where: { userId_name_accountId: { userId: user.id, name: "browser_fingerprint", accountId: '' } }
   });
   console.log("Has fingerprint:", !!fp);
   if (fp) {

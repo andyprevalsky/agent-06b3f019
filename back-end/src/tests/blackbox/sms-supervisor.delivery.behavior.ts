@@ -33,18 +33,22 @@ import {
  * races itself: the write ties the watermark and is filtered out as "already
  * seen", which fails intermittently on a fast machine.
  *
- * Waiting for the clock to leave that millisecond removes the tie without
- * weakening the assertion — these tests pin that a stored timestamp is
- * FORMAT-comparable to an ISO watermark, not that same-millisecond writes are
- * visible (they cannot be, by the storage contract in sessionStore.ts).
+ * Read the watermark from Postgres rather than the Node host clock. Coverage
+ * runs use a Dockerized database whose clock can trail the host by a few
+ * milliseconds; sleeping on the host does not establish an ordering between
+ * those two clocks. Subtracting one stored-precision tick on the same database
+ * clock makes the next database write strictly newer without weakening the
+ * ISO-format comparison this test exists to pin.
  */
-async function watermarkStrictlyBeforeNextWrite(): Promise<string> {
-  const watermark = new Date().toISOString();
-  // Sleeping past the millisecond the watermark landed in is enough — a 2ms
-  // timer cannot resolve inside the same millisecond, so every later write
-  // stamps strictly greater. No polling loop is needed (and a retry helper
-  // would be the wrong primitive: nothing here can fail and be re-attempted).
-  await new Promise((resolve) => setTimeout(resolve, 2));
+async function watermarkStrictlyBeforeNextWrite(prisma: PrismaClient): Promise<string> {
+  const rows = await prisma.$queryRaw<Array<{ watermark: string }>>`
+    SELECT to_char(
+      (clock_timestamp() - INTERVAL '1 millisecond') AT TIME ZONE 'UTC',
+      'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+    ) AS watermark
+  `;
+  const watermark = rows[0]?.watermark;
+  if (watermark === undefined) throw new Error('Failed to read the database catch-up watermark');
   return watermark;
 }
 
@@ -259,7 +263,7 @@ export async function testLifecycleSms_landsOnSupervisorTranscript(prisma: Prism
 export async function testCatchUp_lifecycleSmsIsVisibleToAnIsoWatermark(prisma: PrismaClient) {
   const phone = uniqueSmsPhone();
   const userId = await provisionUserWithPhone(prisma, phone);
-  const watermark = await watermarkStrictlyBeforeNextWrite();
+  const watermark = await watermarkStrictlyBeforeNextWrite(prisma);
 
   try {
     await appendLifecycleSms(userId, 'Started: Order Lok Lak to-go', 'provider-catchup-1');
@@ -299,7 +303,7 @@ export async function testCatchUp_lifecycleSmsIsVisibleToAnIsoWatermark(prisma: 
 export async function testCatchUp_neverReplaysTheInboundEchoOrOwnSend(prisma: PrismaClient) {
   const phone = uniqueSmsPhone();
   const userId = await provisionUserWithPhone(prisma, phone);
-  const watermark = await watermarkStrictlyBeforeNextWrite();
+  const watermark = await watermarkStrictlyBeforeNextWrite(prisma);
 
   try {
     // The supervisor answers the inbound: this re-stores the user turn AND the
