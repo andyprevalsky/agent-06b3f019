@@ -101,6 +101,20 @@ class ReviewWaitTest(unittest.TestCase):
                 sleeper=lambda _seconds: None,
             )
 
+    def test_review_skipped_success_is_not_substantive(self) -> None:
+        status = MODULE.normalize_status(
+            {
+                "__typename": "StatusContext",
+                "context": "CodeRabbit",
+                "state": "SUCCESS",
+                "description": "Review skipped: draft pull request",
+            }
+        )
+
+        self.assertTrue(status.terminal)
+        self.assertFalse(status.successful)
+        self.assertEqual(status.state, "REVIEW_SKIPPED")
+
     def test_terminal_failure_is_not_successful(self) -> None:
         status = MODULE.normalize_status(
             {

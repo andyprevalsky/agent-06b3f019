@@ -60,7 +60,7 @@ class BenchmarkTask:
     tool_count_scope: str = "tree"  # "tree" counts all descendants; "root" counts root-visible tool calls only
     forbidden_tools: List[str] = field(default_factory=list)  # Tool names that must not be called
     sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
-    expected_payment_receipt: Optional[dict] = None  # Expected request_payment_card approval receipt metadata
+    expected_payment_receipt: Optional[dict | bool] = None  # Expected request_payment_card approval receipt metadata (`true` = any well-formed receipt)
     expected_payment_lifecycle: Optional[dict] = None  # Expected post-checkout state across purchase, Stripe, and AgentCard
     success_on_payment_card_request: bool = False  # Treat a validated payment-card request as terminal success
     payment_card_request_action: Optional[str] = None  # Benchmark lifecycle action after card issuance (for example, abandon)

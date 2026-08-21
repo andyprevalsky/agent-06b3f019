@@ -11,7 +11,13 @@ from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
 
 # Agent loop limits
-MAX_ITERATIONS = 50
+# A user-blocking handoff (payment-card / write-lock approval) resumes the SAME
+# task at its prior step count, so the checkout half of a purchase runs on
+# whatever budget the pre-approval half left behind. 50 was not enough to reach
+# checkout and then enter a card (prod agent
+# 7f354640-ffab-4098-b7ae-041ddf246c6f died at "Max iterations reached: 50"
+# mid card entry after resuming at step 32).
+MAX_ITERATIONS = 60
 MAX_CONSECUTIVE_API_FAILURES = 5
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 30
 HEARTBEAT_TIMEOUT_SECONDS = 120

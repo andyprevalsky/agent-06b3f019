@@ -6,10 +6,14 @@ import json
 import math
 import os
 from datetime import datetime, timezone
+from glob import glob
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "span_durations.jsonl")
+# Leave headroom below GitHub's 100 MiB blob ceiling. The original ledger remains
+# immutable once it reaches this size and new rows roll into dated segments.
+MAX_HISTORY_FILE_BYTES = 90 * 1024 * 1024
 
 RECENT_WINDOW = 100
 MIN_SAMPLES = 20
@@ -25,8 +29,41 @@ def _percentile(values: Sequence[float], pct: float) -> float:
     return sorted_values[min(rank - 1, len(sorted_values) - 1)]
 
 
-def _history_path(history_file: Optional[str] = None) -> str:
-    return history_file or os.environ.get("SPAN_HISTORY_FILE") or HISTORY_FILE
+def _history_paths(history_file: Optional[str] = None) -> List[str]:
+    """Return the primary ledger plus ordered rollover segments.
+
+    Explicit paths preserve the historical single-file contract used by tests and
+    one-off diagnostics. Only the repository default is segmented.
+    """
+    configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
+    if configured:
+        return [configured]
+    segments = sorted(glob(os.path.join(HISTORY_DIR, "span_durations.*.jsonl")))
+    return [HISTORY_FILE, *segments]
+
+
+def _append_history_path(history_file: Optional[str] = None) -> str:
+    configured = history_file or os.environ.get("SPAN_HISTORY_FILE")
+    if configured:
+        return configured
+    try:
+        if not os.path.exists(HISTORY_FILE) or os.path.getsize(HISTORY_FILE) < MAX_HISTORY_FILE_BYTES:
+            return HISTORY_FILE
+    except OSError:
+        return HISTORY_FILE
+
+    date_key = datetime.now(timezone.utc).strftime("%Y%m%d")
+    for part in range(1, 100):
+        suffix = "" if part == 1 else f".{part:02d}"
+        candidate = os.path.join(HISTORY_DIR, f"span_durations.{date_key}{suffix}.jsonl")
+        try:
+            if not os.path.exists(candidate) or os.path.getsize(candidate) < MAX_HISTORY_FILE_BYTES:
+                return candidate
+        except OSError:
+            return candidate
+    # More than 99 full 90 MiB segments in one day is not credible, but retaining
+    # a deterministic final target keeps benchmark recording best-effort.
+    return os.path.join(HISTORY_DIR, f"span_durations.{date_key}.99.jsonl")
 
 
 def _clean_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -45,7 +82,7 @@ def record_span_observations(
     is best-effort for benchmark recording: invalid entries are skipped, and
     OSError is swallowed after any successfully written rows.
     """
-    path = _history_path(history_file)
+    path = _append_history_path(history_file)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     written = 0
     try:
@@ -71,32 +108,32 @@ def load_records(
     statuses: Optional[Tuple[str, ...]] = None,
     history_file: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    path = _history_path(history_file)
-    if not os.path.exists(path):
-        return []
     records: List[Dict[str, Any]] = []
-    with open(path, errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if benchmark and record.get("benchmark") != benchmark:
-                continue
-            if environment and record.get("environment") != environment:
-                continue
-            if span_key and record.get("span_key") != span_key:
-                continue
-            if span_keys is not None and record.get("span_key") not in span_keys:
-                continue
-            if statuses is not None and record.get("run_status") not in statuses:
-                continue
-            if not isinstance(record.get("duration_ms"), (int, float)):
-                continue
-            records.append(record)
+    for path in _history_paths(history_file):
+        if not os.path.exists(path):
+            continue
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if benchmark and record.get("benchmark") != benchmark:
+                    continue
+                if environment and record.get("environment") != environment:
+                    continue
+                if span_key and record.get("span_key") != span_key:
+                    continue
+                if span_keys is not None and record.get("span_key") not in span_keys:
+                    continue
+                if statuses is not None and record.get("run_status") not in statuses:
+                    continue
+                if not isinstance(record.get("duration_ms"), (int, float)):
+                    continue
+                records.append(record)
     return records
 
 
@@ -156,9 +193,7 @@ def summaries(
         if span_key in grouped:
             grouped[span_key].append(record)
     return {
-        span_key: stats
-        for span_key, records in grouped.items()
-        if (stats := summarize_records(records)) is not None
+        span_key: stats for span_key, records in grouped.items() if (stats := summarize_records(records)) is not None
     }
 
 
@@ -179,11 +214,7 @@ def compare_observations(
     duration. A row is marked as a regression when current duration exceeds
     both p95 * multiplier and p95 + min_delta_ms.
     """
-    span_keys = {
-        str(observation.get("span_key") or "")
-        for observation in observations
-        if observation.get("span_key")
-    }
+    span_keys = {str(observation.get("span_key") or "") for observation in observations if observation.get("span_key")}
     cache = summaries(
         span_keys,
         benchmark=benchmark,

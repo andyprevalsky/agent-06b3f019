@@ -172,6 +172,8 @@ test('syncIntegrationCredentials preserves a local id for the same user and name
     poolingEnabled: false,
     rateLimitedUntil: null,
     lastUsedAt: null,
+    accountId: '',
+    accountEmail: null,
     createdAt: new Date('2026-01-01T00:00:00Z'),
     updatedAt: new Date('2026-01-02T00:00:00Z'),
   };
@@ -187,10 +189,17 @@ test('syncIntegrationCredentials preserves a local id for the same user and name
 
   assert(ids.length === 1 && ids[0] === 'local-gpt-id', 'expected preserved local id');
   const where = captured?.where as {
-    userId_name?: { userId?: string; name?: string };
+    userId_name_accountId?: { userId?: string; name?: string; accountId?: string };
   };
-  assert(where.userId_name?.userId === remote.userId, 'expected compound user id selector');
-  assert(where.userId_name?.name === remote.name, 'expected compound integration name selector');
+  assert(
+    where.userId_name_accountId?.userId === remote.userId,
+    'expected compound user id selector'
+  );
+  assert(
+    where.userId_name_accountId?.name === remote.name,
+    'expected compound integration name selector'
+  );
+  assert(where.userId_name_accountId?.accountId === '', 'expected legacy account id selector');
   const update = captured?.update as Record<string, unknown>;
   assert(!('id' in update), 'expected update not to rewrite local primary key');
 });

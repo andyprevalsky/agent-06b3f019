@@ -7,7 +7,10 @@ import argparse
 import base64
 import html
 import json
+import os
 import re
+import shutil
+import sys
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +19,7 @@ from typing import Any
 
 SCREENSHOT_KEYS = {"screenshot", "image", "png", "jpeg", "jpg"}
 DEFAULT_OUTPUT_DIR = Path(".context/rendered-llm-dumps")
+DEFAULT_ARTIFACTS_DIR = Path(os.environ.get("CURSOR_ARTIFACTS_DIR", "/opt/cursor/artifacts"))
 SYSTEM_PROMPT_BOUNDARY = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"
 AVAILABLE_ACTIONS_HEADING = "# Available Actions"
 NEXT_SYSTEM_HEADING_RE = re.compile(r"\n# (?!Available Actions\b)")
@@ -80,9 +84,12 @@ def image_extension(mime: str) -> str:
     return ".png"
 
 
+def sibling_assets_dir(html_path: Path) -> Path:
+    return html_path.parent / f"{html_path.stem}_assets"
+
+
 def write_image_asset(output_path: Path, name: str, image: str) -> Path | str:
-    assets_dir = output_path.with_suffix("")
-    assets_dir = assets_dir.parent / f"{assets_dir.name}_assets"
+    assets_dir = sibling_assets_dir(output_path)
     assets_dir.mkdir(parents=True, exist_ok=True)
     mime, image_bytes = split_image_data(image)
     image_path = assets_dir / f"{slug(name)}{image_extension(mime)}"
@@ -608,7 +615,10 @@ def discover_browser_recording_manifest(
     if not manifests:
         return None
     if len(manifests) == 1:
-        return manifests[0]
+        score, _mtime = score_recording_manifest(data, manifests[0])
+        # Require an identity match (task_id/session_id/url) so we never attach a
+        # random sibling recording just because it was the only file on disk.
+        return manifests[0] if score >= 60 else None
 
     scored = sorted(
         ((score_recording_manifest(data, manifest), manifest) for manifest in manifests),
@@ -616,7 +626,7 @@ def discover_browser_recording_manifest(
         reverse=True,
     )
     best_score, best_manifest = scored[0]
-    if best_score[0] < 0:
+    if best_score[0] < 60:
         return None
     return best_manifest
 
@@ -631,7 +641,8 @@ def browser_recording_manifest_path(
         path = str(Path(str(extra["browser_recording_path"])).with_name("manifest.json"))
     if not path:
         return discover_browser_recording_manifest(data, source_path)
-    return Path(str(path)).expanduser()
+    candidate = Path(str(path)).expanduser()
+    return candidate if candidate.exists() else None
 
 
 def select_recording_default_index(
@@ -665,7 +676,50 @@ def select_recording_default_index(
     return 0
 
 
-def load_recording_frames(manifest_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
+def recording_frame_is_usable(src_path: Path) -> bool:
+    """Reject missing/empty frame files so we never attach a dead recording player."""
+    try:
+        return src_path.is_file() and src_path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def materialize_recording_asset(
+    src_path: Path,
+    *,
+    output_path: Path | None,
+    player_seed: str,
+    relative_name: str,
+) -> str | None:
+    """Copy a recording file into the HTML `_assets` sidecar and return a relative URL.
+
+    Remote reviewers open published dumps from `/opt/cursor/artifacts`. Absolute
+    `file://` URLs only resolve on the render machine and show as broken
+    recordings after publish — never emit them.
+    """
+    if not recording_frame_is_usable(src_path):
+        return None
+    if output_path is None:
+        # In-memory/unit render paths: embed bytes so the HTML stays self-contained.
+        raw = src_path.read_bytes()
+        suffix = src_path.suffix.lower()
+        mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png" if suffix == ".png" else "application/octet-stream"
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    assets_dir = sibling_assets_dir(output_path) / f"recording-{slug(player_seed) or 'player'}"
+    dest = assets_dir / relative_name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        shutil.copy2(src_path, dest)
+    return dest.relative_to(output_path.parent).as_posix()
+
+
+def load_recording_frames(
+    manifest_path: Path,
+    *,
+    output_path: Path | None = None,
+    player_seed: str = "",
+) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
     if not manifest_path.exists():
         return {}, [], f"Recording manifest was not found: {manifest_path}"
 
@@ -676,16 +730,29 @@ def load_recording_frames(manifest_path: Path) -> tuple[dict[str, Any], list[dic
 
     raw_frames = manifest.get("frames")
     if not isinstance(raw_frames, list) or not raw_frames:
-        return manifest, [], None
+        return manifest, [], "Recording manifest has no frames"
 
     frames: list[dict[str, Any]] = []
-    for frame in raw_frames:
+    for index, frame in enumerate(raw_frames):
         if not isinstance(frame, dict) or not frame.get("src"):
             continue
+        src_path = (manifest_path.parent / str(frame["src"])).resolve()
+        relative_name = Path(str(frame["src"])).name
+        if not relative_name or relative_name in {".", ".."}:
+            relative_name = f"frame_{index:05d}{src_path.suffix or '.jpg'}"
+        portable_src = materialize_recording_asset(
+            src_path,
+            output_path=output_path,
+            player_seed=player_seed,
+            relative_name=relative_name,
+        )
+        if portable_src is None:
+            continue
         cloned = dict(frame)
-        src_path = manifest_path.parent / str(frame["src"])
-        cloned["src"] = src_path.resolve().as_uri()
+        cloned["src"] = portable_src
         frames.append(cloned)
+    if not frames:
+        return manifest, [], "Recording frames were missing or empty"
     return manifest, frames, None
 
 
@@ -729,16 +796,16 @@ def render_browser_recording_player_from_manifest(
     section_class: str = "output-primary browser-recording",
     default_to_last: bool = False,
     browser_session_metadata: Any = None,
+    output_path: Path | None = None,
 ) -> str:
-    manifest, frames, error = load_recording_frames(manifest_path)
-    if error:
-        return (
-            f'<section class="{escape(section_class)}">'
-            "<h3>Browser Recording</h3>"
-            f'<p class="muted">{escape(error)}</p>'
-            "</section>"
-        )
-    if not frames:
+    # Never attach an invalid/broken recording section: missing manifests, empty
+    # frames, or unreadable frame files must omit the player entirely.
+    manifest, frames, error = load_recording_frames(
+        manifest_path,
+        output_path=output_path,
+        player_seed=player_seed,
+    )
+    if error or not frames:
         return ""
 
     default_index = select_recording_default_index(frames, action_name=action_name, iteration=iteration)
@@ -753,13 +820,26 @@ def render_browser_recording_player_from_manifest(
     metadata_html = render_browser_session_metadata(
         browser_session_metadata or manifest.get("browser_session_metadata")
     )
+    standalone_href = ""
+    index_path = manifest_index_path(manifest_path)
+    if index_path.exists() and output_path is not None:
+        portable_index = materialize_recording_asset(
+            index_path,
+            output_path=output_path,
+            player_seed=player_seed,
+            relative_name="index.html",
+        )
+        if portable_index:
+            standalone_href = (
+                f' Full replay: <a href="{escape(portable_index)}" target="_blank" rel="noreferrer">'
+                "open standalone</a>"
+            )
 
     return f"""
       <section class="{escape(section_class)}">
         <h3>Browser Recording</h3>
         <p class="section-summary">
-          Defaulted to {escape(action_label)} for {escape(iteration_label)} at {default_ts:.1f}s.
-          Full local replay: <a href="{escape((manifest_path.parent / 'index.html').resolve().as_uri())}" target="_blank" rel="noreferrer">open standalone</a>
+          Defaulted to {escape(action_label)} for {escape(iteration_label)} at {default_ts:.1f}s.{standalone_href}
         </p>
         {metadata_html}
         <div class="recording-player" id="{escape(player_id)}">
@@ -869,7 +949,11 @@ def render_browser_recording_player_from_manifest(
     """
 
 
-def render_browser_recording_player(data: dict[str, Any], source_path: Path | None = None) -> str:
+def render_browser_recording_player(
+    data: dict[str, Any],
+    source_path: Path | None = None,
+    output_path: Path | None = None,
+) -> str:
     manifest_path = browser_recording_manifest_path(data, source_path)
     if not manifest_path:
         return ""
@@ -880,6 +964,7 @@ def render_browser_recording_player(data: dict[str, Any], source_path: Path | No
         iteration=output_iteration(data),
         player_seed=str(data.get("call_site") or ""),
         browser_session_metadata=extra.get("browser_session_metadata"),
+        output_path=output_path,
     )
 
 
@@ -964,6 +1049,7 @@ def render_browser_recording_for_tool_message(
     data: dict[str, Any],
     source_path: Path | None = None,
     message_index: int | None = None,
+    output_path: Path | None = None,
 ) -> str:
     if message.get("role") != "tool":
         return ""
@@ -986,10 +1072,15 @@ def render_browser_recording_for_tool_message(
         section_class="message-recording browser-recording",
         default_to_last=True,
         browser_session_metadata=(message.get("metadata") or {}).get("browser_session_metadata"),
+        output_path=output_path,
     )
 
 
-def render_output_section(data: dict[str, Any], source_path: Path | None = None) -> str:
+def render_output_section(
+    data: dict[str, Any],
+    source_path: Path | None = None,
+    output_path: Path | None = None,
+) -> str:
     extra = data.get("extra") or {}
     candidates = [
         ("Output", extra.get("output")),
@@ -1009,7 +1100,7 @@ def render_output_section(data: dict[str, Any], source_path: Path | None = None)
         body = render_output_value(value)
         if index == 0:
             sections.append(f'<section class="output-primary"><h3>{escape(label)}</h3>{body}</section>')
-            recording_player = render_browser_recording_player(data, source_path)
+            recording_player = render_browser_recording_player(data, source_path, output_path)
             if recording_player:
                 sections.append(recording_player)
         else:
@@ -1692,7 +1783,7 @@ def render_message_sequence(
         reasoning_html = render_reasoning_fields(message, output_path, index)
         tool_calls_html = render_tool_calls(message.get("tool_calls"))
         browser_recording_html = render_browser_recording_for_tool_message(
-            message, data, source_path, index
+            message, data, source_path, index, output_path
         )
         message_content_html = (
             f'<div class="message-content"><div class="markdown readable-content">{content_html}</div></div>'
@@ -2386,11 +2477,153 @@ def build_html(data: dict[str, Any], source_path: Path, output_path: Path) -> st
 
     {collapsible_section(title_with_tokens("Messages", token_counts.get("messages")), render_message_sequence(messages, data, output_path, source_path), False)}
 
-    {collapsible_section("Output", render_output_section(data, source_path), False)}
+    {collapsible_section("Output", render_output_section(data, source_path, output_path), False)}
   </main>
 </body>
 </html>
 """
+
+
+def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) -> Path | None:
+    """Copy a self-contained HTML dump to a viewer-reachable artifacts dir.
+
+    `file://` URLs only work on the machine that rendered the dump. Cursor Cloud
+    stores copies under `/opt/cursor/artifacts`, but markdown links to those
+    paths open blank `vscode-remote://` viewers — reviewers need an HTTPS URL
+    from `publish_dump_https()` (printed by main). Still publish the local copy
+    for screenshot / offline use.
+    """
+    target_root = artifacts_dir if artifacts_dir is not None else DEFAULT_ARTIFACTS_DIR
+    if not target_root.is_dir():
+        return None
+    standalone = make_html_self_contained(html_path)
+    dest = target_root / html_path.name
+    # Prefer the inlined standalone body so the published path is one file.
+    shutil.copy2(standalone, dest)
+    # Best-effort sidecar copy for local offline browsing; never required for
+    # the published link to remain viewable.
+    assets = sibling_assets_dir(html_path)
+    if assets.is_dir():
+        dest_assets = target_root / assets.name
+        try:
+            if dest_assets.exists():
+                shutil.rmtree(dest_assets)
+            _copy_tree_best_effort(assets, dest_assets)
+        except OSError:
+            pass
+    return dest
+
+
+def _r2_client():
+    """Build a boto3 S3 client for Cloudflare R2, or None when unset/unavailable."""
+    account = (os.environ.get("R2_ACCOUNT_ID") or "").strip()
+    access = (os.environ.get("R2_ACCESS_KEY_ID") or "").strip()
+    secret = (os.environ.get("R2_SECRET_ACCESS_KEY") or "").strip()
+    bucket = (os.environ.get("R2_BUCKET_TRACE_ARCHIVE") or "").strip()
+    if not account or not access or not secret or not bucket:
+        return None, ""
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError:
+        return None, ""
+    client = boto3.client(
+        "s3",
+        endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
+        aws_access_key_id=access,
+        aws_secret_access_key=secret,
+        region_name="auto",
+        config=Config(signature_version="s3v4"),
+    )
+    return client, bucket
+
+
+def publish_dump_https(
+    html_path: Path,
+    *,
+    agent_id: str | None = None,
+    expires_in: int = 7 * 24 * 3600,
+) -> str | None:
+    """Upload self-contained HTML to R2 and return a presigned HTTPS GET URL.
+
+    Cursor Cloud markdown links to `/opt/cursor/artifacts/*.html` open blank
+    `vscode-remote://` pages. A presigned HTTPS URL is what reviewers can
+    actually open. Returns None when R2 env/creds are missing.
+    """
+    standalone = make_html_self_contained(html_path)
+    body = standalone.read_bytes()
+    client, bucket = _r2_client()
+    if client is None or not bucket:
+        return None
+    safe_agent = slug(agent_id or "unknown-agent")
+    key = f"evidence/llm-dumps/{safe_agent}/{standalone.name}"
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType="text/html; charset=utf-8",
+        CacheControl="public, max-age=31536000, immutable",
+    )
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expires_in,
+    )
+
+
+def _copy_tree_best_effort(src: Path, dst: Path) -> None:
+    """Copy a directory tree file-by-file (some artifact FS overlays reject copytree)."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in src.rglob("*"):
+        rel = path.relative_to(src)
+        target = dst / rel
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def make_html_self_contained(html_path: Path) -> Path:
+    """Inline `_assets/` references as data URIs so one HTML file stays viewable alone."""
+    html = html_path.read_text(encoding="utf-8")
+    assets_dir = sibling_assets_dir(html_path)
+    if not assets_dir.is_dir():
+        out = html_path.with_name(f"{html_path.stem}.standalone.html")
+        out.write_text(html, encoding="utf-8")
+        return out
+
+    replacements: list[tuple[str, str]] = []
+    for asset in assets_dir.rglob("*"):
+        if not asset.is_file():
+            continue
+        rel = asset.relative_to(html_path.parent).as_posix()
+        raw = asset.read_bytes()
+        suffix = asset.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            mime = "image/jpeg"
+        elif suffix == ".png":
+            mime = "image/png"
+        elif suffix == ".gif":
+            mime = "image/gif"
+        elif suffix in {".html", ".htm"}:
+            mime = "text/html"
+        else:
+            mime = "application/octet-stream"
+        data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        replacements.append((rel, data_uri))
+
+    # Longest paths first so nested prefixes do not partially rewrite.
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+    for rel, data_uri in replacements:
+        html = html.replace(rel, data_uri)
+
+    if "file://" in html:
+        raise RuntimeError(f"self-contained dump still contains file:// URIs: {html_path}")
+
+    out = html_path.with_name(f"{html_path.stem}.standalone.html")
+    out.write_text(html, encoding="utf-8")
+    return out
 
 
 def parse_args() -> argparse.Namespace:
@@ -2409,6 +2642,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write the HTML but do not open it in the default browser.",
     )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Copy HTML + _assets here when the directory exists. "
+        "Defaults to $CURSOR_ARTIFACTS_DIR or /opt/cursor/artifacts.",
+    )
     return parser.parse_args()
 
 
@@ -2426,10 +2666,35 @@ def main() -> int:
     output_path = args.output or DEFAULT_OUTPUT_DIR / f"{slug(dump_path.stem)}.html"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(build_html(data, dump_path.resolve(), output_path.resolve()), encoding="utf-8")
-    url = output_path.resolve().as_uri()
-    print(url)
+    published = publish_rendered_dump(output_path.resolve(), args.artifacts_dir)
+    https_url = publish_dump_https(
+        (published or output_path).resolve(),
+        agent_id=str(data.get("agent_id") or ""),
+    )
+    # Prefer HTTPS for reviewers — local artifact paths open blank in Cursor Browser.
+    if https_url:
+        print(https_url)
+        if published is not None:
+            print(f"local_artifact={published}", file=sys.stderr)
+    elif published is not None:
+        print(str(published))
+        print(
+            "warning: no R2 HTTPS publish; /opt/cursor/artifacts paths are not clickable "
+            "for remote reviewers (vscode-remote blank). Set R2_* env to fix.",
+            file=sys.stderr,
+        )
+    else:
+        print(output_path.resolve().as_uri())
+        print(
+            "warning: no artifacts directory / R2 publish; do not send a file:// link "
+            "to a remote reviewer",
+            file=sys.stderr,
+        )
     if not args.no_open:
-        webbrowser.open(url)
+        open_target = https_url or (
+            published.as_uri() if published is not None else output_path.resolve().as_uri()
+        )
+        webbrowser.open(open_target)
     return 0
 
 

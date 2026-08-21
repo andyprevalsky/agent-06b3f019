@@ -162,6 +162,69 @@ test('GET /:id/attachments/:fileId/url — wrong user path → 403', async () =>
   assertStatus(res.status, 403, res.data);
 });
 
+test('GET /:id/attachments/:fileId/url — admin can sign inspected agent owner path', async () => {
+  const owner = await createAnonymousSession('att-admin-owner');
+  trackedUserIds.add(owner.user.id);
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-att-admin-owner', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: owner.user.id,
+        goal: 'attachment admin inspect',
+        status: 'COMPLETED',
+        model: 'rose-labs/rose-1-ultra',
+        busId: agentId,
+      },
+    });
+  });
+  const form = new FormData();
+  form.append('file', new Blob(['<html>recording</html>'], { type: 'text/html' }), 'rec.html');
+  const uploaded = await fetch(`${BASE_URL}/api/agents/${agentId}/attachments`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${owner.session.access_token}` },
+    body: form,
+  });
+  assertStatus(uploaded.status, 201, await uploaded.clone().json());
+  const uploadedBody = (await uploaded.json()) as { file_pointer?: { storage_path?: string } };
+  const storagePath = uploadedBody.file_pointer?.storage_path;
+  assert(typeof storagePath === 'string' && storagePath.startsWith(`${owner.user.id}/`));
+  const andy = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+  const res = await request(
+    `${BASE_URL}/api/agents/${agentId}/attachments/${FAKE_UUID}/url?storage_path=${encodeURIComponent(storagePath)}`,
+    { headers: { ...apiKeyHeaders(), 'X-User-Id': andy } }
+  );
+  assertStatus(res.status, 200, res.data);
+  assert(typeof (res.data as { signed_url?: string }).signed_url === 'string');
+});
+
+test('GET /:id/attachments/:fileId/url — admin cannot sign a different user path', async () => {
+  const owner = await createAnonymousSession('att-admin-other');
+  trackedUserIds.add(owner.user.id);
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-att-admin-other', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: owner.user.id,
+        goal: 'attachment admin deny other',
+        status: 'COMPLETED',
+        model: 'rose-labs/rose-1-ultra',
+        busId: agentId,
+      },
+    });
+  });
+  const andy = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+  const otherUserId = randomUUID();
+  const res = await request(
+    `${BASE_URL}/api/agents/${agentId}/attachments/${FAKE_UUID}/url?storage_path=${encodeURIComponent(otherUserId + '/browser-recording.html')}`,
+    { headers: { ...apiKeyHeaders(), 'X-User-Id': andy } }
+  );
+  assertStatus(res.status, 403, res.data);
+});
+
 // ========================= State transition invariants ======================
 
 test('state: pause → resume round-trip preserves agent data', async () => {

@@ -652,6 +652,73 @@ def test_format_user_context_skips_disconnected_no_creds():
     assert result == ""
 
 
+def test_format_user_context_sync_failed_uses_config_connected_emails():
+    """SYNC_FAILED Gmail still lists send-from addresses from config.connectedEmails."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {
+                "name": "gmail",
+                "status": "SYNC_FAILED",
+                "emailCredentials": None,
+                "config": {
+                    "connectedEmail": "a@roselabs.ai",
+                    "connectedEmails": ["a@roselabs.ai", "andyprevalsky111@gmail.com"],
+                },
+            },
+        ],
+    )
+    assert "## Connected Integrations" in result
+    assert "gmail: a@roselabs.ai, andyprevalsky111@gmail.com" in result
+
+
+def test_format_user_context_null_email_credentials_does_not_raise():
+    """Null emailCredentials must not abort the whole user-context format path."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=["amazon.com"],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {"name": "gmail", "status": "SYNC_FAILED", "emailCredentials": None},
+            {"name": "imessage", "status": "CONNECTED", "emailCredentials": None},
+        ],
+    )
+    assert "## Authenticated Browser Sessions" in result
+    assert "imessage" in result
+    assert "gmail" not in result
+
+
+def test_format_user_context_malformed_email_credentials_does_not_raise():
+    """Non-list containers and non-string emails must not abort formatting."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {"name": "gmail", "status": "CONNECTED", "emailCredentials": 1},
+            {
+                "name": "yahoo",
+                "status": "CONNECTED",
+                "emailCredentials": [{"email": 123}, {"email": "ok@example.com"}, "skip"],
+            },
+        ],
+    )
+    assert "## Connected Integrations" in result
+    assert "yahoo: ok@example.com" in result
+    assert "gmail" in result
+
+
 def test_format_user_context_bad_timestamp():
     """Bad timestamp is handled gracefully."""
     from helpers.get_user_context import _format_user_context
@@ -967,6 +1034,18 @@ async def run_all_tests():
     r.record("fmt_ctx_integ_no_creds", test_format_user_context_integration_no_creds)
     r.record("fmt_ctx_snapshot", test_format_user_context_snapshot)
     r.record("fmt_ctx_skips_disconnected", test_format_user_context_skips_disconnected_no_creds)
+    r.record(
+        "fmt_ctx_sync_failed_config_emails",
+        test_format_user_context_sync_failed_uses_config_connected_emails,
+    )
+    r.record(
+        "fmt_ctx_null_email_credentials",
+        test_format_user_context_null_email_credentials_does_not_raise,
+    )
+    r.record(
+        "fmt_ctx_malformed_email_credentials",
+        test_format_user_context_malformed_email_credentials_does_not_raise,
+    )
     r.record("fmt_ctx_bad_ts", test_format_user_context_bad_timestamp)
     r.record("fmt_ctx_msg_truncate", test_format_user_context_recent_message_truncation)
     r.record("fmt_ctx_address", test_format_user_context_address_variants)

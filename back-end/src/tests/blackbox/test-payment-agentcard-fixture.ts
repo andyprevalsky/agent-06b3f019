@@ -7,7 +7,7 @@ function assert(condition: boolean, message: string): asserts condition {
 
 export async function assertBenchmarkAgentCardResetFixture(userId: string): Promise<void> {
   const integration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'agentcard' } },
+    where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
   });
   assert(integration !== null, 'expected a deterministic sandbox onboarding fixture');
   assert(

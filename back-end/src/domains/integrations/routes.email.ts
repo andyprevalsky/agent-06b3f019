@@ -8,6 +8,7 @@ import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
+import * as resyncService from './service.emailResync';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
@@ -140,6 +141,28 @@ router.get(
         return res.status(404).json({ error: error.message });
       }
       if (error instanceof service.GmailCredentialsNotFoundError) {
+        return res.status(404).json({ error: error.message });
+      }
+      throw error;
+    }
+  })
+);
+
+/** POST /api/integrations/email/gmail/accounts/:email/resync */
+router.post(
+  '/email/gmail/accounts/:email/resync',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const email = req.params.email;
+    if (typeof email !== 'string' || email.trim() === '') {
+      return res.status(400).json({ error: 'Missing Gmail account email' });
+    }
+
+    try {
+      const result = await resyncService.resyncGmailAccount(req.user!.id, email);
+      return res.json(result);
+    } catch (error: unknown) {
+      if (error instanceof resyncService.GmailAccountNotFoundError) {
         return res.status(404).json({ error: error.message });
       }
       throw error;

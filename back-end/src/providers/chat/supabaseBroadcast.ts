@@ -223,6 +223,7 @@ export async function broadcastAgentModeStarted(agentId: string): Promise<void> 
 export async function broadcastAgentUpdate(
   agentId: string,
   updates: {
+    title?: string | null;
     treeCostCents?: number;
     contextSize?: number;
     progress?: number;
