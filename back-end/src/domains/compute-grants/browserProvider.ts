@@ -1,0 +1,65 @@
+/**
+ * Remote-browser selection for the compute-grants domain.
+ *
+ * Kernel is the DEFAULT. Steel stays reachable via
+ * `COMPUTE_GRANT_BROWSER_PROVIDER=steel` so a provider outage does not block
+ * account connect or grant recovery -- the two paths that, when broken, silently
+ * push every request onto paid models.
+ *
+ * Selection lives here rather than at each call site so the connect flow and the
+ * minter can never diverge onto different providers: a session captured on one
+ * provider must be replayable by the other, and mixing them is how a working
+ * connect produces grants that fail to mint.
+ */
+
+import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
+import type { CdpProvider } from './minter';
+import { kernelCdpProvider, computeGrantBrowserProvider, openKernelCdpSession } from './kernelCdp';
+import { steelCdpProvider } from './steelCdp';
+
+export { computeGrantBrowserProvider };
+
+/** CdpProvider for minting, honouring the configured provider. */
+export function computeGrantCdpProvider(): CdpProvider {
+  return computeGrantBrowserProvider() === 'steel' ? steelCdpProvider() : kernelCdpProvider();
+}
+
+export interface ComputeGrantBrowser {
+  cdpBase: string;
+  /** INTERACTIVE live view (never read-only) -- the user types their credentials here. */
+  liveViewUrl: string;
+  sessionId: string;
+  release: () => Promise<void>;
+}
+
+/**
+ * Open a remote browser for the connect flow, on the configured provider.
+ *
+ * Returns the same shape for Kernel and Steel so the connect flow has no
+ * provider-specific branches: the two must stay interchangeable, because a
+ * session captured on one provider is replayed by the other during minting.
+ */
+export async function openComputeGrantBrowser(label: string): Promise<ComputeGrantBrowser> {
+  if (computeGrantBrowserProvider() === 'steel') {
+    const [{ createSteelRecoverySession }, { releaseSteelRemoteSession }] = await Promise.all([
+      import('../../providers/steel/sessionRecovery'),
+      import('../../providers/steel/session'),
+    ]);
+    const s = await createSteelRecoverySession({
+      proxyLocation: DEFAULT_GEOLOCATION,
+      proxyMode: 'managed',
+    });
+    let released = false;
+    return {
+      cdpBase: s.wsUrl,
+      liveViewUrl: s.debugUrl ?? '',
+      sessionId: s.sessionId,
+      release: async () => {
+        if (released) return;
+        released = true;
+        await releaseSteelRemoteSession(s.sessionId).catch(() => undefined);
+      },
+    };
+  }
+  return openKernelCdpSession(label);
+}
