@@ -24,6 +24,7 @@ import {
   resolveHostAnthropicBaseUrl,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
+  shouldEnableClaudeCodeFastMode,
 } from '../../providers/e2b';
 
 /** Substrings that describe our credential inventory and must never reach a client body. */
@@ -216,6 +217,30 @@ function main(): void {
     false
   );
   assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode(undefined), false);
+
+  // Andy write-through + OpenRouter must still disable Fast Mode for Claude Code.
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      openrouterApiKey: 'sk-or-gateway',
+      fastModeCacheEnabled: true,
+      fastModeWriteEnabled: true,
+    }),
+    false
+  );
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      fastModeCacheEnabled: true,
+      fastModeWriteEnabled: true,
+    }),
+    true
+  );
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      openrouterApiKey: '  ',
+      fastModeWriteEnabled: true,
+    }),
+    true
+  );
 
   process.stdout.write('Code-agent credential redaction tests passed\n');
 }

@@ -98,6 +98,18 @@ OpenRouter fallback never fired and Fast Mode still claimed the session.
 `resolveClaudeCodeSandboxApiKey` so OpenRouter wins without requiring host base
 or cooldown. Dedicated `sk-or-*` keys also infer the OpenRouter base URL.
 
+### Recurrence (2026-08-21 fleet3/4) — Andy write-through + Fast Mode cache
+
+Benchmark user `1f85ff25-…` is in `FAST_MODE_WRITE_THROUGH_USER_IDS`, so
+`shouldWriteFastModeCacheForUser` forces Fast Mode on every Claude Code session
+even when `BENCHMARK_FAST_MODE_CACHE` is unset. Fleet4 still showed
+`0 interactions` + HTTP 403 cache hits for red/yellow while green escaped via a
+live Wikipedia download. Preferring OpenRouter alone was insufficient when the
+tee-proxy/flags still engaged.
+
+**Fix:** `shouldEnableClaudeCodeFastMode` returns false whenever
+`OPENROUTER_API_KEY` is set — no `CLAUDE_CODE_FAST_MODE` flags, no proxy inject.
+
 ## Reusable lesson
 
 A capture/replay wrapper may serialize a request to build its cache key, but must
@@ -106,4 +118,5 @@ through untouched and mark them uncacheable. The same rule applies to **response
 bodies: never force binary through `text()` / UTF-8; preserve bytes (e.g. base64)
 or pass the original `Response` through. Prefer an allowlist for text decoding.
 Funded gateway transports must not be overwritten by a Fast Mode proxy that
-forwards to a different host.
+forwards to a different host. Write-through Fast Mode allowlists must not defeat
+funded-gateway recovery paths.
