@@ -2064,15 +2064,49 @@ async function testVerifyOtp_seededMergeAnonymousResources() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
 
-  // Set up an anonymous user with an agent so transferAgents has work to do
+  // Set up an anonymous user with an agent so transferAgents has work to do.
+  // Seed Twilio/Supabase AFTER this setup: under domain concurrency the disk
+  // seed can miss if written before the multi-second anon+agent prologue
+  // (observed as Invalid code when the live VerificationCheck runs).
   const { userId: anonUserId } = await createAnonSession();
   const agentRes = await createAgentWithRetry(anonUserId, 'Seeded merge agent');
   if (agentRes.status !== 200 && agentRes.status !== 201) {
     throw new Error(
       `Expected 200/201 for agent creation, got ${agentRes.status}: ${JSON.stringify(agentRes.data)}`
+    );
+  }
+
+  seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  seedSupabaseAdminCreate(phone, { userId });
+  // Also push into the live backend memo so a concurrent miss cannot stick.
+  const twilioUrl = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`;
+  const twilioBody = new URLSearchParams({ To: phone, Code: SEED_OTP }).toString();
+  await seedLiveFastForward(twilioUrl, 'POST', twilioBody, {
+    status: 200,
+    statusText: 'OK',
+    body: JSON.stringify({
+      account_sid: 'ACseed',
+      channel: 'sms',
+      service_sid: TWILIO_VERIFY_SERVICE_SID,
+      sid: `VE${randomUUID().replace(/-/g, '')}`.slice(0, 34),
+      status: 'approved',
+      to: phone,
+      valid: true,
+    }),
+    headers: { 'content-type': 'application/json' },
+  });
+  if (SUPABASE_URL !== '') {
+    await seedLiveFastForward(
+      `${SUPABASE_URL}/auth/v1/admin/users`,
+      'POST',
+      JSON.stringify({ phone, phone_confirm: true }),
+      {
+        status: 200,
+        statusText: 'OK',
+        body: JSON.stringify({ id: userId, phone }),
+        headers: { 'content-type': 'application/json' },
+      }
     );
   }
 
