@@ -302,7 +302,11 @@ setup_db_term_records() {
 SETUP_DB_TEARDOWN_SIGNAL=""
 
 setup_db_signal_teardown() {
-    SETUP_DB_TEARDOWN_SIGNAL="$1"
+    # First interactive signal wins the exit status. A follow-up INT during a
+    # TERM teardown (or the reverse) must not rewrite 143↔130 mid-cleanup.
+    if [ -z "${SETUP_DB_TEARDOWN_SIGNAL}" ]; then
+        SETUP_DB_TEARDOWN_SIGNAL="$1"
+    fi
     setup_db_teardown
 }
 
@@ -311,6 +315,13 @@ setup_db_teardown() {
     local group targets current record pid reap_pids any_running
     local grace="${SETUP_DB_TEARDOWN_GRACE_SECONDS:-10}"
     local grace_started force_started
+
+    # Idempotent: INT+TERM can both fire before traps are masked; only the first
+    # entry runs descendant cleanup and lock release.
+    if [ -n "${SETUP_DB_TEARING_DOWN:-}" ]; then
+        return 0
+    fi
+    SETUP_DB_TEARING_DOWN=1
 
     # Remove the recursive EXIT handler, but keep both interactive termination
     # signals masked until descendants are gone and the lock is released.
