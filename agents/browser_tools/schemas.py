@@ -278,10 +278,15 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):
-    """Run staged auth-preserving recovery for a persistent anti-bot challenge."""
+    """Last-resort staged recovery after the agent failed to clear the challenge itself."""
 
     tool: Literal["recover_from_challenge"]
-    reason: str = Field(description="One line of concrete evidence that the anti-bot challenge persists")
+    reason: str = Field(
+        description=(
+            "One line of concrete evidence that the anti-bot challenge still persists after "
+            "the agent's own solve attempt"
+        )
+    )
 
 
 class PaymentLineItem(BaseModel):

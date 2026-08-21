@@ -179,22 +179,26 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
-            "unusual-traffic pages — those are not authentication blockers; call recover_from_challenge instead."
+            "unusual-traffic pages — those are not authentication blockers. Attempt to complete the challenge "
+            "yourself first; call recover_from_challenge only after that attempt fails."
         ),
         "params": {},
     },
     "recover_from_challenge": {
         "description": (
-            "Recover from a persistent CAPTCHA, bot challenge, access-denied interstitial, unusual-traffic "
-            "page, or repeated 429 after the browser provider's automatic CAPTCHA solver had a chance to "
-            "finish. Use this ONLY with concrete challenge evidence, never for bad credentials, a 404, "
-            "out-of-stock, form validation, or an ordinary load failure. The tool first waits for Kernel or "
-            "Steel's native auto-solver. If the challenge remains, it tests isolated copies of browser state: "
-            "known challenge cookies, all target-site cookies, then parallel cookie-group reductions. The "
-            "signed-in source context is not changed during testing, and anything that may carry authentication "
-            "is always preserved. If no safe cookie fix is proven, it searches permission-compatible Kernel "
-            "residential, Kernel mobile, Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration "
-            "that passes repeated stability probes, and caches that configuration as this user's default for "
+            "Last-resort recovery for a persistent CAPTCHA, bot challenge, access-denied interstitial, "
+            "unusual-traffic page, or repeated 429. Call this ONLY after you already tried to clear the "
+            "challenge yourself with normal browser actions (drag the slider, click the checkbox/verify "
+            "button, complete the widget, use an audio or alternative path when offered) and the page is "
+            "still blocked. Do not call this as the first reaction to a challenge, and never use it for bad "
+            "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
+            "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
+            "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
+            "cookies, then parallel cookie-group reductions. The signed-in source context is not changed "
+            "during testing, and anything that may carry authentication is always preserved. If no safe "
+            "cookie fix is proven, it searches permission-compatible Kernel residential, Kernel mobile, "
+            "Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration that "
+            "passes repeated stability probes, and caches that configuration as this user's default for "
             "future browser sessions. Provider CAPTCHA solving remains enabled throughout. The successful "
             "recovery returns to the current URL with cookies, localStorage, and IndexedDB preserved."
         ),
@@ -202,8 +206,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "reason": {
                 "type": "string",
                 "description": (
-                    "One line on why you believe the current IP is blocked or rate-limited "
-                    "(e.g. 'repeated 429s on search', 'captcha wall reappears after solving')."
+                    "One line of concrete evidence that the challenge still blocks after your own "
+                    "solve attempt (e.g. 'Bot or Not slider still present after drag', "
+                    "'captcha wall reappears after solving', 'repeated 429s on search')."
                 ),
                 "required": True,
             },
@@ -661,7 +666,7 @@ action envelope in text; use the provided tool call.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
 - When authentication still blocks the task after steps 1–7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. Call recover_from_challenge for those. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
+- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. First attempt to complete the challenge yourself with normal browser actions (slider, checkbox, verify button, audio/alternative path when present). Only call recover_from_challenge after that attempt fails and the challenge still blocks the page. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 

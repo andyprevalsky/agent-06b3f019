@@ -142,6 +142,8 @@ def test_recover_from_challenge_normalizes_and_preserves_reason():
 
 def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
+    assert "tried to clear the challenge yourself" in description
+    assert "Do not call this as the first reaction to a challenge" in description
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
     assert "parallel cookie-group reductions" in description
@@ -153,6 +155,8 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     assert "in parallel" in description
     assert "user's default" in description
     assert "rotate_ip" not in BROWSER_USE_TOOLS
+    reason = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["reason"]["description"]
+    assert "after your own solve attempt" in reason
 
 
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
@@ -227,6 +231,8 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "call request_user_assistance_for_authentication" in prompt
     assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
     assert "CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication." in prompt
+    assert "First attempt to complete the challenge yourself" in prompt
+    assert "Only call recover_from_challenge after that attempt fails" in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
 
