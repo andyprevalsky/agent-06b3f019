@@ -10,11 +10,20 @@ export async function updateAgent(agentId: string, data: Record<string, unknown>
 }
 
 /** Mark an agent as FAILED only if it's still in a pre-terminal, non-paused state. */
-export async function failAgentIfStillActive(agentId: string, statusMessage: string) {
+export async function failAgentIfStillActive(
+  agentId: string,
+  statusMessage: string,
+  workflowGeneration?: string
+) {
   return prisma.agent.updateMany({
     where: {
       id: agentId,
       status: { in: ['STARTING_UP', 'ACTIVE'] },
+      ...(workflowGeneration === undefined
+        ? {}
+        : {
+            OR: [{ temporalWorkflowId: null }, { temporalWorkflowId: workflowGeneration }],
+          }),
     },
     data: { status: 'FAILED', statusMessage },
   });

@@ -7093,6 +7093,39 @@ def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     return scores[-1]
 
 
+def _webdecoy_structured_score(data: dict) -> Optional[float]:
+    """Read the terminal browser task's grounded FCaptcha score."""
+    scores: List[float] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") != "spawn_browser_agent"
+            or metadata.get("toolStatus") != "FINISHED"
+            or metadata.get("action_type") != "task_complete"
+        ):
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        raw_score = structured.get("risk_score")
+        if isinstance(raw_score, bool):
+            continue
+        if isinstance(raw_score, (int, float)):
+            scores.append(float(raw_score))
+            continue
+        if isinstance(raw_score, str):
+            match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*", raw_score)
+            if match is not None:
+                scores.append(float(match.group(1)))
+    if not scores:
+        return None
+    return scores[-1]
+
+
 def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str]]:
     text = _agent_data_search_text(data)
     if "webdecoy.com/product/fcaptcha-demo" not in text and "fcaptcha" not in text:
@@ -7115,11 +7148,19 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
                 continue
 
     exact_score = _webdecoy_exact_score_from_recordings(data)
-    if exact_score is None and not scores:
+    structured_score = _webdecoy_structured_score(data)
+    if exact_score is None and structured_score is None and not scores:
         return False, "No FCaptcha risk score was reported"
 
-    final_score = exact_score if exact_score is not None else scores[-1]
-    score_source = "captured API" if exact_score is not None else "visible"
+    if exact_score is not None:
+        final_score = exact_score
+        score_source = "captured API"
+    elif structured_score is not None:
+        final_score = structured_score
+        score_source = "structured output"
+    else:
+        final_score = scores[-1]
+        score_source = "visible"
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which

@@ -3,7 +3,7 @@ import path from 'path';
 
 export function writeStubRunner(
   dir: string,
-  mode: 'pass' | 'fail' | 'capacity-busy-then-pass'
+  mode: 'pass' | 'fail' | 'capacity-busy-then-pass' | 'gated-pass'
 ): string {
   const stub = path.join(dir, 'stub-run-bench');
   const script = `#!/usr/bin/env bash
@@ -38,7 +38,16 @@ cat > "$CARD_DIR/report-card.json" <<CARD
  "per_task":[{"name":"$TASK","status":"running","duration_s":null,"cost_usd":null,
    "agent_url":"http://localhost/?agent-id=stub-agent-1","world_model_mode":"real","fast_mode":true}]}
 CARD
-sleep 0.6  # long enough for the injected 0.1s snapshot cadence to observe "running"
+${
+  mode === 'gated-pass'
+    ? `GATE_FILE="\${HUB_PIPELINE_RUNNER_GATE_FILE:?}"
+RUNNER_PARENT_PID="$PPID"
+while [ ! -e "$GATE_FILE" ]; do
+  kill -0 "$RUNNER_PARENT_PID" 2>/dev/null || exit 143
+  sleep 0.05
+done`
+    : 'sleep 2.0  # covers poller python startup + 0.1s cadence under coverage contention'
+}
 ${
   mode === 'fail'
     ? `echo "stub runner exploding on purpose" >&2
@@ -63,6 +72,12 @@ exit 0`
 `;
   fs.writeFileSync(stub, script, { mode: 0o755 });
   return stub;
+}
+
+export function writeGatedStubRunner(dir: string): { gateFile: string; stub: string } {
+  const gateFile = path.join(dir, 'stub-run-bench-release');
+  fs.rmSync(gateFile, { force: true });
+  return { gateFile, stub: writeStubRunner(dir, 'gated-pass') };
 }
 
 export function writeForeignArtifactRunner(
