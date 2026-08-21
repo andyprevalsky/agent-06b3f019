@@ -259,24 +259,46 @@ async function runLiveProviderParity(): Promise<void> {
     assert(proxyId !== undefined, 'Kernel browser did not use the managed proxy');
 
     // ----- rotate_ip: real IP rotation on the same profile (residential tier) -----
-    const readExitIp = async (wsUrl: string): Promise<string> => {
-      // Production workers add the Steel key only at this process-local CDP
-      // boundary. The live parity harness must exercise that same contract;
-      // persisted/API ws_url values are deliberately secret-free.
-      const b = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
-      try {
-        const ctx = b.contexts()[0];
-        const p = ctx.pages()[0] ?? (await ctx.newPage());
-        await navigateKernelPage(
-          p,
-          `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
-        );
-        const raw = await p.evaluate(() => document.body.innerText);
-        return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
-      } finally {
-        await b.close();
-      }
-    };
+    const readExitIp = async (wsUrl: string): Promise<string> =>
+      // Kernel/ipify can return non-JSON bodies under parallel blackbox load
+      // (proxy interstitial, truncated response). Retry the whole CDP probe.
+      retryWithBackoff(
+        async () => {
+          // Production workers add the Steel key only at this process-local CDP
+          // boundary. The live parity harness must exercise that same contract;
+          // persisted/API ws_url values are deliberately secret-free.
+          const b = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
+          try {
+            const ctx = b.contexts()[0];
+            const p = ctx.pages()[0] ?? (await ctx.newPage());
+            await navigateKernelPage(
+              p,
+              `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
+            );
+            const raw = await p.evaluate(() => document.body.innerText);
+            try {
+              return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
+            } catch (error) {
+              throw new Error(
+                `exit-IP probe returned non-JSON body: ${raw.slice(0, 80)} (${
+                  error instanceof Error ? error.message : String(error)
+                })`
+              );
+            }
+          } finally {
+            await b.close();
+          }
+        },
+        {
+          maxRetries: 3,
+          fixedDelays: [500, 1_000, 1_500],
+          isRetryable: (error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            return message.includes('non-JSON body') || message.includes('Unexpected token');
+          },
+          component: 'browser-provider:exit-ip-read',
+        }
+      );
     const readDifferentExitIp = (wsUrl: string, previousIp: string): Promise<string> =>
       retryWithBackoff(
         async () => {

@@ -75,9 +75,10 @@ async def test_build_attachment_metadata_text():
 
     text = build_attachment_metadata_text(fp)
 
-    assert "report.docx" in text
+    assert "original_filename: report.docx" in text
+    assert text.startswith("file_pointer:")
     assert "MB" in text or "KB" in text
-    assert "cannot be directly read" in text
+    assert "Not inlined for the parent LLM" in text
 
 
 async def test_build_attachment_metadata_text_small_kb():
@@ -86,7 +87,27 @@ async def test_build_attachment_metadata_text_small_kb():
 
     fp = FilePointer(id="x", storage_path="x", original_filename="a.bin", mime_type="application/octet-stream", size_bytes=500, created_at="")
     text = build_attachment_metadata_text(fp)
+    assert "original_filename: a.bin" in text
     assert "KB" in text
+
+
+async def test_build_attachment_metadata_text_inlined():
+    """Inlined images still expose keyed original_filename."""
+    from helpers.attachments import FilePointer, build_attachment_metadata_text
+
+    fp = FilePointer(
+        id="img",
+        storage_path="u/rs.jpeg",
+        original_filename="rs.jpeg",
+        mime_type="image/jpeg",
+        size_bytes=1200,
+        created_at="",
+    )
+    text = build_attachment_metadata_text(fp, inlined=True)
+    assert text.startswith("file_pointer:")
+    assert "original_filename: rs.jpeg" in text
+    assert "[Attached file:" not in text
+    assert "Shown inline above" in text
 
 
 async def test_file_pointer_type_detection():
@@ -371,6 +392,12 @@ async def test_resolve_attachments_for_llm_image():
     assert len(content_blocks) == 1
     assert content_blocks[0]["type"] == "image_url"
     assert "data:image/png;base64," in content_blocks[0]["image_url"]["url"]
+    # Inline images must still expose exact original_filename for spawn_agent.attachments
+    assert len(metadata) == 1
+    assert "original_filename: a.png" in metadata[0]
+    assert metadata[0].startswith("file_pointer:")
+    assert "[Attached file:" not in metadata[0]
+    assert "Shown inline above" in metadata[0]
 
 
 async def test_resolve_attachments_for_llm_pdf():
@@ -411,8 +438,10 @@ async def test_resolve_attachments_for_llm_text():
     content_blocks, metadata = await resolve_attachments_for_llm([fp])
 
     assert content_blocks == []
-    assert any("[File: a.txt]" in m for m in metadata)
+    assert any("original_filename: a.txt" in m for m in metadata)
+    assert any(m.startswith("file_pointer:") for m in metadata)
     assert any("hello world" in m for m in metadata)
+    assert not any("[File:" in m for m in metadata)
 
 
 async def test_resolve_attachments_for_llm_unreadable():
@@ -489,7 +518,10 @@ async def test_build_multimodal_user_message_with_image():
     assert msg["role"] == "user"
     assert isinstance(msg["content"], list)
     assert msg["content"][0]["type"] == "text"
-    assert msg["content"][0]["text"] == "Look"
+    assert msg["content"][0]["text"].startswith("Look")
+    assert "original_filename: a.png" in msg["content"][0]["text"]
+    assert "file_pointer:" in msg["content"][0]["text"]
+    assert "[Attached file:" not in msg["content"][0]["text"]
     # Image block appended
     assert any(b["type"] == "image_url" for b in msg["content"])
 
@@ -512,7 +544,9 @@ async def test_build_multimodal_user_message_text_attachment_merged():
 
     assert isinstance(msg["content"], list)
     assert "User msg" in msg["content"][0]["text"]
-    assert "[File: a.txt]" in msg["content"][0]["text"]
+    assert "original_filename: a.txt" in msg["content"][0]["text"]
+    assert "file_pointer:" in msg["content"][0]["text"]
+    assert "[File:" not in msg["content"][0]["text"]
 
 
 async def test_upload_to_storage_missing_key():
@@ -606,6 +640,7 @@ async def run_all_tests():
     await r.record_async("extract_attachments", test_extract_attachments_from_context)
     await r.record_async("build_metadata_text", test_build_attachment_metadata_text)
     await r.record_async("build_metadata_text_kb", test_build_attachment_metadata_text_small_kb)
+    await r.record_async("build_metadata_text_inlined", test_build_attachment_metadata_text_inlined)
     await r.record_async("file_pointer_type_detection", test_file_pointer_type_detection)
     await r.record_async("file_pointer_text_ext_fallback", test_file_pointer_text_extension_fallback)
     await r.record_async("file_pointer_size_checks", test_file_pointer_size_checks)

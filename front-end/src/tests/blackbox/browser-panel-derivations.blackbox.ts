@@ -91,7 +91,11 @@ describe('computeActiveBrowserPanels', () => {
     ] as never;
     expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'active', browserUrl: 'y' }]);
   });
-  it('excludes finished browser tasks even when no task_complete action arrives', () => {
+  // Every completion message the browser handler posts at task scope declares
+  // action_type='task_complete' (handler.py is_completion_message=True call
+  // sites), enforced by agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
+  // ::test_browser_tool_events_declare_action_type.
+  it('excludes finished browser tasks on the task_complete terminal', () => {
     const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
       {
         message_id: 'init',
@@ -114,12 +118,46 @@ describe('computeActiveBrowserPanels', () => {
         metadata: {
           task_id: 't1',
           toolName: 'spawn_browser_agent',
-          action_type: 'system',
+          action_type: 'task_complete',
           toolStatus: 'FINISHED',
         },
       },
     ];
     expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+  });
+  // action_type 'system' is the browser VERIFIER-progress type ("⚖️ Verifying
+  // completion", "⚖️ Progress: N%" — handler.py:7669/7762/7912), not a terminal.
+  // It must never close the panel, or a mid-run verifier pass hides a live
+  // browser exactly the way "Payment card ready" did.
+  it('keeps browser task active across a task-scoped verifier "system" message', () => {
+    const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+      {
+        message_id: 'init',
+        timestamp: '2026-01-01T00:00:01.000Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 't1',
+          toolName: 'spawn_browser_agent',
+          action_type: 'browser',
+          browser_url: 'x',
+          toolStatus: 'IN_PROGRESS',
+        },
+      },
+      {
+        message_id: 'verifier',
+        timestamp: '2026-01-01T00:00:02.000Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 't1',
+          toolName: 'spawn_browser_agent',
+          action_type: 'system',
+          toolStatus: 'FINISHED',
+        },
+      },
+    ];
+    expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 't1', browserUrl: 'x' }]);
   });
   it('keeps browser task active after task-scoped action messages finish', () => {
     const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
@@ -152,7 +190,7 @@ describe('computeActiveBrowserPanels', () => {
     ];
     expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 't1', browserUrl: 'x' }]);
   });
-  it('excludes failed browser tasks even when no task_complete action arrives', () => {
+  it('excludes failed browser tasks on the task_complete terminal', () => {
     const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
       {
         message_id: 'init',
@@ -175,7 +213,7 @@ describe('computeActiveBrowserPanels', () => {
         metadata: {
           task_id: 't1',
           toolName: 'spawn_browser_agent',
-          action_type: 'system',
+          action_type: 'task_complete',
           toolStatus: 'ERROR',
         },
       },
