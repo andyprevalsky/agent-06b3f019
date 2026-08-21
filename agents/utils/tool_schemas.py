@@ -697,8 +697,11 @@ class SpawnAgentTool(BaseModel):
     start_url: Optional[str] = Field(
         default=None,
         description=(
-            "User-facing URL the browser navigates to first. Required when type='browser'. "
-            "Ignored for every other type."
+            "HTTPS URL the browser opens first. Required when type='browser'; ignored otherwise. "
+            "Must come from the user or a prior explore/tool result — do not invent or guess deep "
+            "paths, property codes, or booking URLs. If you only know the merchant/site, use that "
+            "site's homepage or search entry URL (e.g. https://www.airbnb.com/). If you do not know "
+            "even the site, spawn explore first, then spawn the browser with the recovered URL."
         ),
     )
     # code only - GitHub repo to clone into sandbox
