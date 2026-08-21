@@ -227,15 +227,41 @@ export function resolveHostAnthropicBaseUrl(hostBaseUrl: string | undefined): st
  * OpenRouter) can back the sandbox without replacing the process-wide
  * `ANTHROPIC_API_KEY` that Rose uses against api.anthropic.com — swapping those
  * put the shared key on cooldown and blocked every later Claude Code session.
+ *
+ * When the host `ANTHROPIC_BASE_URL` points at OpenRouter, use `OPENROUTER_API_KEY`
+ * if no dedicated Claude Code key is set (fleet guests already carry OpenRouter).
  */
 export function resolveClaudeCodeSandboxApiKey(
   claudeCodeAnthropicApiKey: string | undefined,
-  anthropicApiKey: string | undefined
-): string | undefined {
+  anthropicApiKey: string | undefined,
+  options?: {
+    anthropicBaseUrl?: string;
+    openrouterApiKey?: string;
+    sharedKeyOnCooldown?: boolean;
+  }
+): { apiKey: string | undefined; baseUrl: string | undefined } {
   const dedicated = claudeCodeAnthropicApiKey?.trim();
-  if (dedicated) return dedicated;
+  const hostBase = resolveHostAnthropicBaseUrl(options?.anthropicBaseUrl);
+  const openrouter = options?.openrouterApiKey?.trim();
   const shared = anthropicApiKey?.trim();
-  return shared || undefined;
+  const openrouterBase = 'https://openrouter.ai/api';
+
+  if (dedicated) {
+    return { apiKey: dedicated, baseUrl: hostBase };
+  }
+  if (hostBase && openrouter && /openrouter\.ai/i.test(hostBase)) {
+    return { apiKey: openrouter, baseUrl: hostBase };
+  }
+  if (hostBase) {
+    return { apiKey: shared, baseUrl: hostBase };
+  }
+  // Shared Anthropic org is on its out-of-credits cooldown: fall through to the
+  // funded OpenRouter Anthropic-compatible gateway so Claude Code stays runnable
+  // on fleet guests that already have OPENROUTER_API_KEY (no secret rotation).
+  if (options?.sharedKeyOnCooldown && openrouter) {
+    return { apiKey: openrouter, baseUrl: openrouterBase };
+  }
+  return { apiKey: shared, baseUrl: undefined };
 }
 
 /**
@@ -412,10 +438,27 @@ export async function createClaudeCodeSession(
   }
 
   const sharedAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
-  const sandboxApiKey = resolveClaudeCodeSandboxApiKey(
+  // Peek shared cooldown once: drives both OpenRouter auto-fallback and whether
+  // a refresh-only OAuth envelope may be skipped.
+  const sharedKeyOnCooldown = sharedAnthropicApiKey
+    ? await isAnthropicApiKeyOnCooldown()
+    : false;
+  const sandboxTransport = resolveClaudeCodeSandboxApiKey(
     process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
-    sharedAnthropicApiKey
+    sharedAnthropicApiKey,
+    {
+      anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
+      openrouterApiKey: process.env.OPENROUTER_API_KEY,
+      sharedKeyOnCooldown,
+    }
   );
+  const sandboxApiKey = sandboxTransport.apiKey;
+  // Fast Mode proxy wins; otherwise use transport base (host override or
+  // OpenRouter auto-fallback when the shared Anthropic org is on cooldown).
+  if (!envs.ANTHROPIC_BASE_URL && sandboxTransport.baseUrl) {
+    envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
+    log.info(`Routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
+  }
   const sandboxBaseUrl = envs.ANTHROPIC_BASE_URL;
   const ignoreSharedCooldown = shouldIgnoreAnthropicApiKeyCooldownForSandbox({
     sandboxApiKey,
@@ -428,8 +471,7 @@ export async function createClaudeCodeSession(
   if (credentialMeta && isRefreshOnlyOauthEnvelope(credentialMeta) && sandboxApiKey) {
     // Dedicated gateway keys / ANTHROPIC_BASE_URL overrides are never gated by
     // the shared Anthropic-org cooldown (that cooldown tracks api.anthropic.com).
-    const envelopeBlockedBySharedCooldown =
-      !ignoreSharedCooldown && (await isAnthropicApiKeyOnCooldown());
+    const envelopeBlockedBySharedCooldown = !ignoreSharedCooldown && sharedKeyOnCooldown;
     if (!envelopeBlockedBySharedCooldown) {
       log.info(
         `Preferring sandbox Anthropic API key over refresh-only OAuth envelope for agent ${agentId}`
@@ -441,9 +483,7 @@ export async function createClaudeCodeSession(
   // Only consult the shared Anthropic-org cooldown when the sandbox would use
   // that same shared key against api.anthropic.com.
   const apiKeyOnCooldown =
-    !credentialMeta && sandboxApiKey && !ignoreSharedCooldown
-      ? await isAnthropicApiKeyOnCooldown()
-      : false;
+    !credentialMeta && sandboxApiKey && !ignoreSharedCooldown ? sharedKeyOnCooldown : false;
   Object.assign(envs, resolveClaudeCodeAuthEnvs(credentialMeta, sandboxApiKey, apiKeyOnCooldown));
   const claudeTokenSource = resolveClaudeCodeTokenSource(credentialMeta);
 
