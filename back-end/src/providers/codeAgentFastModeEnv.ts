@@ -54,9 +54,18 @@ function escapeRegExp(input: string): string {
 export function isE2bReachableProxyBaseUrl(proxyBaseUrl: string): boolean {
   try {
     const parsed = new URL(proxyBaseUrl);
-    const host = parsed.hostname.toLowerCase();
-    if (host === 'localhost' || host === '0.0.0.0' || host === '::1') return false;
+    // WHATWG URL.hostname keeps IPv6 brackets (e.g. "[::1]"); strip before checks.
+    let host = parsed.hostname.toLowerCase();
+    if (host.startsWith('[') && host.endsWith(']')) {
+      host = host.slice(1, -1);
+    }
+    if (host === 'localhost' || host === '0.0.0.0' || host === '::1' || host === '::') {
+      return false;
+    }
     if (host === '127.0.0.1' || host.startsWith('127.')) return false;
+    // IPv4-mapped IPv6 loopback (::ffff:127.0.0.1 / ::ffff:7f00:1).
+    if (host === '::ffff:127.0.0.1' || host.startsWith('::ffff:127.')) return false;
+    if (/^::ffff:7f[0-9a-f]{2}:[0-9a-f]+$/i.test(host)) return false;
     if (host.endsWith('.localhost')) return false;
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
   } catch {

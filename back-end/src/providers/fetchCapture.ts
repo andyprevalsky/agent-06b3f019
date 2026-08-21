@@ -71,10 +71,9 @@ interface SerializedResponse {
   statusText: string;
   body: string;
   headers: Record<string, string>;
+  /** Private capture metadata — never store this in upstream HTTP headers. */
+  bodyEncoding?: 'base64';
 }
-
-/** Marks a SerializedResponse.body as base64 so binary bytes survive capture/replay. */
-export const FETCH_CAPTURE_BODY_ENCODING_HEADER = 'x-rose-fetch-capture-body-encoding';
 
 /**
  * Content types whose bodies must not pass through `response.text()` — that path
@@ -111,13 +110,15 @@ export function isTextContentType(contentType: string | null | undefined): boole
  * Detect the classic fetchCapture `response.text()` JPEG corruption signature:
  * UTF-8 replacement sequences (EF BF BD) dominating a buffer that should be
  * binary (no JPEG/PNG SOI). Used as a last-line guard before E2B upload.
+ *
+ * PDF magic alone is not enough to skip the scan — a `%PDF` prefix can survive
+ * UTF-8 replacement while the rest of the stream is corrupted.
  */
 export function looksLikeUtf8ReplacementCorruption(buf: Buffer): boolean {
   if (buf.length < 16) return false;
-  // Intact image/PDF magic → not this failure mode.
+  // Intact image magic → not this failure mode.
   if (buf[0] === 0xff && buf[1] === 0xd8) return false; // JPEG
   if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return false; // PNG
-  if (buf.subarray(0, 4).toString('ascii') === '%PDF') return false;
   const fffd = Buffer.from([0xef, 0xbf, 0xbd]);
   let count = 0;
   for (let i = 0; i <= buf.length - 3; i++) {
@@ -140,13 +141,8 @@ export function outboundReplayCacheKey(url: string, method: string, body: string
 
 function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
   const headers: Record<string, string> = { ...serialized.headers };
-  const encoding =
-    headers[FETCH_CAPTURE_BODY_ENCODING_HEADER] ??
-    headers[FETCH_CAPTURE_BODY_ENCODING_HEADER.toLowerCase()];
-  delete headers[FETCH_CAPTURE_BODY_ENCODING_HEADER];
-  delete headers[FETCH_CAPTURE_BODY_ENCODING_HEADER.toLowerCase()];
-
-  const body = encoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
+  const body =
+    serialized.bodyEncoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
 
   return new globalThis.Response(body, {
     status: serialized.status,
@@ -201,12 +197,12 @@ class FetchReplayClient {
     // attachment failure mode. Only known text types use `.text()`.
     if (!isTextContentType(contentType)) {
       const bytes = Buffer.from(await response.arrayBuffer());
-      responseHeaders[FETCH_CAPTURE_BODY_ENCODING_HEADER] = 'base64';
       return {
         status: response.status,
         statusText: response.statusText,
         body: bytes.toString('base64'),
         headers: responseHeaders,
+        bodyEncoding: 'base64',
       };
     }
 

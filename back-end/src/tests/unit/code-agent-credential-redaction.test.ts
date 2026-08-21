@@ -189,6 +189,32 @@ function main(): void {
     }),
     { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
   );
+  // Cooldown / Fast Mode must not keep a shared Anthropic key when OpenRouter is available —
+  // even if ANTHROPIC_BASE_URL points at api.anthropic.com.
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+      openrouterApiKey: 'sk-or-gateway',
+      sharedKeyOnCooldown: true,
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+      openrouterApiKey: 'sk-or-gateway',
+      preferOpenRouterGateway: true,
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
+  // Without cooldown / Fast Mode preference, honor an explicit Anthropic host base.
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+      openrouterApiKey: 'sk-or-gateway',
+    }),
+    { apiKey: 'sk-ant-shared', baseUrl: 'https://api.anthropic.com' }
+  );
   // Dedicated OpenRouter key without ANTHROPIC_BASE_URL still gets OpenRouter base.
   assert.deepEqual(resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared'), {
     apiKey: 'sk-or-dedicated',
@@ -224,6 +250,15 @@ function main(): void {
       sandboxBaseUrl: 'https://openrouter.ai/api',
     }),
     true
+  );
+  // Explicit api.anthropic.com must keep the shared-key cooldown active.
+  assert.equal(
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-ant-shared',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: 'https://api.anthropic.com',
+    }),
+    false
   );
 
   assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://openrouter.ai/api'), true);
