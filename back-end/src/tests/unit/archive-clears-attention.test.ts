@@ -1,10 +1,7 @@
 #!/usr/bin/env tsx
 /**
- * Soft-delete / archive must clear AgentAttentionRequest rows.
- *
- * UI archive already did this via agentLifecycleService.deleteAgentRecursive.
- * SMS kill (/clear + kill_agent) historically only set deletedAt and left inbox
- * orphans — these tests cement both paths wipe attention for the deleted tree.
+ * Soft-delete / archive must clear AgentAttentionRequest rows, and every
+ * surface must call the single canonical kill in providers/agentKill.ts.
  *
  * Run: DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria \
  *      npx tsx src/tests/unit/archive-clears-attention.test.ts
@@ -19,7 +16,7 @@ import { config } from 'dotenv';
 config();
 
 import { prisma } from '../../providers/database';
-import { softDeleteAgentAndChildren } from '../../domains/sms-webhook/repo';
+import { deleteAgentRecursive } from '../../providers/agentKill';
 
 let passed = 0;
 const failures: string[] = [];
@@ -36,51 +33,62 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
   }
 }
 
-function extractFunction(source: string, name: string): string {
-  const start = source.indexOf(`export async function ${name}`);
-  assert.ok(start >= 0, `missing export async function ${name}`);
-  let depth = 0;
-  let started = false;
-  for (let i = start; i < source.length; i++) {
-    const ch = source[i];
-    if (ch === '{') {
-      depth += 1;
-      started = true;
-    } else if (ch === '}') {
-      depth -= 1;
-      if (started && depth === 0) return source.slice(start, i + 1);
-    }
-  }
-  throw new Error(`unclosed function ${name}`);
+function readSrc(...parts: string[]): string {
+  return readFileSync(join(process.cwd(), ...parts), 'utf8');
+}
+
+function assertImportsCanonicalKill(source: string, label: string): void {
+  assert.match(
+    source,
+    /from ['"].*agentKill['"]/,
+    `${label} must import providers/agentKill (not a parallel soft-delete path)`
+  );
+  assert.doesNotMatch(
+    source,
+    /softDeleteAgentAndChildren/,
+    `${label} must not call the removed CTE soft-delete helper`
+  );
 }
 
 async function main(): Promise<void> {
-  await test('UI + SMS deleteAgentRecursive both wipe attention requests', () => {
-    const lifecycle = readFileSync(
-      join(process.cwd(), 'src', 'domains', 'agents', 'agentLifecycleService.ts'),
-      'utf8'
+  await test('canonical kill lives only in providers/agentKill.ts', () => {
+    const kill = readSrc('src', 'providers', 'agentKill.ts');
+    assert.match(kill, /export async function deleteAgentRecursive/);
+    assert.match(kill, /agentAttentionRequest\.deleteMany/);
+    assert.match(kill, /deletedAt:\s*new Date\(\)/);
+    assert.match(kill, /cleanupAgentSessions/);
+
+    const helpers = readSrc('src', 'providers', 'smsSupervisor', 'supervisorTools.helpers.ts');
+    assert.doesNotMatch(
+      helpers,
+      /export async function deleteAgentRecursive/,
+      'SMS helpers must not own a second deleteAgentRecursive'
     );
-    const smsHelper = readFileSync(
-      join(process.cwd(), 'src', 'providers', 'smsSupervisor', 'supervisorTools.helpers.ts'),
-      'utf8'
+
+    const smsRepo = readSrc('src', 'domains', 'sms-webhook', 'repo.ts');
+    assert.doesNotMatch(
+      smsRepo,
+      /softDeleteAgentAndChildren|DELETE FROM "AgentAttentionRequest"/,
+      'sms-webhook repo must not soft-delete agents outside agentKill'
     );
-    const uiDelete = extractFunction(lifecycle, 'deleteAgentRecursive');
-    const smsDelete = extractFunction(smsHelper, 'deleteAgentRecursive');
-    assert.match(uiDelete, /deleteAttentionRequests/);
-    assert.match(smsDelete, /agentAttentionRequest\.deleteMany/);
   });
 
-  await test('sms /clear softDeleteAgentAndChildren deletes attention in the same CTE', () => {
-    const repo = readFileSync(
-      join(process.cwd(), 'src', 'domains', 'sms-webhook', 'repo.ts'),
-      'utf8'
+  await test('UI Archive, SMS kill, and /clear all import agentKill', () => {
+    assertImportsCanonicalKill(
+      readSrc('src', 'domains', 'agents', 'agentLifecycleService.ts'),
+      'UI archive service'
     );
-    const fn = extractFunction(repo, 'softDeleteAgentAndChildren');
-    assert.match(fn, /DELETE FROM "AgentAttentionRequest"/);
-    assert.match(fn, /deleted_agents/);
+    assertImportsCanonicalKill(
+      readSrc('src', 'providers', 'smsSupervisor', 'supervisorTools.ts'),
+      'SMS kill_agent'
+    );
+    assertImportsCanonicalKill(
+      readSrc('src', 'domains', 'sms-webhook', 'service.ts'),
+      'SMS /clear'
+    );
   });
 
-  await test('softDeleteAgentAndChildren removes attention for parent + child', async () => {
+  await test('deleteAgentRecursive removes attention for parent + child', async () => {
     const userId = `archive-attn-${randomUUID()}`;
     const parentId = randomUUID();
     const childId = randomUUID();
@@ -132,7 +140,7 @@ async function main(): Promise<void> {
       });
       assert.equal(before, 2);
 
-      await softDeleteAgentAndChildren(parentId);
+      await deleteAgentRecursive(parentId, { terminateReason: 'unit-test' });
 
       const after = await prisma.agentAttentionRequest.count({
         where: { agentId: { in: [parentId, childId] } },
