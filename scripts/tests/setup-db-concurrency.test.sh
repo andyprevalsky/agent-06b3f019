@@ -83,7 +83,15 @@ stamp() { printf '%s %s %s\n' "\$(date +%s%N)" "\${SETUP_DB_TEST_TAG:-?}" "\$1" 
 args="\$*"
 case "\$args" in
   *"prisma db push"*) stamp PUSH; sleep 0.2; exit 0 ;;
-  *seed-local.ts*)    stamp SEED_START; sleep 1.5; stamp SEED_END; exit 0 ;;
+  *seed-local.ts*)
+    stamp SEED_START
+    # Case 6 swaps in a long-lived seed so signal handling is observable.
+    if [ -n "\${SETUP_DB_TEST_SEED_COMMAND:-}" ]; then
+      "\$SETUP_DB_TEST_SEED_COMMAND"
+    else
+      sleep 1.5
+    fi
+    stamp SEED_END; exit 0 ;;
   *)                  exit 0 ;;
 esac
 STUB
@@ -124,6 +132,7 @@ run_setup_db() { # run_setup_db <tag> <workspace-name>
     CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
     ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
     ROSE_USE_SYSTEM_PG=false \
+    SETUP_DB_TEST_SEED_COMMAND="${SETUP_DB_TEST_SEED_COMMAND:-}" \
       bash "$TMP/fake-repo/scripts/setup-db.sh" > "$TMP/$tag.out" 2>&1
     printf '%s\n' "$?" > "$TMP/$tag.rc"
   )
@@ -241,5 +250,221 @@ $(cat "$TMP/E.out" 2>/dev/null)"
   "case 5: expected flattened lock file system-pg:localhost:5432_victoria.lock
 --- locks ---
 $(ls -la "$TMP/locks" 2>/dev/null)"
+
+# ── Case 6: TERM must stop the seed child, not just the script ───────────────
+# Releasing the lock on EXIT is not enough. The destructive section spawns
+# long-lived children (`prisma db push`, `seed-local.ts`); bash signals only the
+# script, so a TERM'd setup-db released its lock and returned while its seed
+# child kept writing prod rows into a database another process had just claimed.
+# Observed 2026-08-19 during /deploy: stopping a mid-flight setup-db left
+# `tsx scripts/seed-local.ts` alive against victoria-db-dallas and it corrupted a
+# concurrent back-end coverage run (11 domains failing with 500s). "Stopped"
+# must mean stopped.
+: > "$EVENTS"
+mkdir -p "$TMP/locks"
+CHILD_MARKER="$TMP/orphan-child-alive"
+rm -f "$CHILD_MARKER"
+# The seed stub for this case parks a long-lived grandchild exactly the way the
+# real seed does, ignores graceful termination, and keeps touching a marker so
+# survival is observable. Teardown must retain the lock through its grace window
+# and then force this child to stop.
+cat > "$TMP/fake-repo/back-end/scripts/long-seed.sh" <<STUB
+#!/usr/bin/env bash
+trap '' INT TERM
+for _ in \$(seq 1 200); do
+  printf '%s\n' "alive" > "$CHILD_MARKER"
+  sleep 0.1
+done
+STUB
+chmod +x "$TMP/fake-repo/back-end/scripts/long-seed.sh"
+# Launch setup-db as a real process-group leader. This is the production branch
+# that used to signal itself before it could release the workspace lock.
+(
+  cd "$TMP/fake-repo"
+  exec env \
+    PATH="$TMP/bin:$PATH" \
+    SETUP_DB_TEST_TAG=F \
+    CONDUCTOR_PORT=59000 \
+    CONDUCTOR_WORKSPACE_NAME=term-ws \
+    CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
+    ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+    ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+    ROSE_USE_SYSTEM_PG=false \
+    SETUP_DB_TEARDOWN_GRACE_SECONDS=1 \
+    SETUP_DB_TEST_SEED_COMMAND="$TMP/fake-repo/back-end/scripts/long-seed.sh" \
+    python3 -c 'import os, sys; os.setsid(); os.execv("/bin/bash", ["bash", sys.argv[1]])' \
+      "$TMP/fake-repo/scripts/setup-db.sh"
+) > "$TMP/F.out" 2>&1 &
+term_pid=$!
+for _ in $(seq 1 200); do
+  [ -f "$CHILD_MARKER" ] && break
+  sleep 0.05
+done
+if [ -f "$CHILD_MARKER" ]; then
+  kill -TERM "$term_pid" 2>/dev/null || true
+  sleep 0.1
+  kill -INT "$term_pid" 2>/dev/null || true
+  sleep 0.1
+  [ -f "$TMP/locks/victoria-db-term-ws.lock" ] || fail \
+    "case 6: teardown released the workspace DB lock while a TERM-resistant seed child was still alive"
+  set +e
+  wait "$term_pid" 2>/dev/null
+  term_status=$?
+  set -e
+  [ "$term_status" -eq 143 ] || fail \
+    "case 6: TERM'd setup-db.sh exited rc=$term_status instead of 143"
+  rm -f "$CHILD_MARKER"
+  sleep 0.3
+  [ ! -f "$CHILD_MARKER" ] || fail \
+    "case 6: a TERM'd setup-db.sh left its seed child running — it keeps writing to a
+database the next holder already claimed"
+  [ ! -f "$TMP/locks/victoria-db-term-ws.lock" ] || fail \
+    "case 6: process-group teardown exited before releasing the workspace DB lock"
+  pkill -f "$TMP/fake-repo/back-end/scripts/long-seed.sh" 2>/dev/null || true
+else
+  kill -TERM "$term_pid" 2>/dev/null || true
+  wait "$term_pid" 2>/dev/null || true
+  pkill -f "$TMP/fake-repo/back-end/scripts/long-seed.sh" 2>/dev/null || true
+  echo "case 6: skipped (could not observe a live seed child on this host)" >&2
+fi
+
+# ── Case 7: grace cleanup must TERM descendants discovered after teardown starts ─
+# In a shared caller process group, cleanup signals PIDs individually. A wrapper
+# can react to its first TERM by forking one final child; that child must receive
+# TERM during the grace rescan, not its first signal as KILL after grace expires.
+grace_loop="$({
+  sed -n '/while \[ \$((SECONDS - grace_started)) -lt "\$grace" \]; do/,/^[[:space:]]*done$/p' \
+    "$SETUP_DB"
+} 2>/dev/null)"
+printf '%s\n' "$grace_loop" | grep -q 'setup_db_child_records' || fail \
+  "case 7: graceful cleanup does not rescan for late descendants"
+printf '%s\n' "$grace_loop" | grep -q 'setup_db_term_records' || fail \
+  "case 7: descendants discovered during grace are remembered but never sent TERM"
+
+# ── Case 8: force cleanup must keep discovering late descendants ─────────────
+# A TERM-resistant wrapper can fork after the first KILL target snapshot. The
+# force window must rescan inside every iteration; a one-time pre-loop scan can
+# release the DB lock while that late child is still writing.
+force_loop="$({
+  sed -n '/while \[ \$((SECONDS - force_started)) -lt 2 \]; do/,/^[[:space:]]*done$/p' \
+    "$SETUP_DB"
+} 2>/dev/null)"
+printf '%s\n' "$force_loop" | grep -q 'setup_db_child_records' || fail \
+  "case 8: force-cleanup loop does not rescan descendants before releasing the DB lock"
+printf '%s\n' "$force_loop" | grep -q 'kill -KILL' || fail \
+  "case 8: force-cleanup loop discovers descendants but does not stop late arrivals"
+
+# ── Case 8b: surviving descendants must be visible before lock release ───────
+post_force="$({
+  sed -n '/for pid in \$reap_pids; do/,/release_workspace_db_lock/p' "$SETUP_DB"
+} 2>/dev/null)"
+printf '%s\n' "$post_force" | grep -q 'setup_db_child_records' || fail \
+  "case 8b: teardown does not make a final descendant scan before releasing the DB lock"
+printf '%s\n' "$post_force" | grep -q 'setup_db_pid_matches_record' || fail \
+  "case 8b: teardown warns about descendants without revalidating process identity"
+printf '%s\n' "$post_force" | grep -q 'survived SIGKILL.*PID\|PID .*survived SIGKILL' || fail \
+  "case 8b: teardown silently releases the DB lock while a descendant survives SIGKILL"
+
+# ── Case 9: retained PIDs must be identity-checked before force cleanup ───────
+# A short-lived child can exit during the grace phase and its numeric PID can be
+# reused before a later force-loop iteration. PID plus start time distinguish the
+# owned process incarnation from the unrelated replacement process; parent/group
+# values are capture-time provenance because descendants may detach or reparent.
+printf '%s\n' "$force_loop" | grep -q 'setup_db_pid_matches_record' || fail \
+  "case 9: force cleanup can SIGKILL a recycled PID without revalidating identity"
+grep -q 'lstart=' "$SETUP_DB" || fail \
+  "case 9: descendant identity does not include process start time"
+grep -q 'current_started.*expected_started' "$SETUP_DB" || fail \
+  "case 9: process start time is captured but never revalidated"
+
+# ── Case 10: retained identity must survive setsid plus reparenting ───────────
+# A seed can detach from its original process group while its wrapper exits.
+# PPID and PGID then both differ from the capture-time descendant record, but it
+# is still the same live process and must remain eligible for force cleanup.
+DETACHED_TRIGGER="$TMP/detached-child-trigger"
+DETACHED_READY="$TMP/detached-child-ready"
+DETACHED_PID_FILE="$TMP/detached-child.pid"
+rm -f "$DETACHED_TRIGGER" "$DETACHED_READY" "$DETACHED_PID_FILE"
+cat > "$TMP/detaching-child.py" <<STUB
+#!/usr/bin/env python3
+import os
+import time
+from pathlib import Path
+
+trigger = Path("$DETACHED_TRIGGER")
+ready = Path("$DETACHED_READY")
+if os.fork():
+    while True:
+        time.sleep(0.1)
+
+Path("$DETACHED_PID_FILE").write_text(str(os.getpid()))
+while not trigger.exists():
+    time.sleep(0.02)
+os.setsid()
+ready.write_text("detached")
+while True:
+    time.sleep(0.1)
+STUB
+python3 "$TMP/detaching-child.py" &
+detach_parent_pid=$!
+detached_pid=""
+case10_cleanup() {
+  [ -z "$detached_pid" ] || kill -KILL "$detached_pid" 2>/dev/null || true
+  kill -KILL "$detach_parent_pid" 2>/dev/null || true
+  wait "$detach_parent_pid" 2>/dev/null || true
+}
+case10_fail() {
+  local message="$1"
+  case10_cleanup
+  fail "$message"
+}
+for _ in $(seq 1 200); do
+  [ -f "$DETACHED_PID_FILE" ] && break
+  sleep 0.05
+done
+[ -f "$DETACHED_PID_FILE" ] || case10_fail \
+  "case 10: could not observe the forked seed child"
+detached_pid="$(cat "$DETACHED_PID_FILE")"
+detached_record="$(ps -o pid=,ppid=,pgid=,lstart= -p "$detached_pid" 2>/dev/null | awk '
+  NR == 1 { print $1 "|" $2 "|" $3 "|" $4 " " $5 " " $6 " " $7 " " $8 }
+')"
+[ -n "$detached_record" ] || case10_fail \
+  "case 10: could not capture the seed child's original identity"
+IFS='|' read -r _ expected_parent expected_group _ <<< "$detached_record"
+
+: > "$DETACHED_TRIGGER"
+for _ in $(seq 1 100); do
+  [ -f "$DETACHED_READY" ] && break
+  sleep 0.05
+done
+[ -f "$DETACHED_READY" ] || case10_fail \
+  "case 10: seed child did not call setsid"
+# Reparent only after setsid so the regression covers both identity changes in
+# the same order as a detaching child whose wrapper subsequently exits.
+kill -TERM "$detach_parent_pid" 2>/dev/null || true
+wait "$detach_parent_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  current_parent_group="$(ps -o ppid=,pgid= -p "$detached_pid" 2>/dev/null | awk \
+    'NR == 1 { print $1 "|" $2 }')"
+  IFS='|' read -r current_parent current_group <<< "$current_parent_group"
+  if [ -n "$current_parent" ] \
+      && [ "$current_parent" != "$expected_parent" ] \
+      && [ "$current_group" != "$expected_group" ]; then
+    break
+  fi
+  sleep 0.05
+done
+[ -n "${current_parent:-}" ] \
+  && [ "$current_parent" != "$expected_parent" ] \
+  && [ "$current_group" != "$expected_group" ] || case10_fail \
+    "case 10: child did not change both PPID and PGID after setsid/reparenting"
+
+matcher_impl="$(sed -n '/^setup_db_pid_matches_record() {$/,/^}$/p' "$SETUP_DB")"
+[ -n "$matcher_impl" ] || case10_fail \
+  "case 10: could not load setup_db_pid_matches_record"
+eval "$matcher_impl"
+setup_db_pid_matches_record "$detached_record" || case10_fail \
+  "case 10: retained child identity was lost after setsid plus reparenting"
+case10_cleanup
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"
