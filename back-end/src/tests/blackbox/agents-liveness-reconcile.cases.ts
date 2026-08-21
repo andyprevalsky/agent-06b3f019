@@ -194,7 +194,7 @@ test('reconciler seals an agent whose workflow no longer exists', async () => {
   );
 });
 
-test('reconciler releases browser sessions even when interrupted-tool cleanup fails', async () => {
+test('reconciler restores a retryable row when interrupted-tool cleanup fails', async () => {
   const session = await createAnonymousSession('liveness-cleanup-failure');
   const { agentId, workflowId } = await seedLivenessAgent(
     session.user.id,
@@ -202,6 +202,7 @@ test('reconciler releases browser sessions even when interrupted-tool cleanup fa
     'ACTIVE'
   );
   let releasedAgentId: string | null = null;
+  let cleanupAttempts = 0;
 
   await makeEligible([agentId]);
   let cleanupRejected = false;
@@ -210,6 +211,7 @@ test('reconciler releases browser sessions even when interrupted-tool cleanup fa
       batchSize: 1000,
       describeStatus: async (id: string) => (id === workflowId ? 'TERMINATED' : 'RUNNING'),
       finalizeInterruptedTools: async () => {
+        cleanupAttempts++;
         throw new Error('tool cleanup failed');
       },
       releaseBrowserSessions: async (id: string) => {
@@ -226,9 +228,25 @@ test('reconciler releases browser sessions even when interrupted-tool cleanup fa
     `browser release must run after the row is sealed (released=${String(releasedAgentId)})`
   );
   assert(
-    (await statusOf(agentId)) === 'FAILED',
-    'the row should remain sealed after cleanup fails'
+    (await statusOf(agentId)) === 'ACTIVE',
+    'cleanup failure must restore the row so a later reconciliation can retry it'
   );
+
+  await makeEligible([agentId]);
+  const retry = await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async (id: string) => (id === workflowId ? 'TERMINATED' : 'RUNNING'),
+    finalizeInterruptedTools: async () => {
+      cleanupAttempts++;
+      return { candidates: 0, interrupted: 0 };
+    },
+    releaseBrowserSessions: async (id: string) => {
+      releasedAgentId = id;
+    },
+  });
+  assert(cleanupAttempts === 2, `expected cleanup to retry once, got ${cleanupAttempts} attempts`);
+  assert(retry.sealed >= 1, 'the successful retry should seal the restored row');
+  assert((await statusOf(agentId)) === 'FAILED', 'the row should seal after cleanup succeeds');
 });
 
 test('reconciler is idempotent and never re-transitions a settled agent', async () => {
