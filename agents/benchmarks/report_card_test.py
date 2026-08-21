@@ -74,11 +74,28 @@ def _sample_state(**overrides) -> RunState:
 
 def test_report_frontend_url_does_not_override_prompt_frontend_url(monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://public.example")
-    monkeypatch.setenv("BENCHMARK_REPORT_FRONTEND_URL", "http://localhost:5050")
+    monkeypatch.setenv("BENCHMARK_REPORT_FRONTEND_URL", "https://roselabs.ai")
     monkeypatch.delenv("BENCHMARK_FRONTEND_URL", raising=False)
+    monkeypatch.delenv("BENCHMARK_REPORT_ALLOW_EPHEMERAL", raising=False)
 
-    assert _frontend_url_for_benchmark("http://localhost:3001") == "https://public.example"
-    assert _report_frontend_url_for_benchmark("http://localhost:3001") == "http://localhost:5050"
+    assert _frontend_url_for_benchmark("http://127.0.0.1:3099") == "https://public.example"
+    assert _report_frontend_url_for_benchmark("http://127.0.0.1:3099") == "https://roselabs.ai"
+
+
+def test_report_frontend_url_rejects_ephemeral_hosts_by_default(monkeypatch):
+    monkeypatch.setenv("BENCHMARK_REPORT_FRONTEND_URL", "http://localhost:60784")
+    monkeypatch.delenv("BENCHMARK_REPORT_ALLOW_EPHEMERAL", raising=False)
+    assert _report_frontend_url_for_benchmark("http://127.0.0.1:3099") == "https://roselabs.ai"
+
+    monkeypatch.setenv("BENCHMARK_REPORT_ALLOW_EPHEMERAL", "1")
+    assert _report_frontend_url_for_benchmark("http://127.0.0.1:3099") == "http://localhost:60784"
+
+
+def test_report_frontend_url_defaults_to_durable_prod(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_REPORT_FRONTEND_URL", raising=False)
+    monkeypatch.delenv("BENCHMARK_REPORT_ALLOW_EPHEMERAL", raising=False)
+    monkeypatch.setenv("CONDUCTOR_PORT", "3001")
+    assert _report_frontend_url_for_benchmark("http://127.0.0.1:3099") == "https://roselabs.ai"
 
 
 # --- schema + types ---------------------------------------------------------
