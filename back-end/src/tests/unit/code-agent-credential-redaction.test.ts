@@ -189,10 +189,10 @@ function main(): void {
     { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
   );
   // Dedicated OpenRouter key without ANTHROPIC_BASE_URL still gets OpenRouter base.
-  assert.deepEqual(
-    resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared'),
-    { apiKey: 'sk-or-dedicated', baseUrl: 'https://openrouter.ai/api' }
-  );
+  assert.deepEqual(resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared'), {
+    apiKey: 'sk-or-dedicated',
+    baseUrl: 'https://openrouter.ai/api',
+  });
   // sk-or-* must ignore a host base that points at api.anthropic.com (HTTP 403).
   assert.deepEqual(
     resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared', {
@@ -200,30 +200,33 @@ function main(): void {
     }),
     { apiKey: 'sk-or-dedicated', baseUrl: 'https://openrouter.ai/api' }
   );
-  assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
-    sandboxApiKey: 'sk-or-gateway',
-    sharedAnthropicApiKey: 'sk-ant-shared',
-    sandboxBaseUrl: undefined,
-  }), true);
-  assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
-    sandboxApiKey: 'sk-ant-shared',
-    sharedAnthropicApiKey: 'sk-ant-shared',
-    sandboxBaseUrl: undefined,
-  }), false);
-  assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
-    sandboxApiKey: 'sk-ant-shared',
-    sharedAnthropicApiKey: 'sk-ant-shared',
-    sandboxBaseUrl: 'https://openrouter.ai/api',
-  }), true);
-
   assert.equal(
-    shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://openrouter.ai/api'),
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-or-gateway',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: undefined,
+    }),
     true
   );
   assert.equal(
-    shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://api.anthropic.com'),
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-ant-shared',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: undefined,
+    }),
     false
   );
+  assert.equal(
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-ant-shared',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: 'https://openrouter.ai/api',
+    }),
+    true
+  );
+
+  assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://openrouter.ai/api'), true);
+  assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://api.anthropic.com'), false);
   assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode(undefined), false);
 
   // Andy write-through + OpenRouter must still disable Fast Mode for Claude Code
