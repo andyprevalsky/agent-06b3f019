@@ -31,6 +31,7 @@ import { forwardRef, type ComponentPropsWithoutRef } from 'react';
 import { Archive, ArchiveRestore, Bot, Pin } from 'lucide-react';
 
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 
 import AgentRowMenu, { type AgentRowActions } from './AgentRowMenu';
@@ -55,21 +56,29 @@ interface AgentListItemProps extends AgentRowActions {
 function RowActionButton({
   icon,
   label,
+  tooltip,
   onClick,
 }: {
   icon: React.ReactNode;
   label: string;
+  tooltip: string;
   onClick: (e: React.MouseEvent) => void;
 }) {
   return (
-    <button
-      onClick={onClick}
-      aria-label={label}
-      title={label}
-      className="flex-shrink-0 rounded p-0.5 hover:bg-gray-200"
-    >
-      {icon}
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          onClick={onClick}
+          aria-label={label}
+          className="flex-shrink-0 rounded p-0.5 hover:bg-gray-200"
+        >
+          {icon}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6} className="px-2 py-1 text-xs">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -227,12 +236,14 @@ const ExpandedRow = forwardRef<
           {!isArchived && (
             <RowActionButton
               label={isPinned ? `Unpin ${displayName}` : `Pin ${displayName}`}
+              tooltip={isPinned ? 'Unpin Agent' : 'Pin Agent'}
               onClick={onPinClick}
               icon={<Pin className={cn(ACTION_ICON, isPinned && 'fill-current text-gray-600')} />}
             />
           )}
           <RowActionButton
             label={`${isArchived ? 'Restore' : 'Archive'} ${displayName}`}
+            tooltip={isArchived ? 'Restore Agent' : 'Archive Agent'}
             onClick={onArchiveClick}
             icon={
               isArchived ? (

@@ -373,6 +373,26 @@ describe('AppSidebar rows', () => {
     expect(within(menu).queryByText('Pin')).not.toBeInTheDocument();
   });
 
+  it('labels the pin hover action with a tooltip', async () => {
+    const u = userEvent.setup();
+    renderWithProviders(
+      <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
+    );
+
+    await u.hover(await screen.findByLabelText('Pin Row A'));
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Pin Agent');
+  });
+
+  it('labels the archive hover action with a tooltip', async () => {
+    const u = userEvent.setup();
+    renderWithProviders(
+      <AppSidebar {...defaultProps({ agents: [makeAgent({ goal: 'Row A' })] })} />,
+    );
+
+    await u.hover(await screen.findByLabelText('Archive Row A'));
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Archive Agent');
+  });
+
   it('renames via the context menu and PATCHes the new title', async () => {
     const u = userEvent.setup();
     let patched: { id: string; body: Record<string, unknown> } | null = null;
