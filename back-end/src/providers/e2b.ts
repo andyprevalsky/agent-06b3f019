@@ -221,6 +221,20 @@ export function resolveHostAnthropicBaseUrl(hostBaseUrl: string | undefined): st
 }
 
 /**
+ * Fast Mode tee-proxy must not run for Claude Code when OpenRouter is configured —
+ * the proxy forwards to api.anthropic.com and 403s gateway keys / replays stale
+ * 0-interaction cache entries (files-in-sub-agents fleet, 2026-08-21).
+ */
+export function shouldEnableClaudeCodeFastMode(params: {
+  openrouterApiKey?: string;
+  fastModeCacheEnabled?: boolean;
+  fastModeWriteEnabled?: boolean;
+}): boolean {
+  if (params.openrouterApiKey?.trim()) return false;
+  return params.fastModeCacheEnabled === true || params.fastModeWriteEnabled === true;
+}
+
+/**
  * Funded Anthropic-compatible gateways (OpenRouter auto-fallback when the shared
  * Anthropic org is credit-dead) must win over the Fast Mode tee-proxy.
  *
@@ -403,7 +417,20 @@ export async function createClaudeCodeSession(
   const taskId = uuidv4();
   const fastModeWriteEnabled =
     fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
-  const codeAgentFastModeActive = fastModeCacheEnabled === true || fastModeWriteEnabled;
+  const codeAgentFastModeActive = shouldEnableClaudeCodeFastMode({
+    openrouterApiKey: process.env.OPENROUTER_API_KEY,
+    fastModeCacheEnabled,
+    fastModeWriteEnabled,
+  });
+  if (
+    !codeAgentFastModeActive &&
+    (fastModeCacheEnabled === true || fastModeWriteEnabled) &&
+    process.env.OPENROUTER_API_KEY?.trim()
+  ) {
+    log.info(
+      'OpenRouter configured — skipping Fast Mode tee-proxy/flags for Claude Code session'
+    );
+  }
   const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5';
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const templateId = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
