@@ -142,7 +142,19 @@ async function main(): Promise<void> {
     assert.deepEqual(calls, ['list_cardholders']);
   }
 
-  // When every configured id is missing, fall back to the benchmark email cardholder.
+  // When every configured id is missing, prefer andy@ (live KYC) over agentcard-benchmark@.
+  {
+    const resolved = await resolveBenchmarkCardholderId(['ch-stale'], async () =>
+      cardholdersResult([
+        { id: 'ch-bench', email: 'agentcard-benchmark@roselabs.ai' },
+        { id: 'ch-andy', email: 'andy@roselabs.ai' },
+        { id: 'ch-other', email: 'a@roselabs.ai' },
+      ])
+    );
+    assert.equal(resolved, 'ch-andy');
+  }
+
+  // Sandbox orgs without andy@ fall back to the verified agentcard-benchmark@ cardholder.
   {
     const resolved = await resolveBenchmarkCardholderId(['ch-stale'], async () =>
       cardholdersResult([

@@ -68,6 +68,10 @@ BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
+    # Must include admin-bypass so needs_frontend_tunnel still publishes
+    # BENCHMARK_FRONTEND_URL for /test_payment. Bundling itself now follows
+    # needs_public_tunnel (any Kernel-reachable FE), not this allowlist alone.
+    "gate-subscription-card-mint-admin-bypass",
 }
 # Sandbox lifecycle benches run as the default admin account so credit checks
 # stay unlimited. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH (set below, honored
@@ -769,6 +773,24 @@ def needs_public_tunnel(tasks: Sequence[str]) -> bool:
     return False
 
 
+def apply_public_tunnel_env(env: dict[str, str], tasks: Sequence[str]) -> bool:
+    """Make BENCHMARK_SKIP_PUBLIC_TUNNEL match selected tasks; return skip flag.
+
+    Task selection is authoritative. A parent /deploy shell may export
+    BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for the Step-5 semantic stack (or to avoid
+    ngrok contention across Group 4 lanes). That ambient skip must not leak
+    into an isolated browser/payment stack — Kernel cannot reach localhost, so
+    {frontend_url} would be ERR_CONNECTION_REFUSED for the entire timeout.
+    """
+    skip_public_tunnel = bool(tasks) and not needs_public_tunnel(tasks)
+    if skip_public_tunnel:
+        env["BENCHMARK_SKIP_PUBLIC_TUNNEL"] = "1"
+        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+    else:
+        env.pop("BENCHMARK_SKIP_PUBLIC_TUNNEL", None)
+    return skip_public_tunnel
+
+
 def needs_imessage_relay(tasks: Sequence[str]) -> bool:
     return "message-person" in set(tasks) and sys.platform == "darwin"
 
@@ -826,7 +848,14 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         os.environ["BENCHMARK_ISOLATED_RUN"] = "true"
     else:
         os.environ.pop("BENCHMARK_ISOLATED_RUN", None)
-    if needs_frontend_tunnel(tasks):
+    # Any publicly tunneled frontend must be a production bundle. Vite DEV's
+    # unbundled module graph cannot mount reliably through Kernel+ngrok; tying
+    # bundling to a hand-maintained allowlist caused blank-SPA budget burns when
+    # a new tunnel task was omitted (admin-bypass). needs_public_tunnel already
+    # decides who pays for a tunnel — the bundle follows that same gate. Skip
+    # when the run points at an external BENCHMARK_FRONTEND_URL (nothing local
+    # to build).
+    if needs_public_tunnel(tasks) and not os.environ.get("BENCHMARK_FRONTEND_URL"):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
     if needs_non_purchase_gates(tasks):
@@ -1175,7 +1204,7 @@ def start_services(
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
-    skip_public_tunnel = bool(tasks) and not needs_public_tunnel(tasks)
+    skip_public_tunnel = apply_public_tunnel_env(env, tasks)
     if anon_steel_profile:
         env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
         env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
@@ -1268,8 +1297,9 @@ def start_services(
         # run needs to be reachable from the public internet. Skip the quick
         # tunnel (and, with it, the ephemeral-URL publish that would otherwise
         # have nothing to publish) rather than take a per-IP-rate-limited
-        # external dependency for nothing. See needs_public_tunnel().
-        env["BENCHMARK_SKIP_PUBLIC_TUNNEL"] = "1"
+        # external dependency for nothing. See needs_public_tunnel() /
+        # apply_public_tunnel_env() (already applied above; keep EPHEMERAL
+        # pinned off here for the non-isolated path).
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
 
     try:

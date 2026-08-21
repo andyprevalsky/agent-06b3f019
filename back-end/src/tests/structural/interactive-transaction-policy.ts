@@ -48,12 +48,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-    file: 'domains/integrations/repo.plaid.ts',
-    scope: 'persistPlaidItem',
-    fingerprint: 'bdf8165a4e322a23',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'domains/purchases/repo.ts',
     scope: 'backfillLegacyCanonicalFingerprints',
     fingerprint: 'd0194dd6dd622935',

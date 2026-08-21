@@ -857,7 +857,8 @@ cloudbench_wait_machine_startable() {
 # (started/starting/stopping/replacing/created/creating/updating/restarting)
 # are normal during concurrent maintenance; aborting immediately turns a brief
 # race into a fleet-wide INFRA failure. Wait for stopped, fail closed on
-# destroy or timeout.
+# destroy or timeout. state_reader must print the current provider state for
+# the given machine id.
 cloudbench_wait_machine_stopped() {
   local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
   local attempt state
