@@ -56,6 +56,13 @@ vi.mock('@whiskeysockets/baileys', () => ({
   makeWASocket: vi.fn(),
   useMultiFileAuthState: vi.fn(),
 }));
+// Darwin-only; Linux vitest still walks the messaging barrel import graph.
+vi.mock('node-mac-contacts', () => ({
+  authorizationStatus: vi.fn(() => 'authorized'),
+  getAllContacts: vi.fn(() => []),
+  getContactsByName: vi.fn(() => []),
+  requestAccess: vi.fn(async () => true),
+}));
 
 /**
  * Factory: build a NormalizedMessage for a specific channel with sensible defaults.

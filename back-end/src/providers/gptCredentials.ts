@@ -59,6 +59,18 @@ function resolveRateLimitedUntil(rateLimitedUntil?: string | Date | null): Date 
   return new Date(Date.now() + RATE_LIMIT_COOLDOWN_MS);
 }
 
+/**
+ * Only ever EXTEND a backoff window — never shorten one. Mirrors the identical
+ * guard in `claudeCredentials.ts`; see the comment there for the prod incident
+ * that motivated it (a generic short cooldown clobbering a provider-supplied
+ * multi-day reset, which then re-served an exhausted token every few minutes).
+ */
+function notAlreadyBackedOffLonger(until: Date) {
+  return {
+    OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: until } }],
+  };
+}
+
 export async function fetchGptPoolToken(
   excludeIds?: string[]
 ): Promise<GptCodeCredentialResult | null> {
@@ -198,10 +210,28 @@ export async function markGptPoolTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
-  await prisma.integration.update({
-    where: { id: poolTokenId },
+  const { count } = await prisma.integration.updateMany({
+    where: { id: poolTokenId, ...notAlreadyBackedOffLonger(until) },
     data: { rateLimitedUntil: until },
   });
+  if (count === 0) {
+    // No match means EITHER an existing longer window (benign) OR a stale id the
+    // previous single-record `update` would have thrown on. Disambiguate.
+    const existing = await prisma.integration.findUnique({
+      where: { id: poolTokenId },
+      select: { id: true },
+    });
+    if (existing === null) {
+      log.warn(
+        `GPT pool token ${poolTokenId} not found; cannot rate-limit (stale integration id?)`
+      );
+      return;
+    }
+    log.info(
+      `GPT pool token ${poolTokenId} already backed off past ${until.toISOString()} — keeping the longer window`
+    );
+    return;
+  }
   log.info(`GPT pool token ${poolTokenId} rate-limited until ${until.toISOString()}`);
 }
 
@@ -210,10 +240,24 @@ export async function markGptIntegrationRateLimited(
   options?: { rateLimitedUntil?: string | Date | null }
 ): Promise<void> {
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
-  await prisma.integration.update({
-    where: { id: integrationId },
+  const { count } = await prisma.integration.updateMany({
+    where: { id: integrationId, ...notAlreadyBackedOffLonger(until) },
     data: { rateLimitedUntil: until },
   });
+  if (count === 0) {
+    const existing = await prisma.integration.findUnique({
+      where: { id: integrationId },
+      select: { id: true },
+    });
+    if (existing === null) {
+      log.warn(`GPT integration ${integrationId} not found; cannot rate-limit (stale id?)`);
+      return;
+    }
+    log.info(
+      `GPT integration ${integrationId} already backed off past ${until.toISOString()} — keeping the longer window`
+    );
+    return;
+  }
   log.info(`GPT integration ${integrationId} rate-limited until ${until.toISOString()}`);
 }
 
@@ -221,9 +265,10 @@ export async function markGptIntegrationRateLimited(
 export async function isGptApiKeyOnCooldown(): Promise<boolean> {
   const row = await prisma.integration.findUnique({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: GPT_API_KEY_COOLDOWN_USER_ID,
         name: GPT_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     select: { rateLimitedUntil: true },
@@ -236,9 +281,10 @@ export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
   const until = new Date(Date.now() + GPT_API_KEY_COOLDOWN_MS);
   await prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: GPT_API_KEY_COOLDOWN_USER_ID,
         name: GPT_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     create: {
@@ -273,10 +319,23 @@ export async function markGptUserTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
-  await prisma.integration.updateMany({
-    where: { userId, name: 'gpt_code', status: 'CONNECTED' },
+  const { count } = await prisma.integration.updateMany({
+    where: { userId, name: 'gpt_code', status: 'CONNECTED', ...notAlreadyBackedOffLonger(until) },
     data: { rateLimitedUntil: until },
   });
+  if (count === 0) {
+    const existing = await prisma.integration.count({
+      where: { userId, name: 'gpt_code', status: 'CONNECTED' },
+    });
+    if (existing === 0) {
+      log.warn(`No gpt_code integration for ${userId}; nothing to rate-limit`);
+      return;
+    }
+    log.info(
+      `GPT user token for ${userId} already backed off past ${until.toISOString()} — keeping the longer window`
+    );
+    return;
+  }
   log.info(`GPT user token for ${userId} rate-limited until ${until.toISOString()}`);
 }
 

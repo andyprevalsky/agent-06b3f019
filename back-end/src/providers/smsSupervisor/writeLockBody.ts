@@ -110,6 +110,18 @@ export function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
 }
 
+/**
+ * SMS/iMessage does not render Markdown. Convert emphasis markers to plain
+ * text so approval SMS never shows literal `**Email**` / `**To:**` asterisks.
+ * Keep the inner label text; leave unpaired asterisks in prose alone.
+ */
+export function stripMarkdownForSms(value: string): string {
+  return value
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1$2');
+}
+
 function displayServiceName(service: WriteLockNotificationService | null): string {
   const name = asString(service?.name);
   if (name) {
@@ -310,7 +322,7 @@ function formatWriteLockNotificationBody(
   fallbackQuestion: string
 ): string {
   if (!notification) {
-    return SMS_TEMPLATES.writeLock('', fallbackQuestion);
+    return SMS_TEMPLATES.writeLock('', stripMarkdownForSms(fallbackQuestion));
   }
 
   const service = asRecord(notification.service) as WriteLockNotificationService | null;
@@ -378,14 +390,18 @@ export function formatPaymentApprovalBody(
   fallbackQuestion: string,
   agentUrl: string | null
 ): string {
+  // Tool-approval questions (message_person, browser write locks) often carry
+  // Markdown labels meant for the web UI. Strip them at the SMS sink so iMessage
+  // never shows literal asterisks. Payment-card / structured bodies are already
+  // plain text.
+  const plainQuestion = stripMarkdownForSms(fallbackQuestion);
   if (card && getPaymentCardItems(card).length > 0) {
     return appendAgentLink(formatPaymentCardBody(card), agentUrl);
   }
   if (notification) {
-    return appendAgentLink(
-      formatWriteLockNotificationBody(notification, fallbackQuestion),
-      agentUrl
-    );
+    return appendAgentLink(formatWriteLockNotificationBody(notification, plainQuestion), agentUrl);
   }
-  return appendAgentLink(SMS_TEMPLATES.writeLock('', fallbackQuestion), agentUrl);
+  // Natural-language tool approvals must keep the full draft — never apply the
+  // 900-char payment-card truncate budget to the message the user is approving.
+  return appendAgentLink(SMS_TEMPLATES.writeLock('', plainQuestion), agentUrl);
 }

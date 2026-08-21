@@ -3,7 +3,7 @@ import type { CookieData } from './types';
 
 /**
  * Public entry point for cookie-reader. External callers (handlers/registry,
- * cookie-sync repo, blackbox test mocks) use `CookieReader.readCookies()` —
+ * handlers and blackbox test mocks use `CookieReader.readCookies()` —
  * the class shape is preserved for backward compatibility with the legacy
  * `main/services/cookieReader.ts` import surface.
  *

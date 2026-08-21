@@ -4,12 +4,7 @@
  */
 
 import { isPostgresRegexError } from './regexSafety';
-import {
-  buildAgentNetworkMatch,
-  buildDocumentMatch,
-  buildNetworkMatch,
-  buildTransactionMatch,
-} from './format';
+import { buildAgentNetworkMatch, buildDocumentMatch, buildTransactionMatch } from './format';
 import { formatTimeAgo } from './format.snippets';
 import {
   isMessageFamilySource,
@@ -25,6 +20,7 @@ import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
 import { searchMessageSource } from './messageSearchService';
+import { searchNetworkSource } from './networkSearchService';
 import { createLogger } from '../../providers/logger';
 
 // Per-source connectivity lives in a dedicated file; re-export so routes can
@@ -62,21 +58,7 @@ async function searchSource(
   }
 
   if (source === 'network') {
-    const [total, rows] = await Promise.all([
-      grepRepo.countNetworkGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-      }),
-      grepRepo.searchNetworkGrepRows({
-        userId,
-        pattern: input.dbPattern,
-        caseInsensitive: input.caseInsensitive,
-        limit: input.headLimit,
-        offset: input.offset,
-      }),
-    ]);
-    return { total, matches: rows.map((row) => buildNetworkMatch(row, input)) };
+    return searchNetworkSource({ userId, input });
   }
 
   if (source === 'transactions') {
@@ -92,6 +74,9 @@ async function searchSource(
         minAmount: filters?.minAmount,
         maxAmount: filters?.maxAmount,
         status: filters?.status,
+        pathInstitution: filters?.pathInstitution,
+        pathAccount: filters?.pathAccount,
+        pathTransactionId: filters?.pathTransactionId,
       }),
       grepRepo.searchTransactionGrepRows({
         userId,
@@ -105,6 +90,9 @@ async function searchSource(
         minAmount: filters?.minAmount,
         maxAmount: filters?.maxAmount,
         status: filters?.status,
+        pathInstitution: filters?.pathInstitution,
+        pathAccount: filters?.pathAccount,
+        pathTransactionId: filters?.pathTransactionId,
       }),
     ]);
     return { total, matches: rows.map((row) => buildTransactionMatch(row, input)) };
@@ -121,6 +109,8 @@ async function searchSource(
         since: filters?.since,
         until: filters?.until,
         path: filters?.path,
+        pathDocumentSource: filters?.pathDocumentSource,
+        pathRest: filters?.pathRest,
         tag: filters?.tag,
       }),
       grepRepo.searchDocumentGrepRows({
@@ -133,6 +123,8 @@ async function searchSource(
         since: filters?.since,
         until: filters?.until,
         path: filters?.path,
+        pathDocumentSource: filters?.pathDocumentSource,
+        pathRest: filters?.pathRest,
         tag: filters?.tag,
       }),
     ]);
@@ -140,11 +132,15 @@ async function searchSource(
   }
 
   const agentIds = await agentTreeIdsForGrep(userId, agentId);
+  const agentNetworkFilters = input.filters.agentNetwork;
   const [total, rows] = await Promise.all([
     grepRepo.countAgentNetworkGrepRows({
       agentIds,
       pattern: input.dbPattern,
       caseInsensitive: input.caseInsensitive,
+      pathAgentId: agentNetworkFilters?.pathAgentId,
+      pathRole: agentNetworkFilters?.pathRole,
+      pathMessageId: agentNetworkFilters?.pathMessageId,
     }),
     grepRepo.searchAgentNetworkGrepRows({
       agentIds,
@@ -152,6 +148,9 @@ async function searchSource(
       caseInsensitive: input.caseInsensitive,
       limit: input.headLimit,
       offset: input.offset,
+      pathAgentId: agentNetworkFilters?.pathAgentId,
+      pathRole: agentNetworkFilters?.pathRole,
+      pathMessageId: agentNetworkFilters?.pathMessageId,
     }),
   ]);
   return { total, matches: rows.map((row) => buildAgentNetworkMatch(row, input)) };
@@ -300,6 +299,15 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
           from: oldestMessage?.timestamp?.toISOString() ?? null,
           to: newestMessage?.timestamp?.toISOString() ?? null,
         },
+        latest_message: newestMessage
+          ? {
+              timestamp: newestMessage.timestamp.toISOString(),
+              channel: newestMessage.channel,
+              from: newestMessage.from,
+              to: newestMessage.to,
+              text: newestMessage.message,
+            }
+          : null,
         threads: threadSummaries,
       },
     },

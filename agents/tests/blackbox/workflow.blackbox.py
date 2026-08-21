@@ -707,6 +707,7 @@ async def mock_set_response_schema_activity(
     user_messages: List[str],
     compute_auth: Any = None,
     fast_mode_cache_enabled: bool = False,
+    include_title: bool = False,
     *args: Any,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
@@ -2841,6 +2842,170 @@ async def test_workflow_track_usage_fast_cache_replay_is_zero_cost():
         _restore_workflow(original)
 
 
+async def test_workflow_track_usage_browser_items_price_at_browser_pool():
+    """Regression (A-02): browser tokens must price at rose-1-browser-use.
+
+    Full seam: build_usage_items (activity) -> browser_usage_items_to_tool_usage
+    (manager) -> _track_usage (workflow). Before the fix the llm row carried no
+    `model`, so the workflow fell back to the ROOT pool rate and under-billed
+    browser tokens that had actually raced through the browser pool.
+
+    The root pool here is rose-1-lite, NOT rose-1-ultra: ultra and browser-use
+    now share an identical waterfall (gpt-5.6-sol -> kimi-k3) and therefore an
+    identical rate, which would make the "priced at the browser rate, not the
+    root rate" assertion below vacuous. lite (0.1875/0.9375) vs browser-use
+    (0.275/1.5) keeps the two genuinely distinguishable.
+    """
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_usage_items
+    from domains.spawn_browser_agent_v3.service import (
+        browser_usage_items_to_tool_usage,
+        build_usage_items,
+    )
+    from providers.rose.pricing import get_model_pricing
+
+    browser_pricing = get_model_pricing("rose-1-browser-use")
+    root_pricing = get_model_pricing("rose-1-lite")
+    tokens_in, tokens_out = 1_186_754, 40_000
+    expected = (tokens_in / 1000) * browser_pricing["input_cents_per_1k"] + (tokens_out / 1000) * browser_pricing[
+        "output_cents_per_1k"
+    ]
+    root_priced = (tokens_in / 1000) * root_pricing["input_cents_per_1k"] + (tokens_out / 1000) * root_pricing[
+        "output_cents_per_1k"
+    ]
+    assert root_priced < expected  # guard: the two rates must actually differ
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "rose-1-lite"
+    wf.input_cents_per_1k = root_pricing["input_cents_per_1k"]
+    wf.output_cents_per_1k = root_pricing["output_cents_per_1k"]
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        items = build_usage_items(tokens_in, tokens_out, browser_pricing, 900_000)
+        await wf._track_usage(
+            browser_usage_items_to_tool_usage(items),
+            tool_name="spawn_browser_agent",
+            call_site="browser_agent",
+        )
+    finally:
+        _restore_workflow(original)
+
+    save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+    saved = next(i for i in save_call[1][3] if i["type"] == "llm")
+    assert saved["model"] == "rose-1-browser-use", f"browser usage priced as {saved['model']!r}"
+    assert abs(saved["cost_cents"] - expected) < 0.01, f"{saved['cost_cents']} != {expected} (browser pool rate)"
+    assert abs(saved["cost_cents"] - root_priced) > 1.0, "browser tokens were priced at the root pool rate"
+
+    # A direct-compute-token browser row (-claude suffix) must reach the $0 branch.
+    wf2 = _bare_workflow_instance()
+    wf2.agent_id = "a"
+    wf2.user_id = "u"
+    wf2.model = "rose-1-lite"
+    wf2.input_cents_per_1k = root_pricing["input_cents_per_1k"]
+    wf2.output_cents_per_1k = root_pricing["output_cents_per_1k"]
+    fake2 = _FakeWorkflowModule()
+    original = _patch_workflow(fake2)
+    try:
+        direct_items = _simulated_browser_usage_items(
+            50_000,
+            1_000,
+            browser_pricing,
+            usage_by_model={"claude-opus-4-8-claude": {"input_tokens": 50_000, "output_tokens": 1_000}},
+        )
+        await wf2._track_usage(
+            browser_usage_items_to_tool_usage(direct_items),
+            tool_name="spawn_browser_agent",
+            call_site="browser_agent",
+        )
+    finally:
+        _restore_workflow(original)
+
+    save_call2 = next(c for c in fake2.activity_calls if c[0] == "save_tool_usage")
+    direct_row = next(i for i in save_call2[1][3] if i["type"] == "llm")
+    assert direct_row["model"] == "claude-opus-4-8-claude"
+    assert direct_row["cost_cents"] == 0
+    assert direct_row["tokens_in"] == 50_000
+
+
+async def test_workflow_track_usage_browser_rows_carry_real_inference_model():
+    """Browser usage must be attributed per ACTUAL model through the REAL path.
+
+    Seam: build_usage_items (REAL activity helper, not the simulated twin)
+    -> browser_usage_items_to_tool_usage -> _track_usage. A hardcoded
+    `rose-1-browser-use` pool name collapses the race into one row AND can
+    never match the `-claude`/`-gpt` $0 direct-compute-token branch, so steps
+    that ran on the user's own token are billed as paid waterfall usage.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3.service import (
+        browser_usage_items_to_tool_usage,
+        build_usage_items,
+    )
+    from providers.rose.pricing import get_model_pricing
+
+    browser_pricing = get_model_pricing("rose-1-browser-use")
+    root_pricing = get_model_pricing("rose-1-ultra")
+    usage_by_model = {
+        "claude-opus-4-8-claude": {"input_tokens": 50_000, "output_tokens": 1_000},
+        "google/gemini-3.1-pro-preview": {"input_tokens": 20_000, "output_tokens": 4_000},
+    }
+    total_in = sum(u["input_tokens"] for u in usage_by_model.values())
+    total_out = sum(u["output_tokens"] for u in usage_by_model.values())
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "rose-1-ultra"
+    wf.input_cents_per_1k = root_pricing["input_cents_per_1k"]
+    wf.output_cents_per_1k = root_pricing["output_cents_per_1k"]
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        # Behavioral assertion: tolerate the parameter being absent so the
+        # failure is "rows lost the real model" rather than a TypeError.
+        supported = "usage_by_model" in inspect.signature(build_usage_items).parameters
+        items = build_usage_items(
+            total_in,
+            total_out,
+            browser_pricing,
+            900_000,
+            **({"usage_by_model": usage_by_model} if supported else {}),
+        )
+        await wf._track_usage(
+            browser_usage_items_to_tool_usage(items),
+            tool_name="spawn_browser_agent",
+            call_site="browser_agent",
+        )
+    finally:
+        _restore_workflow(original)
+
+    save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+    llm_rows = [i for i in save_call[1][3] if i["type"] == "llm"]
+
+    assert len(llm_rows) == 2, f"expected one row per actual model, got {[r['model'] for r in llm_rows]}"
+    by_model = {r["model"]: r for r in llm_rows}
+    assert set(by_model) == set(usage_by_model), "usage rows lost the real inference model names"
+    assert "rose-1-browser-use" not in by_model, "hardcoded pool constant leaked into per-model rows"
+
+    # The user's own compute token must reach the $0 branch through the REAL path.
+    claude_row = by_model["claude-opus-4-8-claude"]
+    assert claude_row["cost_cents"] == 0, f"claudeAuth browser tokens billed {claude_row['cost_cents']}c"
+    assert claude_row["tokens_in"] == 50_000
+    assert claude_row["tokens_out"] == 1_000
+
+    # ...while the waterfall model is still billed.
+    paid_row = by_model["google/gemini-3.1-pro-preview"]
+    assert paid_row["cost_cents"] > 0
+    assert paid_row["tokens_in"] == 20_000
+
+    # Token conservation across the whole seam.
+    assert sum(r["tokens_in"] for r in llm_rows) == total_in
+    assert sum(r["tokens_out"] for r in llm_rows) == total_out
+
+
 async def test_workflow_update_cost_and_signal_parent_root_checks_limit():
     wf = _bare_workflow_instance()
     wf.agent_id = "root"
@@ -3860,6 +4025,7 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
             "rootAgentId": "agent-run-1",
             "fastCacheAffinityKey": None,
         }
+        assert schema_calls[0][1][4] is True
         assert "mark_finished" in activity_names
         init_posts = [
             c for c in fake.activity_calls if c[0] == "post_agent_message" and c[1][3].get("toolName") == "agent_init"
@@ -4742,6 +4908,301 @@ async def test_workflow_mark_complete_no_parent_no_signal():
                 {"key": "order_total_usd", "label": "Order Total Usd", "value": 11.25},
             ],
         }
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_survives_summary_generation_failure():
+    """A verified-complete root must still reach COMPLETED when the
+    non-critical completion_summary LLM call fails.
+
+    Recurrence of 2026-07-11-completion-gated-behind-final-summary-message-post.
+    That case moved the durable terminal write ahead of the summary *message
+    post*, but the summary *LLM generation* stayed on the critical path inside
+    the same try/raise block. Evidence: benchmark
+    browser-bing-search-single-result, agent
+    f79ad255-85a0-4254-9913-152dceba3381 — the browser child returned the
+    correct result, attempt_completion's verifier scored 100%
+    ("⚖️ Progress: 100%" at 23:36:48.961Z), then the transcript stops at
+    completion_summary IN_PROGRESS (23:36:51.432Z) and the run record reports
+    "Agent status: ACTIVE (expected COMPLETED)".
+
+    Presentation work may degrade; it may never abort or discard an
+    already-verified lifecycle transition.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-summary-fail"
+    wf.user_id = "u-mc"
+    wf.goal = "return one bing result"
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": [{"name": "search_result_title", "type": "str"}]}
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    # The summary LLM activity exhausts its retries and raises.
+    fake.activity_fail_for.add("generate_completion_summary")
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[{"role": "USER", "text": "go"}],
+            structured_response={"search_result_title": "OpenAI | Research & Deployment"},
+        )
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "generate_completion_summary" in activity_names
+        assert "mark_finished" in activity_names, (
+            "mark_finished was never called: a failed completion_summary LLM call "
+            "aborted the durable terminal transition of a verifier-100% agent."
+        )
+        completed_broadcasts = [
+            args
+            for name, args in fake.activity_calls
+            if name == "update_agent_tree_state" or name == "update_agent_status"
+        ]
+        # The final summary message must still be posted so COMPLETED keeps
+        # implying an observable summary row.
+        assert any(
+            name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+            for name, args in fake.activity_calls
+        ), "no FINISHED completion_summary message was posted after the summary LLM failed"
+        assert completed_broadcasts is not None
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_cost_limit_skipped_after_finished():
+    """The cost limit authorizes future spend; it must not re-open a finished agent.
+
+    _mark_complete latches _is_finished first, then tracks the completion
+    summary's own LLM cost (agent_workflow.py:_mark_complete -> _track_llm_cost
+    -> _update_cost_and_signal_parent -> _check_cost_limit). A late
+    child_cost_update signal from a sub-agent lands on the same path. Without
+    an _is_finished guard, that check writes COST_LIMIT_REACHED over an agent
+    whose verifier already scored 100% — the exact
+    "Agent status: COST_LIMIT_REACHED (expected COMPLETED)" verdict the
+    benchmark records, because COST_LIMIT_REACHED is a terminal status for
+    every poller.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-finished"
+    wf.user_id = "u"
+    wf.parent_workflow_id = None
+    wf.subtree_cost_cents = 500.0
+    wf.price_limit_cents = 50
+    wf._is_finished = True  # _mark_complete already latched the terminal flag
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_cost_limit()
+        assert wf._cost_limit_reached is False, (
+            "_check_cost_limit flipped a finished agent to cost-limited"
+        )
+        assert wf.is_paused is False, "_check_cost_limit paused a finished agent"
+        for fn_name, args in fake.activity_calls:
+            if (
+                fn_name == "update_agent_status"
+                and isinstance(args, (list, tuple))
+                and len(args) >= 2
+                and args[1] == "COST_LIMIT_REACHED"
+            ):
+                raise AssertionError(
+                    "update_agent_status wrote COST_LIMIT_REACHED after _is_finished "
+                    "was latched — a verified-complete root is reported as cost-limited."
+                )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_summary_cost_does_not_cost_limit_root():
+    """End-to-end at the boundary: the completion summary's own cost must not
+    flip the completing root to COST_LIMIT_REACHED."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-summary-cost"
+    wf.user_id = "u"
+    wf.goal = "g"
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+    # Already just under the cap when the verifier passed.
+    wf.own_cost_cents = 49.0
+    wf.price_limit_cents = 50
+    wf.input_cents_per_1k = 1.0
+    wf.output_cents_per_1k = 1.0
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "done",
+        "tool_counts": {},
+        # 5k tokens at 1c/1k tips the subtree over the 50c cap.
+        "usage": {"prompt_tokens": 5000, "completion_tokens": 0, "total_tokens": 5000},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response=None)
+        assert "mark_finished" in [c[0] for c in fake.activity_calls]
+        for fn_name, args in fake.activity_calls:
+            if (
+                fn_name == "update_agent_status"
+                and isinstance(args, (list, tuple))
+                and len(args) >= 2
+                and args[1] == "COST_LIMIT_REACHED"
+            ):
+                raise AssertionError(
+                    "the completion summary's own cost flipped the completing root "
+                    "to COST_LIMIT_REACHED"
+                )
+        assert wf._cost_limit_reached is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_persists_summary_cost():
+    """Letting a verified root resolve must not drop the summary's cost.
+
+    `_mark_complete` latches `_is_finished` and persists the tree cost BEFORE
+    `generate_completion_summary` runs, then charges that call's own LLM cost via
+    `_track_llm_cost`. That charge routes through
+    `_update_cost_and_signal_parent`, whose persist is debounced to one emit per
+    3s — so the terminal persist that just ran swallows it and the summary's cost
+    is tracked in memory but never written. Every downstream consumer (agent row,
+    FE cost display, benchmark `cost_cents`) then under-reports the run.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-summary-cost-persist"
+    wf.user_id = "u"
+    wf.goal = "g"
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+    wf.own_cost_cents = 10.0
+    wf.children_cost_cents = {}
+    wf.price_limit_cents = 500
+    wf.input_cents_per_1k = 1.0
+    wf.output_cents_per_1k = 1.0
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "done",
+        "tool_counts": {},
+        # 5k prompt tokens at 1c/1k = 5c of real spend on the summary itself.
+        "usage": {"prompt_tokens": 5000, "completion_tokens": 0, "total_tokens": 5000},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response=None)
+        assert wf.own_cost_cents == 15.0, f"summary cost was not charged: {wf.own_cost_cents}"
+        persisted = [args for name, args in fake.activity_calls if name == "update_agent_tree_cost_activity"]
+        assert persisted, "terminal transition persisted no tree cost at all"
+        # args = [agent_id, subtree_cost_cents, ...]
+        last_persisted = persisted[-1][1]
+        assert last_persisted == 15.0, (
+            f"last persisted tree cost was {last_persisted}c but the run actually "
+            f"cost {wf.own_cost_cents}c — the completion summary's spend was dropped"
+        )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_cost_limit_flushes_tree_cost_before_pausing():
+    """A cost-limited run must not report 0c.
+
+    `_update_cost_and_signal_parent` debounces its persist to one emit per 3s,
+    and the cost-limit transition is terminal — the agent pauses right after —
+    so a suppressed emit leaves the pre-trip value as the last number written.
+    Agent a67ef234-e1d8-4e72-adda-020cdcab6059 tripped a 50c cap and its run
+    record still reported `cost_cents: 0`, which made the trip impossible to
+    reconcile from the record alone.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-cost-flush"
+    wf.user_id = "u"
+    wf.parent_workflow_id = None
+    wf.own_cost_cents = 54.0
+    wf.children_cost_cents = {}
+    wf.subtree_cost_cents = 54.0
+    wf.price_limit_cents = 50
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_cost_limit()
+        assert wf._cost_limit_reached is True
+        cost_persists = [args for name, args in fake.activity_calls if name == "update_agent_tree_cost_activity"]
+        assert cost_persists, (
+            "no tree-cost persist accompanied the cost-limit transition — every "
+            "consumer keeps reading the stale pre-trip cost"
+        )
+        assert cost_persists[-1][1] == 54, f"persisted stale tree cost {cost_persists[-1][1]}c, expected 54c"
+        status_calls = [
+            args
+            for name, args in fake.activity_calls
+            if name == "update_agent_status" and len(args or []) >= 4 and args[1] == "COST_LIMIT_REACHED"
+        ]
+        assert status_calls, "no COST_LIMIT_REACHED status write"
+        message = status_calls[-1][3]
+        assert "54.0c" in message and "50c" in message, (
+            f"cost-limit status message must carry the decision inputs, got: {message}"
+        )
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_degraded_summary_keeps_notification():
+    """A failed summary must degrade the narration, never drop the notification.
+
+    The root completion SMS is gated on `summary` being truthy and the parent's
+    child_completed handler falls back to a goal restatement, so an empty
+    summary silently cancels a successful run's notification.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-degraded-summary"
+    wf.user_id = "u"
+    wf.goal = "return one bing result"
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_fail_for.add("generate_completion_summary")
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response={"answer": "42"})
+        completion_notifications = [
+            args
+            for name, args in fake.activity_calls
+            if name == "notify_sms_event_activity" and len(args or []) >= 2 and args[1] == "completion"
+        ]
+        assert completion_notifications, (
+            "a successful run lost its completion notification because the summary LLM failed"
+        )
+        final_summary = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+            and (args[3] or {}).get("toolName") == "completion_summary"
+        )
+        assert final_summary["completionSummary"]["summaryError"], (
+            "the summary failure must stay visible on the final message"
+        )
     finally:
         _restore_workflow(original)
 
@@ -5744,6 +6205,14 @@ async def run_all_tests():
         "wf_track_usage_fast_cache_replay",
         test_workflow_track_usage_fast_cache_replay_is_zero_cost,
     )
+    await r.record_async(
+        "wf_track_usage_browser_pool_pricing",
+        test_workflow_track_usage_browser_items_price_at_browser_pool,
+    )
+    await r.record_async(
+        "wf_track_usage_browser_real_inference_model",
+        test_workflow_track_usage_browser_rows_carry_real_inference_model,
+    )
     await r.record_async("wf_update_cost_root_limit", test_workflow_update_cost_and_signal_parent_root_checks_limit)
     await r.record_async("wf_update_cost_non_root_signal", test_workflow_update_cost_and_signal_parent_non_root_signals)
     await r.record_async(
@@ -5752,6 +6221,14 @@ async def run_all_tests():
     )
     await r.record_async("wf_check_cost_limit_below", test_workflow_check_cost_limit_no_op_when_below)
     await r.record_async("wf_check_cost_limit_non_root", test_workflow_check_cost_limit_skips_non_root)
+    await r.record_async(
+        "wf_check_cost_limit_after_finished",
+        test_workflow_check_cost_limit_skipped_after_finished,
+    )
+    await r.record_async(
+        "wf_cost_limit_flushes_tree_cost",
+        test_workflow_cost_limit_flushes_tree_cost_before_pausing,
+    )
     await r.record_async("wf_update_tree_state_no_bus", test_workflow_update_tree_state_skips_without_bus)
     await r.record_async("wf_update_tree_state_with_bus", test_workflow_update_tree_state_with_bus_broadcasts)
     await r.record_async("wf_persist_tree_cost", test_workflow_persist_tree_cost_executes_activity)
@@ -5843,6 +6320,22 @@ async def run_all_tests():
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
+    await r.record_async(
+        "wf_mark_complete_survives_summary_failure",
+        test_workflow_mark_complete_survives_summary_generation_failure,
+    )
+    await r.record_async(
+        "wf_mark_complete_summary_cost_no_cost_limit",
+        test_workflow_mark_complete_summary_cost_does_not_cost_limit_root,
+    )
+    await r.record_async(
+        "wf_mark_complete_persists_summary_cost",
+        test_workflow_mark_complete_persists_summary_cost,
+    )
+    await r.record_async(
+        "wf_mark_complete_degraded_summary_keeps_notification",
+        test_workflow_mark_complete_degraded_summary_keeps_notification,
+    )
     await r.record_async("wf_format_outputs_with_schema", test_workflow_format_outputs_with_schema)
     await r.record_async("wf_format_outputs_no_schema", test_workflow_format_outputs_empty_without_schema)
     await r.record_async("wf_format_outputs_none_response", test_workflow_format_outputs_none_response)

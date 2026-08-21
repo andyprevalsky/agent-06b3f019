@@ -3,7 +3,7 @@
  * Split from uploadService.ts for max-lines compliance.
  */
 
-import { IntegrationType, IntegrationStatus } from './types';
+import { IntegrationType, IntegrationStatus, type Prisma } from './types';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import {
@@ -164,6 +164,38 @@ export async function processWhatsAppUpload(
   })();
 
   return { integration, jobId };
+}
+
+/**
+ * Process WhatsApp connect.
+ *
+ * The mac-app calls this the moment the Baileys socket pairs, before any
+ * messages exist. Without it the integration row is only ever created by an
+ * upload, while the mac-app's uploader refuses to upload until the integration
+ * reads as CONNECTED — a deadlock that silently drops every synced message.
+ */
+export async function processWhatsAppConnect(userId: string) {
+  log.info('Creating WhatsApp integration', { userId });
+
+  // Re-pairing is routine (a 515 restart, a new device). Merge rather than
+  // overwrite so reconnecting can't silently drop stored integration settings.
+  const existing = await repo.findIntegrationByUserAndName(userId, 'whatsapp');
+  const existingConfig = (existing?.config as Prisma.JsonObject | null) ?? {};
+  const now = new Date();
+
+  return repo.upsertIntegration({
+    userId,
+    name: 'whatsapp',
+    type: IntegrationType.DATA_SOURCE,
+    status: IntegrationStatus.CONNECTED,
+    isActive: true,
+    lastSyncAt: now,
+    config: {
+      connectedAt: now.toISOString(),
+      ...existingConfig,
+      lastConnectedAt: now.toISOString(),
+    },
+  });
 }
 
 /**

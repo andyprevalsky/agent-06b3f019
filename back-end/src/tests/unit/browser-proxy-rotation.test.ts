@@ -8,6 +8,10 @@ import assert from 'node:assert';
 import { rotateProxySchema } from '../../domains/browser-session/types';
 import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
+import {
+  isSteelProvisioningOutage,
+  isSteelSessionRateLimited,
+} from '../blackbox/browser-provider-rotation.support';
 
 function testMobileCandidates(): void {
   const candidates = kernelProxyCandidates(
@@ -88,11 +92,105 @@ function testRotationRequestSchema(): void {
   );
 }
 
+// The live provider-parity blackbox tolerates a Steel INFRA outage (skips the
+// Steel legs while Kernel is healthy) but must still fail on real defects. This
+// pins isSteelProvisioningOutage() to that exact boundary.
+function testSteelOutageDetector(): void {
+  // Genuine outage: 5xx + production's post-retry Steel-replacement failure + a
+  // connectivity cause. This is the only shape that may skip.
+  assert.ok(
+    isSteelProvisioningOutage(
+      new Error(
+        '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 3 attempts: Connection error."}'
+      )
+    ),
+    'a 5xx Steel-replacement connectivity failure is an outage'
+  );
+  assert.ok(
+    isSteelProvisioningOutage(
+      new Error(
+        '/rotate-proxy 502: {"error":"Failed to create Steel replacement after 3 attempts: fetch failed (ETIMEDOUT)"}'
+      )
+    ),
+    'ETIMEDOUT/fetch-failed replacement failure is an outage'
+  );
+
+  // NOT outages — these must still fail the gate:
+  assert.ok(
+    !isSteelProvisioningOutage(
+      new Error(
+        '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 3 attempts: 401 Unauthorized"}'
+      )
+    ),
+    'a Steel AUTH rejection is a credential problem, not an outage'
+  );
+  assert.ok(
+    !isSteelProvisioningOutage(
+      new Error(
+        '/rotate-proxy 500: {"error":"Failed to create Steel replacement after 3 attempts: 402 payment required (quota exceeded)"}'
+      )
+    ),
+    'a Steel QUOTA rejection is not an outage'
+  );
+  assert.ok(
+    !isSteelProvisioningOutage(
+      new Error('call 3 expected Steel residential, got kernel/residential')
+    ),
+    'a rotation-logic assertion failure is never an outage'
+  );
+  assert.ok(
+    !isSteelProvisioningOutage(
+      new Error('/rotate-proxy 500: {"error":"internal error: Connection error"}')
+    ),
+    'a 5xx connectivity error WITHOUT the Steel-replacement signature is not tolerated'
+  );
+  assert.ok(
+    !isSteelProvisioningOutage(
+      new Error(
+        '/rotate-proxy 409: {"error":"Failed to create Steel replacement after 3 attempts: Connection error."}'
+      )
+    ),
+    'a non-5xx status is not a provisioning outage'
+  );
+
+  // Session rate-limit under parallel blackbox load is skippable (Kernel already
+  // proved rotation) but is NOT classified as a provisioning outage shape.
+  assert.ok(
+    isSteelSessionRateLimited(
+      new Error(
+        '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+      )
+    ),
+    'Steel session rate-limit 429 is skippable contention'
+  );
+  assert.ok(
+    !isSteelSessionRateLimited(
+      new Error('/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"kernel"}')
+    ),
+    'Kernel rate-limit must not skip the Steel legs detector'
+  );
+  assert.ok(
+    !isSteelSessionRateLimited(
+      new Error('/rotate-proxy 401: {"error":"unauthorized","provider":"steel"}')
+    ),
+    'Steel AUTH rejection is not a session rate-limit skip'
+  );
+  assert.ok(
+    !isSteelProvisioningOutage(
+      new Error(
+        '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+      )
+    ),
+    'rate-limit is a separate skip path from provisioning outage'
+  );
+}
+
 function main(): void {
   testMobileCandidates();
   testResidentialUnchanged();
   testRotationTierLadder();
   testRotationRequestSchema();
+  testSteelOutageDetector();
   process.stdout.write('PASS rotate_ip mobile candidates + escalation ladder\n');
 }
 

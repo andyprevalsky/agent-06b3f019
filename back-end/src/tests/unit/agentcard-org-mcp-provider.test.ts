@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import assert from 'node:assert';
 import {
@@ -78,6 +77,9 @@ async function main(): Promise<void> {
   ]);
   assert.strictEqual(minted.providerTransferId, 'owt-123');
   assert.strictEqual(minted.last4, '4242');
+  assert.strictEqual(minted.pan, '4242424242424242');
+  assert.strictEqual(minted.cvv, '123');
+  assert.strictEqual(minted.balanceCents, 4396);
   assert.strictEqual(details.balanceCents, 4396);
 
   const instantCalls: ToolCall[] = [];
@@ -393,6 +395,9 @@ async function main(): Promise<void> {
       error instanceof Error && error.message === 'AgentCard Organization MCP failed'
   );
 
+  // "Cardholder not found" structured errors are covered with thrown MCP errors below
+  // (agentcard_cardholder_not_found) so the funding-resume classifier stays fail-closed.
+
   const proseKycCalls: string[] = [];
   const proseKycProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
     proseKycCalls.push(name);
@@ -419,7 +424,149 @@ async function main(): Promise<void> {
   );
   assert.deepStrictEqual(proseKycCalls, ['create_card']);
 
-  console.log('AgentCard organization MCP provider tests passed');
+  // Regression: the transfer-visibility poll ran on a FIXED interval and issues TWO reads per
+  // attempt, so a single mint spent 40 requests of AgentCard's org-wide 120-requests-per-minute
+  // window in ten seconds — throttling the reclaim/lifecycle callers that share it. Exponential
+  // backoff waits for the same total time on far fewer requests.
+  // Scaled to 1/100 of production (delayMs 5 stands in for 500) so the assertion runs fast; the
+  // request count is a pure function of the schedule shape, so it is identical at either scale.
+  const invisibleTransferAttempts = 20;
+  const invisibleTransferScaledDelayMs = 5;
+  const invisibleTransferTotalWaitMs =
+    (invisibleTransferAttempts - 1) * invisibleTransferScaledDelayMs;
+  let invisibleTransferLookups = 0;
+  const invisibleTransferProvider = new AgentCardOrgMcpProvider(
+    'cardholder-123',
+    async (name) => {
+      if (name === 'create_card') return toolResult({ status: 'created', card_id: 'card-invis' });
+      if (name === 'get_card_details') {
+        return toolResult({
+          pan: '4242424242424242',
+          cvv: '123',
+          expiry: '07/28',
+          balance_cents: 4396,
+          status: 'OPEN',
+        });
+      }
+      if (name === 'list_transfers') {
+        invisibleTransferLookups += 1;
+        return toolResult({ transfers: [] });
+      }
+      throw new Error(`unexpected invisible-transfer tool ${name}`);
+    },
+    { attempts: invisibleTransferAttempts, delayMs: invisibleTransferScaledDelayMs }
+  );
+  const invisibleTransferStartedAt = Date.now();
+  await assert.rejects(
+    () =>
+      invisibleTransferProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:invisible-transfer',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress'
+  );
+  assert.strictEqual(
+    invisibleTransferLookups,
+    12,
+    `a full transfer-visibility wait must cost 12 organization-MCP requests, not ${invisibleTransferLookups}`
+  );
+  // The visibility deadline was NOT shortened to buy the request saving.
+  assert.ok(
+    Date.now() - invisibleTransferStartedAt >= invisibleTransferTotalWaitMs,
+    'the transfer-visibility window must not shrink'
+  );
+
+  // "Cardholder not found" is a deterministic pre-commit rejection: keep a typed safe code so the
+  // purchase funding-resume classifier does not rewrite it into a funding-in-progress retry loop.
+  // Covers both thrown MCP errors and isError structured results.
+  const missingCardholderProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        throw new Error('create_card failed: Cardholder not found');
+      }
+      throw new Error(`unexpected missing-cardholder tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      missingCardholderProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:missing-cardholder',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_cardholder_not_found' &&
+      error.message.includes('Cardholder not found') &&
+      'details' in error &&
+      error.details.agentcardStatus === 'cardholder_not_found'
+  );
+
+  const missingCardholderResultProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        return {
+          isError: true,
+          structuredContent: { status: 'error', message: 'Cardholder not found' },
+        };
+      }
+      throw new Error(`unexpected missing-cardholder-result tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      missingCardholderResultProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:missing-cardholder-result',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_cardholder_not_found' &&
+      error.message.includes('Cardholder not found') &&
+      'details' in error &&
+      error.details.agentcardStatus === 'cardholder_not_found'
+  );
+
+  // Terminal AgentCard idempotency outcome: same purchase:{id} key forever returns
+  // card_creation_failed. Keep a typed safe code so funding-resume cannot rewrite it.
+  const cardCreationFailedProvider = new AgentCardOrgMcpProvider('cardholder-ok', async (name) => {
+    if (name === 'create_card') {
+      return {
+        isError: true,
+        structuredContent: {
+          status: 'error',
+          message: 'create_card failed: card_creation_failed',
+        },
+      };
+    }
+    throw new Error(`unexpected card-creation-failed tool ${name}`);
+  });
+  await assert.rejects(
+    () =>
+      cardCreationFailedProvider.mintCard({
+        amountCents: 100,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:card-creation-failed',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_card_creation_failed' &&
+      error.message.includes('card_creation_failed') &&
+      'details' in error &&
+      error.details.agentcardStatus === 'card_creation_failed'
+  );
+
+  process.stdout.write('AgentCard organization MCP provider tests passed\n');
 }
 
 void main();

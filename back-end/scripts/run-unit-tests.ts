@@ -2,6 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 
 type UnitResult = {
   durationMs: number;
@@ -99,27 +100,55 @@ function resolveLocalDatabaseEnv(): Record<string, string> | undefined {
   return undefined;
 }
 
-const localDatabaseEnv = resolveLocalDatabaseEnv();
-if (localDatabaseEnv === undefined) {
+/**
+ * Refuse to run DB-touching unit tests against a remote database.
+ *
+ * Fail-closed backstop for the resolver above. These tests create and delete real rows through
+ * `providers/database`, which falls back to `back-end/.env` — whose DATABASE_URL is the PRODUCTION
+ * Supabase pooler. Prod latency also blows Prisma's 10s interactive-transaction budget and
+ * manufactures failures that look like real bugs.
+ *
+ * An UNSET DATABASE_URL is refused too: that is precisely the case that falls back to the prod
+ * pooler, so treating it as "nothing to validate" would leave the original hazard open.
+ * `nonLocalDatabaseReason` is the single shared definition of "local"
+ * (src/utils/localDatabaseUrl.ts), so this runner, the checkpoint scripts, and
+ * `providers/database` cannot drift apart.
+ *
+ * `resolved` is what the child processes will actually receive, so it — not the ambient
+ * DATABASE_URL — is what gets judged. Checking the ambient value instead would reject a run the
+ * resolver had already made safe.
+ */
+function assertLocalDatabaseUrl(resolved: Record<string, string> | undefined): void {
+  // Deliberate, explicit remote runs stay possible.
+  if (process.env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1') return;
+  const effectiveUrl = resolved?.DATABASE_URL ?? process.env.DATABASE_URL;
+  const reason = nonLocalDatabaseReason(effectiveUrl);
+  if (reason === null) return;
+
   // This runner does not load dotenv (the tests do), so read .env directly to name the host the
-  // tests will actually hit. A warning that says "unknown host" is not actionable.
-  let configuredUrl = process.env.DATABASE_URL ?? '';
+  // tests would have hit. An error that says "unknown host" is not actionable.
+  let configuredUrl = effectiveUrl ?? '';
   if (configuredUrl === '') {
     try {
       const envFile = readFileSync(join(backendDir, '.env'), 'utf8');
       configuredUrl = /^DATABASE_URL=["']?([^"'\n]+)/m.exec(envFile)?.[1] ?? '';
     } catch {
-      // .env unreadable; fall through to the generic message
+      // .env unreadable; fall through to the generic reason
     }
   }
   const remoteHost = /@([^/?]+)/.exec(configuredUrl)?.[1] ?? 'the DATABASE_URL in back-end/.env';
-  console.warn(
-    `\n⚠️  No local Postgres found — unit tests will run against ${remoteHost}.\n` +
-      `   This is the SHARED/PROD database: tests will mutate real rows and DB-timing suites\n` +
-      `   may flake from network latency. Start the workspace DB (scripts/run.sh) or set\n` +
-      `   BACKEND_UNIT_DATABASE_URL to a localhost URL.\n`
+  console.error(
+    `Refusing to run backend unit tests: ${reason} (${remoteHost}). These tests create and\n` +
+      'delete real rows. Start the workspace DB (scripts/run.sh), run via `npm run test:coverage`\n' +
+      '(which exports the local container URL), set BACKEND_UNIT_DATABASE_URL to a localhost URL,\n' +
+      'or set BACKEND_UNIT_ALLOW_REMOTE_DB=1 to override deliberately.'
   );
+  process.exit(2);
 }
+
+const localDatabaseEnv = resolveLocalDatabaseEnv();
+assertLocalDatabaseUrl(localDatabaseEnv);
+
 
 async function findTests(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });

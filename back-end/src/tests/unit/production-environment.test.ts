@@ -141,7 +141,7 @@ assert.ok(
 
 const bootstrapPath = path.resolve(testDirectory, '../../bootstrap.ts');
 const backendDirectory = path.resolve(testDirectory, '../../..');
-const failedBoot = spawnSync('npx', ['tsx', bootstrapPath], {
+const failedBoot = spawnSync(process.execPath, ['--import', 'tsx', bootstrapPath], {
   cwd: backendDirectory,
   encoding: 'utf8',
   env: {

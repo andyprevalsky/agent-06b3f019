@@ -40,7 +40,8 @@ from helpers.llm import (
     check_progress,
 )
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
-from helpers.summarize import compress_context
+from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
+from helpers.summarize import compaction_saved_ratio, compress_context, estimate_context_tokens
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
 from helpers.workflow_safe import safe_now as _safe_now
@@ -93,7 +94,9 @@ AUTOCOMPACT_BUFFER_TOKENS = 13_000  # matches Claude Code's AUTOCOMPACT_BUFFER
 # _estimate_tokens is a chars-÷-4 heuristic that under-counts JSON-heavy tool
 # results (observed 308k actual Anthropic tokens reported as <80k). Multiply
 # by this safety factor so the trigger fires before we hit the real ceiling.
-ESTIMATE_SAFETY_MULTIPLIER = 1.4
+# Owned by helpers.summarize so the loop and the compactor share one value;
+# re-exported here for callers that read it off this module.
+ESTIMATE_SAFETY_MULTIPLIER = SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
 
 # Compactor circuit-breaker: stop attempting compaction after this many
 # consecutive failures so a broken compactor doesn't loop forever.
@@ -814,6 +817,34 @@ async def run_agent(
         ):
             context_tokens = _estimate_tokens(context)
 
+        if context_tokens >= compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+            # Breaker open while the context is still over the trigger. Falling
+            # through would send an over-window context to the model on every
+            # remaining iteration and fail with a provider-side length error
+            # that says nothing about compaction. Fail loudly instead.
+            message = (
+                "Context compression unavailable: compactor failed "
+                f"{compactor_failures} consecutive times and the context estimate "
+                f"{context_tokens} tokens still exceeds trigger {compaction_trigger}."
+            )
+            logger.error(
+                "Compactor circuit breaker open with context still over trigger",
+                context_tokens=context_tokens,
+                trigger=compaction_trigger,
+                compactor_failures=compactor_failures,
+            )
+            return {
+                "status": "error",
+                "context": context,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "token_count": token_count,
+                "context_size": context_size,
+                "cache_read_input_tokens": cache_read_total,
+                "cache_creation_input_tokens": cache_write_total,
+                "message": message,
+            }
+
         if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
@@ -848,9 +879,13 @@ async def run_agent(
 
             if success:
                 compressed_tokens = _estimate_tokens(compressed)
-                saved_ratio = 0.0
-                if context_tokens > 0:
-                    saved_ratio = max(0.0, (context_tokens - compressed_tokens) / context_tokens)
+                # Signed on purpose: a compaction that GREW the context must not
+                # be indistinguishable from one that saved nothing. The old
+                # max(0.0, ...) clamp reported 0.0 for the -0.4% growth in prod
+                # agent e14d5abb. Negative values are still < the minimum, so
+                # the MIN_AUTOCOMPACT_SAVINGS_RATIO check below is unchanged in
+                # direction — it just now sees the real number.
+                saved_ratio = compaction_saved_ratio(context_tokens, compressed_tokens)
 
                 if compressed_tokens >= compaction_trigger:
                     message = (
@@ -1005,6 +1040,11 @@ async def run_agent(
         ) = _resolve_current_compute_credentials()
 
         # 7. Call LLM with structured streaming
+        # Only a failure BEFORE a usable response is a retry of this iteration.
+        # Once the provider returns and we accept the response, the turn has
+        # really been spent (tokens are charged in _account_llm_usage below), so
+        # a later failure in accounting/broadcast must NOT refund the iteration.
+        llm_response_accepted = False
         try:
             if is_inside_temporal_activity:
                 # Inside activity (browser agent) - call LLM directly with streaming callback
@@ -1214,6 +1254,12 @@ async def run_agent(
                                 continue
                             raise
 
+                    # Validated provider response in hand. Everything below
+                    # (tool-call normalization, stream close, drainer dispose)
+                    # is post-response bookkeeping, so a failure there must not
+                    # refund the turn — its tokens are already spent.
+                    llm_response_accepted = True
+
                     # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
                     tool_calls_as_dicts = []
                     if pydantic_result.tool_calls:
@@ -1288,6 +1334,9 @@ async def run_agent(
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=180),
                 )
+
+                # The activity returned a validated payload; the turn is spent.
+                llm_response_accepted = True
 
                 # Reconstruct result object from activity response
                 class ActivityResult:
@@ -1402,6 +1451,21 @@ async def run_agent(
                     "cache_creation_input_tokens": cache_write_total,
                     "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {error_message}",
                 }
+            # A failed LLM call produced no assistant turn, no tool call, and no
+            # context growth — it is a retry of this iteration, not a new one.
+            # Counting it would let transient provider/schema errors eat the
+            # agent's remaining turns: agent 16ae3e8f's explore sub-agent had
+            # completed 18 turns of real work, then spent iterations 19 and 20
+            # on two failed parses and died on "Reached max iterations (20)"
+            # without ever getting another chance to act. The retry budget
+            # (consecutive_llm_failures, capped at 3 above) bounds this path;
+            # max_iterations bounds productive work.
+            #
+            # Scoped to pre-acceptance failures only: once the provider returned
+            # a usable response the turn really was spent (tokens are charged),
+            # so a later accounting/broadcast error must not refund it.
+            if not llm_response_accepted:
+                iteration -= 1
             if error_chain_has_type(e, "LLMStructuredOutputError"):
                 # call_llm_activity marks schema/required-tool violations
                 # non-retryable so Temporal does not multiply requests. The
@@ -1610,27 +1674,20 @@ async def run_agent(
                     error = tool_result["error"]
 
                     if error:
-                        # Tool failed - add error to context
-                        if is_inside_temporal_activity and post_message:
-                            async with span(
-                                "run_loop.post_tool_error_message",
-                                agent_id=agent_id,
-                                iteration=iteration,
-                                tool_name=tool_name,
-                                agent_type="explore" if cache_call_site == "explore_agent" else None,
-                            ):
-                                await post_message(
-                                    str(error),
-                                    "TOOL",
-                                    {
-                                        "toolCallId": tool_call_id,
-                                        "toolName": tool_name,
-                                        "toolStatus": "ERROR",
-                                        "title": f"{tool_name} failed",
-                                        "error": True,
-                                        "subAgentId": task_id,
-                                    },
-                                )
+                        # Tool failed. Do NOT post an FE chip here: the tool layer
+                        # already owns the terminal chip for this tool_call_id and
+                        # posts a formatted one (params, elapsed, cost) before it
+                        # re-raises — see domains/web_fetch/handler.py,
+                        # domains/grep/service.py, tools/web_search/handler.py,
+                        # tools/people_search/handler.py. The FE resolves a chip by
+                        # toolCallId with last write wins, so a second row here
+                        # DELETED the tool's formatted chip and replaced it with a
+                        # bare exception string.
+                        # docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md
+                        #
+                        # The model's own error feedback is the context.append below,
+                        # which is independent of the FE post.
+                        #
                         # When no poll_messages, locally append error so agent sees it
                         # (omit subAgentId so convert_context_to_messages doesn't filter it)
                         if not poll_messages:
@@ -2270,13 +2327,20 @@ async def run_agent(
 def _estimate_tokens(context: List[Dict]) -> int:
     """Rough token estimation: ~4 chars per token × safety multiplier.
 
-    Excludes sub-agent internal messages (tagged with subAgentId) since
-    these are filtered out before sending to the LLM. The chars/4 heuristic
-    severely under-counts JSON-heavy content (observed 308k actual Anthropic
-    tokens reported as <80k); ESTIMATE_SAFETY_MULTIPLIER pads for that.
+    Thin alias for the canonical ``helpers.summarize.estimate_context_tokens``
+    so the overflow trigger and the compactor measure the SAME thing. This used
+    to join only ``m["text"]``, which scored production tool-call rows (empty
+    text, payload in ``metadata.tool_calls``) at ~0 while the compactor counted
+    them in full — compaction then removed ~0 measured tokens and added a
+    measured summary, i.e. it GREW the context it was asked to shrink
+    (prod agent e14d5abb, 2026-08-03).
+
+    Excludes sub-agent internal messages (tagged with subAgentId) since these
+    are filtered out before sending to the LLM. The chars/4 heuristic severely
+    under-counts JSON-heavy content (observed 308k actual Anthropic tokens
+    reported as <80k); ESTIMATE_SAFETY_MULTIPLIER pads for that.
     """
-    text = "\n".join([m.get("text", "") for m in context if not (m.get("metadata") or {}).get("subAgentId")])
-    return int((len(text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
+    return estimate_context_tokens(context)
 
 
 async def _compress_context(
@@ -2361,6 +2425,21 @@ async def _compress_context(
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")
 
     if not success or not new_context:
+        return context, False
+
+    # Defense in depth: the compactor activity runs out-of-process and can be a
+    # different code version, so re-verify here that it actually shrank the
+    # context. Adopting a larger context guarantees the caller's overflow
+    # trigger fires again on the very next check (prod agent e14d5abb).
+    original_tokens = _estimate_tokens(context)
+    compressed_tokens = _estimate_tokens(new_context)
+    if compressed_tokens >= original_tokens:
+        logger.warning(
+            "Compactor returned a context that is not smaller; keeping original",
+            original_tokens=original_tokens,
+            compressed_tokens=compressed_tokens,
+            saved_ratio=compaction_saved_ratio(original_tokens, compressed_tokens),
+        )
         return context, False
 
     return new_context, True

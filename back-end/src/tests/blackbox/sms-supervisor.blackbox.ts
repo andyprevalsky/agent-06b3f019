@@ -46,11 +46,15 @@ import {
   testRealLlm_supervisorRoundTrip,
 } from './sms-supervisor.behavior';
 import { smsDeliveryBehaviorCases } from './sms-supervisor.delivery.behavior';
+import { smsBluebottleBehaviorCases } from './sms-supervisor.bluebottle.behavior';
 import {
   testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_voiceNoteRoundTrip,
 } from './sms-supervisor.media.behavior';
-import { replyIntentBlackboxCase } from './sms-supervisor.intent.behavior';
+import {
+  bareRejectionBlackboxCase,
+  replyIntentBlackboxCase,
+} from './sms-supervisor.intent.behavior';
 import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
@@ -205,6 +209,8 @@ const SMS_SUPERVISOR_INFRA_HOSTS = [
   'stripe.com',
   'parallel.ai',
   'connect.steelbrowser.com',
+  'connect.steel.dev',
+  'api.steel.dev',
   'perplexity.ai',
   'exa.ai',
   'vapi.ai',
@@ -507,53 +513,50 @@ async function testWs2_suppressedRunDiscardsStartNewAgent() {
   const token = captureToken('sms-supervisor-ws2-discard');
   const goal = `WS2-discard-goal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const replyText = `Started agent for: ${goal.substring(0, 30)}`;
-  // delay_ms keeps both supervisor runs inside their LLM call long enough for
-  // B's webhook to bump lastInboundSeq before A reaches its commit gate —
-  // otherwise A finishes in ~5ms and commits before B has bumped, defeating
-  // the seq-gating logic this test was written to verify.
-  const fixture = buildStartNewAgentFixture(goal, replyText, 0.5, 250);
+  // Keep both supervisor runs inside their LLM call long enough for B's
+  // webhook to bump lastInboundSeq before A reaches its commit gate. The
+  // shared deploy host can delay timers and socket dispatch by seconds under
+  // parallel coverage, so use a bounded contention-safe fixture delay.
+  const fixture = buildStartNewAgentFixture(goal, replyText, 0.5, 5_000);
   const firstText = 'WS2 discard — first inbound (suppressed)';
   const secondText = 'WS2 discard — second inbound (committing)';
 
   try {
     await setFixtureOverride(userId, fixture);
 
-    // Fire two inbounds nearly together. The webhook handler bumps
-    // SmsSession.lastInboundSeq atomically per call so the first run's seq
-    // (mySeq=N) trails the persisted value (N+1) when it reaches the commit
-    // gate. The 25ms stagger keeps the seq increments ordered; the fixture
-    // short-circuits the LLM call so both loops complete in tens of ms.
-    const [resA, resB] = await Promise.all([
-      request(`${BASE_URL}/api/sms/inbound`, {
-        method: 'POST',
-        headers: { 'X-Capture-Token': token },
-        body: JSON.stringify({
-          data: {
-            body: firstText,
-            conversation: {
-              contact: { phone_number: phone },
-              phone_number: { number: '+14154498072' },
-            },
+    // The first webhook response is sent only after its inbound sequence was
+    // persisted, while its supervisor continues asynchronously. Waiting for
+    // that response gives the race a deterministic order without weakening
+    // the actual assertion: run A is still in its fixture-delayed LLM call
+    // when B advances the sequence and supersedes it.
+    const resA = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: firstText,
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
           },
-        }),
+        },
       }),
-      new Promise((r) => setTimeout(r, 25)).then(() =>
-        request(`${BASE_URL}/api/sms/inbound`, {
-          method: 'POST',
-          headers: { 'X-Capture-Token': token },
-          body: JSON.stringify({
-            data: {
-              body: secondText,
-              conversation: {
-                contact: { phone_number: phone },
-                phone_number: { number: '+14154498072' },
-              },
-            },
-          }),
-        })
-      ),
-    ]);
+    });
     assertStatus(resA.status, 200, resA.data);
+
+    const resB = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: secondText,
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
     assertStatus(resB.status, 200, resB.data);
 
     await waitFor(() => findSurgeCallForReply(token, cursor, phone, replyText));
@@ -642,6 +645,7 @@ async function runAll() {
       fn: () => testNaturalApproval_ambiguousApprovalAsksClarification(prisma),
     },
     replyIntentBlackboxCase(prisma),
+    bareRejectionBlackboxCase(prisma),
     {
       name: 'prompt -- supervisor never exposes routing identifiers',
       fn: () => testPrompt_neverExposeRoutingIds(prisma),
@@ -663,6 +667,7 @@ async function runAll() {
       fn: () => testAttemptCompletion_requiresSuccessfulUserMessage(prisma),
     },
     ...smsDeliveryBehaviorCases(prisma),
+    ...smsBluebottleBehaviorCases(prisma),
     {
       name: 'real-llm -- answers contact fact via grep without asking user (opt-in)',
       fn: () => testRealLlm_answersContactFactViaGrep(prisma),

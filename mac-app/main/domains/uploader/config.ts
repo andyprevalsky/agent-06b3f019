@@ -36,6 +36,13 @@ export const UPLOAD_ENDPOINTS: Record<UploadStrategy, string> = {
   generic: '/api/integrations/upload',
 };
 
+/**
+ * Endpoint that marks the WhatsApp integration CONNECTED before any messages
+ * exist. Kept out of UPLOAD_ENDPOINTS because it carries no payload — it
+ * exists purely to break the connect/upload bootstrap deadlock.
+ */
+export const WHATSAPP_CONNECT_ENDPOINT = '/api/integrations/whatsapp/connect';
+
 /** IPC channel the renderer window listens on for upload progress. */
 export const UPLOAD_PROGRESS_CHANNEL = 'upload:progress';
 
@@ -44,3 +51,9 @@ export const UPLOAD_PROGRESS_START_PERCENT = 50;
 
 /** Progress percentage emitted after the network request settles. */
 export const UPLOAD_PROGRESS_DONE_PERCENT = 100;
+
+/** Browser cookie snapshots are idempotent, so transient transport failures are safe to retry. */
+export const BROWSER_COOKIE_UPLOAD_MAX_ATTEMPTS = 3;
+
+/** Exponential backoff base for browser-cookie transport retries. */
+export const BROWSER_COOKIE_UPLOAD_RETRY_DELAY_MS = 1000;

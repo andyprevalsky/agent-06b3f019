@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { startAgentWorkflow } from '../src/providers/temporal';
+import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 
 type ExportMessage = {
   message_id?: string;
@@ -139,17 +140,10 @@ function pick<T>(obj: Record<string, any>, ...keys: string[]): T | undefined {
 
 function assertLocalDatabase() {
   if (process.env.ALLOW_PROD_CHECKPOINT_CLONE === 'true') return;
-  const databaseUrl = process.env.DATABASE_URL || '';
-  if (!databaseUrl) throw new Error('DATABASE_URL is not set');
-  let host = '';
-  try {
-    host = new URL(databaseUrl).hostname;
-  } catch {
-    throw new Error('DATABASE_URL is not a valid URL');
-  }
-  if (!['localhost', '127.0.0.1', '::1'].includes(host)) {
+  const reason = nonLocalDatabaseReason(process.env.DATABASE_URL);
+  if (reason) {
     throw new Error(
-      `Refusing to clone checkpoint into non-local database host "${host}". ` +
+      `Refusing to clone checkpoint: ${reason}. ` +
         'Set ALLOW_PROD_CHECKPOINT_CLONE=true only if you intend this.'
     );
   }
@@ -319,7 +313,8 @@ async function main() {
     treeAgents.length > 0 && isForEachBoundary(checkpointMessages[checkpointMessages.length - 1]);
   const messagesToClone = shouldDropForEachChildRows
     ? checkpointMessages.filter(
-        (message, index) => index === checkpointMessages.length - 1 || !isForEachChildRootRow(message)
+        (message, index) =>
+          index === checkpointMessages.length - 1 || !isForEachChildRootRow(message)
       )
     : checkpointMessages;
   const droppedForEachChildMessageCount = checkpointMessages.length - messagesToClone.length;

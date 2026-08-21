@@ -19,6 +19,12 @@ import {
 } from '../../providers/smsSupervisor/outboundEvents';
 import * as repo from './repo';
 import type { NotifyInput } from './types';
+import {
+  notificationChannelsFor,
+  isWhatsAppConfigured,
+  type SupervisorChannel,
+} from '../../providers/smsSupervisor/channelDelivery';
+import { getWhatsAppReachable } from '../../providers/whatsappReachability';
 
 const log = createLogger('SendSMS');
 const COMPLETION_SMS_OPERATION_TYPE = 'lifecycle-sms.completion';
@@ -187,11 +193,29 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
     return { success: true, skipped: true, reason: 'benchmark_agent', messagePreview };
   }
 
-  if (data.event_type === 'completion') {
-    return dispatchCompletionOnce(data, payload);
+  // Mirror lifecycle/onboarding notifications across every channel the user is
+  // reachable on: SMS always, plus WhatsApp when configured and the number is
+  // not known-unreachable. A WhatsApp-sourced agent's user just texted us on
+  // WhatsApp, so include it even if the reachability flag hasn't caught up yet.
+  const reachable = await getWhatsAppReachable(data.user_id);
+  const channels = notificationChannelsFor(reachable);
+  // A WhatsApp-sourced agent's user just texted us, so include WhatsApp even if
+  // the reachability flag hasn't caught up (null) — but NEVER when the number is
+  // known-unreachable (false), or we'd hammer a number that can't receive.
+  if (
+    agent.source === 'WHATSAPP' &&
+    isWhatsAppConfigured() &&
+    reachable !== false &&
+    !channels.includes('WHATSAPP')
+  ) {
+    channels.push('WHATSAPP');
   }
 
-  await dispatchByEventType(data, payload, agent.goal);
+  if (data.event_type === 'completion') {
+    return dispatchCompletionOnce(data, payload, channels);
+  }
+
+  await dispatchByEventType(data, payload, agent.goal, channels);
 
   log.info('SMS Notify processed', {
     eventType: data.event_type,
@@ -204,7 +228,8 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
 
 async function dispatchCompletionOnce(
   data: NotifyInput,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  channels: SupervisorChannel[]
 ): Promise<NotifyResult> {
   const operationKey = `${COMPLETION_SMS_OPERATION_TYPE}:${data.agent_id}`;
   const claim = await claimToolSideEffect({
@@ -228,7 +253,8 @@ async function dispatchCompletionOnce(
     data.user_id,
     { id: data.agent_id },
     (payload.summary as string | undefined) ?? '',
-    payload.outputs
+    payload.outputs,
+    channels
   );
   if (!delivery.success) {
     if (delivery.definitiveFailure === true) {
@@ -253,14 +279,23 @@ async function dispatchCompletionOnce(
 async function dispatchByEventType(
   data: NotifyInput,
   payload: Record<string, unknown>,
-  agentGoal: string
+  agentGoal: string,
+  channels: SupervisorChannel[]
 ): Promise<void> {
   switch (data.event_type) {
     case 'agent_started':
-      await notifyAgentStarted(data.user_id, {
-        id: data.agent_id,
-        goal: (payload.goal as string | undefined) ?? 'Unknown goal',
-      });
+      await notifyAgentStarted(
+        data.user_id,
+        {
+          id: data.agent_id,
+          // Prefer the payload's goal (the worker may have refined it), but fall
+          // back to the goal already read off the Agent row rather than to the
+          // literal string "Unknown goal" — a caller that omits `goal` otherwise
+          // texts the user `Started: "Unknown goal"` about their own request.
+          goal: (payload.goal as string | undefined) ?? agentGoal,
+        },
+        channels
+      );
       break;
 
     case 'planner_message':
@@ -268,7 +303,8 @@ async function dispatchByEventType(
         data.user_id,
         { id: data.agent_id },
         (payload.message as string | undefined) ?? '',
-        (payload.is_question as boolean | undefined) ?? false
+        (payload.is_question as boolean | undefined) ?? false,
+        channels
       );
       break;
 
@@ -279,7 +315,8 @@ async function dispatchByEventType(
         (payload.question as string | undefined) ?? '',
         (payload.attention_request_id as string | undefined) ?? '',
         (payload.workflow_id as string | undefined) ?? '',
-        payload.metadata
+        payload.metadata,
+        channels
       );
       break;
 
@@ -294,17 +331,21 @@ async function dispatchByEventType(
         });
         break;
       }
-      await notifyAgentCardSetup(data.user_id, { id: data.agent_id }, setupUrl);
+      await notifyAgentCardSetup(data.user_id, { id: data.agent_id }, setupUrl, channels);
       break;
     }
 
     case 'cost_limit':
-      await notifyCostLimit(data.user_id, {
-        id: data.agent_id,
-        goal: agentGoal,
-        treeCostCents: (payload.tree_cost_cents as number | undefined) ?? 0,
-        priceLimitCents: (payload.price_limit_cents as number | undefined) ?? 0,
-      });
+      await notifyCostLimit(
+        data.user_id,
+        {
+          id: data.agent_id,
+          goal: agentGoal,
+          treeCostCents: (payload.tree_cost_cents as number | undefined) ?? 0,
+          priceLimitCents: (payload.price_limit_cents as number | undefined) ?? 0,
+        },
+        channels
+      );
       break;
 
     default:

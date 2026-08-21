@@ -9,7 +9,43 @@ export interface SmsSessionMessage {
   timestamp: string;
   inboundSeq?: number;
   providerMessageId?: string;
+  /**
+   * Set on turns the supervisor did NOT author — lifecycle SMS emitted directly
+   * by a spawned agent (`agent_started`, `completion`, `cost_limit`, …). They are
+   * `assistant` turns because the user experiences them as Rose talking, but the
+   * marker lets callers tell "I said this" from "an agent said this for me".
+   */
+  origin?: 'agent-lifecycle';
 }
+
+/**
+ * The ONE timestamp format stored on a session message.
+ *
+ * `fetchSessionMessagesSince` compares these as plain strings, which is only
+ * correct while every writer emits the same fixed-width UTC format that
+ * `Date.toISOString()` produces. `NOW()::text` does NOT: it renders
+ * `2026-08-05 03:09:02.185+00`, whose space at index 10 sorts BEFORE the `T` of
+ * any ISO watermark. Every stored message therefore compared as older than a
+ * watermark taken the same day, and the catch-up poll returned nothing on every
+ * round — the blind spot it exists to close stayed wide open.
+ *
+ * Keep this the only way a session timestamp is written.
+ *
+ * `clock_timestamp()`, NOT `NOW()`: `NOW()` is the TRANSACTION start time and
+ * does not advance inside one, so an append made later in a transaction is
+ * stamped with an instant that can precede a watermark taken before the write.
+ * `fetchSessionMessagesSince` compares with a strict `>`, so such a message is
+ * invisible to catch-up forever. `clock_timestamp()` is the real current
+ * instant and advances within the transaction.
+ *
+ * Precision stays at `.MS` (3 digits) deliberately. The comparison is a plain
+ * fixed-width STRING compare against a `Date.toISOString()` watermark, so a
+ * microsecond format would sort WRONG against it — `...718500Z` < `...718Z`
+ * because '5' < 'Z'. Widening this silently inverts ordering. The residual
+ * cost is that two writes inside one millisecond tie, and strict `>` then
+ * treats the second as already-seen.
+ */
+const SESSION_TIMESTAMP_SQL = Prisma.sql`to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
 function storedMessagesArray(column: Prisma.Sql = Prisma.sql`messages`): Prisma.Sql {
   return Prisma.sql`CASE
@@ -43,7 +79,7 @@ export async function recordInboundSms(userId: string, content: string): Promise
         jsonb_build_object(
           'role', 'user',
           'content', ${content},
-          'timestamp', NOW()::text,
+          'timestamp', ${SESSION_TIMESTAMP_SQL},
           'inboundSeq', 1
         )
       )::text),
@@ -59,7 +95,7 @@ export async function recordInboundSms(userId: string, content: string): Promise
           jsonb_build_object(
             'role', 'user',
             'content', ${content},
-            'timestamp', NOW()::text,
+            'timestamp', ${SESSION_TIMESTAMP_SQL},
             'inboundSeq', "SmsSession"."lastInboundSeq" + 1
           )
         )
@@ -87,7 +123,7 @@ export async function appendOutboundSms(
           jsonb_build_object(
             'role', 'user',
             'content', ${precedingUserContent},
-            'timestamp', NOW()::text
+            'timestamp', ${SESSION_TIMESTAMP_SQL}
           )
         )`;
   await prisma.$executeRaw`
@@ -99,8 +135,44 @@ export async function appendOutboundSms(
             jsonb_build_object(
               'role', 'assistant',
               'content', ${content},
-              'timestamp', NOW()::text,
+              'timestamp', ${SESSION_TIMESTAMP_SQL},
               'providerMessageId', ${providerMessageId ?? null}
+            )
+          )
+        )
+      )::text),
+      "updatedAt" = NOW()
+    WHERE "userId" = ${userId}
+  `;
+}
+
+/**
+ * Append a lifecycle SMS a spawned agent sent straight to the user's phone.
+ *
+ * Without this the supervisor's transcript held only its own sends, so on the
+ * next inbound it had no idea the user had already been told "Started: …" or
+ * "Done: …" — and narrated the same progress again itself. Best-effort by
+ * design: the SMS is already delivered by the time we get here, so a failed
+ * append must never fail the caller.
+ */
+export async function appendLifecycleSms(
+  userId: string,
+  content: string,
+  providerMessageId?: string
+): Promise<void> {
+  await ensureSession(userId);
+  await prisma.$executeRaw`
+    UPDATE "SmsSession"
+    SET
+      messages = to_jsonb((
+        ${storedMessagesArray()} || jsonb_build_array(
+          jsonb_strip_nulls(
+            jsonb_build_object(
+              'role', 'assistant',
+              'content', ${content},
+              'timestamp', ${SESSION_TIMESTAMP_SQL},
+              'providerMessageId', ${providerMessageId ?? null},
+              'origin', 'agent-lifecycle'
             )
           )
         )
@@ -126,4 +198,34 @@ export function parseSmsSessionMessages(raw: unknown): SmsSessionMessage[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Lifecycle SMS added to the user's thread since `sinceIso`.
+ *
+ * A supervisor run composes its context once, at wake-up. Anything that reaches
+ * the phone *during* the run — an agent it just spawned announcing itself, a
+ * sibling agent finishing, an approval request — is invisible until the next
+ * inbound SMS. That blind spot is what produces duplicate traffic: the
+ * supervisor has no evidence the user was told anything, so it says it again.
+ *
+ * Scoped to `origin: 'agent-lifecycle'` — turns the supervisor did NOT author.
+ * Its own sends are already in its context, and `appendOutboundSms` re-stores
+ * the triggering inbound under a fresh timestamp, so replaying everything would
+ * hand the run a duplicate `user` turn and invite a second reply to a message it
+ * had already answered. Returning only what an agent said, verbatim and in
+ * order, is exactly the evidence the supervisor lacks.
+ */
+export async function fetchSessionMessagesSince(
+  userId: string,
+  sinceIso: string
+): Promise<SmsSessionMessage[]> {
+  const session = await prisma.smsSession.findUnique({
+    where: { userId },
+    select: { messages: true },
+  });
+  if (session === null) return [];
+  return parseSmsSessionMessages(session.messages).filter(
+    (message) => message.origin === 'agent-lifecycle' && message.timestamp > sinceIso
+  );
 }

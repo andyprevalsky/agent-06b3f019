@@ -112,11 +112,11 @@ const grepCallSchema = z
         .describe(
           'Context on both sides: adjacent message records for messages, logical lines for text records.'
         ),
+      '-i': z.boolean().nullable().describe('Enable case-insensitive regex matching.'),
       '-n': z
         .boolean()
         .nullable()
         .describe('Show logical line numbers in content output. Defaults to true.'),
-      '-i': z.boolean().nullable().describe('Enable case-insensitive regex matching.'),
       head_limit: z
         .number()
         .nullable()

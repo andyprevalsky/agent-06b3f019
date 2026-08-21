@@ -53,6 +53,42 @@ def test_record_and_summarize_span_history():
         }
 
 
+def test_default_span_history_rolls_over_before_git_blob_limit():
+    import benchmarks.span_history as history
+
+    observation = {
+        "benchmark": "chat-mode",
+        "environment": "local",
+        "agent_id": "agent-rollover",
+        "run_status": "passed",
+        "span_key": "agents.helpers.llm.call_llm:execute_loop",
+        "span_name": "call_llm",
+        "duration_ms": 1234,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        original_dir = history.HISTORY_DIR
+        original_file = history.HISTORY_FILE
+        original_limit = history.MAX_HISTORY_FILE_BYTES
+        old_env = os.environ.pop("SPAN_HISTORY_FILE", None)
+        try:
+            history.HISTORY_DIR = tmp
+            history.HISTORY_FILE = str(Path(tmp) / "span_durations.jsonl")
+            history.MAX_HISTORY_FILE_BYTES = 1
+            Path(history.HISTORY_FILE).write_text("already-full\n")
+
+            assert history.record_span_observations([observation]) == 1
+            segments = sorted(Path(tmp).glob("span_durations.*.jsonl"))
+            assert len(segments) == 1
+            assert Path(history.HISTORY_FILE).read_text() == "already-full\n"
+            assert history.load_records() == [observation]
+        finally:
+            history.HISTORY_DIR = original_dir
+            history.HISTORY_FILE = original_file
+            history.MAX_HISTORY_FILE_BYTES = original_limit
+            if old_env is not None:
+                os.environ["SPAN_HISTORY_FILE"] = old_env
+
+
 def test_compare_observations_marks_regression():
     from benchmarks.span_history import compare_observations, record_span_observations
 
@@ -223,6 +259,64 @@ def test_agent_latency_inline_baseline_requires_20_samples():
                 os.environ["SPAN_HISTORY_FILE"] = old
 
 
+def test_agent_latency_decodes_span_history_once_for_all_baselines():
+    """One latency report must scan the history ledger only once.
+
+    The ecommerce Epoch 9 history held 241,740 rows / 77 MB. Looking up each
+    unique span key with a separate full-ledger scan kept agent_latency.py
+    CPU-bound beyond its 180-second diagnostic budget.
+    """
+    import benchmarks.span_history as history
+    from benchmarks.agent_latency import _span_baseline_map
+
+    span_keys = ["span-key-a", "span-key-b", "span-key-c"]
+    observations = [
+        {
+            "benchmark": "browser-imax-group-tickets",
+            "environment": "local",
+            "agent_id": "agent-a",
+            "run_status": "passed",
+            "span_key": span_key,
+            "span_name": span_key,
+            "duration_ms": 1000,
+        }
+        for span_key in span_keys
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        history_file = str(Path(tmp) / "span_durations.jsonl")
+        rows = [{**observations[index % len(observations)], "duration_ms": 1000 + index} for index in range(90)]
+        history.record_span_observations(rows, history_file=history_file)
+
+        old_history_file = os.environ.get("SPAN_HISTORY_FILE")
+        original_loads = history.json.loads
+        decode_count = 0
+
+        def counted_loads(value):
+            nonlocal decode_count
+            decode_count += 1
+            return original_loads(value)
+
+        try:
+            os.environ["SPAN_HISTORY_FILE"] = history_file
+            history.json.loads = counted_loads
+            baselines = _span_baseline_map(
+                observations,
+                benchmark="browser-imax-group-tickets",
+                environment="local",
+                min_samples=20,
+            )
+        finally:
+            history.json.loads = original_loads
+            if old_history_file is None:
+                os.environ.pop("SPAN_HISTORY_FILE", None)
+            else:
+                os.environ["SPAN_HISTORY_FILE"] = old_history_file
+
+    assert set(baselines) == set(span_keys)
+    assert decode_count == len(rows), "span history was decoded once per unique span key"
+
+
 def test_agent_latency_handles_events_without_reconstructed_spans():
     from benchmarks.agent_latency import (
         _RawEvent,
@@ -271,10 +365,15 @@ async def run_all_tests():
     print("span-history blackbox tests:")
     r = BlackboxResult()
     r.record("record_and_summarize", test_record_and_summarize_span_history)
+    r.record("default_history_rollover", test_default_span_history_rolls_over_before_git_blob_limit)
     r.record("compare_marks_regression", test_compare_observations_marks_regression)
     r.record("record_from_embedded_logs", test_agent_latency_records_span_history_from_embedded_logs)
     r.record("parse_nested_fly_clickhouse_json", test_agent_latency_parses_nested_fly_clickhouse_json)
     r.record("inline_baseline_requires_20_samples", test_agent_latency_inline_baseline_requires_20_samples)
+    r.record(
+        "latency_decodes_span_history_once",
+        test_agent_latency_decodes_span_history_once_for_all_baselines,
+    )
     r.record("latency_handles_events_without_spans", test_agent_latency_handles_events_without_reconstructed_spans)
     teardown_mock()
     return r.all_passed

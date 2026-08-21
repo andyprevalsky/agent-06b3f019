@@ -17,16 +17,38 @@ export class RoseError extends Error {
 }
 
 export class RoseAuthError extends RoseError {
-  constructor(message: string, status?: number) {
+  /**
+   * True only when the provider said this grant was REVOKED, as opposed to any
+   * other auth failure. Carried here because the completion path is where grant
+   * death is observed (real traffic, no scheduled probes), while the decision to
+   * mint a replacement is taken by the caller.
+   *
+   * Deliberately NOT inferred from the status code: revocation arrives as both
+   * 401 and 403 with the reason only in the body, so a status-only check reports
+   * a revoked grant as healthy. See `classifyComputeGrantFailure`.
+   */
+  readonly grantRevoked: boolean;
+
+  constructor(message: string, status?: number, grantRevoked = false) {
     super(message, status);
     this.name = 'RoseAuthError';
+    this.grantRevoked = grantRevoked;
   }
 }
 
 export class RoseRateLimitError extends RoseError {
-  constructor(message: string, status?: number) {
+  /**
+   * The provider's OWN reset time for this credential (ISO-8601 UTC), when it
+   * gave us one — from `anthropic-ratelimit-*-reset` / `retry-after` / the error
+   * body. Undefined means the provider told us nothing, and only then may a
+   * caller substitute a synthetic cooldown. Threading this through is what stops
+   * a 5-minute default from overwriting a real multi-day usage window.
+   */
+  rateLimitedUntil?: string;
+  constructor(message: string, status?: number, rateLimitedUntil?: string) {
     super(message, status);
     this.name = 'RoseRateLimitError';
+    this.rateLimitedUntil = rateLimitedUntil;
   }
 }
 

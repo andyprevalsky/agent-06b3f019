@@ -22,6 +22,8 @@ export async function recoverBrowserChallenge(input: {
   currentUrl: string;
   storageState: Record<string, unknown>;
   userAgent?: string;
+  blockedResourceUrl?: string;
+  requirePaymentCdn?: boolean;
 }) {
   await requireOwnedTask(input.taskId, input.userId);
   return searchAndPromoteBrowserConfig({
@@ -30,5 +32,7 @@ export async function recoverBrowserChallenge(input: {
     targetUrl: input.currentUrl,
     storageState: input.storageState,
     userAgent: input.userAgent,
+    blockedResourceUrl: input.blockedResourceUrl,
+    requirePaymentCdn: input.requirePaymentCdn,
   });
 }

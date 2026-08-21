@@ -18,14 +18,14 @@ export function registerBrowserResumeRoute(router: Router): void {
     auth,
     asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
       try {
-        const { task_id } = resumeSessionSchema.parse(req.body);
+        const { task_id, force_fresh_profile } = resumeSessionSchema.parse(req.body);
         const userId = req.isInternal === true ? undefined : req.userId;
         if (req.isInternal !== true && (userId === undefined || userId === '')) {
           res.status(401).json({ error: 'Unauthorized' });
           return;
         }
 
-        const result = await resumeBrowserSession(task_id, userId);
+        const result = await resumeBrowserSession(task_id, userId, force_fresh_profile);
         if (req.isInternal === true) {
           res.json({ success: true, ...result });
         } else {

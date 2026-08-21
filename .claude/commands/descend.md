@@ -1,5 +1,5 @@
 ---
-description: "Descend on a benchmark slice to 100% green with zero reward hacks: run, fix infra, RCA harness failures in parallel, stop for fix decisions, rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
+description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel, freeze a min-heap of failing tasks by fix complexity, pipeline approve → local-snapshot rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
 argument-hint: "<slice> — daily | pre-deploy | rose-bench | incomplete, or explicit task names"
 ---
 
@@ -18,8 +18,8 @@ Both planned user-input gates, and any unplanned human approval permitted by
 the composed commands, must follow `.claude/shared/approval-format.md`.
 Read it completely immediately before composing the request. The
 response-contract fields below add benchmark and lifecycle context, but never
-replace the shared Detail, Before Behavior, After Behavior, and Downstream
-Implications sections.
+replace the shared Evidence, Detail, Before Behavior, After Behavior, and
+Downstream Implications sections.
 
 ## Hard rules
 
@@ -86,9 +86,30 @@ Implications sections.
    and cement it first. A HARNESS fix must then have Andy's fix approval before
    the exact post-fix benchmark rerun; an INFRA fix does not require approval.
    That exact rerun supplies `/RCA`'s benchmark outcome proof and is what moves
-   the RCA from Causal proof; outcome pending to Complete. When the slice is
-   executed one task at a time, finish this full RCA → approval when required →
-   exact rerun cycle before starting another original-slice task.
+   the RCA from Causal proof; outcome pending to Complete. After the first
+   infra-clean run with causal RCA for every failing task, freeze a min-heap
+   over those tasks and pipeline the rest: do not wait for one task's
+   approve → local rerun cycle to finish before asking about the next idle
+   task. On approve, immediately apply the fix on a local snapshot and rerun
+   that task; immediately ask about the next idle heap item.
+12. **Approval format is the ONLY response format — no exceptions.** Every
+   response emitted while `/descend` is active MUST consist of exactly: the
+   header block (including the approvals counter), the delta rows of the
+   lifecycle table, and — only at a stop — the ONE approval section for the
+   highest-priority pending row. Never re-render the full ledger; never batch
+   two approval requests into one response. Nothing else may appear. No
+   free-form prose report, no narrative of what you did, no "what I found"
+   essay, no recap of completed work, no bulleted list of open items outside
+   the table, no explanation of a fix outside its own approval section, no
+   commentary on sub-agent results. If a fact does not fit in the header, a
+   table cell, or a required approval section, it is not said in chat —
+   evidence belongs in the RCA and the commit message.
+   **Single exception:** inside a deploy approval gate you may additionally show
+   the exact file diff or file content under review, because a human cannot
+   approve a snapshot they cannot see.
+   Be as concise as possible without losing critical information: preserve the
+   measurement, the wrong value, the expected value, and the file link; cut
+   everything else. Never pad.
 
 ## Issue clusters
 
@@ -169,7 +190,10 @@ transition. It must contain:
 - Andy decisions and approval snapshot IDs;
 - deploy unit base SHA, exact fix commits, worktree, worker ID, PR, and status;
 - active timing lanes, their current steps, and the last completed timing
-  record ID.
+  record ID;
+- the frozen min-heap: each failing task's immutable rank, complexity class,
+  issue cluster, and row ID;
+- each heap task's pipeline state: idle | applying | local-rerunning | rca.
 
 Compaction, session restart, or a sub-agent response must not erase or recreate
 state from memory.
@@ -301,13 +325,15 @@ RESOLVE_SLICE
       │                   └─ real rerun confirms fix → ENQUEUE_DEPLOY_UNIT ─┐
       └─ infra-clean → SYNC_CHECKPOINT_PER_RCA                        │
                            → RCA_HARNESS_FAILURES_IN_PARALLEL → VERIFY_LOCAL
-                           → HARNESS_FIX_DECISION              [STOP 1]     │
-                           → APPLY_HARNESS_DECISIONS                        │
-                           → SYNC_CHECKPOINT → RERUN_FAILED_SUBSET          │
-                                ├─ still failing → CLASSIFY_RESULTS         │
-                                └─ confirmed fix → ENQUEUE_DEPLOY_UNIT ─────┤
-                                                                            │
-MAIN:   continue every independent RCA and rerun ◀───────────────────────────┘
+                           → RANK_HEAP (freeze 1..N once)                   │
+                           → PIPELINE_HEAP                                  │
+                                ├─ ask min idle → HARNESS_FIX_DECISION [STOP 1]
+                                ├─ approve → APPLY_AND_LOCAL_RERUN (sub-agent)
+                                │    ├─ pass → ENQUEUE_DEPLOY_UNIT ─────────┤
+                                │    └─ fail → /rca again, reinsert at rank │
+                                └─ immediately ask next idle ───────────────┘
+
+MAIN:   continue every independent RCA, local rerun, and deploy
 
 DEPLOY: prepare isolated fix-only worktree → /deploy
         ├─ no admin approval required → merge → verify production
@@ -319,7 +345,8 @@ FULL_SLICE_ACCEPTANCE
   └─ all pass + every deploy merged → DONE → propose/enable cron
 ~~~
 
-HARNESS_FIX_DECISION pauses the main controller. DEPLOY_ADMIN_APPROVAL pauses only
+HARNESS_FIX_DECISION pauses only the next ask, not the pipeline. Approved
+workers keep applying and local-rerunning. DEPLOY_ADMIN_APPROVAL pauses only
 the affected deploy unit while the controller continues every independent RCA,
 rerun, and deploy. If no independent work remains, the controller may wait for
 that deploy approval.
@@ -387,22 +414,52 @@ Only after an infra-clean run:
 
 At this boundary the owning-boundary RCA is causally proven, but the benchmark
 RCA is not outcome-complete yet. Do not run the exact benchmark here and do not
-label the row Complete. Enter HARNESS_FIX_DECISION with Causal proof; outcome
-pending. After approval, the exact unchanged benchmark rerun either supplies
-the missing outcome proof and completes the RCA or becomes new primary evidence
-that returns the row to CLASSIFY_RESULTS.
+label the row Complete. After RANK_HEAP, enter HARNESS_FIX_DECISION for the
+min idle heap item with Causal proof; outcome pending. After approval, the
+exact unchanged local-snapshot benchmark rerun either supplies the missing
+outcome proof and completes the RCA or becomes new primary evidence that
+returns that task through `/rca` and reinserts it at its original frozen rank.
 
 Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 
+## Fix-complexity min-heap
+
+Phase A stays fully parallel: run every resolved task, fix infra without
+stopping, and RCA every failing task. RANK_HEAP starts only when the latest
+run is infra-clean and every failing task has causal RCA proof.
+
+The heap is per failing **task**, not per issue row. Sort set Y by the
+complexity of the current proven issue, easiest first, then freeze immutable
+ranks 1..N for the entire descent. A later RCA never re-ranks that task.
+Infra and External Blocker never enter this heap.
+
+| Rank | Class | Clusters |
+|---|---|---|
+| 1 | Evaluator / task contract | Faulty Evaluator, Underspecified Task |
+| 2 | Fixture / data | Fixture/Data Mismatch |
+| 3 | Product / tool | Product Defect, Broken Tool, Lacking Tool, Context Drift |
+| 4 | Harness | Prompting Inconsistency, Agent Reasoning Failure, Resource/Performance Failure |
+
+Same-rank ties break by task name, then row ID.
+
+A task is **idle** when it is not applying, local-rerunning, or in RCA. Ask
+Andy about `min{ idle tasks that need a fix decision }`. Andy sees a deeper
+bench only if every easier bench is applying, local-rerunning, or in RCA.
+
+Do not yank an in-flight ask if a higher-priority task becomes idle. After
+Andy answers, the next ask is the new min idle.
+
 ## Stop 1 — HARNESS_FIX_DECISION
 
-Enter this state only when:
+Enter RANK_HEAP, then the first HARNESS_FIX_DECISION, only when:
 
 - the latest benchmark run is infra-clean; and
 - every HARNESS failure has complete causal RCA proof (evidence, unchanged
   owning-boundary repro red then green, and a cemented test); and
 - all independent RCA workers have returned.
 
+After the heap is frozen, enter HARNESS_FIX_DECISION whenever the min idle
+heap item needs a fix decision.
 Never enter HARNESS_FIX_DECISION with an open observability gap. If evidence is
 incomplete, remain in RCA_HARNESS_FAILURES_IN_PARALLEL and keep gathering it
 autonomously until every RCA has the unchanged owning-boundary failing/passing
@@ -411,30 +468,38 @@ remains explicitly pending until after Andy approves the harness fix. An
 exhausted external blocker follows Hard rule 7; it does not become a
 user-response gate.
 
-Emit the complete sorted lifecycle ledger using the response contract below.
-Andy responds to each HARNESS row with approve, edit, or reject. Infra rows use
-Not required.
+Emit the delta lifecycle rows using the response contract below. Andy
+responds to the current HARNESS row with approve, edit, or reject. Infra rows
+use Not required.
 
-- **approve:** set Approval to Fix approved.
-- **edit:** set Approval to Edit requested, apply the instruction, and
-  return the row through the identical local verification gate.
-- **reject:** set Approval to Rejected and Fix to Dropped; never deploy that fix.
+- **approve:** set Approval to Fix approved. Immediately fire a sub-agent to
+  apply the approved fix on a local snapshot — not a prod deploy — and rerun
+  that exact bench via `scripts/run-bench --local <task>`. Immediately ask
+  about the next idle heap item. If the local rerun fails, the sub-agent
+  reruns `/rca` and reinserts the task at its original frozen rank.
+- **edit:** set Approval to Edit requested, apply the instruction, return the
+  row through the identical local verification gate, and ask again at the
+  same frozen rank.
+- **reject:** set Approval to Rejected and Fix to Dropped; never deploy that
+  fix. The task stays at its original rank and needs a new RCA for a
+  different approach.
 
 The harness-fix decision does not satisfy any later prompt or terminal-behavior
 admin approval. Those approvals are snapshot-scoped inside /deploy.
 
 ## Rerun and parallel deploy
 
-Rerun at least the previously failing subset after applying Andy's decisions.
-Run `/sync` before every subset or full-slice rerun. The final acceptance run
-covers the entire original slice.
+On each approve, immediately start that task's outcome-proof run on a local
+snapshot. Do not wait to batch approvals or rerun the whole failed subset
+first. Run `/sync` before every subset or full-slice rerun. The final
+acceptance run covers the entire original slice.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
 criteria identical to the failing run except for the exact approved fix. A pass
 moves RCA to Complete and Real rerun to Confirmed. A failure moves Real rerun to
-Failed and returns to CLASSIFY_RESULTS; never call the RCA complete from its
-owning-boundary proxy proof alone.
+Failed, reruns `/rca`, and reinserts the task at its original frozen rank;
+never call the RCA complete from its owning-boundary proxy proof alone.
 
 A fix earns deployment only after:
 
@@ -497,6 +562,15 @@ banner, an infra 0 field, or a LANES section. Passing tasks collapse into the
 overall-slice header count. Emit exactly one table row per issue/fix, including
 the full infra ledger and current HARNESS fixes.
 
+**This contract is exhaustive, not a minimum (Hard rule 12).** A response
+contains the header, the lifecycle table, and — at a stop only — the approval
+sections below. It contains nothing else. Do not append a summary, a status
+narrative, a list of what is still open, or any prose outside an approval
+section; the table already carries that state. The only permitted addition is
+the file diff or file content shown inside a deploy approval gate. Keep every
+required field as short as it can be while preserving the measurement, the
+wrong value, the expected value, and the file link.
+
 ### Header
 
 Use a Markdown heading and a human-readable status. The only status labels are:
@@ -531,6 +605,8 @@ For a completed run:
 
 **Epoch 3**
 
+Approvals: **2/6 complete**
+
 Overall slice: **39/42 passed**
 
 Latest run: **3/3 passed** · **42m 46s**
@@ -548,12 +624,45 @@ Bench run: **Started Jul 20, 2026 · 10:14:22 PDT** · **18m 42s elapsed**
 
 ### Ledger order
 
-Re-sort the entire ledger on every response:
+Sort by:
 
 1. Rows with ⏳ Deploy approval first, ordered by row ID.
-2. Rows with ⏳ Fix approval next, ordered by row ID.
-3. All other rows not yet deployed next, ordered by row ID.
+2. Rows with ⏳ Fix approval next, ordered by frozen heap rank, then row ID.
+3. All other rows not yet deployed next, ordered by frozen heap rank, then row ID.
 4. Rows with ✅ Deployed #<PR> last, ordered by deployment completion timestamp.
+
+### Render the delta, not the whole ledger
+
+**Never re-render the full lifecycle table.** It grows without bound and buries
+the one thing needing attention. Each response shows only:
+
+- the row currently being asked about, and
+- any row whose state changed since the previous response.
+
+Emit no table at all when nothing changed and nothing is being asked. Render the
+complete ledger exactly twice: once at the terminal `DONE`/`BLOCKED` response,
+and whenever Andy explicitly asks for it. `state.json` remains the durable
+record of every row, so omitting a row from a response never loses it.
+
+### One approval per response
+
+**Ask for exactly ONE approval at a time.** Emit the single highest-priority
+pending row by the sort order above: deploy-approval first, else the min idle
+heap item that needs a fix decision. Wait for Andy's answer, then emit the
+next. Never batch multiple approval sections into one response, and never list
+the still-pending ones as a preview — the counter below already conveys how
+many remain.
+
+### Approvals counter
+
+Every response begins with the approvals counter directly under the status line:
+
+Approvals: **<resolved>/<total> complete**
+
+`total` counts every row that has ever required a fix or deploy approval in this
+descent. `resolved` counts those Andy has answered — approved, edited, or
+rejected. The counter only ever grows in `total` as new approval-bearing rows
+are proven; it never silently drops a row Andy has not answered.
 
 ### Lifecycle table
 
@@ -583,15 +692,41 @@ or multi-line explanations.
 
 ### Stop 1 content — fix approval
 
-After the lifecycle table, include one section per HARNESS row with
-⏳ Fix approval. Lead with the complete benchmark task and the one-glance core
-claim, then use the canonical four-part approval narrative from
-`.claude/shared/approval-format.md`. Never truncate, summarize, or paraphrase
-`task.prompt`, even when it is long or multiline:
+After the lifecycle table, include one section for the current min-idle heap
+item with ⏳ Fix approval. Lead with the one-glance core claim, then use
+the canonical approval narrative from `.claude/shared/approval-format.md`.
+Put the verbatim `task.prompt` in Evidence, not above it. Never truncate,
+summarize, or paraphrase `task.prompt`, even when it is long or multiline:
 
 ### <row ID> · <issue summary>
 
-**Exact benchmark task (`task.prompt`, verbatim):**
+#### TL;DR
+
+<exactly one sentence: what to approve and its most important consequence>
+
+#### Evidence
+
+**What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
+
+**FE link:** [Open agent](<frontend-agent-url>) — <verification status>
+
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
+
+**Local repro (<wall-clock>):**
+
+Tests: <one sentence naming the actual assertion>
+
+1. <copy-paste command>
+2. <next step>
+
+- Pre-fix: <measured wrong value>
+- Post-fix: <measured passing value>
+
+**Environment**
+
+- **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
+- **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
+- **Task prompt:**
 
 > <full exact task.prompt with every line and character preserved>
 
@@ -606,7 +741,7 @@ The issue is **<root cause at the first-bad boundary>**. I reproduced it with
 and observed **<wrong result>** instead of **<expected result>**.
 The unchanged local repro now **<exact passing result>**, and the regression is
 cemented in **<permanent test name>**. Include the approval snapshot and
-clickable links to every affected hunk.
+clickable links to every affected hunk. Do not restate the Evidence pack.
 
 #### Before Behavior
 
@@ -641,12 +776,41 @@ After the affected lifecycle rows, include:
 
 ### A-<id> · <row IDs>
 
+#### TL;DR
+
+<exactly one sentence: what to approve and its most important consequence>
+
+#### Evidence
+
+**What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
+
+**FE link:** [Open agent](<frontend-agent-url>) — <verification status>
+
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
+
+**Local repro (<wall-clock>):**
+
+Tests: <one sentence naming the actual assertion>
+
+1. <copy-paste command>
+
+- Pre-fix: <measured wrong value>
+- Post-fix: <measured passing value>
+
+**Environment**
+
+- **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
+- **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
+- **Task prompt:**
+
+> <full exact task.prompt, or `Not applicable — not a catalog task`>
+
 #### Detail
 
 This deploy changes **<one-line prompt or terminal-behavior effect>**. Name the
 exact unchanged test or reproduction that failed before and passes after the
 change, its concrete results, the approval snapshot ID, and clickable links to
-every affected hunk.
+every affected hunk. Do not restate the Evidence pack.
 
 #### Before Behavior
 

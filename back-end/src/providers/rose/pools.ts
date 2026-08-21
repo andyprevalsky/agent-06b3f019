@@ -26,19 +26,26 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-lite',
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-terra',
-    waterfall: ['google/gemini-3.5-flash', 'moonshotai/kimi-k3'],
+    waterfall: ['google/gemini-3.6-flash', 'moonshotai/kimi-k3'],
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
     claudeAuthModel: 'claude-fable-5',
     gptAuthModel: 'gpt-5.6-sol',
-    waterfall: ['anthropic/claude-opus-4.8', 'google/gemini-3.1-pro-preview'],
+    // Anthropic dropped from the waterfall: opus-4.8 was both the most
+    // expensive layer ($5/$25 per M) and scored below the models beneath it
+    // (AA intelligence 57.3 vs sol 60.9). Sol leads — highest-scoring model in
+    // the registry on all three AA indices — and kimi-k3 backs it with a
+    // different vendor so one OpenAI-side outage can't drain the waterfall.
+    waterfall: ['openai/gpt-5.6-sol', 'moonshotai/kimi-k3'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',
     claudeAuthModel: 'claude-fable-5',
     gptAuthModel: 'gpt-5.6-sol',
-    waterfall: ['anthropic/claude-opus-4.8', 'openai/gpt-5.6-sol'],
+    // Same reordering as rose-1-ultra; both layers must stay vision-capable
+    // (see VISION_MODELS in agents/providers/rose/transforms.py).
+    waterfall: ['openai/gpt-5.6-sol', 'moonshotai/kimi-k3'],
   },
 };
 

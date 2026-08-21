@@ -63,6 +63,15 @@ async def test_kyc_gate_uses_canonical_detection_contract():
     }
 
 
+async def test_subscription_gate_cta_is_thirty_dollars():
+    """Purchase-gate CTA must show the live $30/mo Rose Labs Pro price."""
+    from domains.gate import service
+
+    gate = service.build_subscription_gate(checkout_url="https://roselabs.ai/s/x")
+    assert gate["presentation"]["cta"] == "Subscribe · $30/mo"
+    assert "$20" not in gate["presentation"]["cta"]
+
+
 async def test_activity_suppresses_source_connect_without_network():
     """The activity short-circuits a suppressed gate to the sentinel, no HTTP."""
     from domains.gate import repo
@@ -124,15 +133,53 @@ async def test_raise_gate_direct_blocks_on_real_request():
     assert result == "resolved"
 
 
+async def test_raise_gate_direct_unwinds_on_pause_without_closing_gate():
+    """Pause during a gate wait must unwind without marking the gate declined."""
+    from domains.gate import service
+    from domains.gate.types import GateRejectedError
+
+    request_id = "req-pause-1"
+    fake_wf = SimpleNamespace(
+        info=lambda: SimpleNamespace(workflow_id="wf-1"),
+        execute_activity=AsyncMock(return_value=request_id),
+        wait_condition=AsyncMock(return_value=None),
+    )
+    wf_instance = SimpleNamespace(
+        user_id="u",
+        agent_id="a",
+        is_paused=True,
+        # Even with a queued resolution, pause must win and leave it unread.
+        _signal_responses={request_id: "resolved"},
+        _handle_tool_event=AsyncMock(side_effect=AssertionError("gate must stay PENDING")),
+    )
+    gate = service.build_source_connect_gate("gmail", "t", "r", "https://x")
+    with patch.object(service, "workflow", fake_wf):
+        try:
+            await service.raise_gate_direct(wf_instance, gate, gate_key="source_connect:gmail")
+            raise AssertionError("expected GateRejectedError on pause")
+        except GateRejectedError:
+            pass
+    wf_instance._handle_tool_event.assert_not_awaited()
+    assert wf_instance._signal_responses[request_id] == "resolved"
+
+
 async def run_all_tests():
     print("gate blackbox tests:")
     r = BlackboxResult()
     await r.record_async("suppressible_allowlist_defaults_off", test_suppressible_allowlist_defaults_off)
     await r.record_async("flag_reenables_suppressible", test_flag_reenables_suppressible)
     await r.record_async("kyc_gate_uses_canonical_detection_contract", test_kyc_gate_uses_canonical_detection_contract)
+    await r.record_async(
+        "subscription_gate_cta_is_thirty_dollars",
+        test_subscription_gate_cta_is_thirty_dollars,
+    )
     await r.record_async("activity_suppresses_source_connect", test_activity_suppresses_source_connect_without_network)
     await r.record_async("raise_gate_direct_noop_on_sentinel", test_raise_gate_direct_noop_on_sentinel)
     await r.record_async("raise_gate_direct_blocks_on_real_request", test_raise_gate_direct_blocks_on_real_request)
+    await r.record_async(
+        "raise_gate_direct_unwinds_on_pause",
+        test_raise_gate_direct_unwinds_on_pause_without_closing_gate,
+    )
     _clear_flag()
     return r.all_passed
 

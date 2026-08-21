@@ -29,7 +29,35 @@ RESTORE_ARGS=(
     --single-transaction
 )
 
-if [ -n "$DB_CONTAINER" ]; then
+# A plain-SQL dump has no equivalent of pg_restore's --clean --if-exists: every
+# CREATE runs unconditionally, so ANY object the caller already made in the
+# target collides and (under ON_ERROR_STOP=1) fails the whole restore. run.sh
+# does exactly that — it ensures the Fast Mode cache table before the seed
+# restore — which made a canonical base fail with `relation
+# "FastModeCacheEntry" already exists` and refuse to boot. Restoring a base
+# image means "the dump IS the database state", so reset the schema first and
+# give this path the same idempotence the archive path already has.
+RESET_SQL='DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;'
+
+ARCHIVE_MAGIC="$(LC_ALL=C head -c 5 "$DUMP_PATH" || true)"
+if [ "$ARCHIVE_MAGIC" != "PGDMP" ]; then
+    if [ -n "$DB_CONTAINER" ]; then
+        # RESET uses -c only — do not pass -i. An interactive attach with no
+        # redirected stdin inherits the caller's TTY/pipe and can hang forever
+        # (fake docker stubs that drain stdin, and real psql waiting on input).
+        docker exec "$DB_CONTAINER" psql \
+            -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" -c "$RESET_SQL"
+        docker exec -i "$DB_CONTAINER" psql \
+            -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" < "$DUMP_PATH"
+    else
+        PGPASSWORD="${PGPASSWORD:-postgres}" psql \
+            -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" \
+            -U "$DB_USER" -d "$DB_NAME" -c "$RESET_SQL"
+        PGPASSWORD="${PGPASSWORD:-postgres}" psql \
+            -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" \
+            -U "$DB_USER" -d "$DB_NAME" < "$DUMP_PATH"
+    fi
+elif [ -n "$DB_CONTAINER" ]; then
     # The database image owns the only client guaranteed to understand its
     # server startup parameters. In particular, pg_restore 18 emits
     # `SET transaction_timeout`, which PostgreSQL 16 rejects before restoring

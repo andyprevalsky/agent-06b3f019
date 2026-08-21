@@ -22,8 +22,8 @@ import {
   WHATSAPP_MAX_RECONNECT_ATTEMPTS,
   WHATSAPP_RECONNECT_DELAY_MS,
   WHATSAPP_STATUS_LOGGED_OUT,
-  WHATSAPP_STATUS_RESTART_REQUIRED,
 } from './config';
+import { decideConnectionClose } from './policy';
 import { isSkippableJid, normalizeMessage, type WABaileysMessage } from './normalize';
 import type {
   NormalizedMessage,
@@ -63,10 +63,19 @@ export class WhatsAppClient extends EventEmitter {
   private isConnecting: boolean = false;
   private authCallbacks: WhatsAppAuthCallbacks | undefined = undefined;
   private reconnectAttempts: number = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly maxReconnectAttempts: number = WHATSAPP_MAX_RECONNECT_ATTEMPTS;
 
   constructor() {
     super();
+  }
+
+  /** Cancel a pending reconnect so an explicit disconnect can't be resurrected. */
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   /** Current connection state. */
@@ -140,6 +149,7 @@ export class WhatsAppClient extends EventEmitter {
 
   /** Disconnect from WhatsApp. */
   async disconnect(): Promise<void> {
+    this.clearReconnectTimer();
     if (this.sock !== null) {
       try {
         this.sock.ws?.close();
@@ -245,6 +255,7 @@ export class WhatsAppClient extends EventEmitter {
       this.setConnectionState('connected');
       this.reconnectAttempts = 0;
       console.log('[WhatsAppClient] Connected');
+      void callbacks?.onConnected?.();
       this.emit('sync', {
         type: 'connection_change',
         channel: 'WHATSAPP',
@@ -261,22 +272,32 @@ export class WhatsAppClient extends EventEmitter {
   private handleConnectionClose(lastDisconnect: ConnectionState['lastDisconnect']): void {
     const statusCode = (lastDisconnect?.error as WhatsAppConnectionCloseError | undefined)?.output
       ?.statusCode;
-    const isLoggedOut = statusCode === WHATSAPP_STATUS_LOGGED_OUT;
-    const isRestartRequired = statusCode === WHATSAPP_STATUS_RESTART_REQUIRED;
-
-    console.log(
-      `[WhatsAppClient] Connection closed (status: ${statusCode}, loggedOut: ${isLoggedOut}, restart: ${isRestartRequired})`
+    const { clearCredentials, reconnect } = decideConnectionClose(
+      statusCode,
+      this.reconnectAttempts,
+      this.maxReconnectAttempts
     );
 
-    if (isLoggedOut) WhatsAppAuth.clearCredentials();
+    console.log(
+      `[WhatsAppClient] Connection closed (status: ${statusCode}, clearCredentials: ${clearCredentials}, reconnect: ${reconnect})`
+    );
 
-    if (isRestartRequired && this.reconnectAttempts < this.maxReconnectAttempts) {
+    if (clearCredentials) WhatsAppAuth.clearCredentials();
+
+    if (reconnect) {
       this.reconnectAttempts++;
+      // 515 is Baileys' post-pairing handshake: reconnect reusing the creds we
+      // just saved. Clearing them here would undo the pairing that succeeded.
       console.log(
-        `[WhatsAppClient] Restart required, clearing auth and reconnecting (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`
+        `[WhatsAppClient] Restart required, reconnecting with existing credentials (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`
       );
-      WhatsAppAuth.clearCredentials();
-      setTimeout(() => {
+      // The socket is gone; drop out of 'connected' or the re-dial below trips
+      // connect()'s already-connected guard and the client wedges as connected
+      // with a dead socket.
+      this.setConnectionState('connecting');
+      this.clearReconnectTimer();
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
         this.sock = null;
         this.isConnecting = false;
         this.connect(this.authCallbacks).catch((err) => {

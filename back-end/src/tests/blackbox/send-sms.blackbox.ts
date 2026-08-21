@@ -1208,6 +1208,85 @@ async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
   }
 }
 
+/**
+ * message_person email approvals historically embedded Markdown (`**Email**`,
+ * `**To:**`) that iMessage renders as literal asterisks, and long drafts must
+ * survive the write_lock SMS formatter intact (no 900-char payment truncate).
+ */
+async function testBoundary_notifyWriteLockStripsMarkdownAndKeepsFullDraft() {
+  const token = captureToken('notify-write-lock-plain');
+  const agent = await createNotifyAgent('boundary write lock plain-text agent');
+  const attentionRequestId = `attn-bb-${crypto.randomUUID()}`;
+  const fullDraft =
+    'Hi Speedrun Team,\n\n' +
+    'I am looking into credit allocations provided through the Speedrun marketplace ' +
+    'for our infrastructure planning.\n\n' +
+    'Please share the exact credit amounts by provider for OpenAI, Anthropic, AWS, ' +
+    'Google Cloud, Azure, and Runpod.\n\n' +
+    'Thanks,\nAndy';
+  const question = [
+    'Rose wants to send an **Email**',
+    '',
+    '**To:** sr-team@a16z.com (sr-team@a16z.com)',
+    '**From:** andy@roselabs.ai',
+    '**Subject:** LLM and Cloud Credit Amounts for Speedrun Marketplace',
+    '',
+    '**Intent:** Ask for exact LLM and cloud credit amounts',
+    '',
+    '**Message:**',
+    fullDraft,
+    '',
+    'Reply to approve, or say "no" to cancel.',
+  ].join('\n');
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'write_lock',
+        agent_id: agent.id,
+        payload: {
+          question,
+          attention_request_id: attentionRequestId,
+          workflow_id: 'wf-boundary-write-lock-plain',
+          metadata: { toolApproval: true },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, 'Please share the exact credit amounts');
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!) as { to?: string; body?: string };
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    assert(typeof body.body === 'string', 'Expected SMS body string');
+    assert(
+      !body.body.includes('**'),
+      `Expected no markdown asterisks in SMS body, got: ${body.body}`
+    );
+    assert(
+      body.body.includes('Rose wants to send an Email'),
+      `Expected plain Email label, got: ${body.body}`
+    );
+    assert(
+      body.body.includes('To: sr-team@a16z.com'),
+      `Expected plain To label, got: ${body.body}`
+    );
+    assert(body.body.includes(fullDraft), `Expected full draft in SMS body, got: ${body.body}`);
+    assertNoRoutingLeaks(body.body, agent.id);
+    assertAgentLinkPresent(body.body, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
 async function testBoundary_notifyAgentCardSetupIncludesSetupLink() {
   const token = captureToken('notify-agentcard-setup');
   const agent = await createNotifyAgent('boundary agentcard setup agent');
@@ -1831,6 +1910,10 @@ async function runAll() {
         {
           name: 'notify write_lock uses natural language only',
           fn: testBoundary_notifyWriteLockNaturalLanguageOnly,
+        },
+        {
+          name: 'notify write_lock strips markdown and keeps full draft',
+          fn: testBoundary_notifyWriteLockStripsMarkdownAndKeepsFullDraft,
         },
         {
           name: 'notify agentcard_setup includes setup link',

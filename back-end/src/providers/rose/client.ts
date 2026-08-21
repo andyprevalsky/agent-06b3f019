@@ -31,6 +31,7 @@ import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
 import { RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
+import { attemptClaudeAuthWithRecovery } from './claudeAuthAttempt';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
 import { buildOpenAiResponseFormat } from './schema';
@@ -332,7 +333,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
   };
 
-  // Chat prefers low-latency GLM-4.7 on Cerebras. If that route produces no
+  // Chat prefers low-latency Gemma-4-31B on Cerebras. If that route produces no
   // caller-visible content before its deadline, we race the same-model
   // OpenRouter spill against the REAL multi-provider waterfall. Neither branch
   // is pinned to the stalled Cerebras host, so a slow/empty provider can never
@@ -350,7 +351,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   }
   if (cerebrasRoute !== null) {
     // Cerebras low-latency chat with fallover: on a pre-content quota/rate cap
-    // (402/429) it keeps the chat on GLM-4.7 via OpenRouter (unpinned); on a
+    // (402/429) it keeps the chat on Gemma-4-31B via OpenRouter (unpinned); on a
     // stall it races that spill against the generic multi-provider waterfall.
     try {
       yield* runCerebrasChatWithWaterfallFallback({
@@ -452,24 +453,15 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   let gptAuthFailed: RoseError | null = null;
   let openAiApiKeyFailed: RoseError | null = null;
   if (opts.options.claude_token) {
-    try {
-      yield* runWithFallThrough({
-        produce: () =>
-          claudeAuthComplete({
-            poolSpec,
-            messages: opts.options.messages,
-            responseFormat: opts.options.response_format,
-            tools: opts.options.tools,
-            toolChoice: opts.options.tool_choice,
-            maxTokens: opts.options.max_tokens,
-            temperature: opts.options.temperature,
-            auth: { mode: 'oauth', token: opts.options.claude_token! },
-            requestId: opts.requestId,
-            callSite: opts.callSite,
-            providerFastMode: opts.options.provider_fast_mode,
-          }),
-        emit: emitChunk,
-      });
+    const failure = yield* attemptClaudeAuthWithRecovery({
+      poolSpec,
+      options: opts.options,
+      requestId: opts.requestId,
+      callSite: opts.callSite,
+      emit: emitChunk,
+      log,
+    });
+    if (failure === null) {
       log.info('claude_auth.done', {
         request_id: opts.requestId,
         pool: opts.pool,
@@ -477,18 +469,12 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       });
       finalizeDump();
       return;
-    } catch (err) {
-      if (err instanceof PreContentFallThroughError) {
-        claudeAuthFailed = err.cause;
-        log.info('fall_through_from_claude_auth', {
-          request_id: opts.requestId,
-          reason: err.cause.name,
-        });
-      } else {
-        finalizeDump(err);
-        throw err;
-      }
     }
+    claudeAuthFailed = failure;
+    log.info('fall_through_from_claude_auth', {
+      request_id: opts.requestId,
+      reason: failure.name,
+    });
   }
 
   // 2. gptAuth attempt (with fall-through buffering)

@@ -1,74 +1,27 @@
 /**
- * Blackbox tests for AppSidebar.
- * Covers agent list rendering + sorting, collapse/expand toggle, create-agent callback,
- * nav-view changes, login/logout rendering, empty/loading states, and the
- * feedback popover.
+ * Blackbox tests for AppSidebar chrome: drag-to-resize and the collapse snap,
+ * nav-view changes, create-agent, login/logout, empty/loading states, and the
+ * feedback popover. Agent row behaviour lives in app-sidebar-rows.blackbox.tsx.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
-import type { Agent } from '@/lib/api';
-
-function mockSession() {
-  const session = {
-    access_token: 'test-token',
-    refresh_token: 'test-refresh',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
-  };
-  localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
-}
-
-function makeAgent(overrides: Partial<Agent> = {}): Agent {
-  return {
-    agent_id: 'a1',
-    goal: 'A test goal',
-    model: 'rose-1-lite',
-    source: 'WEB',
-    reasoning_effort: 'medium',
-    progress: 0.25,
-    status: 'ACTIVE',
-    status_message: null,
-    temporal_workflow_id: null,
-    token_count: 0,
-    tokens_in: 0,
-    tokens_out: 0,
-    tool_tokens_in: 0,
-    tool_tokens_out: 0,
-    tool_cost_cents: 0,
-    context_size: 0,
-    message_count: 0,
-    price_limit_cents: 100,
-    tree_cost_cents: 0,
-    created_at: new Date(Date.now() - 60_000).toISOString(),
-    updated_at: new Date(Date.now() - 60_000).toISOString(),
-    write_lock_enabled: false,
-    ...overrides,
-  };
-}
-
-function defaultProps(overrides: Partial<React.ComponentProps<typeof AppSidebar>> = {}) {
-  return {
-    currentView: 'agents' as const,
-    onViewChange: vi.fn(),
-    agents: [] as Agent[],
-    isLoadingAgents: false,
-    selectedAgentId: null,
-    onSelectAgent: vi.fn(),
-    onCreateAgent: vi.fn(),
-    onResumeAgent: vi.fn().mockResolvedValue(undefined),
-    resumingAgentId: null,
-    user: { id: 'test-user' },
-    onLogout: vi.fn(),
-    onLoginClick: vi.fn(),
-    ...overrides,
-  };
-}
+import {
+  SIDEBAR_COLLAPSE_SNAP_WIDTH,
+  SIDEBAR_WIDTH_COLLAPSED,
+  SIDEBAR_WIDTH_EXPANDED,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_STORAGE_KEY,
+} from '@/features/terminal-component-group/config';
+import {
+  defaultProps,
+  dragHandleTo,
+  makeAgent,
+  mockSession,
+  sidebarWidth,
+} from './app-sidebar.fixtures';
 
 describe('AppSidebar', () => {
   beforeEach(() => {
@@ -85,27 +38,98 @@ describe('AppSidebar', () => {
   });
 
   it('shows Benchmarks between Feedback and Integrations for the team', async () => {
-    const u = userEvent.setup();
     renderWithProviders(<AppSidebar {...defaultProps({ showBenchmarks: true })} />);
     expect(screen.getByLabelText('Benchmarks')).toBeInTheDocument();
-    await u.click(screen.getByLabelText('Expand sidebar'));
     const labels = ['Feedback', 'Benchmarks', 'Integrations'].map(
       (text) => screen.getByText(text).getBoundingClientRect,
     );
     expect(labels).toHaveLength(3); // all three render; order is the nav array order
   });
 
-  it('renders in collapsed state by default with Expand button', () => {
+  it('renders expanded by default with a drag handle instead of a toggle button', () => {
     renderWithProviders(<AppSidebar {...defaultProps()} />);
-    expect(screen.getByLabelText('Expand sidebar')).toBeInTheDocument();
+    // The one-click chevron is gone; width is driven by the drag handle.
+    expect(screen.queryByLabelText('Expand sidebar')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Collapse sidebar')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Resize sidebar')).toBeInTheDocument();
+    expect(screen.getByText('New Agent')).toBeInTheDocument();
   });
 
-  it('toggles to expanded state on toggle-button click', async () => {
-    const u = userEvent.setup();
+  it('renders New Agent below visible desktop headroom, above the flat Search row', () => {
+    const { container } = renderWithProviders(<AppSidebar {...defaultProps()} />);
+
+    const create = screen.getByRole('button', { name: 'New Agent' });
+    const search = screen.getByRole('searchbox', { name: 'Search agents' });
+    const sidebar = container.querySelector('aside');
+
+    expect(create.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(sidebar).toHaveStyle({ paddingTop: '3rem' });
+    expect(create.className).toContain('hover:bg-gray-100');
+    expect(create.className).not.toMatch(/(^|\s)bg-(primary|black|navi-black)(\s|$)/);
+    expect(search.className).toContain('border-transparent');
+    expect(search.className).toContain('shadow-none');
+  });
+
+  it('defaults to the wider expanded width and restores a stored width', () => {
+    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_EXPANDED);
+    unmount();
+
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '420');
     renderWithProviders(<AppSidebar {...defaultProps()} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
-    expect(screen.getByLabelText('Collapse sidebar')).toBeInTheDocument();
-    expect(screen.getByText('Create Agent')).toBeInTheDocument();
+    expect(sidebarWidth()).toBe(420);
+  });
+
+  it('clamps a stored width above the max and snaps a tiny one to the rail', () => {
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '9999');
+    const { unmount } = renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_MAX);
+    unmount();
+
+    localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, '40');
+    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED);
+  });
+
+  it('resizes the rail by dragging the handle and persists the new width', async () => {
+    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_EXPANDED);
+
+    dragHandleTo(360);
+
+    await waitFor(() => expect(sidebarWidth()).toBe(360));
+    expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe('360');
+  });
+
+  it('collapses to the rail when dragged below the snap threshold', async () => {
+    renderWithProviders(<AppSidebar {...defaultProps({ agents: [makeAgent()] })} />);
+
+    dragHandleTo(20);
+
+    await waitFor(() => expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED));
+    // Collapsed rail drops the text labels.
+    expect(screen.queryByText('Integrations')).not.toBeInTheDocument();
+  });
+
+  it('uses an agent icon instead of animated letters in the collapsed rail', async () => {
+    const { container } = renderWithProviders(
+      <AppSidebar
+        {...defaultProps({
+          agents: [makeAgent({ agent_id: 'active', goal: 'Active agent', status: 'ACTIVE' })],
+        })}
+      />,
+    );
+
+    dragHandleTo(20);
+
+    await waitFor(() => expect(sidebarWidth()).toBe(SIDEBAR_WIDTH_COLLAPSED));
+    expect(container.querySelector('[data-sidebar-agent-icon]')).not.toBeNull();
+    expect(container.querySelector('[data-letter]')).toBeNull();
+  });
+
+  it('renders the expanded nav labels', () => {
+    renderWithProviders(<AppSidebar {...defaultProps()} />);
+    expect(screen.getByText('New Agent')).toBeInTheDocument();
     expect(screen.getByText('Feedback')).toBeInTheDocument();
     expect(screen.queryByText('Browse')).not.toBeInTheDocument();
     expect(screen.getByText('Integrations')).toBeInTheDocument();
@@ -114,20 +138,16 @@ describe('AppSidebar', () => {
     expect(screen.getByText('Logout')).toBeInTheDocument();
   });
 
-  it('calls onCreateAgent when Create Agent button is clicked', async () => {
+  it('calls onCreateAgent when the New Agent button is clicked', async () => {
     const u = userEvent.setup();
     const onCreateAgent = vi.fn();
     renderWithProviders(<AppSidebar {...defaultProps({ onCreateAgent })} />);
-    // Expand first to see the text
-    await u.click(screen.getByLabelText('Expand sidebar'));
-    await u.click(screen.getByText('Create Agent'));
+    await u.click(screen.getByText('New Agent'));
     expect(onCreateAgent).toHaveBeenCalledTimes(1);
   });
 
   it('renders "No agents yet" placeholder when expanded and empty', async () => {
-    const u = userEvent.setup();
     renderWithProviders(<AppSidebar {...defaultProps({ agents: [] })} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
     expect(screen.getByText('No agents yet')).toBeInTheDocument();
   });
 
@@ -144,7 +164,6 @@ describe('AppSidebar', () => {
       makeAgent({ agent_id: 'a2', goal: 'Second goal' }),
     ];
     renderWithProviders(<AppSidebar {...defaultProps({ agents, onSelectAgent })} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
 
     const first = await screen.findByText('First goal');
     await u.click(first);
@@ -152,7 +171,6 @@ describe('AppSidebar', () => {
   });
 
   it('sorts processing agents before completed ones', async () => {
-    const u = userEvent.setup();
     const agents = [
       // Older completed agent
       makeAgent({
@@ -177,7 +195,6 @@ describe('AppSidebar', () => {
       }),
     ];
     renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
 
     const nodes = await screen.findAllByRole('heading', { level: 3 });
     const texts = nodes.map((n) => n.textContent);
@@ -191,7 +208,6 @@ describe('AppSidebar', () => {
     const onViewChange = vi.fn();
     const onSelectAgent = vi.fn();
     renderWithProviders(<AppSidebar {...defaultProps({ onViewChange, onSelectAgent })} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
 
     await u.click(screen.getByText('Integrations'));
     expect(onViewChange).toHaveBeenCalledWith('integrations');
@@ -211,7 +227,6 @@ describe('AppSidebar', () => {
     renderWithProviders(
       <AppSidebar {...defaultProps({ onViewChange, onSelectAgent, showBrowse: true })} />,
     );
-    await u.click(screen.getByLabelText('Expand sidebar'));
 
     await u.click(screen.getByText('Browse'));
 
@@ -226,7 +241,6 @@ describe('AppSidebar', () => {
     const { rerender } = renderWithProviders(
       <AppSidebar {...defaultProps({ onViewChange, onSelectAgent, showAdminHealth: true })} />,
     );
-    await u.click(screen.getByLabelText('Expand sidebar'));
 
     const feedback = screen.getByText('Feedback');
     const health = screen.getByText('Health');
@@ -246,7 +260,6 @@ describe('AppSidebar', () => {
     const u = userEvent.setup();
     const onLoginClick = vi.fn();
     renderWithProviders(<AppSidebar {...defaultProps({ user: null, onLoginClick })} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
     expect(screen.getByText('Login')).toBeInTheDocument();
     expect(screen.queryByText('Logout')).not.toBeInTheDocument();
     await u.click(screen.getByText('Login'));
@@ -257,7 +270,6 @@ describe('AppSidebar', () => {
     const u = userEvent.setup();
     const onLogout = vi.fn();
     renderWithProviders(<AppSidebar {...defaultProps({ onLogout })} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
     await u.click(screen.getByText('Logout'));
     expect(onLogout).toHaveBeenCalled();
   });
@@ -265,7 +277,6 @@ describe('AppSidebar', () => {
   it('opens the Feedback popover and closes with Escape', async () => {
     const u = userEvent.setup();
     renderWithProviders(<AppSidebar {...defaultProps()} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
     await u.click(screen.getByText('Feedback'));
 
     const input = await screen.findByPlaceholderText('Share your thoughts...');
@@ -281,10 +292,17 @@ describe('AppSidebar', () => {
   });
 
   it('marks current view as active', async () => {
-    const u = userEvent.setup();
     renderWithProviders(<AppSidebar {...defaultProps({ currentView: 'settings' })} />);
-    await u.click(screen.getByLabelText('Expand sidebar'));
     const settingsButton = screen.getByText('Settings').closest('button')!;
     expect(settingsButton.className).toMatch(/font-medium/);
+  });
+
+  // ── Row title, pin, and the row context menu ────────────────────────────
+
+  it('keeps the snap threshold below the minimum drag width', () => {
+    // Guards the invariant that collapsing takes a deliberate drag rather than
+    // an accidental nudge past the minimum.
+    expect(SIDEBAR_COLLAPSE_SNAP_WIDTH).toBeLessThan(SIDEBAR_WIDTH_EXPANDED);
+    expect(SIDEBAR_WIDTH_COLLAPSED).toBeLessThan(SIDEBAR_COLLAPSE_SNAP_WIDTH);
   });
 });

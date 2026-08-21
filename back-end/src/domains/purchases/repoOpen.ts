@@ -1,5 +1,5 @@
 import { PurchaseSpendStatus, type Prisma } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { runTransactionWithRetry } from '../../providers/database';
 
 const PURCHASE_OPEN_LOCK_SEED = 4_951_887;
 const ACTIVE_PURCHASE_STATUSES = [
@@ -27,7 +27,9 @@ export async function createPendingPurchaseWithLock(data: {
   lineItemsJson: unknown;
   totalCents: number;
 }) {
-  return prisma.$transaction(async (transaction) => {
+  const agentId =
+    data.agentId !== undefined && data.agentId.trim() !== '' ? data.agentId.trim() : undefined;
+  return runTransactionWithRetry(async (transaction) => {
     const lockKey = `${data.userId}:${data.canonicalFingerprint}`;
     await transaction.$queryRaw`
       WITH acquired AS MATERIALIZED (
@@ -37,13 +39,20 @@ export async function createPendingPurchaseWithLock(data: {
       )
       SELECT 1 AS locked FROM acquired
     `;
+    // Active rows are agent-scoped, but legacy null-agent rows still count for this cart so we do
+    // not mint a second live card. Another agent's HELD/PENDING row stays excluded.
     const existing = await transaction.purchaseSpend.findFirst({
       where: {
         userId: data.userId,
         status: { in: ACTIVE_PURCHASE_STATUSES },
-        OR: [
-          { fingerprint: data.fingerprint },
-          { canonicalFingerprint: data.canonicalFingerprint },
+        AND: [
+          {
+            OR: [
+              { fingerprint: data.fingerprint },
+              { canonicalFingerprint: data.canonicalFingerprint },
+            ],
+          },
+          ...(agentId !== undefined ? [{ OR: [{ agentId }, { agentId: null }] }] : []),
         ],
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -52,7 +61,7 @@ export async function createPendingPurchaseWithLock(data: {
     const purchase = await transaction.purchaseSpend.create({
       data: {
         userId: data.userId,
-        agentId: data.agentId,
+        agentId,
         fingerprint: data.fingerprint,
         canonicalFingerprint: data.canonicalFingerprint,
         merchant: data.merchant,

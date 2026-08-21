@@ -7,13 +7,26 @@
  * [LOADING_ITEMS] -- success --> [SHOPPING]
  * [LIVE_FIXTURE] -- static item loaded --> [CHECKOUT_READY]
  * [SHOPPING] -- user selects required items --> [CHECKOUT_READY]
- * [CHECKOUT_READY] -- submit card --> [CONFIRMING]
+ * [CHECKOUT_READY] -- live Place order --> [HOSTED_CHECKOUT_REDIRECT]
+ * [HOSTED_CHECKOUT_REDIRECT] -- location.href handoff --> Stripe Checkout (leave submitting true)
+ * [HOSTED_CHECKOUT_REDIRECT] -- SPA stayed put --> show Continue-to-Stripe link (same url)
+ * [CHECKOUT_READY] -- live Place order (optional last4 when card number filled) --> checkout-session
+ * [CHECKOUT_READY] -- submit card (sandbox) --> [CONFIRMING]
  * [CONFIRMING] -- success --> [CONFIRMED]
  * [CONFIRMING] -- API/Stripe error --> [CHECKOUT_ERROR]
  *
  * This page is a local benchmark merchant. It intentionally exposes real card
- * fields so browser agents must use request_payment_card and produce a full
- * receipt approval before filling the one-time card.
+ * fields so browser agents can use request_payment_card before Stripe hosted
+ * Checkout. Live authorization happens on Stripe's page — merchant Place order
+ * only creates the Checkout session. Optional card last4 is sent when the
+ * number field is filled so checkout-session can disambiguate multiple HELD
+ * same-total purchases; Place order must stay clickable without it so agents
+ * that only fill Stripe (not this merchant form) can still redirect.
+ *
+ * After checkout-session returns, set location.href and do NOT clear submitting
+ * in finally — clearing re-enabled Place order while Steel browsers sometimes
+ * stay on /test_payment, so agents re-clicked and never completed Stripe pay.
+ * A visible Continue link carries the same hosted URL as a clickable fallback.
  *
  * Each product card renders the fields a payment-line-item receipt requires:
  * name, description, imageUrl, priceCents, an absolute productUrl
@@ -35,7 +48,12 @@ import {
   TAX_LABEL,
   TEST_PAYMENT_MERCHANT_NAME,
 } from '../config';
-import { confirmTestPayment, fetchTestPaymentItems } from '../hooks';
+import {
+  confirmTestPayment,
+  fetchTestPaymentItems,
+  settleTestPaymentCheckout,
+  startTestPaymentCheckout,
+} from '../hooks';
 import type { TestPaymentCardForm, TestPaymentConfirmation, TestPaymentItem } from '../types';
 
 function formatCents(value: number): string {
@@ -247,16 +265,10 @@ function CardForm({
         <CreditCard className="h-5 w-5" />
         <h2 className="text-lg font-semibold">Payment details</h2>
       </div>
-      <label className="block text-sm font-medium" htmlFor="card-name">
-        Name on card
-      </label>
-      <input
-        id="card-name"
-        value={card.name}
-        disabled={disabled}
-        onChange={(e) => update('name', e.target.value)}
-        className="w-full rounded-md border px-3 py-2"
-      />
+      <p className="text-sm text-muted-foreground">
+        Live checkout charges on Stripe&apos;s hosted page. Filling the card number here is optional
+        — it only helps disambiguate leftover holds via last4.
+      </p>
       <label className="block text-sm font-medium" htmlFor="card-number">
         Card number
       </label>
@@ -267,6 +279,16 @@ function CardForm({
         value={card.number}
         disabled={disabled}
         onChange={(e) => update('number', e.target.value)}
+        className="w-full rounded-md border px-3 py-2"
+      />
+      <label className="block text-sm font-medium" htmlFor="card-name">
+        Name on card
+      </label>
+      <input
+        id="card-name"
+        value={card.name}
+        disabled={disabled}
+        onChange={(e) => update('name', e.target.value)}
         className="w-full rounded-md border px-3 py-2"
       />
       <div className="grid grid-cols-2 gap-3">
@@ -411,7 +433,24 @@ export default function TestPaymentPage() {
   const [confirmation, setConfirmation] = useState<TestPaymentConfirmation | null>(null);
   const [loading, setLoading] = useState(!isLiveLifecycleFixture && !isAbandonmentFixture);
   const [submitting, setSubmitting] = useState(false);
+  // Hosted Checkout URL after Place order — kept when location.href handoff does not unload
+  // the SPA (observed on Steel fleet sessions) so agents still have a clickable Stripe target.
+  const [hostedCheckoutUrl, setHostedCheckoutUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Return leg of the hosted Stripe Checkout. Stripe has already captured by the time it sends the
+  // shopper back, so this only reconciles that authorization onto the Rose purchase record.
+  useEffect(() => {
+    const checkoutSessionId = new URLSearchParams(window.location.search).get(
+      'checkout_session_id',
+    );
+    if (checkoutSessionId === null || checkoutSessionId === '') return;
+    setSubmitting(true);
+    settleTestPaymentCheckout(checkoutSessionId)
+      .then(setConfirmation)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSubmitting(false));
+  }, []);
 
   useEffect(() => {
     if (!isDev || isLiveLifecycleFixture || isAbandonmentFixture) return;
@@ -426,6 +465,10 @@ export default function TestPaymentPage() {
     [isLiveLifecycleFixture, items, selectedIds],
   );
   const expectedItemCount = isLiveLifecycleFixture ? 1 : 3;
+  // Live Place order must stay enabled without a merchant-form PAN: authorization happens on
+  // Stripe Checkout, and browser agents often skip this form (fleet evidence: only #card-name
+  // filled → disabled button → zero checkout-session calls). Optional last4 is still sent when
+  // the number field has ≥4 digits.
   const canSubmit = selectedIds.length === expectedItemCount && !submitting && items.length > 0;
 
   if (!isEnabled) return <DisabledPage />;
@@ -470,15 +513,39 @@ export default function TestPaymentPage() {
           onClick={async () => {
             setSubmitting(true);
             setError(null);
+            setHostedCheckoutUrl(null);
+            let handingOffToHostedCheckout = false;
             try {
-              if (isLiveLifecycleFixture || isAbandonmentFixture) {
+              // The abandonment fixture must NEVER submit — the whole point of that benchmark is
+              // that the minted card is left unspent so the reclaim/refund path can be asserted.
+              if (isAbandonmentFixture) {
                 throw new Error('This checkout is unavailable');
+              }
+              // Live fixture: hand off to a REAL hosted Stripe Checkout. A live Rose-minted card
+              // cannot be charged any other way — AgentCard's test_charge is sandbox-only and
+              // Stripe blocks live-mode raw-PAN tokenization — so this is what makes the page an
+              // actual merchant rather than a fixture.
+              if (isLiveLifecycleFixture) {
+                const cardLast4 = card.number.replace(/\D/g, '').slice(-4);
+                const { url } = await startTestPaymentCheckout(
+                  selectedIds,
+                  cardLast4.length === 4 ? cardLast4 : undefined,
+                );
+                // Keep submitting=true through unload. Clearing it in finally re-enabled Place
+                // order while Steel sometimes stayed on /test_payment after location.assign, so
+                // agents re-clicked and never completed Stripe Checkout (fleet 4a2ff6aa).
+                handingOffToHostedCheckout = true;
+                setHostedCheckoutUrl(url);
+                window.location.href = url;
+                return;
               }
               setConfirmation(await confirmTestPayment(selectedIds, card));
             } catch (err) {
               setError(err instanceof Error ? err.message : String(err));
             } finally {
-              setSubmitting(false);
+              if (!handingOffToHostedCheckout) {
+                setSubmitting(false);
+              }
             }
           }}
           className="inline-flex items-center rounded-md bg-foreground px-5 py-3 font-medium text-background disabled:cursor-not-allowed disabled:opacity-50"
@@ -486,6 +553,20 @@ export default function TestPaymentPage() {
           {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
           {isLiveLifecycleFixture ? 'Place order' : 'Pay'} {formatCents(totals.totalCents)}
         </button>
+
+        {hostedCheckoutUrl ? (
+          <p className="text-sm text-muted-foreground">
+            Continuing to Stripe Checkout… If this page stays put, open{' '}
+            <a
+              href={hostedCheckoutUrl}
+              data-testid="test-payment-hosted-checkout-link"
+              className="font-medium text-foreground underline"
+            >
+              Continue to Stripe Checkout
+            </a>
+            .
+          </p>
+        ) : null}
       </div>
     </main>
   );

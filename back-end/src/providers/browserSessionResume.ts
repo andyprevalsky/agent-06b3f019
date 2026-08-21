@@ -4,6 +4,7 @@ import { DEFAULT_GEOLOCATION } from './geoip';
 import { createLogger } from './logger';
 import { canonicalAuthRealm } from './authRealm';
 import {
+  closeSession,
   getBrowserCaptchaTelemetry,
   getFingerprintInjectionData,
   injectUserData,
@@ -67,7 +68,9 @@ export interface SerializedPassword {
 
 export interface UserSettings {
   name: string | null;
+  email: string | null;
   phone: string | null;
+  deliveryRecipientName: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
   city: string | null;
@@ -136,7 +139,9 @@ async function findUserSettings(userId: string): Promise<UserSettings | null> {
     where: { userId },
     select: {
       name: true,
+      email: true,
       phone: true,
+      deliveryRecipientName: true,
       addressLine1: true,
       addressLine2: true,
       city: true,
@@ -196,10 +201,13 @@ async function reservePasskeysForRealm(userId: string, authRealm: string) {
   }));
 }
 
-export async function resumeBrowserSession(taskId: string) {
-  log.info('Resuming browser task', { taskId });
+export async function resumeBrowserSession(
+  taskId: string,
+  options: { forceFreshProfile?: boolean } = {}
+) {
+  log.info('Resuming browser task', { taskId, forceFreshProfile: options.forceFreshProfile });
 
-  const result = await resumeSession(taskId);
+  const result = await resumeSession(taskId, options);
   return assembleResumeResponse(taskId, result);
 }
 
@@ -231,11 +239,30 @@ async function assembleResumeResponse(taskId: string, result: RecreatedSession) 
 
   if (session?.context.userId !== undefined) {
     if (result.savedUrl !== undefined && result.savedUrl !== '') {
-      injectionResult = await injectUserData(
-        result.sessionId,
-        session.context.userId,
-        result.savedUrl
-      );
+      try {
+        injectionResult = await injectUserData(
+          result.sessionId,
+          session.context.userId,
+          result.savedUrl
+        );
+      } catch (error) {
+        // `injectUserData` deliberately REJECTS on a state-injection timeout
+        // rather than resuming with partial state. `resumeSession` already
+        // created a fresh remote browser by this point, so letting the error
+        // propagate untouched leaks a paid session that nothing will ever
+        // close — the caller only sees the exception, never the session id.
+        // Close it (not pause: the resume failed, so there is no state worth
+        // preserving) before rethrowing.
+        await closeSession(result.sessionId, false).catch((closeError) => {
+          // Never let cleanup mask the original injection failure.
+          log.error('Failed to close browser session after injection failure', {
+            taskId,
+            sessionId: result.sessionId,
+            error: closeError instanceof Error ? closeError.message : String(closeError),
+          });
+        });
+        throw error;
+      }
     }
     fingerprintInjection = await getFingerprintInjectionData(session.context.userId);
     const [passwords, passkeys, user] = await Promise.all([

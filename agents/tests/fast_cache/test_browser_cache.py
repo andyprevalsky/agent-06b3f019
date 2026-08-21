@@ -22,6 +22,7 @@ from providers.fast_cache import browser_http, browser_use_cache
 from providers.fast_cache import normalize
 from domains.spawn_browser_agent_v3.handler import (
     _attach_browser_replay_target,
+    _install_fast_mode_network_cache,
     _remap_cached_browser_action_target,
 )
 
@@ -75,12 +76,35 @@ def mem(monkeypatch):
 
 def test_should_cache_only_get_cacheable_types():
     # #17/#18 page-resource types only; POST is allowed for XHR/fetch with body keying.
-    assert browser_http.should_cache("GET", "document") is True
-    assert browser_http.should_cache("get", "xhr") is True
-    assert browser_http.should_cache("POST", "xhr") is True
-    assert browser_http.should_cache("POST", "document") is False
-    assert browser_http.should_cache("GET", "websocket") is False
-    assert browser_http.should_cache("GET", "media") is False
+    assert browser_http.should_cache("GET", "document", "https://example.com/") is True
+    assert browser_http.should_cache("get", "xhr", "https://example.com/api") is True
+    assert browser_http.should_cache("POST", "xhr", "https://example.com/api") is True
+    assert browser_http.should_cache("POST", "document", "https://example.com/") is False
+    assert browser_http.should_cache("GET", "websocket", "wss://example.com/ws") is False
+    assert browser_http.should_cache("GET", "media", "https://example.com/video.mp4") is False
+    # Payment CDNs must never enter Fast Mode HTTP cache (Eventim Stripe Elements).
+    assert browser_http.should_cache("GET", "script", "https://js.stripe.com/v3/") is False
+    assert browser_http.should_cache("GET", "fetch", "https://api.stripe.com/healthcheck") is False
+    assert browser_http.should_cache("POST", "xhr", "https://r.stripe.com/b") is False
+    assert browser_http.is_payment_cdn_url("https://merchant-ui-api.stripe.com/link/get-cookie") is True
+
+
+def test_browser_http_never_records_payment_cdn(mem):
+    async def body():
+        cache = browser_http.BrowserHttpCache("checkout", read_enabled=False, write_enabled=True)
+        wrote = await cache.record(
+            "GET",
+            "https://js.stripe.com/v3/",
+            "script",
+            200,
+            {"content-type": "application/javascript"},
+            b"stripe",
+        )
+        assert wrote is False
+        assert mem.set_calls == 0
+        assert await cache.lookup("GET", "https://js.stripe.com/v3/", "script") is None
+
+    asyncio.run(body())
 
 
 def test_browser_http_record_then_replay(mem):
@@ -131,6 +155,43 @@ def test_browser_http_write_only_records_without_read(mem):
         assert mem.get_calls == 0
         assert mem.set_calls == 1
         assert len(mem.data) == 1
+
+    asyncio.run(body())
+
+
+def test_write_through_install_does_not_route_all_requests(mem):
+    """Write-through must record without Playwright route interception.
+
+    Routing ``**/*`` (even with continue_) breaks Eventim Stripe Elements while
+    js.stripe.com still returns 200 — empty Billing Address / Payment Details.
+    """
+
+    class FakeContext:
+        def __init__(self):
+            self.route_patterns: list[str] = []
+            self.response_handlers = 0
+
+        async def route(self, pattern, _handler):
+            self.route_patterns.append(pattern)
+
+        def on(self, event, _handler):
+            if event == "response":
+                self.response_handlers += 1
+
+    async def body():
+        write_only = FakeContext()
+        await _install_fast_mode_network_cache(
+            write_only, "eventim checkout", read_enabled=False, write_enabled=True
+        )
+        assert write_only.route_patterns == []
+        assert write_only.response_handlers == 1
+
+        replay = FakeContext()
+        await _install_fast_mode_network_cache(
+            replay, "eventim checkout", read_enabled=True, write_enabled=True
+        )
+        assert replay.route_patterns == ["**/*"]
+        assert replay.response_handlers == 1
 
     asyncio.run(body())
 

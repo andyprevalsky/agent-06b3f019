@@ -14,9 +14,11 @@ interface SyncHandlers {
   handleClaudeCodeSync: () => Promise<void>;
   handleGptCodeSync: () => Promise<void>;
   handleIMessageSync: () => Promise<void>;
+  handleWhatsAppConnect: () => Promise<void>;
   handleLinkedInSync: () => Promise<void>;
   handleEmailConnect: (provider: 'gmail') => Promise<void>;
   handleEmailDisconnect: (email: string) => Promise<void>;
+  handleEmailResync: (email: string) => Promise<void>;
   handleFileUpload: (type: 'vcf' | 'email-zip', file: File) => Promise<string | undefined>;
 }
 
@@ -79,6 +81,11 @@ export function useIntegrationActions(handlers: SyncHandlers) {
       ),
       onGptCodeSync: wrapAction(h.handleGptCodeSync, setError, 'Failed to sync GPT credentials'),
       onIMessageSync: wrapAction(h.handleIMessageSync, setError, 'Failed to sync iMessage'),
+      onWhatsAppConnect: wrapAction(
+        h.handleWhatsAppConnect,
+        setError,
+        'Failed to connect WhatsApp',
+      ),
       onLinkedInSync: wrapAction(h.handleLinkedInSync, setError, 'Failed to start LinkedIn sync'),
       onGmailConnect: wrapAction(() => h.handleEmailConnect('gmail'), setError, 'Unknown error'),
       onGmailDisconnect: async (email: string) => {
@@ -87,6 +94,14 @@ export function useIntegrationActions(handlers: SyncHandlers) {
           await h.handleEmailDisconnect(email);
         } catch (e) {
           setError(formatError(e, 'Failed to disconnect Gmail account'));
+        }
+      },
+      onGmailResync: async (email: string) => {
+        setError(null);
+        try {
+          await h.handleEmailResync(email);
+        } catch (e) {
+          setError(formatError(e, 'Failed to reconnect Gmail account'));
         }
       },
       onFileChange: async (type: 'vcf' | 'email-zip', file: File) => {

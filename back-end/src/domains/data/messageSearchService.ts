@@ -16,8 +16,12 @@ export async function searchMessageSource(params: {
   const { userId, input, source } = params;
   let personId: string | undefined;
   const messageFilters = input.filters.messages;
-  if (messageFilters?.person !== undefined) {
-    const resolved = await grepRepo.resolvePersonId(userId, messageFilters.person);
+  // `filters.path` addresses a thread; its thread segment is the same identifier
+  // space `person` already resolves (full name, phone, email, or person id), so
+  // an emitted path narrows through the existing, tested resolution.
+  const personIdentifier = messageFilters?.person ?? messageFilters?.pathThread;
+  if (personIdentifier !== undefined) {
+    const resolved = await grepRepo.resolvePersonId(userId, personIdentifier);
     if (resolved === null) return { total: 0, matches: [] };
     personId = resolved;
   }
@@ -31,6 +35,7 @@ export async function searchMessageSource(params: {
       pattern: input.dbPattern,
       caseInsensitive: input.caseInsensitive,
       personId,
+      messageId: messageFilters?.pathMessageId,
       since: messageFilters?.since,
       channel,
     }),
@@ -41,6 +46,7 @@ export async function searchMessageSource(params: {
       limit: input.headLimit,
       offset: input.offset,
       personId,
+      messageId: messageFilters?.pathMessageId,
       since: messageFilters?.since,
       channel,
     }),

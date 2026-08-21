@@ -32,6 +32,7 @@ TMP_ROOT="$(mktemp -d)"
 PIDS=()
 HUB_PIDS=()
 TEST_FAILED=0
+PORT_CLAIM_DIR=""
 
 cleanup() {
     local pid
@@ -41,6 +42,10 @@ cleanup() {
     for pid in "${PIDS[@]:-}"; do
         wait "$pid" 2>/dev/null || true
     done
+    if [ -n "$PORT_CLAIM_DIR" ]; then
+        rm -f "$PORT_CLAIM_DIR/owner" 2>/dev/null || true
+        rmdir "$PORT_CLAIM_DIR" 2>/dev/null || true
+    fi
     if [ "$TEST_FAILED" = "1" ] \
         && [ "${CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE:-0}" = "1" ]; then
         echo "ℹ️  retained failed cloudbench fixture: $TMP_ROOT" >&2
@@ -69,9 +74,25 @@ cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2
 # Keep the synthetic worktrees dependency-fingerprintable. Pool compatibility is
 # now a fail-closed production contract, so an intentionally minimal fake repo
 # still needs real (minimal) manifests rather than relying on an absent proof.
-mkdir -p "$SANDBOX/back-end" "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
+mkdir -p "$SANDBOX/back-end/scripts" "$SANDBOX/back-end/prisma" \
+  "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
 printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
+# run-bench-fleet preflights the guest-pg canonical seed dump before clone.
+# Keep the synthetic worktrees hermetic: real token helper + stub R2 get.
+cp "$ROOT_DIR/agents/benchmarks/seed_cache_path.py" "$SANDBOX/agents/benchmarks/seed_cache_path.py"
+printf '// cloudbench-multi seed-token fixture\n' > "$SANDBOX/back-end/prisma/schema.prisma"
+cat > "$SANDBOX/back-end/scripts/seed-dump-cache.ts" <<'SEEDSTUB'
+import { writeFileSync } from "node:fs";
+
+const [, , cmd, , file] = process.argv;
+if (cmd === "get" && typeof file === "string" && file.length > 0) {
+  writeFileSync(file, "cloudbench-multi-stub-seed-dump\n");
+  process.exit(0);
+}
+console.error("usage: seed-dump-cache.ts <get|put> <token> <file>");
+process.exit(2);
+SEEDSTUB
 printf '{}\n' > "$SANDBOX/package.json"
 printf '{}\n' > "$SANDBOX/back-end/package.json"
 printf '{}\n' > "$SANDBOX/front-end/package.json"
@@ -327,16 +348,17 @@ def run_fake_driver(mdir):
                 break
             time.sleep(0.1)
     # Prove that capacity counts alone cannot substitute for the autoscaler's
-    # causal terminal marker. Finish only after worker-ready.ids is populated;
-    # the autoscaler is then in its normal poll sleep when the child exits.
+    # causal terminal marker. Finish only after the fake-only hold proves the
+    # autoscaler has observed ready capacity but cannot yet observe child
+    # completion. This is an owned barrier, not a scheduler-window assumption.
     if exit_code == 0 and os.path.exists(
         os.path.join(FAKE_DIR, "worker-ready-before-child-no-terminal")
     ):
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
         deadline = time.time() + 30
-        ready = False
+        held = False
         while time.time() < deadline:
-            ready_files = glob.glob(
+            hold_files = glob.glob(
                 os.path.join(
                     controller_ws,
                     ".context",
@@ -344,15 +366,15 @@ def run_fake_driver(mdir):
                     "runs",
                     "*",
                     bench,
-                    "worker-ready.ids",
+                    "autoscaler.test-held-after-ready",
                 )
             )
-            ready = any(os.path.getsize(path) > 0 for path in ready_files)
-            if ready:
+            held = any(os.path.exists(path) for path in hold_files)
+            if held:
                 break
             time.sleep(0.1)
-        if not ready:
-            log("FATAL: worker capacity never became ready before child completion")
+        if not held:
+            log("FATAL: autoscaler never reached the ready-capacity hold boundary")
             exit_code = 1
     if exit_code == 0:
         context = os.path.join(mdir, "data", "repo", ".context", "cloudbench")
@@ -903,6 +925,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_FAKE_FAIL_METRICS_PROXY="${CLOUDBENCH_FAKE_FAIL_METRICS_PROXY:-0}" \
         CLOUDBENCH_FAKE_INVALID_METRICS="${CLOUDBENCH_FAKE_INVALID_METRICS:-0}" \
         CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM="${CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM:-0}" \
+        CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY="${CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY:-0}" \
         CLOUDBENCH_DETACHED_RECOVERY_SECONDS="${CLOUDBENCH_DETACHED_RECOVERY_SECONDS:-120}" \
         CLOUDBENCH_CAPACITY_RESERVATION_ROOT="$TMP_ROOT/capacity-reservations" \
         CLOUDBENCH_CLONE_LOOKUP_SECONDS="${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}" \
@@ -987,26 +1010,56 @@ PY
 # Derive a process-specific search window from this run's random tmp root so
 # concurrent copies of this regression (for example, two Conductor workspaces)
 # do not both probe 42000 free and then race to own the same listener.
-find_free_port() {  # find_free_port <start>
-    local start="$1" port
-    for port in $(seq "$start" $((start + 500))); do
-        if ! lsof -ti :"$port" >/dev/null 2>&1; then
-            printf '%s' "$port"
-            return 0
-        fi
-    done
-    return 1
-}
-PORT_WINDOW_START="$(TMP_ROOT="$TMP_ROOT" python3 - <<'PY'
+PORT_WINDOW_SLOT="$(TMP_ROOT="$TMP_ROOT" python3 - <<'PY'
 import hashlib
 import os
 
 digest = hashlib.sha256(os.environ["TMP_ROOT"].encode()).digest()
-print(40000 + int.from_bytes(digest[:4], "big") % 15000)
+print(int.from_bytes(digest[:4], "big") % 200)
 PY
 )"
-HUB_PORT_A="$(find_free_port "$PORT_WINDOW_START")" || fail "could not find a free test port for workstream A"
-HUB_PORT_B="$(find_free_port $((HUB_PORT_A + 1)))" || fail "could not find a free test port for workstream B"
+PORT_CLAIM_ROOT="${TMPDIR:-/tmp}/cloudbench-multi-workstream-port-claims"
+mkdir -p "$PORT_CLAIM_ROOT" || fail "could not initialize the cross-workspace port claim directory"
+for port_attempt in $(seq 0 199); do
+    port_slot=$(((PORT_WINDOW_SLOT + port_attempt) % 200))
+    port_base=$((40000 + port_slot * 64))
+    candidate_claim="$PORT_CLAIM_ROOT/$port_base"
+    if ! mkdir "$candidate_claim" 2>/dev/null; then
+        [ -f "$candidate_claim/owner" ] || continue
+        owner_pid="$(sed -n '1p' "$candidate_claim/owner" 2>/dev/null || true)"
+        owner_tmp="$(sed -n '2p' "$candidate_claim/owner" 2>/dev/null || true)"
+        if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null \
+            && [ -n "$owner_tmp" ] && [ -d "$owner_tmp" ]; then
+            continue
+        fi
+        rm -f "$candidate_claim/owner" 2>/dev/null || continue
+        rmdir "$candidate_claim" 2>/dev/null || continue
+        mkdir "$candidate_claim" 2>/dev/null || continue
+    fi
+    printf '%s\n%s\n' "$$" "$TMP_ROOT" > "$candidate_claim/owner" || {
+        rm -f "$candidate_claim/owner" 2>/dev/null || true
+        rmdir "$candidate_claim" 2>/dev/null || true
+        continue
+    }
+    port_window_busy=0
+    for candidate_port in "$port_base" "$((port_base + 1))" \
+        "$((port_base + 20))" "$((port_base + 21))"; do
+        if lsof -tiTCP:"$candidate_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            port_window_busy=1
+            break
+        fi
+    done
+    if [ "$port_window_busy" = "1" ]; then
+        rm -f "$candidate_claim/owner" 2>/dev/null || true
+        rmdir "$candidate_claim" 2>/dev/null || true
+        continue
+    fi
+    PORT_CLAIM_DIR="$candidate_claim"
+    HUB_PORT_A="$port_base"
+    HUB_PORT_B=$((port_base + 1))
+    break
+done
+[ -n "$PORT_CLAIM_DIR" ] || fail "could not atomically reserve a free cloudbench test port window"
 CONDUCTOR_PORT_A=$((HUB_PORT_A - 5764))
 CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 
@@ -1849,6 +1902,7 @@ reset_fake_state
 : > "$FAKE_DIR/worker-ready-before-child-no-terminal"
 missing_terminal_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=0 \
+    CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-missing-terminal.log" \
     autoscaler-missing-terminal --timeout 240 || missing_terminal_status=$?
 [ "$missing_terminal_status" -ne 0 ] ||

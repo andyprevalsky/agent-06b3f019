@@ -19,8 +19,25 @@ export async function findIntegrationsByUser(userId: string) {
     where: { userId },
     orderBy: { updatedAt: 'desc' },
     include: {
+      // Scoped to genuinely-connected accounts so callers can derive the
+      // connected-address list from the source of truth in this one query
+      // (no per-integration follow-up). An abandoned OAuth flow leaves a
+      // null-email, tokenless row, which must never surface as an account.
+      // Ordered so the derived primary is stable: without it Postgres may
+      // return a different first row per query and the displayed primary
+      // address would flicker between the user's accounts.
       emailCredentials: {
-        select: { email: true },
+        where: { email: { not: null }, accessToken: { not: null } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        // Health drives the per-account FE chips. Token columns stay unselected
+        // so credentials never cross the API edge.
+        select: {
+          id: true,
+          email: true,
+          state: true,
+          lastErrorReason: true,
+          lastFailedSyncAt: true,
+        },
       },
     },
   });
@@ -92,9 +109,10 @@ export async function upsertIntegration(params: {
 }) {
   return prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: params.userId,
         name: params.name,
+        accountId: '',
       },
     },
     create: {
@@ -131,13 +149,20 @@ export async function upsertIntegrationRaw(params: {
   isActive?: boolean;
   lastSyncAt?: Date;
   lastSuccessfulSyncAt?: Date;
+  /**
+   * Effective pool eligibility for this sync. Written on create AND update so a
+   * re-sync materializes the account policy; callers resolve it from the
+   * account default + any explicit per-integration override.
+   */
+  poolingEnabled?: boolean;
   updateExtra?: Record<string, unknown>;
 }) {
   return prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: params.userId,
         name: params.name,
+        accountId: '',
       },
     },
     create: {
@@ -147,6 +172,7 @@ export async function upsertIntegrationRaw(params: {
       config: params.config ?? {},
       status: params.status ?? IntegrationStatus.NOT_CONNECTED,
       ...(params.isActive !== undefined && { isActive: params.isActive }),
+      ...(params.poolingEnabled !== undefined && { poolingEnabled: params.poolingEnabled }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
       ...(params.lastSuccessfulSyncAt !== undefined && {
         lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
@@ -157,6 +183,7 @@ export async function upsertIntegrationRaw(params: {
       config: params.config ?? {},
       ...(params.status !== undefined && { status: params.status }),
       ...(params.isActive !== undefined && { isActive: params.isActive }),
+      ...(params.poolingEnabled !== undefined && { poolingEnabled: params.poolingEnabled }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
       ...(params.lastSuccessfulSyncAt !== undefined && {
         lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
@@ -173,9 +200,10 @@ export async function upsertIntegrationForUpload(params: {
 }) {
   return prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: params.userId,
         name: params.name,
+        accountId: '',
       },
     },
     create: {
@@ -190,6 +218,60 @@ export async function upsertIntegrationForUpload(params: {
       config: params.config,
     },
   });
+}
+
+/**
+ * Reserve the integration row for an OAuth flow that is only just STARTING.
+ *
+ * Deliberately not `upsertIntegrationForUpload`: that helper REPLACES `config`
+ * wholesale, so merely opening the Google consent screen destroyed the
+ * `connectedEmails` the UI renders its account chips from. A user who then
+ * abandoned the flow never reached the callback that rewrites them, so a
+ * still-connected account silently lost its chips (prod, 2026-08-18).
+ *
+ * Nothing is known about the new grant yet, so this must be purely additive:
+ * merge the flow marker over existing config, and never downgrade a healthy
+ * integration's status — no credential has changed at this point.
+ *
+ * The merge happens INSIDE the database (`jsonb ||`) via a single
+ * INSERT ... ON CONFLICT, not as a read-modify-write in Node. A RMW would
+ * reintroduce the same data loss under concurrency: two OAuth starts racing
+ * each other both read the pre-write config, and the loser's write erases keys
+ * the winner (or an interleaved callback) just persisted. It would also race
+ * the legacy-account `@@unique([userId, name, accountId])` identity and fail one
+ * request outright.
+ * Being a single atomic statement, this is safe to run concurrently and on
+ * retry.
+ */
+export async function upsertIntegrationForOAuthStart(params: {
+  userId: string;
+  name: string;
+  config: Record<string, unknown>;
+}) {
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    INSERT INTO "Integration" ("id", "userId", "name", "accountId", "type", "status", "config", "createdAt", "updatedAt")
+    VALUES (
+      gen_random_uuid(),
+      ${params.userId},
+      ${params.name},
+      '',
+      ${IntegrationType.DATA_SOURCE}::"IntegrationType",
+      ${IntegrationStatus.SYNCING}::"IntegrationStatus",
+      ${JSON.stringify(params.config)}::jsonb,
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT ("userId", "name", "accountId") DO UPDATE
+      SET "config" = COALESCE("Integration"."config", '{}'::jsonb) || EXCLUDED."config",
+          "updatedAt" = NOW()
+    RETURNING "id"
+  `;
+
+  const id = rows[0]?.id;
+  if (id === undefined) {
+    throw new Error(`Failed to reserve integration row for OAuth start: ${params.name}`);
+  }
+  return { id };
 }
 
 export async function updateIntegrationStatus(
@@ -213,32 +295,11 @@ export async function updateIntegrationStatus(
   });
 }
 
-export async function findIntegrationByUserAndName(userId: string, name: string) {
-  return prisma.integration.findUnique({
-    where: {
-      userId_name: {
-        userId,
-        name,
-      },
-    },
-  });
-}
-
-export async function updateIntegration(
-  integrationId: string,
-  data: Prisma.IntegrationUpdateInput
-) {
-  return prisma.integration.update({
-    where: { id: integrationId },
-    data,
-  });
-}
-
-export async function deleteIntegration(integrationId: string) {
-  return prisma.integration.delete({
-    where: { id: integrationId },
-  });
-}
+export {
+  deleteIntegration,
+  findIntegrationByUserAndName,
+  updateIntegration,
+} from './repo.integration';
 
 // Email credential operations — split for max-lines compliance
 export {
@@ -273,5 +334,9 @@ export {
   bulkUpsertPasskeys,
   bulkUpsertCacheStorage,
   findUserById,
+  findUserPoolTokensByDefault,
+  findIntegrationPoolingState,
   findIntegrationById,
 } from './repo.bulk';
+
+export { ingestIndexedDBUploadJsonDocument } from './repo.indexeddbUpload';

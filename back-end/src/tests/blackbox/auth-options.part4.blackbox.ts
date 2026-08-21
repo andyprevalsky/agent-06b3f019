@@ -45,7 +45,23 @@ async function cleanup(userId: string) {
   await prisma.browserPassword.deleteMany({ where: { userId } });
   await prisma.steelSessionAuth.deleteMany({ where: { userId } });
   await prisma.mintedAccount.deleteMany({ where: { userId } });
+  await prisma.passkeyCredential.deleteMany({ where: { userId } });
+  await prisma.browserContext.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
+}
+
+async function createPasskey(userId: string, authRealm: string) {
+  return prisma.passkeyCredential.create({
+    data: {
+      userId,
+      authRealm,
+      rpId: authRealm,
+      credentialId: `cred-${randomUUID()}`,
+      encryptedPrivateKey: 'enc-stub',
+      userHandle: 'uh-stub',
+      signCount: 0,
+    },
+  });
 }
 
 async function createBundleWithCookie(params: {
@@ -83,6 +99,24 @@ async function createBundleWithCookie(params: {
   });
   return bundle;
 }
+
+test('browser agent loads normal and SSO passkeys lazily by the active realm', async () => {
+  const userId = await createUser();
+  try {
+    const normal = await createPasskey(userId, 'amazon.com');
+    const sso = await createPasskey(userId, 'google.com');
+
+    const initial = await getAuthOptions(userId, 'https://www.amazon.com/ap/signin');
+    assert(initial.passkeys.length === 1, 'initial realm must not eagerly load SSO passkeys');
+    assert(initial.passkeys[0].id === normal.id, 'expected the normal-site passkey at startup');
+
+    const transitioned = await getAuthOptions(userId, 'https://accounts.google.com/v3/signin');
+    assert(transitioned.passkeys.length === 1, 'expected one passkey after the SSO transition');
+    assert(transitioned.passkeys[0].id === sso.id, 'expected the Google passkey in Google realm');
+  } finally {
+    await cleanup(userId);
+  }
+});
 
 test('benchmark anon auth options hide saved auth and expose minted identity', async () => {
   const userId = await createUser('Rose Harbor');
@@ -259,8 +293,35 @@ test('mark Steel session auth failed disables only owner row and resets context'
   const otherUserId = await createUser();
   try {
     const contextId = `ctx-${randomUUID()}`;
-    await prisma.browserContext.create({
+    const browserContext = await prisma.browserContext.create({
       data: { userId, contextId },
+    });
+    await prisma.browserProviderProfile.create({
+      data: {
+        contextId: browserContext.id,
+        provider: 'steel',
+        profileId: contextId,
+      },
+    });
+    const browserSession = await prisma.browserSession.create({
+      data: {
+        contextId: browserContext.id,
+        agentId: `agent-${randomUUID()}`,
+        sessionId: `session-${randomUUID()}`,
+        provider: 'steel',
+        providerProfileId: contextId,
+        providerProfileSource: 'steel_session_auth',
+      },
+    });
+    const siblingSession = await prisma.browserSession.create({
+      data: {
+        contextId: browserContext.id,
+        agentId: `agent-${randomUUID()}`,
+        sessionId: `session-${randomUUID()}`,
+        provider: 'steel',
+        providerProfileId: contextId,
+        providerProfileSource: 'steel_session_auth',
+      },
     });
     const steelAuth = await prisma.steelSessionAuth.create({
       data: {
@@ -276,7 +337,12 @@ test('mark Steel session auth failed disables only owner row and resets context'
       steelAuth.id,
       'other user attempt'
     );
-    const updated = await markSteelSessionAuthFailed(userId, steelAuth.id, 'login page displayed');
+    const updated = await markSteelSessionAuthFailed(
+      userId,
+      steelAuth.id,
+      'login page displayed',
+      browserSession.id
+    );
 
     assert(unauthorized === null, 'expected cross-user Steel auth update to be rejected');
     assert(updated?.disabledReason === 'login page displayed', 'expected disabled reason');
@@ -285,8 +351,49 @@ test('mark Steel session auth failed disables only owner row and resets context'
       where: { id: steelAuth.id },
     });
     const context = await prisma.browserContext.findUniqueOrThrow({ where: { userId } });
+    const providerProfile = await prisma.browserProviderProfile.findUnique({
+      where: {
+        contextId_provider: {
+          contextId: browserContext.id,
+          provider: 'steel',
+        },
+      },
+    });
+    const session = await prisma.browserSession.findUniqueOrThrow({
+      where: { id: browserSession.id },
+    });
+    const sibling = await prisma.browserSession.findUniqueOrThrow({
+      where: { id: siblingSession.id },
+    });
     assert(persisted.disabledAt !== null, 'expected Steel auth disabledAt');
     assert(context.contextId === null, 'expected persistent context reset');
+    assert(providerProfile === null, 'expected provider-specific Steel profile reset');
+    assert(
+      session.providerProfileId === contextId,
+      'expected handoff session Steel profile binding preserved until replacement commits'
+    );
+    assert(
+      session.providerProfileSource === 'steel_session_auth_invalidated',
+      'expected handoff session profile marked invalidated but retained for assistance completion'
+    );
+    assert(
+      sibling.providerProfileId === contextId,
+      'expected sibling Steel profile identity retained for assistance completion'
+    );
+    assert(
+      sibling.providerProfileSource === 'steel_session_auth_invalidated',
+      'expected sibling profile excluded from reuse without erasing completion lineage'
+    );
+    const siblingRecovery = await markSteelSessionAuthFailed(
+      userId,
+      steelAuth.id,
+      'sibling also reached login',
+      sibling.id
+    );
+    assert(
+      siblingRecovery !== null,
+      'expected invalidated sibling to retain a valid recovery lineage'
+    );
   } finally {
     await cleanup(userId);
     await cleanup(otherUserId);

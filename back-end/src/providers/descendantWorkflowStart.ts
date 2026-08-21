@@ -4,6 +4,7 @@ import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma, runTransactionWithRetry } from './database';
 import {
   captureInProgressWorkflowTools,
+  closeInterruptedAttentionRequests,
   finalizeInterruptedWorkflowTools,
   type ToolProgressCandidate,
 } from './staleWorkflowTools';
@@ -344,16 +345,7 @@ export async function completeStaleDescendantWorkflowStart(
       });
       return;
     }
-    await tx.agentAttentionRequest.updateMany({
-      where: {
-        agentId: identity.agentId,
-        ...(child.staleTemporalWorkflowId === null
-          ? {}
-          : { workflowId: child.staleTemporalWorkflowId }),
-        userResponse: null,
-      },
-      data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
-    });
+    await closeInterruptedAttentionRequests(tx, identity.agentId, child.staleTemporalWorkflowId);
     await tx.agent.update({
       where: { id: identity.agentId },
       data: {

@@ -31,6 +31,7 @@ import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
+import whatsappWebhookRouter from './domains/whatsapp-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
 import agentcardRouter from './domains/agentcard/routes';
@@ -54,6 +55,11 @@ import archiveRouter from './domains/archive/routes';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
+import computeGrantsRouter from './domains/compute-grants/routes';
+import { installGrantRecovery } from './domains/compute-grants/service';
+import { releaseAllConnectSessions } from './domains/compute-grants/connectSession.shutdown';
+import { createCloudMinter } from './domains/compute-grants/minter';
+import { computeGrantCdpProvider } from './domains/compute-grants/browserProvider';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createDeepHealthHandler } from './providers/deepHealth';
@@ -107,6 +113,19 @@ app.use(
   '/api/agentphone',
   express.json({ type: 'application/json', limit: '1mb' }),
   agentPhoneRouter
+);
+
+// WhatsApp webhook from Meta Cloud API (JSON body; preserve raw body for the
+// X-Hub-Signature-256 HMAC verification). Routes inbound messages through the
+// same SMS supervisor.
+app.use(
+  '/api/whatsapp',
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as unknown as { rawBody: string }).rawBody = buf.toString('utf-8');
+    },
+  }),
+  whatsappWebhookRouter
 );
 
 // AgentCard webhooks: JSON body, but HMAC is over the raw bytes, so preserve them on req.rawBody.
@@ -501,6 +520,7 @@ app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
 app.use('/api/integrations', integrationsRouter);
+app.use('/api/compute-accounts', computeGrantsRouter);
 app.use('/api/billing', billingRouter);
 app.use('/api/api-keys', apiKeysRouter);
 app.use('/api/upload', uploadRouter);
@@ -549,6 +569,33 @@ app.use(
 );
 
 // Start server
+// Compute-grant self-healing: when a live agent's grant is REVOKED, mint a
+// replacement from the stored account connection and retry, instead of silently
+// diverting the request onto paid models.
+//
+// Recovery is ALWAYS registered, but by default it does not mint.
+//
+// Automatic cloud re-minting has to drive a real sign-in session, and that state
+// is fragile in ways we cannot control -- bot checks on the consent screen,
+// expired cookies, provider-side session invalidation. A re-mint that silently
+// fails is worse than none at all: the account looks healthy while every request
+// quietly falls through to paid models. So the default is to mark the connection
+// `needs_reconnect`, which surfaces on the FE chip and asks the user to reauth.
+//
+// Setting COMPUTE_GRANT_AUTO_REMINT=1 opts into unattended minting instead.
+if (process.env.COMPUTE_GRANT_AUTO_REMINT === '1') {
+  installGrantRecovery({ minter: createCloudMinter({ cdp: computeGrantCdpProvider() }) });
+  log.info('compute_grant.auto_remint_enabled');
+} else {
+  // No minter: a revoked grant is marked dead and its connection flagged for the
+  // user to reconnect, rather than being retried in the background forever.
+  installGrantRecovery();
+  log.info('compute_grant.recovery_installed', {
+    mode: 'user_reauth',
+    hint: 'set COMPUTE_GRANT_AUTO_REMINT=1 to attempt unattended cloud re-minting',
+  });
+}
+
 app.listen(PORT, () => {
   const isProduction = process.env.NODE_ENV === 'production';
   log.info('Server started', {
@@ -588,6 +635,13 @@ app.listen(PORT, () => {
 // Graceful shutdown
 const shutdown = async (signal: string) => {
   log.info(`${signal} received, closing server...`);
+  // Remote browsers bill until released and are tracked in memory, so exiting
+  // without this strands every in-flight connect session.
+  await releaseAllConnectSessions().catch((err: unknown) => {
+    log.warn('connect_session_cleanup_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   await cleanupBenchmarkKernelProfiles();
   await prisma.$disconnect();
   process.exit(0);

@@ -26,8 +26,11 @@ export interface CompletionMessage {
   tool_calls?: Array<{
     id?: string;
     call_id?: string;
-    /** OpenAI's discriminator. Strict validators (Google via OpenRouter) reject
-     *  an assistant tool_call without it and fail the entire transcript. */
+    /**
+     * OpenAI's discriminator. Cerebras and strict OpenRouter validators (e.g.
+     * Google) reject assistant tool_calls that omit it; Anthropic tolerated
+     * absence, so the bug only surfaces off the Anthropic path.
+     */
     type?: 'function';
     name?: string;
     arguments?: unknown;
@@ -69,6 +72,21 @@ export interface CompletionOptions {
   claude_token?: string;
   gpt_token?: string;
   gpt_account_id?: string;
+  /**
+   * Identifies WHICH grant supplied `claude_token`/`gpt_token`, so a revocation
+   * observed here can be healed rather than merely reported.
+   *
+   * Optional on purpose: without it a revoked grant falls through to the
+   * waterfall exactly as before, so un-migrated callers keep working. With it,
+   * the completion path mints a replacement and retries on the subscription
+   * instead of silently spending money on paid models.
+   */
+  compute_grant?: {
+    userId: string;
+    provider: 'claude' | 'codex';
+    accountId: string;
+    grantId?: string;
+  };
   disable_waterfall?: boolean;
   dump_context?: {
     call_site: string;

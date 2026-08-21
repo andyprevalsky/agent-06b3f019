@@ -17,7 +17,20 @@ run_required_service_exit_code() {
 run_process_env_value() {
   local pid="$1"
   local key="$2"
-  ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -1
+  local environ="/proc/${pid}/environ"
+  local value=""
+
+  # Prefer /proc/<pid>/environ: it is the process's real env block. `ps eww`
+  # can surface duplicate/redacted KEY=value tokens under sandboxed hosts, and
+  # `tail -1` then picks a value that never matches the worker's real queue or
+  # backend URL — leaving stale same-queue workers alive across restarts.
+  if [ -r "$environ" ]; then
+    value="$(tr '\0' '\n' <"$environ" | sed -n "s/^${key}=//p" | head -1)"
+  fi
+  if [ -z "$value" ]; then
+    value="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^${key}=//p" | head -1)"
+  fi
+  printf '%s\n' "$value"
 }
 
 run_process_env_value_wait() {

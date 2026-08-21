@@ -149,10 +149,53 @@ EMAIL_SEND_BUTTON_PATTERNS = [
     "send mail",
 ]
 
-EMAIL_SEND_BUTTON_EXCLUSION_PATTERNS = [
-    "resend",
-    "re-send",
-]
+# A resend action re-issues something the site already sent; it never composes a
+# new outbound message, so it is not a write the user needs to approve. The test
+# is purely positional — the label must START with one of these — so ordinary
+# sends ("Send message", "Send email") are untouched.
+EMAIL_OTP_RETRY_PREFIXES = ("resend", "re-send")
+
+# A one-time code is something the site sends TO the account being signed into.
+# It is never a message composed for a third party, so no control that asks for
+# one is a write the user needs to approve — regardless of how the label is
+# phrased or where in the label the phrase appears. This is deliberately a
+# substring test, not a prefix test: "Send new email verification code",
+# "Get verification code", and "Email me a security code" are all the same
+# action, and making the agent park on any of them wedges the run on an approval
+# that nobody is there to answer.
+ONE_TIME_CODE_PATTERNS = (
+    "verification code",
+    "confirmation code",
+    "security code",
+    "one-time code",
+    "one time code",
+    "one-time password",
+    "login code",
+    "sign-in code",
+    "sign in code",
+    "access code",
+    "passcode",
+)
+
+# Marketing / newsletter opt-in checkboxes ask the site to send info TO the
+# shopper. That is not an outbound message the agent composed, so it must not
+# trip the email_send write lock. Eventim checkout labels like
+# "Send me info about other shows by this organizer" previously parked the
+# agent on write_lock approval and blocked request_payment_card.
+MARKETING_OPT_IN_PATTERNS = (
+    "send me info",
+    "send me update",
+    "send me news",
+    "send me email",
+    "send me offer",
+    "send me deal",
+    "send me promo",
+    "email me about",
+    "email me info",
+    "keep me informed",
+    "subscribe to",
+    "sign me up for",
+)
 
 # Purchase/order button text patterns (case-insensitive)
 # These are matched as full phrases to avoid false positives (e.g. "place" alone)
@@ -174,6 +217,20 @@ PURCHASE_BUTTON_PHRASES = [
     "confirm return",
     "complete return",
     "submit return",
+]
+
+# Legal/consent copy often quotes the purchase button ("By clicking Buy Now, you
+# agree…"). That prose is not a submit control. Eventim checkout (2026-08-10
+# agent e20e5a4e) matched "buy now" inside Terms of Purchase text, forced a
+# purchase write-lock notification, and blocked request_payment_card.
+PURCHASE_CONSENT_PROSE_PATTERNS = [
+    "by clicking",
+    "you agree",
+    "terms of purchase",
+    "terms of service",
+    "privacy policy",
+    "privacy practices",
+    "acknowledge our",
 ]
 
 
@@ -252,16 +309,87 @@ def is_submit_button(element_text: str) -> bool:
     return False
 
 
+ONE_TIME_CODE_TOKEN_RE = re.compile(r"\botps?\b")
+
+
+def _is_one_time_code_action(normalized: str) -> bool:
+    """Return True when the label asks the site for a one-time code.
+
+    Content test, anywhere in the label. A code is issued to the account being
+    signed into, never composed for a third party, so the phrasing and the word
+    order carry no risk signal worth gating on.
+    """
+    if ONE_TIME_CODE_TOKEN_RE.search(normalized) is not None:
+        return True
+    return any(pattern in normalized for pattern in ONE_TIME_CODE_PATTERNS)
+
+
+def _is_email_otp_retry(normalized: str) -> bool:
+    """Return True when the label's action is a resend rather than a new send.
+
+    Deliberately positional and nothing else: no email/code/destination
+    inspection. A resend re-issues something the site already decided to send, so
+    it is never a new outbound write, and the earlier destination and code-word
+    tests only made safe retry labels fail closed and hang the run on an approval
+    that never arrives.
+    """
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix} ")
+        for prefix in EMAIL_OTP_RETRY_PREFIXES
+    )
+
+
+def _is_marketing_opt_in_action(normalized: str) -> bool:
+    """Return True when the label opts into receiving marketing/info from the site.
+
+    Content test, anywhere in the label. Opting in asks the merchant to email the
+    shopper later; it is not composing and sending an outbound message now.
+    """
+    return any(pattern in normalized for pattern in MARKETING_OPT_IN_PATTERNS)
+
+
+def _matches_specific_email_send(normalized: str) -> bool:
+    """True for exact ``send`` or multi-word outbound-send phrases.
+
+    Bare substring ``send`` is handled separately so marketing opt-in labels
+    ("Send me info…") are not locked solely because they contain ``send``.
+    """
+    for pattern in EMAIL_SEND_BUTTON_PATTERNS:
+        if pattern == "send":
+            if normalized == "send":
+                return True
+            continue
+        if pattern == normalized or pattern in normalized:
+            return True
+    return False
+
+
 def is_email_send_button(element_text: str) -> bool:
-    """Check if element text indicates an outbound send action."""
+    """Check whether any local action signal is an outbound send.
+
+    Exemptions: one-time code (content, anywhere), resend (positional prefix),
+    and marketing/newsletter opt-in (content) — but marketing never suppresses a
+    specific outbound-send phrase (e.g. ``send email`` in a composite label).
+    Each newline-delimited signal is classified on its own so an exempt label
+    can never unlock a neighbouring send control or action-bearing attribute.
+    """
     if not element_text:
         return False
 
-    text_lower = re.sub(r"\s+", " ", element_text.lower()).strip()
-    if any(pattern in text_lower for pattern in EMAIL_SEND_BUTTON_EXCLUSION_PATTERNS):
-        return False
-
-    return any(pattern == text_lower or pattern in text_lower for pattern in EMAIL_SEND_BUTTON_PATTERNS)
+    for candidate in element_text.splitlines():
+        normalized = re.sub(r"\s+", " ", candidate.lower()).strip()
+        if not normalized:
+            continue
+        if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
+            continue
+        # Specific outbound phrases win over marketing opt-in (composite labels).
+        if _matches_specific_email_send(normalized):
+            return True
+        if _is_marketing_opt_in_action(normalized):
+            continue
+        if "send" in normalized:
+            return True
+    return False
 
 
 def is_purchase_button(element_text: str) -> bool:
@@ -276,12 +404,26 @@ def is_purchase_button(element_text: str) -> bool:
     if not element_text:
         return False
 
-    text_lower = normalize_write_lock_text(element_text)
+    # Callers join independent write-lock signals with newlines. Apply consent
+    # exclusion only within the same signal that carries a purchase phrase so
+    # "Terms of Service" in one signal cannot veto "Buy Now" in another.
+    for signal in element_text.split("\n"):
+        text_lower = normalize_write_lock_text(signal)
+        if not text_lower:
+            continue
+        if any(
+            normalize_write_lock_text(pattern) in text_lower
+            for pattern in PURCHASE_CONSENT_PROSE_PATTERNS
+        ):
+            logger.debug(
+                f"Element signal '{signal[:80]}' matched purchase consent-prose exclusion"
+            )
+            continue
 
-    for phrase in PURCHASE_BUTTON_PHRASES:
-        if normalize_write_lock_text(phrase) in text_lower:
-            logger.debug(f"Element text '{element_text}' matched purchase pattern: {phrase}")
-            return True
+        for phrase in PURCHASE_BUTTON_PHRASES:
+            if normalize_write_lock_text(phrase) in text_lower:
+                logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
+                return True
 
     return False
 

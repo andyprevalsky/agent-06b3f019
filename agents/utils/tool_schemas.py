@@ -1,8 +1,10 @@
 """Tool schemas and dynamic models used by the LLM orchestration layer."""
 
 import json
+import re
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
+from urllib.parse import urlsplit
 
 import structlog
 from pydantic import (
@@ -368,11 +370,11 @@ class GrepTool(BaseModel):
                 "gmail",
                 "imessage",
                 "whatsapp",
-                "sms",
                 "network",
                 "agent_network",
                 "transactions",
                 "documents",
+                "summary",
             ]
         ]
     ] = Field(
@@ -383,12 +385,18 @@ class GrepTool(BaseModel):
             "concrete sources (e.g. [\"email\"], or [\"email\", \"imessage\"]). Omit entirely to "
             "search the local defaults (messages, network, agent_network). "
             "Channels of the user's communications: email searches the user's email/Gmail; "
-            "imessage searches iMessage; whatsapp searches WhatsApp; sms searches SMS. "
+            "imessage searches iMessage (including SMS stored in the Mac Messages DB); "
+            "whatsapp searches WhatsApp. "
             "messages is the umbrella over all communication channels (use only when the channel "
             "is genuinely unknown). network searches contact records. agent_network searches all "
             "message roles in the current agent tree and returns role/location metadata. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
+            "summary returns a compact, precomputed inventory with message counts, date ranges, "
+            "channel totals, and threads ranked by volume. Use sources=[\"summary\"] first for "
+            "aggregate questions such as total messages, date coverage, or most-contacted threads; "
+            "then use the concrete channel source to inspect exact message text. Thread identifiers "
+            "in the summary are valid contact identifiers when no human-readable name is stored. "
             "If a named source's connector isn't connected, the search returns a 'source not "
             "connected' notice and the user is automatically asked to connect it - do NOT retry "
             "that source; continue with the sources you can reach."
@@ -401,11 +409,11 @@ class GrepTool(BaseModel):
             "gmail",
             "imessage",
             "whatsapp",
-            "sms",
             "network",
             "agent_network",
             "transactions",
             "documents",
+            "summary",
         ]
     ] = Field(
         default=None,
@@ -463,12 +471,18 @@ class GrepTool(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Source-specific nested filters. For transactions: since, until, account, min_amount, "
-            "max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. "
-            "For messages: person and since. For documents: document_source, since, until, path, and tag; "
+            "Nested per-source filters. Each source accepts only its own keys:\n"
+            "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
+            "  network: path\n"
+            "  agent_network: path\n"
+            "  transactions: since, until, account, min_amount, max_amount, "
+            "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
+            "  documents: document_source, since, until, tag, path\n"
             "documents is an umbrella corpus, so set document_source to the concrete provider "
             "(chatgpt, claude, apple_notes, or obsidian). "
-            "Unsupported filters are rejected by the backend for the selected source."
+            "`path` takes a path from an earlier result "
+            "(e.g. 'network/Andy Prevalsky.contact', 'messages/+15551234567.thread') "
+            "to scope the search to that record or thread."
         ),
     )
     person: Optional[str] = Field(
@@ -566,6 +580,75 @@ ForEachItem = Annotated[
 ]
 
 
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>\"'`\\]+")
+# Punctuation that terminates prose but is never meaningful at the end of a URL.
+_URL_TRAILING_PUNCTUATION = ".,;:!?"
+_URL_CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def first_url_in_text(text: Optional[str]) -> Optional[str]:
+    """Return the first http(s) URL embedded in free-form text, or None.
+
+    Models routinely put the browsing target in prose ("Navigate to
+    https://example.com/checkout. Then ...") instead of a dedicated field, so
+    the URL arrives glued to sentence punctuation or wrapped in brackets. Trim
+    trailing punctuation and unbalanced closing brackets so the recovered value
+    is the URL the model actually meant.
+    """
+    if not isinstance(text, str):
+        return None
+    match = _URL_IN_TEXT_RE.search(text)
+    if not match:
+        return None
+
+    url = match.group(0)
+    while url:
+        last = url[-1]
+        if last in _URL_TRAILING_PUNCTUATION:
+            url = url[:-1]
+            continue
+        opener = _URL_CLOSERS.get(last)
+        if opener and url.count(last) > url.count(opener):
+            url = url[:-1]
+            continue
+        break
+
+    # A destination needs a host: "https://", "https:///orders" and
+    # "https://?next=orders" all parse but name no server to navigate to.
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None
+        # `.port` is what actually validates the port; urlsplit itself accepts
+        # "https://a.test:99999/" and only raises when the value is read.
+        parts.port
+    except ValueError:
+        return None
+    return url
+
+
+def url_origin_for_log(url: str) -> str:
+    """Scheme + host (+ port) only — never credentials, path, query, or fragment.
+
+    A URL recovered from free-form text can carry `user:password@` userinfo and
+    secrets in the query string, so only the origin is ever safe to log.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<unparseable-url>"
+    if not parts.hostname:
+        return "<hostless-url>"
+    origin = f"{parts.scheme}://{parts.hostname}"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return f"{origin}:{port}" if port else origin
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields."""
 
@@ -576,7 +659,13 @@ class SpawnAgentTool(BaseModel):
             "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
             "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
             "cross-domain multi-step work; 'explore' performs read-only research for web or user-data facts; "
-            "'for_each' starts one general-purpose agent per item for repeated fan-out."
+            "'for_each' starts one general-purpose agent per item for repeated fan-out. "
+            "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
+            "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
+            "identity - an email address and phone number it can read delivered messages at, including "
+            "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
+            "user has connected as an integration; any other address, including one you compose from the "
+            "user's name, is write-only to it."
         )
     )
     goal: str = Field(
@@ -677,7 +766,26 @@ class SpawnAgentTool(BaseModel):
     @model_validator(mode="after")
     def check_spawn_agent_constraints(self) -> "SpawnAgentTool":
         if self.type == "browser" and not self.start_url:
-            raise ValueError("start_url is required when type='browser'.")
+            # Models very often express the browsing target inside `goal`
+            # ("Navigate to https://... then check out") and leave `start_url`
+            # unset. Rejecting that costs a full re-generation, and because the
+            # omission is a systematic model habit rather than a random glitch,
+            # the blind retry reproduces it — three strikes then kills the agent
+            # before a browser session is ever created. Recover the URL instead;
+            # only fail when the goal genuinely names no destination.
+            # Only https is recoverable. The browser restores authenticated
+            # session cookies before it navigates, so silently promoting a
+            # cleartext target inferred from prose would leak that state; an
+            # http:// goal still fails loudly rather than being repaired.
+            recovered = first_url_in_text(self.goal)
+            if recovered and urlsplit(recovered).scheme == "https":
+                self.start_url = recovered
+                logger.warning(
+                    "spawn_agent(type='browser') omitted start_url; recovered from goal",
+                    start_url_origin=url_origin_for_log(recovered),
+                )
+            else:
+                raise ValueError("start_url is required when type='browser'.")
         if self.type in ("general_purpose", "for_each") and not self.start_phase:
             raise ValueError("start_phase is required when type='general_purpose' or 'for_each'.")
         if self.type == "for_each":

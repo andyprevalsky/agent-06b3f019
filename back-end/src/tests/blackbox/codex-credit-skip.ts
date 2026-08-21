@@ -28,8 +28,14 @@ export class CredentialExhaustionSkip extends Error {
 // a deploy on 2026-08-04 for exactly the funding state this skip exists to
 // absorb, so both are matched explicitly. Neither phrase can be produced by an
 // auth/OAuth revocation, so the deliberate exclusion above still holds.
+//
+// `credit_balance_exhausted` / `credit balance is too low` are the same state as
+// delivered in a STRUCTURED provider error rather than prose — the API-key leg
+// surfaces the machine code where the CLI surfaces the sentence, and only the
+// prose reaches the raw output. Both dialects are matched so the skip does not
+// depend on which leg reported the exhaustion.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -45,7 +51,11 @@ export function detectCodexCreditExhaustion(output: string, events: unknown[]): 
   const haystacks: string[] = [output];
   for (const event of events) {
     const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
-    for (const field of [typed?.message, typed?.reason, typed?.error]) {
+    // `error` arrives as a bare string on some providers and as
+    // `{ message }` on others; only reading the string form let a nested
+    // out-of-funds message slip past the detector and hard-fail the deploy.
+    const nestedError = (typed?.error as { message?: unknown } | null | undefined)?.message;
+    for (const field of [typed?.message, typed?.reason, typed?.error, nestedError]) {
       if (typeof field === 'string' && field) haystacks.push(field);
     }
   }
@@ -92,22 +102,83 @@ export function testDetectCreditExhaustion_positive(): void {
     ]) !== null,
     'insufficient_quota event reason must be detected'
   );
+  // OpenAI's current platform wording. Observed verbatim on 2026-08-04, when the
+  // funded key ran dry and the older "out of credits" phrasing never appeared, so
+  // the smoke hard-failed instead of taking the deploy-approved SKIP.
+  assert(
+    detectCodexCreditExhaustion(
+      'stream disconnected before completion: You have no credits remaining. ' +
+        'Add credits to continue using the API at ' +
+        'https://platform.openai.com/settings/organization/billing/.',
+      []
+    ) !== null,
+    'OpenAI "no credits remaining / add credits to continue" must be detected as credit exhaustion'
+  );
+  // Same wording arriving only through a structured turn.failed event.
+  assert(
+    detectCodexCreditExhaustion('normal output', [
+      {
+        type: 'error',
+        raw_type: 'turn.failed',
+        message: 'stream disconnected before completion: You have no credits remaining.',
+      },
+    ]) !== null,
+    'no-credits-remaining event message must be detected'
+  );
   // 402 payment-required is an out-of-funds signal.
   assert(
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
   );
-  // The exact wording the OpenAI API returns for a defunded account, as seen in
-  // the turn.failed event during a real deploy run.
+  // OpenAI's CURRENT out-of-funds wording, verbatim from the 2026-08-04 deploy
+  // that hard-failed because this exact phrasing was not matched.
+  const liveWording =
+    'stream disconnected before completion: You have no credits remaining. ' +
+    'Add credits to continue using the API at ' +
+    'https://platform.openai.com/settings/organization/billing/.';
+  assert(
+    detectCodexCreditExhaustion(liveWording, []) !== null,
+    'OpenAI "no credits remaining" wording must be detected as out of funds'
+  );
   assert(
     detectCodexCreditExhaustion('normal output', [
+      { type: 'error', message: liveWording, raw_type: 'turn.failed' },
+    ]) !== null,
+    'OpenAI "no credits remaining" surfaced only in a turn.failed event must be detected'
+  );
+}
+
+export function testDetectCreditExhaustion_observedOpenAiWording(): void {
+  // VERBATIM from the 2026-08-04 deploy, which this detector failed to skip and
+  // hard-failed instead. Pin the real wording, not a paraphrase.
+  const real =
+    'stream disconnected before completion: You have no credits remaining. ' +
+    'Add credits to continue using the API at ' +
+    'https://platform.openai.com/settings/organization/billing/.';
+  assert(
+    codexSmokeCreditSkipReason(real, []) !== null,
+    "OpenAI's real $0-balance message must be detected as credit exhaustion"
+  );
+  // The same state as delivered in a structured provider-error event.
+  assert(
+    codexSmokeCreditSkipReason('no sentinel', [
       {
         type: 'error',
-        message:
-          'stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+        error: {
+          type: 'insufficient_quota',
+          code: 'credit_balance_exhausted',
+        } as unknown as string,
+        message: 'You have no credits remaining.',
       },
     ]) !== null,
-    'the live "no credits remaining" wording must be detected as exhaustion'
+    'structured credit_balance_exhausted must be detected as credit exhaustion'
+  );
+  // Success still wins: a run that reached the sentinel can never skip, even if
+  // a recoverable funding warning appeared earlier in its output.
+  assert(
+    codexSmokeCreditSkipReason(`warning: no credits remaining on key A\nCODEX_E2B_DONE`, []) ===
+      null,
+    'a run that produced CODEX_E2B_DONE must never skip'
   );
 }
 

@@ -44,6 +44,8 @@ function hasSafeProviderFailureCode(error: Error): boolean {
     'agentcard_org_wallet_funding_required',
     'agentcard_wallet_funding_required',
     'agentcard_payment_method_required',
+    'agentcard_cardholder_not_found',
+    'agentcard_card_creation_failed',
     'kyc_required',
   ]).has(error.code);
 }
@@ -105,7 +107,6 @@ export async function classifyFundingResumeFailure(
     state.walletFundingPrepared &&
     ((boundaryError instanceof PurchaseError &&
       boundaryError.code === 'agentcard_company_funding_in_progress') ||
-      state.fundingRetryClaimed ||
       ambiguousExternalOutcome ||
       funding?.status === PurchaseWalletFundingStatus.FAILED ||
       walletWasFunded);
@@ -142,6 +143,17 @@ export async function classifyFundingResumeFailure(
     walletFundingPrepared: state.walletFundingPrepared,
     issuedCardId,
   };
+}
+
+function fundingResumeAgentMatches(purchase: PurchaseSpend, input: MintPurchaseInput): boolean {
+  // Null-agent legacy rows remain claimable by any agent (same as tryReuseExistingPurchase).
+  // A different non-null agent must not 409 — the caller should open its own purchase instead.
+  return !(
+    input.agentId !== undefined &&
+    input.agentId.trim() !== '' &&
+    purchase.agentId !== null &&
+    purchase.agentId !== input.agentId
+  );
 }
 
 function assertFundingResumeMatchesInput(purchase: PurchaseSpend, input: MintPurchaseInput): void {
@@ -190,6 +202,7 @@ export async function tryClaimFundingResume(
   now: Date
 ): Promise<PurchaseSpend | null> {
   let candidate = existing;
+  if (!fundingResumeAgentMatches(candidate, input)) return null;
   if (isStaleChargingPurchase(candidate, now)) {
     const funding = await repo.findWalletFundingByPurchaseId(candidate.id);
     if (

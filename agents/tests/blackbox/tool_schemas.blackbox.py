@@ -144,6 +144,27 @@ def test_explore_agent_action_model_accepts_documents_grep():
     assert instance.tool_calls[0].filters == {"document_source": "obsidian"}
 
 
+def test_explore_agent_action_model_accepts_summary_grep():
+    """Explore agents can request aggregate local-data metadata before raw scans."""
+    from utils.tool_schemas import EXPLORE_AGENT_TOOLS, create_agent_action_model
+
+    Model = create_agent_action_model(EXPLORE_AGENT_TOOLS)
+    instance = Model(
+        response="Checking aggregate WhatsApp statistics",
+        tool_calls=[
+            {
+                "tool": "grep",
+                "pattern": "WhatsApp totals",
+                "sources": ["summary"],
+                "source": "summary",
+            }
+        ],
+    )
+
+    assert instance.tool_calls[0].tool == "grep"
+    assert instance.tool_calls[0].sources == ["summary"]
+
+
 def test_planner_assignable_tools():
     """PLANNER_ASSIGNABLE_TOOLS contains expected planner-specific tool names."""
     from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS
@@ -197,11 +218,11 @@ def test_grep_tool_schema_exact_contract():
         "gmail",
         "imessage",
         "whatsapp",
-        "sms",
         "network",
         "agent_network",
         "transactions",
         "documents",
+        "summary",
     }
 
     def _enum_values(prop_schema: dict) -> set:
@@ -384,6 +405,109 @@ def test_spawn_agent_browser_missing_url_raises():
         ),
         "start_url",
     )
+
+
+def test_spawn_agent_browser_recovers_start_url_from_goal():
+    """A browser spawn whose URL lives only in `goal` is repaired, not rejected.
+
+    Regression: benchmark agent-payment-abandonment (agent
+    3e6e3834-44a2-4a2e-84aa-016e8d502280) died after three identical
+    `start_url is required when type='browser'` validation failures. The model
+    consistently put the checkout URL in `goal` and left `start_url` unset, so
+    every blind re-generation reproduced the same omission and no browser agent
+    was ever spawned.
+    """
+    from utils.tool_schemas import (
+        ResponseSchemaConfig,
+        ResponseSchemaFieldConfig,
+        SpawnAgentTool,
+    )
+
+    schema = ResponseSchemaConfig(
+        fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
+    )
+    tool = SpawnAgentTool(
+        tool="spawn_agent",
+        type="browser",
+        goal=(
+            "Navigate to https://example-shop.test/test_payment?benchmark=agentcard-abandonment. "
+            "Select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and "
+            "Canvas Tote. Do not submit payment."
+        ),
+        output_schema=schema,
+    )
+    assert tool.start_url == "https://example-shop.test/test_payment?benchmark=agentcard-abandonment"
+
+
+def test_first_url_in_text_trims_prose_punctuation():
+    """URL recovery strips sentence punctuation and unbalanced brackets."""
+    from utils.tool_schemas import first_url_in_text
+
+    assert first_url_in_text("go to https://a.test/x.") == "https://a.test/x"
+    assert first_url_in_text("see (https://a.test/x) now") == "https://a.test/x"
+    assert first_url_in_text("open https://a.test/x?q=1#frag!") == "https://a.test/x?q=1#frag"
+    assert first_url_in_text("keep https://a.test/path(1) intact") == "https://a.test/path(1)"
+    assert first_url_in_text("no link here") is None
+    assert first_url_in_text("bare https:// scheme") is None
+    assert first_url_in_text(None) is None
+
+
+def test_first_url_in_text_requires_a_host():
+    """Hostless URLs parse but name no server, so they are not recoverable."""
+    from utils.tool_schemas import first_url_in_text
+
+    assert first_url_in_text("go to https:///orders") is None
+    assert first_url_in_text("go to https://?next=orders") is None
+    assert first_url_in_text("go to https://#frag") is None
+
+
+def test_first_url_in_text_rejects_invalid_port():
+    """urlsplit accepts an out-of-range port; only reading .port validates it."""
+    from utils.tool_schemas import first_url_in_text
+
+    assert first_url_in_text("go to https://a.test:99999/checkout") is None
+    assert first_url_in_text("go to https://a.test:notaport/checkout") is None
+    assert first_url_in_text("go to https://a.test:8443/checkout") == "https://a.test:8443/checkout"
+
+
+def test_spawn_agent_browser_refuses_to_recover_cleartext_url():
+    """An http:// goal still fails loudly; only https is repaired.
+
+    The browser restores authenticated session cookies before navigating, so
+    silently promoting a cleartext target inferred from prose would transmit
+    that state in the clear (CWE-319).
+    """
+    from utils.tool_schemas import (
+        ResponseSchemaConfig,
+        ResponseSchemaFieldConfig,
+        SpawnAgentTool,
+    )
+
+    schema = ResponseSchemaConfig(
+        fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
+    )
+    try:
+        SpawnAgentTool(
+            tool="spawn_agent",
+            type="browser",
+            goal="Navigate to http://insecure.test/checkout and pay.",
+            output_schema=schema,
+        )
+    except Exception as exc:  # pydantic wraps the ValueError
+        assert "start_url is required" in str(exc)
+    else:
+        raise AssertionError("cleartext start_url was recovered instead of rejected")
+
+
+def test_url_origin_for_log_drops_credentials_and_query():
+    """Only the origin is logged — never userinfo, path, query, or fragment."""
+    from utils.tool_schemas import url_origin_for_log
+
+    redacted = url_origin_for_log("https://u:pw@a.test/p?token=secret#f")
+    assert redacted == "https://a.test"
+    assert url_origin_for_log("https://a.test:8443/p?token=secret") == "https://a.test:8443"
+    for leak in ("pw", "secret", "token", "/p"):
+        assert leak not in redacted
 
 
 def test_spawn_agent_general_purpose_missing_phase_raises():
@@ -817,6 +941,9 @@ async def run_all_tests():
     r.record(
         "explore_agent_action_model_accepts_documents_grep", test_explore_agent_action_model_accepts_documents_grep
     )
+    r.record(
+        "explore_agent_action_model_accepts_summary_grep", test_explore_agent_action_model_accepts_summary_grep
+    )
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)
@@ -835,6 +962,15 @@ async def run_all_tests():
         test_spawn_agent_type_description_explains_capability_routing,
     )
     r.record("spawn_agent_browser_no_url", test_spawn_agent_browser_missing_url_raises)
+    r.record("spawn_agent_browser_url_from_goal", test_spawn_agent_browser_recovers_start_url_from_goal)
+    r.record("first_url_in_text_trims_punctuation", test_first_url_in_text_trims_prose_punctuation)
+    r.record("first_url_in_text_requires_host", test_first_url_in_text_requires_a_host)
+    r.record("first_url_in_text_rejects_invalid_port", test_first_url_in_text_rejects_invalid_port)
+    r.record(
+        "spawn_agent_browser_rejects_cleartext_url",
+        test_spawn_agent_browser_refuses_to_recover_cleartext_url,
+    )
+    r.record("url_origin_for_log_redacts", test_url_origin_for_log_drops_credentials_and_query)
     r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)
@@ -869,6 +1005,7 @@ async def run_all_tests():
     r.record("create_action_custom_registry", test_create_agent_action_model_custom_registry)
     r.record("agent_action_openai_schema_spawn_items", test_agent_action_openai_schema_has_typed_spawn_agent_items)
     teardown_mock()
+    r.record("all_phase_tools_superset", test_all_phase_tools_superset)
     return r.all_passed
 
 

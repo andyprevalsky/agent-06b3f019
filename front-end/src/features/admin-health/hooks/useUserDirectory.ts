@@ -39,12 +39,17 @@ export function useUserDirectory() {
 
   // Debounce typing into the applied term so each keystroke doesn't hit the DB.
   useEffect(() => {
+    const normalizedSearch = search.trim();
+    // On mount (and after a term has settled), there is nothing to apply. In
+    // particular, do not schedule a stale page-1 reset that can race a quick
+    // pagination click during the initial debounce window.
+    if (normalizedSearch === appliedSearch) return;
     const timer = window.setTimeout(() => {
-      setAppliedSearch(search.trim());
+      setAppliedSearch(normalizedSearch);
       setPage(1);
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [search]);
+  }, [search, appliedSearch]);
 
   useEffect(() => {
     let active = true;

@@ -9,6 +9,8 @@
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
+import { authAssistanceDeploymentFenceTests } from './auth-assistance.deployment-fence-cases';
+import { authAssistanceProviderCompletionTests } from './auth-assistance.provider-cases';
 
 config();
 
@@ -353,6 +355,10 @@ async function testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent(): Promise<vo
     agentId: agent.id,
     debugUrl: 'https://debug.steel.dev/session/def?interactive=false',
   });
+  await prisma.browserSession.update({
+    where: { id: browserSession.id },
+    data: { providerProfileSource: 'steel_session_auth_invalidated' },
+  });
 
   const createRes = await request(`${BASE_URL}/api/auth-assistance`, {
     method: 'POST',
@@ -366,6 +372,18 @@ async function testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent(): Promise<vo
   });
   assertStatus(createRes.status, 201, createRes.data);
   const requestId = String(asRecord(asRecord(createRes.data).request).id);
+
+  await prisma.browserContext.update({
+    where: { id: browserSession.contextId },
+    data: { contextId: null },
+  });
+  await prisma.browserProviderProfile.create({
+    data: {
+      contextId: browserSession.contextId,
+      provider: 'steel',
+      profileId: `stale-profile-${randomUUID()}`,
+    },
+  });
 
   const completeRes = await request(`${BASE_URL}/api/auth-assistance/${requestId}/complete`, {
     method: 'POST',
@@ -386,6 +404,33 @@ async function testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent(): Promise<vo
   assert(steelAuth !== null, 'Completion should upsert SteelSessionAuth');
   assert(steelAuth?.disabledAt === null, 'Completion should clear disabledAt');
   assert(steelAuth?.disabledReason === null, 'Completion should clear disabledReason');
+  const reboundContext = await prisma.browserContext.findUnique({
+    where: { id: browserSession.contextId },
+  });
+  assert(
+    reboundContext?.contextId === browserSession.providerProfileId,
+    'Completion should rebind the authenticated Steel profile to future browser sessions'
+  );
+  const reboundProviderProfile = await prisma.browserProviderProfile.findUnique({
+    where: {
+      contextId_provider: {
+        contextId: browserSession.contextId,
+        provider: 'steel',
+      },
+    },
+  });
+  assert(
+    reboundProviderProfile?.profileId === browserSession.providerProfileId,
+    'Completion should restore the provider-specific Steel profile index'
+  );
+  const reboundSession = await prisma.browserSession.findUnique({
+    where: { id: browserSession.id },
+  });
+  assert(
+    reboundSession?.providerProfileId === browserSession.providerProfileId &&
+      reboundSession.providerProfileSource === 'steel_session_auth',
+    'Completion should reactivate an invalidated sibling profile lineage'
+  );
   const credentialMessage = await prisma.message.findFirst({
     where: {
       agentId: agent.id,
@@ -565,11 +610,13 @@ async function main(): Promise<void> {
       'POST /api/auth-assistance/:id/complete upserts Steel auth idempotently',
       testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent,
     ],
+    ...authAssistanceProviderCompletionTests,
     [
       'POST /api/attention-requests/:id/respond completes auth assistance',
       testAttentionRespondCompletesAuthAssistance,
     ],
     ['manual_step completion does not require Steel auth', testManualModeCompletesWithoutSteelAuth],
+    ...authAssistanceDeploymentFenceTests,
   ];
 
   const results = [];

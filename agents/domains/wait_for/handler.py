@@ -28,6 +28,7 @@ from domains.wait_for.config import (
 )
 from domains.wait_for.service import cap_evidence, evaluate_condition_activity, format_duration
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.source_connect_gates import raise_source_connect_gates
 
 # =============================================================================
 # WAIT_FOR MANAGER
@@ -53,9 +54,7 @@ class WaitForManager(ToolManager):
         resume = tool_call.get("resume") is True
 
         if until_timestamp:
-            async for event in self._timestamp_mode(
-                workflow_instance, until_timestamp, tool_call_id, resume=resume
-            ):
+            async for event in self._timestamp_mode(workflow_instance, until_timestamp, tool_call_id, resume=resume):
                 yield event
         elif condition:
             if not isinstance(description, str) or not 3 <= len(description) <= 80:
@@ -273,6 +272,7 @@ class WaitForManager(ToolManager):
             # persisted into ToolEvent.data / shipped across activity boundaries.
             explore_tool_call_results: list[str] = []
             explore_usage: dict[str, list[Any]] = {}
+            explore_unavailable_sources: list[dict] = []
 
             async for event in spawn_mgr._spawn_explore(
                 workflow_instance,
@@ -285,11 +285,22 @@ class WaitForManager(ToolManager):
                 # Route explore events as spawn_agent messages (correct toolName for FE grouping)
                 await workflow_instance._handle_tool_event(event, explore_tool_call_id, "spawn_agent")
 
-                # Capture usage from the FINISHED event (raw tool results come via the collector)
-                if event.status == MessageStatus.FINISHED and event.data:
-                    explore_usage = event.data.get("usage", {})
+                # Usage is FINISHED-only; unavailable_sources can also arrive on
+                # ERROR when an explore had connector gaps plus another failure.
+                if event.data:
+                    if event.status == MessageStatus.FINISHED:
+                        explore_usage = event.data.get("usage", {})
+                    if "unavailable_sources" in event.data:
+                        explore_unavailable_sources = event.data.get("unavailable_sources") or []
 
-            # Check if explore was cancelled (paused during explore)
+            # Direct _spawn_explore callers must raise source_connect gates the
+            # same way execute_tool does; wait_for previously dropped them.
+            # Skip when already paused so we reach the pause branch below instead
+            # of parking on raise_gate_direct's response wait.
+            if explore_unavailable_sources and not workflow_instance.is_paused:
+                await raise_source_connect_gates(workflow_instance, explore_unavailable_sources)
+
+            # Check if explore was cancelled (paused during explore / gate wait)
             if workflow_instance.is_paused:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,

@@ -1,12 +1,27 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain } from 'electron';
 import path from 'path';
 import { config } from '../base/config';
 import { getPackagedRendererPath } from './packagedPaths';
+import { normalizeQuickQueryPayload } from './quickQueryPayload';
+import { scheduleQuickQueryFocusAttempts } from './quickQueryFocus';
+import {
+  LAUNCHER_WINDOW_HEIGHT,
+  LAUNCHER_WINDOW_MAX_HEIGHT,
+  LAUNCHER_WINDOW_WIDTH,
+  applyQuickQueryWindowHeight,
+  getDevLauncherUrl,
+  parseFileDragActive,
+  positionQuickQueryWindow,
+  resizeQuickQueryWindow,
+} from './quickQueryGeometry';
 
-interface QuickQueryPayload {
-  query: string;
-  submittedAt: number;
-}
+/**
+ * Delay blur→hide so Finder/screenshot file-drags can re-enter the window.
+ * Screenshot thumbnails often spawn in a screen corner; dragging from there to
+ * the bottom-center launcher routinely takes multiple seconds. 500ms was too
+ * short and hid the pill before dragover could cancel the hide.
+ */
+export const QUICK_QUERY_BLUR_HIDE_DELAY_MS = 5_000;
 
 interface QuickQueryControllerOptions {
   getMainWindow: () => BrowserWindow | null;
@@ -16,6 +31,8 @@ interface QuickQueryControllerOptions {
 export class QuickQueryController {
   private quickQueryWindow: BrowserWindow | null = null;
   private blurEnabled = false;
+  private fileDragActive = false;
+  private blurHideTimer: NodeJS.Timeout | null = null;
   private lastHiddenAt = 0;
   private shownAt = 0;
   private focusTimeouts: NodeJS.Timeout[] = [];
@@ -29,12 +46,12 @@ export class QuickQueryController {
 
   createWindow(): BrowserWindow {
     this.quickQueryWindow = new BrowserWindow({
-      width: 500,
-      height: 100,
-      minWidth: 500,
-      maxWidth: 500,
-      minHeight: 100,
-      maxHeight: 100,
+      width: LAUNCHER_WINDOW_WIDTH,
+      height: LAUNCHER_WINDOW_HEIGHT,
+      minWidth: LAUNCHER_WINDOW_WIDTH,
+      maxWidth: LAUNCHER_WINDOW_WIDTH,
+      minHeight: LAUNCHER_WINDOW_HEIGHT,
+      maxHeight: LAUNCHER_WINDOW_MAX_HEIGHT,
       useContentSize: true,
       resizable: false,
       movable: true,
@@ -49,6 +66,8 @@ export class QuickQueryController {
       alwaysOnTop: true,
       hasShadow: false,
       roundedCorners: false,
+      // Inactive window must still accept the first click/drag from Finder.
+      acceptFirstMouse: true,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
@@ -65,11 +84,13 @@ export class QuickQueryController {
 
   registerIpc(): void {
     ipcMain.handle('quick-query:submit', (_event, payload: unknown) => {
-      const queryPayload = this.normalizePayload(payload);
+      const queryPayload = normalizeQuickQueryPayload(payload);
       this.hideWindow({ focusMain: true });
 
       const mainWindow = this.options.getMainWindow();
-      if (mainWindow !== null && queryPayload.query.trim().length > 0) {
+      const hasContent =
+        queryPayload.query.trim().length > 0 || (queryPayload.attachments?.length ?? 0) > 0;
+      if (mainWindow !== null && hasContent) {
         mainWindow.show();
         mainWindow.focus();
         mainWindow.webContents.send('quick-query:submit', queryPayload);
@@ -80,6 +101,15 @@ export class QuickQueryController {
 
     ipcMain.handle('quick-query:hide', () => {
       this.hideWindow({ focusMain: true });
+      return { success: true };
+    });
+
+    ipcMain.handle('quick-query:resize', (_event, payload: unknown) => {
+      return resizeQuickQueryWindow(this.quickQueryWindow, payload);
+    });
+
+    ipcMain.handle('quick-query:file-drag', (_event, payload: unknown) => {
+      this.setFileDragActive(parseFileDragActive(payload));
       return { success: true };
     });
 
@@ -135,7 +165,7 @@ export class QuickQueryController {
   }
 
   private configureWindow(quickWindow: BrowserWindow): void {
-    quickWindow.setContentSize(500, 100);
+    applyQuickQueryWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
     quickWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     quickWindow.setAlwaysOnTop(true, 'screen-saver');
     if (process.platform === 'darwin') {
@@ -143,7 +173,7 @@ export class QuickQueryController {
     }
 
     if (config.isDev) {
-      void quickWindow.loadURL(this.getDevLauncherUrl());
+      void quickWindow.loadURL(getDevLauncherUrl());
     } else {
       void quickWindow.loadFile(getPackagedRendererPath('launcher.html'));
     }
@@ -154,16 +184,59 @@ export class QuickQueryController {
       console.log('[QuickQuery] Bounds:', quickWindow.getBounds());
     });
 
-    quickWindow.on('blur', () => {
-      if (this.blurEnabled) {
-        this.hideWindow();
-      }
+    // Dropping a file onto Electron navigates the webContents by default.
+    quickWindow.webContents.on('will-navigate', (event) => {
+      event.preventDefault();
     });
 
-    quickWindow.on('focus', () => undefined);
+    quickWindow.on('blur', () => {
+      if (!this.blurEnabled) return;
+      // Starting a Finder/screenshot drag steals focus. Defer hide so the
+      // drag can re-enter; renderer cancels via quick-query:file-drag.
+      this.scheduleBlurHide();
+    });
+
+    quickWindow.on('focus', () => {
+      this.cancelBlurHide();
+    });
     quickWindow.on('closed', () => {
       this.quickQueryWindow = null;
     });
+  }
+
+  private setFileDragActive(active: boolean): void {
+    this.fileDragActive = active;
+    if (!active) return;
+
+    this.cancelBlurHide();
+    // Stop focus steals mid-drag — synthetic center-clicks can hit the
+    // paperclip and open Finder while the screenshot thumbnail is in flight.
+    this.clearFocusTimeouts();
+    const quickWindow = this.quickQueryWindow;
+    if (quickWindow === null || quickWindow.isDestroyed()) return;
+
+    // Blur-hide may have already won the race — bring the pill back under
+    // the cursor without stealing focus from the drag source.
+    if (!quickWindow.isVisible()) {
+      quickWindow.showInactive();
+      this.blurEnabled = true;
+      console.log('[QuickQuery] Re-shown inactive for in-flight file drag');
+    }
+  }
+
+  private scheduleBlurHide(): void {
+    this.cancelBlurHide();
+    this.blurHideTimer = setTimeout(() => {
+      this.blurHideTimer = null;
+      if (!this.blurEnabled || this.fileDragActive) return;
+      this.hideWindow();
+    }, QUICK_QUERY_BLUR_HIDE_DELAY_MS);
+  }
+
+  private cancelBlurHide(): void {
+    if (this.blurHideTimer === null) return;
+    clearTimeout(this.blurHideTimer);
+    this.blurHideTimer = null;
   }
 
   private showWindow(): void {
@@ -179,15 +252,18 @@ export class QuickQueryController {
       return;
     }
 
+    this.cancelBlurHide();
+    this.fileDragActive = false;
     this.blurEnabled = false;
     this.shownAt = Date.now();
-    this.positionWindow(quickWindow);
+    applyQuickQueryWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
+    positionQuickQueryWindow(quickWindow);
     app.focus({ steal: true });
     quickWindow.show();
     quickWindow.focus();
     quickWindow.focusOnWebView();
     this.clearFocusTimeouts();
-    this.scheduleFocusAttempts(quickWindow);
+    scheduleQuickQueryFocusAttempts(quickWindow, this.focusTimeouts);
     this.emitToggle(true);
 
     setTimeout(() => {
@@ -203,8 +279,10 @@ export class QuickQueryController {
       return;
     }
 
+    this.cancelBlurHide();
     this.clearFocusTimeouts();
     this.blurEnabled = false;
+    this.fileDragActive = false;
     this.lastHiddenAt = Date.now();
     if (!quickWindow.isDestroyed()) {
       quickWindow.hide();
@@ -230,86 +308,8 @@ export class QuickQueryController {
     }
   }
 
-  private positionWindow(quickWindow: BrowserWindow): void {
-    const cursorPoint = screen.getCursorScreenPoint();
-    const targetDisplay = screen.getDisplayNearestPoint(cursorPoint);
-    const [width] = quickWindow.getSize();
-    const workArea = targetDisplay.workArea ?? targetDisplay.bounds;
-    const x = Math.round(workArea.x + (workArea.width - width) / 2);
-    const y = Math.round(workArea.y + workArea.height * 0.8);
-    quickWindow.setPosition(x, y, false);
-  }
-
-  private scheduleFocusAttempts(quickWindow: BrowserWindow): void {
-    for (const delay of [10, 50, 100, 150, 300, 500, 1000]) {
-      const timeout = setTimeout(() => {
-        if (quickWindow.isDestroyed()) return;
-        app.focus({ steal: true });
-        quickWindow.moveTop();
-        quickWindow.focus();
-        quickWindow.focusOnWebView();
-        quickWindow.webContents.focus();
-        this.clickWindowCenter(quickWindow);
-        void quickWindow.webContents
-          .executeJavaScript(
-            `
-          const input = document.querySelector('input');
-          if (input) {
-            input.click();
-            input.focus();
-          }
-        `
-          )
-          .catch(() => undefined);
-      }, delay);
-      this.focusTimeouts.push(timeout);
-    }
-  }
-
-  private clickWindowCenter(quickWindow: BrowserWindow): void {
-    const bounds = quickWindow.getBounds();
-    const x = Math.round(bounds.width / 2);
-    const y = Math.round(bounds.height / 2);
-    quickWindow.webContents.sendInputEvent({
-      type: 'mouseDown',
-      x,
-      y,
-      button: 'left',
-      clickCount: 1,
-    });
-    quickWindow.webContents.sendInputEvent({
-      type: 'mouseUp',
-      x,
-      y,
-      button: 'left',
-      clickCount: 1,
-    });
-  }
-
   private clearFocusTimeouts(): void {
     this.focusTimeouts.forEach((timeout) => clearTimeout(timeout));
     this.focusTimeouts = [];
-  }
-
-  private normalizePayload(payload: unknown): QuickQueryPayload {
-    if (typeof payload === 'string') {
-      return { query: payload, submittedAt: Date.now() };
-    }
-
-    if (payload !== null && typeof payload === 'object') {
-      const maybePayload = payload as Record<string, unknown>;
-      return {
-        query: typeof maybePayload.query === 'string' ? maybePayload.query : '',
-        submittedAt:
-          typeof maybePayload.submittedAt === 'number' ? maybePayload.submittedAt : Date.now(),
-      };
-    }
-
-    return { query: '', submittedAt: Date.now() };
-  }
-
-  private getDevLauncherUrl(): string {
-    const port = process.env.MAC_APP_PORT ?? '5174';
-    return `http://localhost:${port}/launcher.html`;
   }
 }

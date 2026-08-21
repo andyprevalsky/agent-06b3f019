@@ -47,7 +47,15 @@ VISION_MODELS: frozenset[str] = frozenset({
     "google/gemini-2.5-flash",
     "google/gemini-2.5-pro",
     "google/gemini-3-pro-preview",
+    "google/gemini-3-flash-preview",
     "google/gemini-3.5-flash",
+    "google/gemini-3.6-flash",
+    # Vision-capable per OpenRouter (text+image+video->text). Required by the
+    # rose-1-ultra / rose-1-browser-use waterfalls. A waterfall model missing
+    # from this set silently strips screenshots instead of erroring, so the
+    # browser agent flies blind on that layer — see the invariant test in
+    # tests/blackbox/rose.blackbox.py.
+    "moonshotai/kimi-k3",
     "anthropic/claude-sonnet-4",
     "anthropic/claude-sonnet-4.5",
     "anthropic/claude-haiku-4.5",
@@ -819,11 +827,116 @@ def _strip_system_prompt_boundary(msg: Dict[str, Any]) -> None:
     msg["content"] = blocks
 
 
+def _message_content_to_text(content: Any) -> str:
+    """Best-effort flatten of a message `content` value into plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+                else:
+                    # Structured tool results and provider-specific blocks are
+                    # still conversation history. Preserve their JSON instead
+                    # of silently turning the containing message into empty
+                    # text when no tools are declared on a waterfall retry.
+                    parts.append(json.dumps(block, ensure_ascii=False, sort_keys=True, default=str))
+            elif isinstance(block, str) and block:
+                parts.append(block)
+            elif not isinstance(block, str):
+                parts.append(json.dumps(block, ensure_ascii=False, sort_keys=True, default=str))
+        return "\n".join(parts)
+    return json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def flatten_tool_history_to_text(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Rewrite tool-call history into plain text for a request that declares no tools.
+
+    Google rejects a request whose contents carry functionCall /
+    functionResponse parts while `functionDeclarations` is absent, with a
+    deterministic 400 INVALID_ARGUMENT. That combination is reachable on the
+    waterfall: client.py sends `response_format=None if tools else
+    response_format`, so a structured-output call drops `tools` while the
+    conversation still carries assistant `tool_calls` and `role:"tool"` replies
+    from earlier turns.
+
+    Observed in a benchmark run (agent 64fe48c1, browser-smoke): the identical
+    execute_loop request succeeded on Gemini while the history was 5
+    system/user messages, then failed 10/10 once it reached 8 messages
+    including assistant(tool_calls) + tool.
+
+    Dropping the history outright would lose tool results the model still needs,
+    so preserve them as readable text instead:
+      - assistant.tool_calls -> "[Called <name>(<args>)]" folded into content,
+        with the `tool_calls` key removed.
+      - role:"tool"          -> a user message "[Result of <name>] <content>".
+    Messages with no tool history pass through unchanged.
+    """
+    out: List[Dict[str, Any]] = []
+    # tool_call_id -> function name, so a result can name the call it answers.
+    call_names: Dict[str, str] = {}
+
+    for msg in messages:
+        role = msg.get("role")
+        tool_calls = msg.get("tool_calls")
+
+        if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+            rewritten = dict(msg)
+            rewritten.pop("tool_calls", None)
+            summaries: List[str] = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") if isinstance(call.get("function"), dict) else call
+                name = str(fn.get("name") or "tool")
+                call_id = call.get("id")
+                if isinstance(call_id, str) and call_id:
+                    call_names[call_id] = name
+                args = fn.get("arguments")
+                if not isinstance(args, str):
+                    # `default=str` keeps a non-JSON-native argument value from
+                    # raising TypeError here. This runs while flattening history
+                    # for a provider that declared no tools, so a single exotic
+                    # value must not abort the whole request.
+                    args = json.dumps(args, default=str) if args is not None else ""
+                summaries.append(f"[Called {name}({args})]")
+            existing_text = _message_content_to_text(rewritten.get("content"))
+            joined = "\n".join(summaries)
+            rewritten["content"] = f"{existing_text}\n{joined}".strip() if existing_text else joined
+            out.append(rewritten)
+            continue
+
+        if role == "tool":
+            name = call_names.get(str(msg.get("tool_call_id") or ""), "tool")
+            text = _message_content_to_text(msg.get("content"))
+            # Re-role to `user`: a bare `tool` role is equally invalid without
+            # declared tools, and the result is input the model must still see.
+            out.append({"role": "user", "content": f"[Result of {name}] {text}".strip()})
+            continue
+
+        out.append(dict(msg))
+
+    return out
+
+
 def transform_messages_for_openai(
     messages: List[Dict[str, Any]],
+    *,
+    tools_declared: bool = True,
 ) -> List[Dict[str, Any]]:
     """Transform for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
     Kimi-via-OR, Anthropic-via-OR).
+
+    When `tools_declared` is False, tool-call history is flattened to text
+    first — see `flatten_tool_history_to_text` for the Gemini 400 it avoids.
+    Defaults to True so existing callers keep today's behavior.
 
     cache_control placement contract (waterfall path, OpenRouter-targeted):
 
@@ -844,7 +957,35 @@ def transform_messages_for_openai(
     should set cache_control explicitly on the relevant content blocks
     before calling — those markers are preserved here.
     """
-    out = [dict(m) for m in messages]
+    source = messages if tools_declared else flatten_tool_history_to_text(messages)
+    out: List[Dict[str, Any]] = []
+    declared_tool_names: Dict[str, str] = {}
+    for message in source:
+        rewritten = dict(message)
+        if rewritten.get("role") == "assistant":
+            tool_calls = rewritten.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = call.get("id")
+                    fn = call.get("function")
+                    if not isinstance(call_id, str) or not call_id or not isinstance(fn, dict):
+                        continue
+                    name = fn.get("name")
+                    if isinstance(name, str) and name:
+                        declared_tool_names[call_id] = name
+        elif rewritten.get("role") == "tool":
+            call_id = rewritten.get("tool_call_id")
+            declared_name = declared_tool_names.get(str(call_id or ""))
+            if declared_name:
+                # OpenAI-compatible providers pair tool results by ID, but some
+                # (notably Gemini via OpenRouter) also validate the optional
+                # result name against the assistant declaration. Internal task
+                # metadata can describe the concrete executor instead, so make
+                # the outbound name follow the declared call.
+                rewritten["name"] = declared_name
+        out.append(rewritten)
     if not out:
         return out
 

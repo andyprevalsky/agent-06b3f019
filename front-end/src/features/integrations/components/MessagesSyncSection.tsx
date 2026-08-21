@@ -6,38 +6,43 @@
  * Sub-items:
  *   iMessage: [IDLE] --click--> [SYNCING] --done--> [SYNCED]  (Desktop only)
  *   Gmail:    [IDLE] --plus click--> [CONNECTING] --OAuth--> [CONNECTED + email chips]
- *   WhatsApp, Telegram, Messenger: [COMING_SOON] (static)
+ *   WhatsApp: [DESKTOP_ONLY + download] --paired in Mac app--> [CONNECTED]
+ *   Telegram, Messenger: [COMING_SOON] (static)
  */
 
-import { Loader2, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
+import { hasDamagedGmailAccount } from '../hooks/useIntegrationData';
 import type { ConnectedIntegration, MessageSyncType } from '../types';
-import ConnectedAccountChip from './ConnectedAccountChip';
-import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
+import DropdownIconFrame, { DropdownIconPreset, warningGlowGradient } from './DropdownIconFrame';
+import GmailRow from './GmailRow';
 import {
   ChatSyncIcon,
-  GmailIcon,
   IMessageIcon,
   MessengerIcon,
   TelegramIcon,
-  WhatsAppIcon,
 } from './MessageSyncIcons';
 import SectionToggleButton from './SectionToggleButton';
+import WhatsAppRow from './WhatsAppRow';
 import SyncItemButton from './SyncItemButton';
 
 interface MessagesSyncSectionProps {
   expanded: boolean;
   onToggle: () => void;
   isIMessageAvailable: boolean;
+  isWhatsAppAvailable: boolean;
   iMessageSynced: boolean;
+  whatsAppConnected: boolean;
   messageSyncLoading: MessageSyncType | null;
   onIMessageSync: () => void;
+  onWhatsAppConnect: () => void;
   connectedIntegrations: ConnectedIntegration[];
   connectingProvider: 'gmail' | null;
   disconnectingEmail: string | null;
+  resyncingEmail: string | null;
   onGmailConnect: () => void;
   onGmailDisconnect: (email: string) => void;
+  onGmailResync: (email: string) => void;
 }
 
 const COMING_SOON_BADGE = (
@@ -116,104 +121,36 @@ function IMessageRow({
   );
 }
 
-function GmailEmails({
-  connectedIntegrations,
-  disconnectingEmail,
-  onGmailDisconnect,
-}: {
-  connectedIntegrations: ConnectedIntegration[];
-  disconnectingEmail: string | null;
-  onGmailDisconnect: (email: string) => void;
-}) {
-  const gmail = connectedIntegrations.find((i) => i.name === 'gmail');
-  const emails =
-    gmail?.config?.connectedEmails ||
-    (gmail?.config?.connectedEmail ? [gmail.config.connectedEmail] : []);
-  if (emails.length === 0) return null;
-
-  return (
-    <div className="mt-1 flex min-w-0 flex-wrap gap-1.5">
-      {(emails as string[]).map((email: string) => (
-        <ConnectedAccountChip
-          key={email}
-          label={email}
-          tone="synced"
-          removing={disconnectingEmail === email}
-          onRemove={() => onGmailDisconnect(email)}
-          removeLabel={`Disconnect ${email}`}
-          title="Disconnect Gmail account"
-        />
-      ))}
-    </div>
-  );
-}
-
-function GmailRow({
-  connectedIntegrations,
-  connectingProvider,
-  disconnectingEmail,
-  onGmailConnect,
-  onGmailDisconnect,
-}: {
-  connectedIntegrations: ConnectedIntegration[];
-  connectingProvider: 'gmail' | null;
-  disconnectingEmail: string | null;
-  onGmailConnect: () => void;
-  onGmailDisconnect: (email: string) => void;
-}) {
-  const isConnected = connectedIntegrations.some((i) => i.name === 'gmail');
-  return (
-    <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-      <div className="flex items-center gap-3">
-        <DropdownIconFrame {...DropdownIconPreset.gmail} isSynced={isConnected}>
-          <GmailIcon />
-        </DropdownIconFrame>
-        <div className="flex min-w-0 flex-col">
-          <div className="flex min-w-0 items-center">
-            <span className="truncate text-sm">Gmail</span>
-          </div>
-          <GmailEmails
-            connectedIntegrations={connectedIntegrations}
-            disconnectingEmail={disconnectingEmail}
-            onGmailDisconnect={onGmailDisconnect}
-          />
-        </div>
-      </div>
-      <button
-        onClick={onGmailConnect}
-        disabled={connectingProvider === 'gmail'}
-        className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground disabled:opacity-60"
-      >
-        {connectingProvider === 'gmail' ? (
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-        ) : (
-          <Plus className="w-3.5 h-3.5" />
-        )}
-      </button>
-    </div>
-  );
-}
-
 export default function MessagesSyncSection({
   expanded,
   onToggle,
   isIMessageAvailable,
+  isWhatsAppAvailable,
   iMessageSynced,
+  whatsAppConnected,
   messageSyncLoading,
   onIMessageSync,
+  onWhatsAppConnect,
   connectedIntegrations,
   connectingProvider,
   disconnectingEmail,
+  resyncingEmail,
   onGmailConnect,
   onGmailDisconnect,
+  onGmailResync,
 }: MessagesSyncSectionProps) {
   const anyMessageConnected =
-    iMessageSynced || connectedIntegrations.some((i) => i.name === 'gmail');
+    iMessageSynced || whatsAppConnected || connectedIntegrations.some((i) => i.name === 'gmail');
+  const needsReconnection = hasDamagedGmailAccount(connectedIntegrations);
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...DropdownIconPreset.messagesMain} isSynced={anyMessageConnected}>
+          <DropdownIconFrame
+            {...DropdownIconPreset.messagesMain}
+            isSynced={anyMessageConnected}
+            glowGradient={needsReconnection ? warningGlowGradient : undefined}
+          >
             <ChatSyncIcon />
           </DropdownIconFrame>
           <div className="flex flex-col">
@@ -221,7 +158,12 @@ export default function MessagesSyncSection({
             <span className="text-xs text-muted-foreground">Sync messaging clients</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={anyMessageConnected} onClick={onToggle} />
+        <SectionToggleButton
+          isConnected={anyMessageConnected}
+          needsReconnection={needsReconnection}
+          onClick={onToggle}
+          sectionLabel="Messages"
+        />
       </div>
       {expanded && (
         <div className="border-t border-border">
@@ -235,13 +177,16 @@ export default function MessagesSyncSection({
             connectedIntegrations={connectedIntegrations}
             connectingProvider={connectingProvider}
             disconnectingEmail={disconnectingEmail}
+            resyncingEmail={resyncingEmail}
             onGmailConnect={onGmailConnect}
             onGmailDisconnect={onGmailDisconnect}
+            onGmailResync={onGmailResync}
           />
-          <ComingSoonRow
-            icon={<WhatsAppIcon />}
-            iconFrameProps={DropdownIconPreset.whatsapp}
-            label="WhatsApp"
+          <WhatsAppRow
+            connected={whatsAppConnected}
+            isAvailable={isWhatsAppAvailable}
+            isLoading={messageSyncLoading === 'whatsapp'}
+            onConnect={onWhatsAppConnect}
           />
           <ComingSoonRow
             icon={<TelegramIcon />}

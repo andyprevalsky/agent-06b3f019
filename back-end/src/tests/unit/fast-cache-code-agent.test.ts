@@ -25,6 +25,7 @@ function test(name: string, fn: () => void): void {
 
 test('Claude Code sandbox enables Fast Mode through a live Claude Code model alias', () => {
   const e2bProvider = readFileSync(join(process.cwd(), 'src', 'providers', 'e2b.ts'), 'utf8');
+  const e2bWorkDir = readFileSync(join(process.cwd(), 'src', 'providers', 'e2bWorkDir.ts'), 'utf8');
   const wsServer = readFileSync(
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs'),
     'utf8'
@@ -34,10 +35,22 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'backend must use the upgraded Claude Code model by default'
   );
   assert.ok(
-    e2bProvider.includes(
+    e2bProvider.includes('shouldEnableClaudeCodeFastMode'),
+    'Claude Code Fast Mode must go through the opt-in gate (not raw write-through)'
+  );
+  assert.ok(
+    e2bProvider.includes('shouldInjectClaudeCodeFastModeProxy'),
+    'tee-proxy injection must be gated so Andy write-through cannot bypass opt-in'
+  );
+  assert.ok(
+    !e2bProvider.includes(
       'const codeAgentFastModeActive = fastModeCacheEnabled === true || fastModeWriteEnabled'
     ),
-    'write-only cache runs must use the same Claude Code provider envelope as read-enabled runs'
+    'must not re-enable Fast Mode from write-through alone (k=5 t5 403/cache recurrence)'
+  );
+  assert.ok(
+    e2bProvider.includes('const injectFastModeProxy = shouldInjectClaudeCodeFastModeProxy'),
+    'createClaudeCodeSession must compute injectFastModeProxy before buildFastModeAnthropicEnv'
   );
   assert.ok(
     !e2bProvider.includes('ANTHROPIC_DEFAULT_OPUS_MODEL'),
@@ -57,7 +70,7 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'backend must overlay the checked-in server before launch'
   );
   assert.ok(
-    e2bProvider.includes("const CODE_AGENT_REPO_WORKDIR = '/home/user/workspace'"),
+    e2bWorkDir.includes("const CODE_AGENT_REPO_WORKDIR = '/home/user/workspace'"),
     'backend must use a stable repo workdir for cache replay'
   );
   assert.ok(

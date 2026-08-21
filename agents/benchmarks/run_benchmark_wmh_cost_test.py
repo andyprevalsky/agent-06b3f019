@@ -122,6 +122,7 @@ def test_live_fixture_syncs_complete_browser_auth_when_real(monkeypatch):
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
     calls = []
     monkeypatch.setattr(rb, "_sync_compute_tokens", lambda **_kwargs: calls.append("compute") or True)
+    monkeypatch.setattr(rb, "_sync_email_credentials", lambda: calls.append("email") or True)
     monkeypatch.setattr(
         rb,
         "_sync_browser_credentials",
@@ -130,7 +131,7 @@ def test_live_fixture_syncs_complete_browser_auth_when_real(monkeypatch):
 
     manifest = rb._apply_live_fixture(_fixture_ctx())
 
-    assert calls == ["compute", "browser"]
+    assert calls == ["compute", "email", "browser"]
     assert manifest == {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 

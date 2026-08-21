@@ -120,6 +120,7 @@ export function handleUpdateAgent(
     if (!prev) return prev;
     return {
       ...prev,
+      title: updated.title !== undefined ? updated.title : prev.title,
       progress: updated.progress ?? prev.progress,
       status: updated.status ?? prev.status,
       status_message: updated.statusMessage ?? prev.status_message,
@@ -314,7 +315,7 @@ export function cleanupSubscription(
 
   setStreamingBubbles((prev) => {
     for (const [, bubble] of prev) {
-      if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
+      if (bubble.timeoutId) globalThis.clearTimeout(bubble.timeoutId);
     }
     return new Map();
   });

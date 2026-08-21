@@ -125,12 +125,8 @@ describe('Terminal page', () => {
       const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
-      // Sidebar starts collapsed (compact mode shows only icons, no text).
-      // Expand it by clicking the toggle button.
-      const expandBtn = await screen.findByLabelText('Expand sidebar');
-      await user.click(expandBtn);
-
-      // After expanding, agent goal text should be visible
+      // The sidebar now renders expanded by default (drag-to-resize replaced
+      // the collapse toggle), so goal text is visible without any interaction.
       await waitFor(() => {
         expect(screen.getByText('Test agent')).toBeInTheDocument();
       });
@@ -145,7 +141,10 @@ describe('Terminal page', () => {
     });
 
     it('opens the name-collecting waitlist modal from the opening CTA', async () => {
-      const user = userEvent.setup();
+      // Avoid setTimeout(0)-scheduled user-event steps: under the fully
+      // concurrent coverage gate they can be starved long enough to hit the
+      // suite timeout even though this interaction is synchronous.
+      const user = userEvent.setup({ delay: null });
       // The CTA is for logged-out/anonymous visitors. Keeping the default
       // authenticated fixture here only exposed it transiently during auth init.
       mockAnonymousSession();
@@ -312,7 +311,6 @@ describe('Terminal page', () => {
       );
 
       renderWithProviders(<Terminal />);
-      await user.click(await screen.findByLabelText('Expand sidebar'));
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
@@ -403,7 +401,7 @@ describe('Terminal page', () => {
                       title: 'Subscribe to let Rose complete purchases',
                       reason:
                         'This checkout needs an active subscription before Rose can mint a payment card.',
-                      cta: 'Subscribe · $20/mo',
+                      cta: 'Subscribe · $30/mo',
                     },
                     action: {
                       kind: 'link',
@@ -438,8 +436,7 @@ describe('Terminal page', () => {
       const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
-      await user.click(await screen.findByLabelText('Expand sidebar'));
-
+      expect(await screen.findByText('Integrations')).toBeInTheDocument();
       expect(screen.queryByText('Browse')).not.toBeInTheDocument();
       expect(screen.getByText('Integrations')).toBeInTheDocument();
     });

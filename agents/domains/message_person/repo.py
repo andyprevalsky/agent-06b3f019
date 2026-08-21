@@ -463,6 +463,11 @@ async def generate_message_activity(
     # native (claudeAuth) and OpenRouter-routed Anthropic accept this shape.
     # `transform_messages_for_openai` will idempotently mark the last user
     # message too \u2014 that's the third (and last) breakpoint.
+    # 4096 (not 1024): short emails were still truncated mid-sentence when the
+    # model spent output budget on preamble/reasoning under the old 1024 cap
+    # (incident eab955b6 — approval SMS ended at "Please share the"). call_llm
+    # also escalates once on finish_reason=length; this floor keeps the common
+    # path from needing that retry.
     result = await call_llm(
         messages=[
             {
@@ -476,7 +481,7 @@ async def generate_message_activity(
         ],
         model=model,
         temperature=0.7,
-        max_tokens=1024,
+        max_tokens=4096,
         call_site="message_person",
         agent_id=agent_id,
         claude_token=claude_token,
@@ -492,6 +497,15 @@ async def generate_message_activity(
 
     content = result.get("content", "").strip()
     usage = result.get("usage", {})
+    finish_reason = result.get("finish_reason") or usage.get("finish_reason")
+    if finish_reason == "length":
+        # Refuse to ship a truncated draft to approval/SMS. call_llm should have
+        # escalated already; if we still see length, fail loudly so the tool
+        # retries rather than asking the user to approve an incomplete email.
+        raise ValueError(
+            "Message generation was truncated at the model output limit. "
+            "Retry so the approval shows the full draft."
+        )
 
     # Parse subject from email response
     subject = None

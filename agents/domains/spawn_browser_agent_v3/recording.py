@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import html
+import io
 import json
 import mimetypes
 import os
@@ -19,8 +21,9 @@ import shutil
 import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
@@ -72,7 +75,7 @@ def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool
 
 
 def steel_api_url(path: str) -> str:
-    base_url = os.getenv("STEEL_BASE_URL", "https://connect.steelbrowser.com").rstrip("/")
+    base_url = os.getenv("STEEL_BASE_URL", "https://api.steel.dev").rstrip("/")
     return f"{base_url}/{path.lstrip('/')}"
 
 
@@ -215,6 +218,87 @@ def _mask_sensitive_headers(headers: Any) -> Dict[str, str]:
         text = str(value)
         masked[key] = f"<redacted {len(text)} chars>" if key in _SENSITIVE_HEADERS else text
     return masked
+
+
+_CONSOLE_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(auth(?:orization)?|bearer|card|cookie|credential|cvv|email|key|otp|pass(?:code|word)?|"
+    r"phone|secret|session|signature|token)(\s*[:=]\s*)([^\s,;]+)"
+)
+_CONSOLE_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_CONSOLE_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+_CONSOLE_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+_DIAGNOSTIC_HEADER_SECRET_MARKERS = (
+    "auth",
+    "cookie",
+    "credential",
+    "key",
+    "otp",
+    "pass",
+    "secret",
+    "session",
+    "signature",
+    "token",
+)
+
+
+def _redact_console_text(value: Any, *, limit: int = 4096) -> str:
+    """Bound and redact page-controlled console text before durable storage."""
+    text = str(value or "")
+    text = _CONSOLE_URL_RE.sub(lambda match: _redact_url_query(match.group(0)), text)
+    text = _CONSOLE_BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = _CONSOLE_JWT_RE.sub("[REDACTED JWT]", text)
+    text = _CONSOLE_SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
+    return _truncate_text(text, max(0, limit)) or ""
+
+
+def _diagnostic_headers(headers: Any) -> Dict[str, str]:
+    """Redact and bound headers more strictly than the agent-facing live tool."""
+    redacted: Dict[str, str] = {}
+    for index, (name, value) in enumerate(_coerce_header_map(headers).items()):
+        if index >= 100:
+            break
+        if any(marker in name for marker in _DIAGNOSTIC_HEADER_SECRET_MARKERS):
+            redacted[name] = "[REDACTED]"
+        else:
+            redacted[name] = _redact_console_text(value, limit=2048)
+    return redacted
+
+
+def _console_remote_object_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _redact_console_text(value)
+    if value.get("value") is not None:
+        raw = value.get("value")
+        if isinstance(raw, (dict, list)):
+            with contextlib.suppress(TypeError, ValueError):
+                return _redact_console_text(json.dumps(raw, ensure_ascii=False, default=str))
+        return _redact_console_text(raw)
+    description = value.get("description")
+    if description is not None:
+        return _redact_console_text(description)
+    subtype = value.get("subtype")
+    object_type = value.get("type")
+    return _redact_console_text(subtype or object_type or "unknown")
+
+
+def _console_stack_frames(stack_trace: Any) -> List[Dict[str, Any]]:
+    if not isinstance(stack_trace, dict):
+        return []
+    frames: List[Dict[str, Any]] = []
+    for frame in stack_trace.get("callFrames") or []:
+        if not isinstance(frame, dict):
+            continue
+        frames.append(
+            {
+                "function": _redact_console_text(frame.get("functionName") or "", limit=256),
+                "url": _redact_url_query(str(frame.get("url") or "")),
+                "line": frame.get("lineNumber"),
+                "column": frame.get("columnNumber"),
+            }
+        )
+        if len(frames) >= 20:
+            break
+    return frames
 
 
 def _encoded_len(text: Any) -> int:
@@ -1112,7 +1196,10 @@ class BrowserAgentRecorder:
         if self._cursor and "cursor" not in next_metadata:
             next_metadata["cursor"] = dict(self._cursor)
         self._last_metadata = next_metadata
-        await self.capture(label, action=action, metadata=next_metadata, force=force)
+        # capture() already swallows screenshot/write failures; suppress any
+        # unexpected escape so a recording glitch cannot abort Place order.
+        with contextlib.suppress(Exception):
+            await self.capture(label, action=action, metadata=next_metadata, force=force)
 
     async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> tuple[bytes, str]:
         # Forced (action) frames get the full budget; best-effort idle frames use
@@ -1140,6 +1227,9 @@ class BrowserAgentRecorder:
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> None:
+        # Recording is best-effort diagnostics. A missing /tmp scratch dir,
+        # mid-run cleanup, or write failure must NEVER abort the browser agent
+        # (prod purchase fleet died on FileNotFoundError during post-click mark).
         if self.uses_kernel_replay or self._closed or len(self.frames) >= self.max_frames:
             return
         async with self._capture_lock:
@@ -1163,7 +1253,19 @@ class BrowserAgentRecorder:
             self._frame_index += 1
             filename = f"frame_{self._frame_index:05d}.jpg"
             frame_path = self.frames_dir / filename
-            frame_path.write_bytes(image_bytes)
+            try:
+                self.frames_dir.mkdir(parents=True, exist_ok=True)
+                frame_path.write_bytes(image_bytes)
+            except OSError as exc:
+                self._consecutive_failures += 1
+                logger.warning(
+                    "Browser agent recording frame write failed",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    frame=filename,
+                    error=str(exc),
+                )
+                return
             self.frames.append(
                 {
                     "src": f"frames/{filename}",
@@ -1929,6 +2031,203 @@ def provider_exit_monitoring_enabled() -> bool:
 
 
 _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
+# Kept for log/search continuity; new exits use CRITICAL_RESOURCE_BLOCK_REASON.
+_PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
+_CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
+_API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
+# Network failures that mean "this exit cannot fetch the resource" — includes
+# ORB and classic proxy tunnel deaths.
+_RESOURCE_BLOCK_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_connection_refused",
+    "err_blocked_by_orb",
+    "err_blocked_by_response",
+    "err_blocked_by_client",
+)
+# Alias used by older call sites / tests.
+_TUNNEL_FAILURE_MARKERS = _RESOURCE_BLOCK_MARKERS
+# Optional noise: blocked analytics must not rotate the browser exit.
+_OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "googleadservices.com",
+    "doubleclick.net",
+    "facebook.net",
+    "facebook.com",
+    "hotjar.com",
+    "segment.com",
+    "segment.io",
+    "mixpanel.com",
+    "amplitude.com",
+    "sentry.io",
+    "newrelic.com",
+    "nr-data.net",
+    "clarity.ms",
+)
+_API_CHALLENGE_HTML_MARKERS = (
+    "access denied",
+    "attention required",
+    "just a moment",
+    "cf-chl-",
+    "/cdn-cgi/challenge-platform",
+    "challenges.cloudflare.com/turnstile",
+)
+_API_CHALLENGE_RESOURCE_TYPES = {"xhr", "fetch", "document"}
+# Cap automatic API-challenge exits so cookie-stage loops cannot be replaced by
+# an unbounded config-search thrash on a permanently blocked endpoint.
+_MAX_API_CHALLENGE_PROVIDER_EXITS = 2
+# Cap automatic critical-resource exit rotations per recorder so a bad proxy
+# cannot thrash recover_from_challenge forever.
+_MAX_CRITICAL_RESOURCE_PROVIDER_EXITS = 2
+# Backward-compat alias (tests + older call sites).
+_MAX_PAYMENT_CDN_PROVIDER_EXITS = _MAX_CRITICAL_RESOURCE_PROVIDER_EXITS
+_MAX_GENERIC_SCRIPT_PROVIDER_EXITS = 1
+
+
+def _host_looks_like_script_cdn(url: str) -> bool:
+    """Shape heuristic: ``js.*`` hosts (no vendor allowlists, no path markers)."""
+    host = (urlparse(url).hostname or "").lower()
+    if host and host.split(".", 1)[0] == "js":
+        return True
+    return False
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """True when both URLs share scheme, host, and effective port."""
+    left = urlparse(a or "")
+    right = urlparse(b or "")
+    if not left.scheme or not right.scheme or not left.hostname or not right.hostname:
+        return False
+    try:
+        left_port = left.port or {"http": 80, "https": 443}.get(left.scheme.lower())
+        right_port = right.port or {"http": 80, "https": 443}.get(right.scheme.lower())
+    except ValueError:
+        return False
+    return (left.scheme.lower(), left.hostname.lower(), left_port) == (
+        right.scheme.lower(),
+        right.hostname.lower(),
+        right_port,
+    )
+
+
+def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
+    """Backward-compatible critical script-CDN tunnel check (no vendor hosts)."""
+    err = (error_text or "").lower()
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
+        return False
+    return _host_looks_like_script_cdn(url or "")
+
+
+def _is_critical_resource_block(
+    url: str,
+    error_text: str,
+    *,
+    resource_type: str = "",
+    document_url: str | None = None,
+) -> bool:
+    """True when a page-critical third-party request is blocked on this exit.
+
+    Shape-based only: js.*/script-like hosts OR cross-origin ``script`` resources
+    that die with tunnel/ORB/client-block errors. Soft third-parties (analytics)
+    never rotate. No vendor host allowlists.
+    """
+    err = (error_text or "").lower()
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if any(fragment in host for fragment in _OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS):
+        return False
+    if _host_looks_like_script_cdn(url or ""):
+        # First-party script failures stay on the page; only third-party CDNs rotate.
+        if document_url and _same_origin(url or "", document_url):
+            return False
+        return True
+    if (resource_type or "").lower() != "script":
+        return False
+    if document_url:
+        return not _same_origin(url or "", document_url)
+    return True
+
+
+_API_CHALLENGE_LARGE_HTML_BYTES = 20_000
+_STATIC_ASSET_SUFFIXES = (
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".css",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".webp",
+    ".mp4",
+    ".webm",
+    ".map",
+)
+
+
+def _url_looks_like_static_asset(url: str) -> bool:
+    path = (urlparse(url).path or "").lower()
+    return any(path.endswith(suffix) for suffix in _STATIC_ASSET_SUFFIXES)
+
+
+def _is_api_challenge_html_response(
+    *,
+    status: Any,
+    url: str,
+    resource_type: str,
+    mime_type: str,
+    body_bytes: bytes,
+    document_url: str | None = None,
+) -> bool:
+    """True when a same-tab XHR/fetch/document returns CF challenge HTML.
+
+    Document GET can look clean while same-origin POSTs 403 with a large
+    challenge page. Cookie-stage recovery only GET-probes the document URL and
+    false-succeeds; treat the API challenge as a provider-exit signal instead.
+    When ``document_url`` is provided, require same-origin with ``url`` so a
+    third-party 403 HTML body cannot rotate the exit.
+
+    No cart/checkout path allowlists. Large HTML 403s count unless the URL is a
+    static asset (fonts/css/images) — those are not API challenge pages.
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if code != 403:
+        return False
+    resource = (resource_type or "").lower()
+    if resource and resource not in _API_CHALLENGE_RESOURCE_TYPES:
+        return False
+    if not (url or "").startswith("http"):
+        return False
+    if document_url and not _same_origin(url, document_url):
+        return False
+    sample = body_bytes[:12_000].decode("utf-8", errors="ignore").lower()
+    mime = (mime_type or "").lower()
+    looks_html = "html" in mime or "<html" in sample[:800] or "<!doctype html" in sample[:800]
+    if not looks_html:
+        return False
+    if any(marker in sample for marker in _API_CHALLENGE_HTML_MARKERS):
+        return True
+    if _url_looks_like_static_asset(url):
+        return False
+    return len(body_bytes) >= _API_CHALLENGE_LARGE_HTML_BYTES
+
+
+def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
+    """Rotate on critical third-party blocks for any real document URL.
+
+    No payment/checkout path allowlists and no inventory-path exclusions —
+    exit caps bound thrash instead.
+    """
+    return bool((document_url or "").strip())
 
 
 def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
@@ -2096,8 +2395,13 @@ class BrowserNetworkRecorder:
         self.session_id = session_id
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
+        self.console_dir = self.output_dir / "console"
+        self.network_index_path = self.network_dir / "index.json"
+        self.console_index_path = self.console_dir / "index.json"
         self.persists_network_log = persist_network_log
         self.entries: Dict[str, Dict[str, Any]] = {}
+        self._diagnostic_entries: List[Dict[str, Any]] = []
+        self.console_entries: List[Dict[str, Any]] = []
         # Request IDs that were in flight when the agent last cleared the buffer
         # (read_network_requests clear=True). Their late response events must NOT
         # resurrect a pre-clear entry, or the next read would leak old traffic.
@@ -2111,6 +2415,9 @@ class BrowserNetworkRecorder:
         self._tasks: set[asyncio.Task] = set()
         self._provider_exit_rejections: List[Dict[str, Any]] = []
         self._rejected_network_generations: set[int] = set()
+        self._payment_cdn_provider_exits = 0
+        self._generic_script_provider_exits = 0
+        self._api_challenge_provider_exits = 0
         self._cdp_client: Any = None
         # CDP requestId values are scoped to one remote browser connection and
         # can repeat after challenge recovery promotes another provider/session.
@@ -2119,9 +2426,15 @@ class BrowserNetworkRecorder:
         self._network_generation = 0
         self._body_index = 0
         self._max_entries = max(1, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_ENTRIES", "600")))
+        self._max_console_entries = max(1, int(os.getenv("BROWSER_AGENT_CONSOLE_MAX_ENTRIES", "500")))
         self._max_body_bytes = max(1024, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_BODY_BYTES", "262144")))
         if not self.persists_network_log:
             self._max_body_bytes = min(self._max_body_bytes, 65_536)
+        # Lightweight classification fields for in-flight requests. Survives
+        # bounded ``entries`` eviction so loadingFailed can still reject a
+        # provider exit (Stripe/critical script) after the capture row is gone.
+        self._active_request_meta: Dict[str, Dict[str, Any]] = {}
+        self._max_active_request_meta = max(self._max_entries * 2, 256)
         # Response bodies the agent can read back via read_network_requests.
         # Kept separate from `entries` so the byte budget is enforced on the only
         # unbounded axis: one browser session must not hold tens of MB of page
@@ -2189,8 +2502,11 @@ class BrowserNetworkRecorder:
         return recorder
 
     async def start(self) -> None:
-        if self.persists_network_log:
-            self.network_dir.mkdir(parents=True, exist_ok=True)
+        # Metadata + console diagnostics are always persisted. The flag only
+        # controls response-body files, which are much larger and may contain
+        # page data unsuitable for the attached redacted bundle.
+        self.network_dir.mkdir(parents=True, exist_ok=True)
+        self.console_dir.mkdir(parents=True, exist_ok=True)
         cdp_session = await self.browser_session.get_or_create_cdp_session()
         cdp_client = getattr(self.browser_session, "cdp_client", None) or cdp_session.cdp_client
         self._cdp_client = cdp_client
@@ -2219,6 +2535,7 @@ class BrowserNetworkRecorder:
         )
 
         await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
+        await self._start_console_capture(cdp_client, cdp_session.session_id, generation)
         logger.info(
             (
                 "Browser network response-body recording started"
@@ -2230,6 +2547,183 @@ class BrowserNetworkRecorder:
             session_id=self.session_id,
             **({"output_dir": str(self.network_dir)} if self.persists_network_log else {}),
         )
+
+    async def _start_console_capture(self, cdp_client: Any, session_id: str, generation: int) -> None:
+        """Capture page console, uncaught exceptions, and browser log entries."""
+        register = getattr(cdp_client, "register", None)
+        send = getattr(cdp_client, "send", None)
+        runtime_register = getattr(register, "Runtime", None) if register is not None else None
+        runtime_send = getattr(send, "Runtime", None) if send is not None else None
+        log_register = getattr(register, "Log", None) if register is not None else None
+        log_send = getattr(send, "Log", None) if send is not None else None
+        webauthn_register = getattr(register, "WebAuthn", None) if register is not None else None
+
+        try:
+            if runtime_register is not None and runtime_send is not None:
+                runtime_register.consoleAPICalled(
+                    lambda event, event_session_id: self._on_console_api_called(
+                        event, event_session_id, generation
+                    )
+                )
+                runtime_register.exceptionThrown(
+                    lambda event, event_session_id: self._on_exception_thrown(
+                        event, event_session_id, generation
+                    )
+                )
+                await runtime_send.enable(session_id=session_id)
+        except Exception as exc:
+            logger.warning(
+                "Browser console Runtime capture failed to start",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc),
+            )
+
+        try:
+            if log_register is not None and log_send is not None:
+                log_register.entryAdded(
+                    lambda event, event_session_id: self._on_log_entry_added(
+                        event, event_session_id, generation
+                    )
+                )
+                await log_send.enable(session_id=session_id)
+        except Exception as exc:
+            logger.warning(
+                "Browser console Log capture failed to start",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc),
+            )
+
+        try:
+            if webauthn_register is not None:
+                webauthn_register.credentialAsserted(
+                    lambda event, event_session_id: self._on_webauthn_credential_asserted(
+                        event, event_session_id, generation
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                "Browser WebAuthn assertion capture failed to start",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc),
+            )
+
+    def _append_console_entry(self, entry: Dict[str, Any]) -> None:
+        self.console_entries.append(entry)
+        overflow = len(self.console_entries) - self._max_console_entries
+        if overflow > 0:
+            del self.console_entries[:overflow]
+
+    def _on_console_api_called(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        try:
+            self._append_console_entry(
+                {
+                    "kind": "console",
+                    "level": str(event.get("type") or "log"),
+                    "text": " ".join(_console_remote_object_text(arg) for arg in (event.get("args") or [])),
+                    "timestamp": event.get("timestamp"),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                    "execution_context_id": event.get("executionContextId"),
+                    "stack": _console_stack_frames(event.get("stackTrace")),
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser console event capture failed", error=str(exc))
+
+    def _on_exception_thrown(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        try:
+            details = event.get("exceptionDetails") or {}
+            exception = details.get("exception") or {}
+            text = exception.get("description") or exception.get("value") or details.get("text") or "Uncaught exception"
+            self._append_console_entry(
+                {
+                    "kind": "exception",
+                    "level": "error",
+                    "text": _redact_console_text(text),
+                    "url": _redact_url_query(str(details.get("url") or "")),
+                    "line": details.get("lineNumber"),
+                    "column": details.get("columnNumber"),
+                    "timestamp": event.get("timestamp"),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                    "stack": _console_stack_frames(details.get("stackTrace")),
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser exception capture failed", error=str(exc))
+
+    def _on_log_entry_added(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        try:
+            entry = event.get("entry") or {}
+            self._append_console_entry(
+                {
+                    "kind": "browser_log",
+                    "source": str(entry.get("source") or ""),
+                    "level": str(entry.get("level") or "log"),
+                    "text": _redact_console_text(entry.get("text") or ""),
+                    "url": _redact_url_query(str(entry.get("url") or "")),
+                    "line": entry.get("lineNumber"),
+                    "timestamp": entry.get("timestamp"),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser log entry capture failed", error=str(exc))
+
+    def _on_webauthn_credential_asserted(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        """Record proof of assertion without persisting credential/user material."""
+        try:
+            credential = event.get("credential") or {}
+            credential_id = str(credential.get("credentialId") or "")
+            authenticator_id = str(event.get("authenticatorId") or "")
+            self._append_console_entry(
+                {
+                    "kind": "webauthn_credential_asserted",
+                    "rp_id": _redact_console_text(credential.get("rpId") or "", limit=512),
+                    "sign_count": credential.get("signCount"),
+                    "is_resident_credential": credential.get("isResidentCredential"),
+                    "backup_eligibility": credential.get("backupEligibility"),
+                    "backup_state": credential.get("backupState"),
+                    "credential_id_sha256": (
+                        hashlib.sha256(credential_id.encode("utf-8")).hexdigest()
+                        if credential_id
+                        else None
+                    ),
+                    "authenticator_id_sha256": (
+                        hashlib.sha256(authenticator_id.encode("utf-8")).hexdigest()
+                        if authenticator_id
+                        else None
+                    ),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser WebAuthn assertion capture failed", error=str(exc))
 
     async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
         """Attach the same logical network log to a promoted browser session."""
@@ -2276,11 +2770,133 @@ class BrowserNetworkRecorder:
         The tool reads newest-first, so overflow must evict the OLDEST request —
         the previous behaviour refused to record NEW requests once full, which
         made every API call after a heavy page load invisible to the agent.
+
+        Eviction must NOT clear ``_active_request_meta``: an in-flight Stripe or
+        critical-script request may still emit loadingFailed after its capture
+        row is gone, and provider-exit classification needs those fields.
         """
         while len(self.entries) > self._max_entries:
             oldest_key = next(iter(self.entries))
-            self.entries.pop(oldest_key, None)
+            evicted = self.entries.pop(oldest_key, None)
+            if evicted:
+                self._append_diagnostic_entry(evicted)
             self._discard_body(oldest_key)
+
+    def _remember_active_request_meta(
+        self,
+        request_key: str,
+        *,
+        url: str,
+        document_url: str = "",
+        resource_type: str = "",
+        browser_generation: int | None = None,
+    ) -> None:
+        """Retain classification fields for an in-flight request outside ``entries``."""
+        meta = getattr(self, "_active_request_meta", None)
+        if meta is None:
+            meta = {}
+            self._active_request_meta = meta
+        meta[request_key] = {
+            "url": url,
+            "document_url": document_url or "",
+            "resource_type": resource_type or "",
+            "browser_generation": browser_generation,
+        }
+        self._prune_active_request_meta()
+
+    def _clear_active_request_meta(self, request_key: str | None) -> None:
+        if not request_key:
+            return
+        meta = getattr(self, "_active_request_meta", None)
+        if meta is not None:
+            meta.pop(request_key, None)
+
+    def _prune_active_request_meta(self) -> None:
+        """Bound the meta map so abandoned CDP ids cannot grow without limit."""
+        meta = getattr(self, "_active_request_meta", None)
+        if not meta:
+            return
+        max_meta = int(getattr(self, "_max_active_request_meta", 0) or 0)
+        if max_meta <= 0:
+            max_meta = max(int(getattr(self, "_max_entries", 600) or 600) * 2, 256)
+            self._max_active_request_meta = max_meta
+        if len(meta) <= max_meta:
+            return
+        active_ids = getattr(self, "_active_request_ids", set())
+        # Prefer dropping metadata for requests no longer considered in-flight.
+        for key in list(meta):
+            if key not in active_ids:
+                meta.pop(key, None)
+                if len(meta) <= max_meta:
+                    return
+        # Still over: drop oldest keys (dict insertion order) to protect heap.
+        while len(meta) > max_meta:
+            oldest_key = next(iter(meta))
+            meta.pop(oldest_key, None)
+
+    def _redacted_network_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the bounded, secret-safe network row used for durable diagnostics."""
+        scalar_fields = (
+            "request_id",
+            "browser_generation",
+            "session_id",
+            "method",
+            "resource_type",
+            "has_post_data",
+            "initiator",
+            "request_ts_ms",
+            "status",
+            "status_text",
+            "mime_type",
+            "protocol",
+            "remote_address",
+            "from_cache",
+            "response_ts_ms",
+            "encoded_data_length",
+            "terminal",
+            "body_size",
+            "body_truncated",
+            "body_base64_encoded",
+            "body_captured_at_ms",
+            "body_file",
+            "failed",
+        )
+        redacted = {
+            field: entry.get(field)
+            for field in scalar_fields
+            if entry.get(field) is not None
+        }
+        redacted["url"] = _redact_url_query(str(entry.get("url") or ""))
+        redacted["request_headers"] = _diagnostic_headers(entry.get("request_headers"))
+        redacted["response_headers"] = _diagnostic_headers(entry.get("response_headers"))
+        redirects = []
+        for hop in entry.get("redirects") or []:
+            if not isinstance(hop, dict):
+                continue
+            redirects.append(
+                {
+                    "url": _redact_url_query(str(hop.get("url") or "")),
+                    "status": hop.get("status"),
+                    "location": _redact_url_query(str(hop.get("location") or "")),
+                }
+            )
+        if redirects:
+            redacted["redirects"] = redirects
+        if entry.get("failure"):
+            redacted["failure"] = _redact_console_text(entry.get("failure"), limit=1024)
+        if entry.get("body_error"):
+            redacted["body_error"] = _redact_console_text(entry.get("body_error"), limit=1024)
+        return redacted
+
+    def _append_diagnostic_entry(self, entry: Dict[str, Any]) -> None:
+        diagnostic_entries = getattr(self, "_diagnostic_entries", None)
+        if diagnostic_entries is None:
+            diagnostic_entries = []
+            self._diagnostic_entries = diagnostic_entries
+        diagnostic_entries.append(self._redacted_network_entry(entry))
+        overflow = len(diagnostic_entries) - getattr(self, "_max_entries", 600)
+        if overflow > 0:
+            del diagnostic_entries[:overflow]
 
     def _discard_body(self, request_key: str) -> None:
         self._bodies.pop(request_key, None)
@@ -2361,6 +2977,7 @@ class BrowserNetworkRecorder:
                 "session_id": session_id,
                 "method": request.get("method"),
                 "url": url,
+                "document_url": str(event.get("documentURL") or ""),
                 "resource_type": resource_type,
                 "request_headers": _coerce_header_map(request.get("headers")),
                 # Default-deny: only allowlisted anti-bot endpoints retain a body,
@@ -2377,6 +2994,13 @@ class BrowserNetworkRecorder:
                 "redirects": redirects,
                 "request_ts_ms": int((time.monotonic() - self._started_at) * 1000),
             }
+            self._remember_active_request_meta(
+                request_key,
+                url=url,
+                document_url=str(event.get("documentURL") or ""),
+                resource_type=resource_type,
+                browser_generation=generation,
+            )
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network request capture failed", error=str(exc))
@@ -2430,6 +3054,13 @@ class BrowserNetworkRecorder:
                     "response_ts_ms": int((time.monotonic() - self._started_at) * 1000),
                 }
             )
+            self._remember_active_request_meta(
+                request_key,
+                url=str(entry.get("url") or url),
+                document_url=str(entry.get("document_url") or ""),
+                resource_type=str(entry.get("resource_type") or resource_type or ""),
+                browser_generation=entry.get("browser_generation", generation),
+            )
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network response capture failed", error=str(exc))
@@ -2446,6 +3077,7 @@ class BrowserNetworkRecorder:
         if request_id:
             self._ignored_request_ids.discard(request_key)
             self._active_request_ids.discard(request_key)
+            self._clear_active_request_meta(request_key)
         if not request_id or request_key not in self.entries:
             return
         entry = self.entries[request_key]
@@ -2483,10 +3115,100 @@ class BrowserNetworkRecorder:
         if request_id:
             self._ignored_request_ids.discard(request_key)
             self._active_request_ids.discard(request_key)
-        if request_id and request_key in self.entries:
-            self.entries[request_key]["failed"] = True
-            self.entries[request_key]["failure"] = event.get("errorText")
-            self.entries[request_key]["terminal"] = True
+        entry = self.entries.get(request_key) if request_id and request_key else None
+        meta = None
+        if request_id and request_key:
+            active_meta = getattr(self, "_active_request_meta", None)
+            if active_meta is not None:
+                meta = active_meta.pop(request_key, None)
+        if entry is not None:
+            entry["failed"] = True
+            entry["failure"] = event.get("errorText")
+            entry["terminal"] = True
+        # Prefer the capture row; fall back to meta retained across entry eviction
+        # so provider-exit classification still runs for in-flight critical scripts.
+        source = entry if entry is not None else meta
+        if not request_id or source is None:
+            return
+        # Critical third-party script/CDN died with tunnel/ORB — rotate the
+        # provider exit so recovery searches a fresh IP before the agent loops.
+        entry_generation = int(source.get("browser_generation") or generation or 0)
+        current_generation = int(getattr(self, "_network_generation", entry_generation))
+        rejected_generations = getattr(self, "_rejected_network_generations", set())
+        document_url = str(source.get("document_url") or "")
+        if (
+            entry_generation == current_generation
+            and entry_generation not in rejected_generations
+            and _is_critical_resource_block(
+                str(source.get("url") or ""),
+                str(event.get("errorText") or ""),
+                resource_type=str(source.get("resource_type") or ""),
+                document_url=document_url or None,
+            )
+        ):
+            if not _document_warrants_payment_cdn_exit(document_url):
+                logger.info(
+                    "Ignoring critical resource block on empty document URL",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    browser_generation=entry_generation,
+                    document_url=_redact_url_query(document_url),
+                    url=_redact_url_query(str(source.get("url") or "")),
+                )
+            else:
+                blocked_url = str(source.get("url") or "")
+                blocked_url_is_script_cdn = _host_looks_like_script_cdn(blocked_url)
+                payment_exits = int(getattr(self, "_payment_cdn_provider_exits", 0))
+                generic_exits = int(getattr(self, "_generic_script_provider_exits", 0))
+                if blocked_url_is_script_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
+                    logger.warning(
+                        "Critical resource block ignored: provider-exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
+                    )
+                elif (
+                    not blocked_url_is_script_cdn
+                    and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
+                ):
+                    logger.warning(
+                        "Critical resource block ignored: generic-script exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_GENERIC_SCRIPT_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(entry_generation)
+                    self._rejected_network_generations = rejected_generations
+                    if blocked_url_is_script_cdn:
+                        self._payment_cdn_provider_exits = payment_exits + 1
+                    else:
+                        self._generic_script_provider_exits = generic_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
+                            "url": _redact_url_query(blocked_url),
+                            "browser_generation": entry_generation,
+                            "document_url": _redact_url_query(document_url),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: critical third-party resource blocked",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(str(source.get("url") or "")),
+                        error=event.get("errorText"),
+                    )
 
     async def _fetch_response_body(
         self,
@@ -2513,12 +3235,12 @@ class BrowserNetworkRecorder:
             if truncated:
                 body_bytes = body_bytes[: self._max_body_bytes]
 
+            generation = int(entry.get("browser_generation") or 0)
+            current_generation = int(getattr(self, "_network_generation", generation))
+            rejected_generations = getattr(self, "_rejected_network_generations", set())
             if "json" in str(entry.get("mime_type", "")).lower():
                 with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
                     payload = json.loads(body_bytes.decode("utf-8"))
-                    generation = int(entry.get("browser_generation") or 0)
-                    current_generation = int(getattr(self, "_network_generation", generation))
-                    rejected_generations = getattr(self, "_rejected_network_generations", set())
                     if (
                         generation == current_generation
                         and generation not in rejected_generations
@@ -2541,6 +3263,50 @@ class BrowserNetworkRecorder:
                             task_id=self.task_id,
                             browser_generation=generation,
                         )
+            if (
+                generation == current_generation
+                and generation not in rejected_generations
+                and _is_api_challenge_html_response(
+                    status=entry.get("status"),
+                    url=str(entry.get("url") or ""),
+                    resource_type=str(entry.get("resource_type") or ""),
+                    mime_type=str(entry.get("mime_type") or ""),
+                    body_bytes=body_bytes,
+                    document_url=entry.get("document_url"),
+                )
+            ):
+                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
+                    logger.warning(
+                        "API challenge HTML provider-exit ignored: cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(generation)
+                    self._rejected_network_generations = rejected_generations
+                    self._api_challenge_provider_exits = api_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _API_CHALLENGE_HTML_REASON,
+                            "url": _redact_url_query(str(entry.get("url") or "")),
+                            "browser_generation": generation,
+                            "status": entry.get("status"),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: API returned challenge HTML",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        status=entry.get("status"),
+                    )
 
             entry.update(
                 {
@@ -2703,15 +3469,123 @@ class BrowserNetworkRecorder:
             # while the buffer was full, so late response events cannot resurrect
             # pre-clear traffic. Terminal events remove IDs from both sets.
             self._ignored_request_ids.update(self._active_request_ids)
+            for entry in self.entries.values():
+                self._append_diagnostic_entry(entry)
             self.entries.clear()
             self._bodies.clear()
             self._body_byte_sizes.clear()
             self._body_bytes = 0
         return rows
 
+    def _diagnostics_payloads(
+        self,
+        *,
+        include_response_body_metadata: bool = True,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        current_entries = [self._redacted_network_entry(entry) for entry in self.entries.values()]
+        durable_entries = (
+            list(getattr(self, "_diagnostic_entries", [])) + current_entries
+        )[-getattr(self, "_max_entries", 600) :]
+        if not include_response_body_metadata:
+            body_metadata_fields = {
+                "body_size",
+                "body_truncated",
+                "body_base64_encoded",
+                "body_captured_at_ms",
+                "body_file",
+                "body_error",
+            }
+            durable_entries = [
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if key not in body_metadata_fields
+                }
+                for entry in durable_entries
+            ]
+        network_payload = {
+            "agent_id": self.agent_id,
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "entry_count": len(durable_entries),
+            "redacted": True,
+            "response_bodies_included": False,
+            "entries": durable_entries,
+        }
+        console_payload = {
+            "agent_id": self.agent_id,
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "entry_count": len(getattr(self, "console_entries", [])),
+            "redacted": True,
+            "entries": list(getattr(self, "console_entries", [])),
+        }
+        return network_payload, console_payload
+
+    def _write_diagnostics_indexes(self) -> None:
+        self.network_dir.mkdir(parents=True, exist_ok=True)
+        self.console_dir.mkdir(parents=True, exist_ok=True)
+        network_payload, console_payload = self._diagnostics_payloads()
+        self.network_index_path.write_text(
+            json.dumps(network_payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        self.console_index_path.write_text(
+            json.dumps(console_payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+
+    def export_diagnostics_bundle_bytes(self) -> Optional[bytes]:
+        """Build the small attachment used by post-run debuggers.
+
+        Raw response body files are deliberately excluded. The two indexes are
+        already redacted and bounded per browser task.
+        """
+        if not self.network_index_path.exists() or not self.console_index_path.exists():
+            return None
+        network_payload, console_payload = self._diagnostics_payloads(
+            include_response_body_metadata=False
+        )
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "network/index.json",
+                json.dumps(network_payload, indent=2, ensure_ascii=False, default=str).encode("utf-8"),
+            )
+            archive.writestr(
+                "console/index.json",
+                json.dumps(console_payload, indent=2, ensure_ascii=False, default=str).encode("utf-8"),
+            )
+        return output.getvalue()
+
+    async def archive_diagnostics_artifacts(self) -> Dict[str, str]:
+        """Archive each redacted index and return stable trace references."""
+        if not archive_enabled():
+            return {}
+        root_agent_id = current_root_agent_id() or self.agent_id
+        refs: Dict[str, str] = {}
+        network_payload, console_payload = self._diagnostics_payloads(
+            include_response_body_metadata=False
+        )
+        for kind, path, payload in (
+            ("network", self.network_index_path, network_payload),
+            ("console", self.console_index_path, console_payload),
+        ):
+            if not path.exists():
+                continue
+            result = archive_bytes(
+                root_agent_id=root_agent_id,
+                path=f"diagnostics/browser/{self.task_id}/{kind}/index.json",
+                body=json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8"),
+                content_type="application/json",
+            )
+            if isinstance(result, dict) and isinstance(result.get("ref"), str):
+                refs[kind] = result["ref"]
+        return refs
+
     async def close(self) -> Optional[Path]:
         if self._closed:
-            return self.network_dir / "index.json" if self.entries and self.persists_network_log else None
+            return self.network_index_path if self.network_index_path.exists() else None
         if self._tasks:
             done, pending = await asyncio.wait(self._tasks, timeout=3)
             for task in pending:
@@ -2725,38 +3599,48 @@ class BrowserNetworkRecorder:
                     completed=len(done),
                 )
         self._closed = True
-        if not self.persists_network_log:
-            return None
-        if not self.entries:
-            return None
-        index_path = self.network_dir / "index.json"
-        index_path.write_text(
-            json.dumps(
-                {
-                    "agent_id": self.agent_id,
-                    "task_id": self.task_id,
-                    "session_id": self.session_id,
-                    "entry_count": len(self.entries),
-                    # The index is archived alongside the recording, so the same
-                    # credential-header masking the agent sees applies here.
-                    "entries": [
-                        {
-                            **entry,
-                            "request_headers": _mask_sensitive_headers(entry.get("request_headers")),
-                            "response_headers": _mask_sensitive_headers(entry.get("response_headers")),
-                        }
-                        for entry in self.entries.values()
-                    ],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        self._write_diagnostics_indexes()
+        # Terminal cleanup: drop in-flight meta so a closed recorder cannot retain
+        # unbounded request classification state after CDP detach.
+        active_meta = getattr(self, "_active_request_meta", None)
+        if active_meta is not None:
+            active_meta.clear()
         logger.info(
-            "Browser network response-body recording saved",
+            "Browser console and network diagnostics saved",
             agent_id=self.agent_id,
             task_id=self.task_id,
-            index_path=str(index_path),
+            network_index_path=str(self.network_index_path),
+            console_index_path=str(self.console_index_path),
             entry_count=len(self.entries),
+            console_entry_count=len(self.console_entries),
         )
-        return index_path
+        return self.network_index_path
+
+
+def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
+    """True when the blocked resource should latch sticky require_payment_cdn.
+
+    Any absolute http(s) critical-resource URL qualifies — no vendor host
+    allowlists. The URL that failed is the URL recovery re-verifies.
+    """
+    if not url:
+        return False
+    trimmed = str(url).strip()
+    return trimmed.startswith("http://") or trimmed.startswith("https://")
+
+
+def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:
+    """URL to re-verify after promote, or None when CF-clear alone is enough.
+
+    Only critical third-party resource blocks (CDN/script ORB/tunnel) carry a
+    re-verify URL. Same-origin API-challenge exits (e.g. Eventim
+    ``checkaddtocart``) must NOT — GET-probing that path false-fails recovery
+    after a good Steel promote.
+    """
+    if not isinstance(rejection, Mapping):
+        return None
+    if str(rejection.get("reason") or "") != _CRITICAL_RESOURCE_BLOCK_REASON:
+        return None
+    url = str(rejection.get("url") or "").strip()
+    return url or None
+

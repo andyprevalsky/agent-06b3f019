@@ -166,9 +166,26 @@ export async function refreshOrgCardholderStatus(
 
   const onboarding = await deps.getOrgOnboardingConfig(userId);
   if (onboarding === undefined) return { connected: false };
-  const result = resultRecord(
-    await deps.callOrgTool('get_onboarding_session', { session_id: onboarding.sessionId })
-  );
+  let sessionResult: unknown;
+  try {
+    sessionResult = await deps.callOrgTool('get_onboarding_session', {
+      session_id: onboarding.sessionId,
+    });
+  } catch (error) {
+    // Benchmark/reset races and expired hosted sessions leave a stale session id. Surface as
+    // disconnected instead of 500'ing GET /api/agentcard/status.
+    const message = error instanceof Error ? error.message : String(error);
+    if (/onboarding session not found|session not found/i.test(message)) {
+      return {
+        connected: false,
+        status: 'session_not_found',
+        setupUrl: onboarding.setupUrl,
+        setupSessionId: onboarding.sessionId,
+      };
+    }
+    throw error;
+  }
+  const result = resultRecord(sessionResult);
   const status = stringField(result, ['status']) ?? 'pending';
   const completedCardholderId = stringField(result, ['cardholder_id', 'cardholderId']);
   if (status === 'completed' && completedCardholderId !== undefined) {

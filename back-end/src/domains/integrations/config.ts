@@ -21,6 +21,10 @@ export function isAnthropicApiKeyConfigured(): boolean {
   return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
 }
 
+export function isOpenRouterApiKeyConfigured(): boolean {
+  return Boolean(process.env.OPENROUTER_API_KEY?.trim());
+}
+
 export const EMAIL_PROVIDER_CONFIG: Record<EmailProviderSlug, EmailProviderConfig> = {
   gmail: {
     provider: EmailProvider.GMAIL,
@@ -201,3 +205,8 @@ export const UPLOAD_LIMITS = {
 };
 
 export const PLAID_SKIP_WEBHOOK_VERIFICATION = process.env.PLAID_SKIP_WEBHOOK_VERIFICATION === '1';
+
+/** Whether an integration name is one of the OAuth email providers. */
+export function isEmailProviderSlug(name: string): name is EmailProviderSlug {
+  return Object.prototype.hasOwnProperty.call(EMAIL_PROVIDER_CONFIG, name);
+}

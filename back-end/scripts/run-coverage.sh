@@ -11,6 +11,9 @@ set -euo pipefail
 # Usage:
 #   bash scripts/run-coverage.sh              # Run with threshold enforcement
 #   bash scripts/run-coverage.sh --report-only # Just report (no threshold check)
+#   bash scripts/run-coverage.sh --print-coverage-port # Reserve, print, and release a port
+#   bash scripts/run-coverage.sh --hold-coverage-lock # Test-only run-lock probe
+#   bash scripts/run-coverage.sh --hold-coverage-lock-with-child # Test-only orphan cleanup probe
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -25,10 +28,116 @@ normalize_conductor_workspace_env
 source "$SCRIPT_DIR/local-db-container.sh"
 cd "$BACKEND_DIR"
 
+# Cursor Cloud (and similar) may inject BROWSER_PROVIDER into the process
+# environment. Node dotenv does not override existing vars, so a stale value
+# like "browserbase" wins over back-end/.env ("kernel") and the live
+# browser-provider blackbox 500s on /init. Force a supported provider here.
+case "${BROWSER_PROVIDER:-}" in
+  kernel|steel) ;;
+  *)
+    echo "⚠️  BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' is unsupported; forcing kernel for coverage."
+    export BROWSER_PROVIDER=kernel
+    ;;
+esac
+
 REPORT_ONLY=0
+PRINT_COVERAGE_PORT=0
+HOLD_COVERAGE_LOCK=0
+HOLD_COVERAGE_LOCK_WITH_CHILD=0
 for arg in "$@"; do
   [[ "$arg" == "--report-only" ]] && REPORT_ONLY=1
+  [[ "$arg" == "--print-coverage-port" ]] && PRINT_COVERAGE_PORT=1
+  [[ "$arg" == "--hold-coverage-lock" ]] && HOLD_COVERAGE_LOCK=1
+  [[ "$arg" == "--hold-coverage-lock-with-child" ]] && HOLD_COVERAGE_LOCK_WITH_CHILD=1
 done
+
+# All coverage runs in one worktree share coverage/tmp, coverage/blackbox-run,
+# coverage/server.log, and the workspace database. Hold OS advisory locks in a
+# child that watches this shell. Unlike mkdir locks, a separately-sessioned
+# guardian reaps registered test groups after SIGKILL/OOM before unlocking.
+COVERAGE_RUN_LOCK_FILE="${BACKEND_COVERAGE_RUN_LOCK_FILE:-${BACKEND_COVERAGE_RUN_LOCK_DIR:-$BACKEND_DIR/coverage/.run-lock}}"
+COVERAGE_RUN_LOCK_KEEPER_PID=""
+COV_PORT_LOCK_KEEPER_PID=""
+# Linux mktemp -t requires ≥3 trailing X's in the template; macOS is looser.
+COVERAGE_PROCESS_GROUPS_FILE="${BACKEND_COVERAGE_PROCESS_GROUPS_FILE:-$(mktemp -t navi-backend-coverage-groups.XXXXXX)}"
+: >"$COVERAGE_PROCESS_GROUPS_FILE"
+
+acquire_process_lock() {
+  local lock_file="$1"
+  local process_groups_file="${2:-}"
+  local status_file lock_keeper_pid lock_status
+  status_file="$(mktemp -t navi-backend-coverage-lock.XXXXXX)"
+  if [[ -n "$process_groups_file" ]]; then
+    python3 "$SCRIPT_DIR/coverage-process-lock.py" \
+      "$lock_file" "$status_file" "$$" "$process_groups_file" &
+  else
+    python3 "$SCRIPT_DIR/coverage-process-lock.py" "$lock_file" "$status_file" "$$" &
+  fi
+  lock_keeper_pid=$!
+
+  for _attempt in $(seq 1 250); do
+    if [[ -s "$status_file" ]]; then
+      break
+    fi
+    if ! kill -0 "$lock_keeper_pid" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.02
+  done
+
+  lock_status="$(cat "$status_file" 2>/dev/null || printf 'failed')"
+  rm -f "$status_file"
+  if [[ "$lock_status" == "acquired" ]]; then
+    ACQUIRED_LOCK_KEEPER_PID="$lock_keeper_pid"
+    ACQUIRED_LOCK_OWNER=""
+    return 0
+  fi
+
+  wait "$lock_keeper_pid" >/dev/null 2>&1 || true
+  ACQUIRED_LOCK_KEEPER_PID=""
+  ACQUIRED_LOCK_OWNER="${lock_status#blocked:}"
+  return 1
+}
+
+launch_coverage_process_group() {
+  python3 "$SCRIPT_DIR/coverage-process-group.py" "$COVERAGE_PROCESS_GROUPS_FILE" "$@" &
+  LAUNCHED_COVERAGE_PID=$!
+}
+
+release_process_lock() {
+  local lock_keeper_pid="$1"
+  [[ -n "$lock_keeper_pid" ]] || return 0
+  kill "$lock_keeper_pid" >/dev/null 2>&1 || true
+  wait "$lock_keeper_pid" >/dev/null 2>&1 || true
+}
+
+if ! acquire_process_lock "$COVERAGE_RUN_LOCK_FILE" "$COVERAGE_PROCESS_GROUPS_FILE"; then
+  echo "❌ Another backend coverage run is already active (pid=$ACQUIRED_LOCK_OWNER)." >&2
+  rm -f "$COVERAGE_PROCESS_GROUPS_FILE"
+  exit 1
+fi
+COVERAGE_RUN_LOCK_KEEPER_PID="$ACQUIRED_LOCK_KEEPER_PID"
+
+release_coverage_reservations() {
+  release_process_lock "$COV_PORT_LOCK_KEEPER_PID"
+  release_process_lock "$COVERAGE_RUN_LOCK_KEEPER_PID"
+  rm -f "$COVERAGE_PROCESS_GROUPS_FILE"
+}
+trap release_coverage_reservations EXIT
+trap 'exit 130' INT TERM
+
+if [[ "$HOLD_COVERAGE_LOCK" == "1" ]]; then
+  printf 'coverage lock acquired by %s\n' "$$"
+  sleep "${BACKEND_COVERAGE_HOLD_SECONDS:-30}"
+  exit 0
+fi
+
+if [[ "$HOLD_COVERAGE_LOCK_WITH_CHILD" == "1" ]]; then
+  launch_coverage_process_group python3 -c 'import time; time.sleep(30)'
+  printf 'coverage child process group %s\n' "$LAUNCHED_COVERAGE_PID"
+  sleep "${BACKEND_COVERAGE_HOLD_SECONDS:-30}"
+  exit 0
+fi
 
 # Returns 0 when a funded OpenAI key (GPT_API_KEY / OPENAI_API_KEY) fallback is
 # available to the coverage backend — either already exported into this shell or
@@ -67,26 +176,43 @@ codex_funded_fallback_configured() {
 # Coverage data directory (NODE_V8_COVERAGE tells Node to dump raw coverage here)
 COV_TMP="$BACKEND_DIR/coverage/tmp"
 
-# Pick an isolated port
+# Reserve one of the two currently-unused ports inside Conductor's ten-port
+# workspace allocation. Port arithmetic outside that allocation is only a
+# preference and can collide with a sibling workspace whose valid service has
+# not started yet. A process-bound advisory lock closes the check/start race
+# between cooperating processes without leaving stale reservations, while lsof
+# protects against an ordinary listener already using an owned port.
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
-COV_PORT=$((BASE_PORT + 200))
+COV_PORT_START="${BACKEND_COVERAGE_START_PORT:-$((BASE_PORT + 7))}"
+COV_PORT_END="${BACKEND_COVERAGE_END_PORT:-$((BASE_PORT + 8))}"
+COV_PORT_LOCK_ROOT="${BACKEND_COVERAGE_PORT_LOCK_ROOT:-$ROOT_DIR/.context/test-runs/.port-locks}"
+mkdir -p "$COV_PORT_LOCK_ROOT"
 
-# Check whether a server is already listening on the coverage port. Restricting
-# the lookup to LISTEN avoids false positives from unrelated outbound sockets
-# that happen to use the same ephemeral local port.
-#
-# This check MUST stay ahead of the COV_TMP wipe below. A port that is already
-# listening usually means another coverage run is mid-flight in this worktree,
-# and COV_TMP is shared: wiping first would delete that run's accumulated V8
-# data and then abort, leaving the surviving run to report a large bogus
-# coverage shortfall (its tests still pass, so it reads as a threshold
-# regression rather than the collision it is). Fail before mutating shared
-# state, never after.
-if lsof -tiTCP:"$COV_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "❌ Port $COV_PORT is in use. Free it or set a different CONDUCTOR_PORT."
-  echo "   (Another coverage run may be in flight; this one stopped before"
-  echo "    touching its shared coverage data.)"
-  exit 1
+reserve_coverage_port() {
+  local candidate="$1"
+  while ((candidate <= COV_PORT_END)); do
+    local lock_file="$COV_PORT_LOCK_ROOT/$candidate.lock"
+    if acquire_process_lock "$lock_file"; then
+      if lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+        release_process_lock "$ACQUIRED_LOCK_KEEPER_PID"
+      else
+        COV_PORT="$candidate"
+        COV_PORT_LOCK_KEEPER_PID="$ACQUIRED_LOCK_KEEPER_PID"
+        return 0
+      fi
+    fi
+    candidate=$((candidate + 1))
+  done
+  echo "❌ No available coverage port in this workspace's owned range $1-$COV_PORT_END." >&2
+  return 1
+}
+
+COV_PORT=""
+reserve_coverage_port "$COV_PORT_START"
+
+if [[ "$PRINT_COVERAGE_PORT" == "1" ]]; then
+  printf '%s\n' "$COV_PORT"
+  exit 0
 fi
 
 rm -rf "$COV_TMP"
@@ -102,6 +228,8 @@ export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
+export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
@@ -217,11 +345,25 @@ if ! $DB_FOUND; then
 fi
 
 if $DB_FOUND; then
-  LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  # Every blackbox/unit child creates its own Prisma pool. Bound each pool so
+  # the prescribed parallel coverage workers cannot exceed Postgres's shared
+  # max_connections ceiling before the test assertions even run.
+  TEST_DB_CONNECTION_LIMIT="${BACKEND_TEST_DB_CONNECTION_LIMIT:-4}"
+  if ! [[ "$TEST_DB_CONNECTION_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ BACKEND_TEST_DB_CONNECTION_LIMIT must be a positive integer." >&2
+    exit 1
+  fi
+  LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  # Docker Desktop can briefly stop accepting new TCP connections while the
+  # parallel coverage lanes saturate the shared host. Prisma's five-second
+  # default connect timeout made every first query fail even when Postgres
+  # recovered immediately after, so keep the gate bounded but give the local
+  # database the same contention-safe startup window.
+  LOCAL_DB_URL="$LOCAL_PSQL_URL?connection_limit=$TEST_DB_CONNECTION_LIMIT&pool_timeout=30&connect_timeout=15"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
   if command -v psql >/dev/null 2>&1; then
-    psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+    psql "$LOCAL_PSQL_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
 BEGIN
   IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL
@@ -237,8 +379,10 @@ END $$;
 SQL
   fi
   echo "Syncing Prisma schema to local test database..."
+  npx prisma generate >/dev/null
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
-  bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
+  DATABASE_URL="$LOCAL_PSQL_URL" DIRECT_URL="$LOCAL_PSQL_URL" \
+    bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
   # Credential seeding and smoke execution are separate controls. A caller may
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
@@ -249,7 +393,7 @@ SQL
       echo "Syncing local Codex credentials to local test database..."
       npx tsx scripts/sync-codex-token.ts >/dev/null
     else
-      SEEDED_CODEX_COUNT="$(psql "$LOCAL_DB_URL" -At -v ON_ERROR_STOP=1 -c \
+      SEEDED_CODEX_COUNT="$(psql "$LOCAL_PSQL_URL" -At -v ON_ERROR_STOP=1 -c \
         "SELECT count(*) FROM \"Integration\" WHERE name='gpt_code' AND status='CONNECTED' AND \"isActive\"=true AND coalesce(config->>'encryptedCredentials','') <> '';" 2>/dev/null || printf 0)"
       if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
         echo "Using the connected gpt_code credential already seeded in the isolated test database."
@@ -272,6 +416,12 @@ SQL
   fi
 fi
 
+if ! $DB_FOUND || [ -z "${LOCAL_DB_URL:-}" ]; then
+  echo "❌ No local Postgres found for coverage (Docker container or system Postgres on :5432)." >&2
+  echo "   Start the workspace DB container or \`sudo service postgresql start\` (Cloud: ROSE_USE_SYSTEM_PG=true)." >&2
+  exit 1
+fi
+
 # Fast Mode cache still requires an explicit URL outside production, but a local
 # coverage run must not write fixtures into (or depend on capacity from) the
 # shared production cache database. The local schema includes FastModeCacheEntry,
@@ -281,19 +431,30 @@ fi
 export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
 
 echo "Starting backend with coverage collection on port $COV_PORT..."
-NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 \
-  node --import tsx src/bootstrap.ts >"$COV_LOG" 2>&1 &
-BACKEND_PID=$!
+launch_coverage_process_group env \
+  NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 \
+  node --import tsx src/bootstrap.ts >"$COV_LOG" 2>&1
+BACKEND_PID="$LAUNCHED_COVERAGE_PID"
+BLACKBOX_PID=""
+UNIT_PID=""
 
 cleanup() {
-  if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
+  local child_pid
+  for child_pid in "$UNIT_PID" "$BLACKBOX_PID" "$BACKEND_PID"; do
+    [[ -n "$child_pid" ]] || continue
+    kill -TERM -- "-$child_pid" >/dev/null 2>&1 || true
+    wait "$child_pid" 2>/dev/null || true
+  done
+  # Every registered group is now explicitly reaped. Disarm the guardian before
+  # releasing it so a long successful run cannot act on a recycled historical
+  # PGID during normal cleanup.
+  printf 'disarmed\n' >"$COVERAGE_PROCESS_GROUPS_FILE"
   # These raw blobs are inputs to the report, not durable test evidence.
   rm -rf "$COV_TMP"
+  release_coverage_reservations
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 # Wait for backend to be ready. Instrumented TypeScript startup can exceed a
 # minute on a busy shared host, so use a wall-clock five-minute deadline and
@@ -343,23 +504,27 @@ echo "Backend ready at $TEST_BASE_URL"
 echo "Running blackbox and unit tests in parallel..."
 TEST_EXIT=0
 UNIT_EXIT=0
-NODE_V8_COVERAGE="$COV_TMP" \
-BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
-BLACKBOX_TEST_DATABASE_URL="$LOCAL_DB_URL" CONTRACT_TEST_DATABASE_URL="$LOCAL_DB_URL" \
-BLACKBOX_TEST_SKIP_DB_SYNC=1 CONTRACT_TEST_SKIP_DB_SYNC=1 \
-BACKEND_CODEX_TOKEN_SYNC_SKIP=1 \
-BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-4}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-4}" \
-BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-30}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-30}" \
-  bash scripts/run-blackbox-tests.sh &
-BLACKBOX_PID=$!
+launch_coverage_process_group env \
+  NODE_V8_COVERAGE="$COV_TMP" \
+  BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
+  BLACKBOX_TEST_DATABASE_URL="$LOCAL_DB_URL" CONTRACT_TEST_DATABASE_URL="$LOCAL_DB_URL" \
+  BLACKBOX_TEST_SKIP_DB_SYNC=1 CONTRACT_TEST_SKIP_DB_SYNC=1 \
+  BACKEND_CODEX_TOKEN_SYNC_SKIP=1 \
+  BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-4}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-4}" \
+  BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-30}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-30}" \
+  bash scripts/run-blackbox-tests.sh
+BLACKBOX_PID="$LAUNCHED_COVERAGE_PID"
 
-BACKEND_UNIT_COVERAGE_DIR="$COV_TMP" \
-BACKEND_UNIT_CONCURRENCY="${BACKEND_UNIT_CONCURRENCY:-6}" \
-  node --import tsx scripts/run-unit-tests.ts &
-UNIT_PID=$!
+launch_coverage_process_group env \
+  BACKEND_UNIT_COVERAGE_DIR="$COV_TMP" \
+  BACKEND_UNIT_CONCURRENCY="${BACKEND_UNIT_CONCURRENCY:-6}" \
+  node --import tsx scripts/run-unit-tests.ts
+UNIT_PID="$LAUNCHED_COVERAGE_PID"
 
 wait "$BLACKBOX_PID" || TEST_EXIT=$?
+BLACKBOX_PID=""
 wait "$UNIT_PID" || UNIT_EXIT=$?
+UNIT_PID=""
 
 if [[ "$TEST_EXIT" -ne 0 || "$UNIT_EXIT" -ne 0 ]]; then
   echo "Backend test phase failed; skipping report work until the failing lifecycle is fixed."
@@ -373,6 +538,7 @@ fi
 echo "Stopping backend and collecting coverage data..."
 kill "$BACKEND_PID" 2>/dev/null || true
 wait "$BACKEND_PID" 2>/dev/null || true
+BACKEND_PID=""
 
 # Generate the coverage report and also the json-summary for the gap analysis
 echo ""

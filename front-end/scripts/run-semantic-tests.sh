@@ -74,6 +74,14 @@ else
   BACKEND_PORT="${BACKEND_PORT:-3001}"
   FRONTEND_PORT="${FRONTEND_PORT:-3002}"
   export BACKEND_PORT FRONTEND_PORT
+  # Cloud/injected envs often export BACKEND_URL to local port 3001 (and the
+  # matching VITE_/API aliases). Playwright helpers prefer BACKEND_URL over
+  # BACKEND_PORT, so a stale injection makes create/delete/poll hit a dead port
+  # even when CONDUCTOR_PORT health checks pass. Force local-mode URLs to the
+  # ports under test.
+  export BACKEND_URL="http://localhost:${BACKEND_PORT}"
+  export BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
+  export VITE_BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
     echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2
@@ -128,12 +136,53 @@ if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+# Resolve the test runner from this package explicitly. In the root npm
+# workspace, `npx playwright` can select the backend's Playwright CLI while the
+# specs import the frontend's @playwright/test singleton, making every suite
+# fail during discovery with a misleading duplicate-version error.
+# Prefer frontend-local .bin, then the CLI declared by the exact @playwright/test
+# the specs resolve (via node), then a repo-root hoist as last resort. Resolving
+# the package's own bin entry keeps the original guarantee: a shared .bin is
+# flat and unnamespaced, so a same-named binary from another package can win
+# there and silently run a different Playwright than the one the specs import.
+PLAYWRIGHT_BIN=""
+if [[ -x "$FRONTEND_DIR/node_modules/.bin/playwright" ]]; then
+  PLAYWRIGHT_BIN="$FRONTEND_DIR/node_modules/.bin/playwright"
+fi
+PLAYWRIGHT_CLI=""
+if [[ -z "$PLAYWRIGHT_BIN" ]]; then
+  PLAYWRIGHT_CLI="$(cd "$FRONTEND_DIR" && node -e "
+    const path = require('path');
+    const pkgPath = require.resolve('@playwright/test/package.json');
+    const bin = require(pkgPath).bin;
+    const rel = typeof bin === 'string' ? bin : bin && bin.playwright;
+    if (!rel) process.exit(1);
+    console.log(path.join(path.dirname(pkgPath), rel));
+  " 2>/dev/null || true)"
+fi
+if [[ -z "$PLAYWRIGHT_BIN" && ! -f "$PLAYWRIGHT_CLI" && -x "$REPO_DIR/node_modules/.bin/playwright" ]]; then
+  PLAYWRIGHT_BIN="$REPO_DIR/node_modules/.bin/playwright"
+fi
+if [[ -z "$PLAYWRIGHT_BIN" && ! -f "$PLAYWRIGHT_CLI" ]]; then
+  echo "FAIL: Frontend Playwright is not installed (checked front-end/, @playwright/test package, and repo-root .bin)" >&2
+  exit 1
+fi
+
+# Prefer the frontend-local symlink; otherwise run the resolved package CLI
+# under node so the exact @playwright/test the specs import is what executes.
+run_playwright() {
+  if [[ -x "$PLAYWRIGHT_BIN" ]]; then
+    exec "$PLAYWRIGHT_BIN" "$@"
+  fi
+  exec node "$PLAYWRIGHT_CLI" "$@"
+}
+
 if [[ $# -eq 0 ]]; then
   PLAYWRIGHT_ARGS=(--reporter=list --workers="$SEMANTIC_WORKERS")
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
     PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
   fi
-  exec npx playwright test "${PLAYWRIGHT_ARGS[@]}"
+  run_playwright test "${PLAYWRIGHT_ARGS[@]}"
 fi
 
 TEST_NAME="$1"
@@ -148,4 +197,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-exec npx playwright test "$TEST_FILE" --reporter=list --workers="$SEMANTIC_WORKERS"
+run_playwright test "$TEST_FILE" --reporter=list --workers="$SEMANTIC_WORKERS"
