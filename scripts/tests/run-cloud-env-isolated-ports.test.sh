@@ -39,10 +39,10 @@ chmod +x "$TMP/probe.sh"
 out=$(cd "$TMP" && BENCHMARK_ISOLATED_RUN=true CONDUCTOR_PORT=3201 CONDUCTOR_WORKSPACE_NAME=bench-x bash probe.sh)
 [ "$out" = "port=3201 ws=bench-x" ] || { echo "FAIL isolated preserve: $out" >&2; exit 1; }
 
-out=$(cd "$TMP" && RUN_SH_STRICT_CONDUCTOR_PORT=1 CONDUCTOR_PORT=56000 CONDUCTOR_WORKSPACE_NAME=deploy-ws bash probe.sh)
+out=$(cd "$TMP" && env -u BENCHMARK_ISOLATED_RUN RUN_SH_STRICT_CONDUCTOR_PORT=1 CONDUCTOR_PORT=56000 CONDUCTOR_WORKSPACE_NAME=deploy-ws bash probe.sh)
 [ "$out" = "port=56000 ws=deploy-ws" ] || { echo "FAIL strict preserve: $out" >&2; exit 1; }
 
-out=$(cd "$TMP" && CONDUCTOR_PORT=3201 CONDUCTOR_WORKSPACE_NAME=bench-x bash probe.sh)
+out=$(cd "$TMP" && env -u BENCHMARK_ISOLATED_RUN -u RUN_SH_STRICT_CONDUCTOR_PORT CONDUCTOR_PORT=3201 CONDUCTOR_WORKSPACE_NAME=bench-x bash probe.sh)
 [ "$out" = "port=3001 ws=shared-ws" ] || { echo "FAIL shared cloud-env wins: $out" >&2; exit 1; }
 
 # AgentCard lifecycle launches run.sh --benchmark and must export the isolated
