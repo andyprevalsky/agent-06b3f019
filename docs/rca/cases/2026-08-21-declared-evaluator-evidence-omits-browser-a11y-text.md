@@ -12,9 +12,7 @@ symptoms:
   - 'opaque screenshots'
   - 'does not expose the order-history dates'
   - 'Delivered August 19'
-  - 'Eligible through September 18'
   - 'All declared static checks passed'
-  - 'Score 0.0'
 tags:
   - browser-agent
   - llm-judge
@@ -22,8 +20,7 @@ tags:
   - amazon-return
 sources:
   - agent d943db4b-43c4-4e72-8ab4-8f93ba7ebe4e
-  - agents/benchmarks/runs/20260821_222730_browser-amazon-return.json
-  - descend-20260820T202409Z-browser-amazon-return
+  - commit 9ac3e35ca
 repro: pending — cement after fix; red proof via _declared_evaluator_evidence on saved run vs browser_use_step_4 dump
 status: open
 ---

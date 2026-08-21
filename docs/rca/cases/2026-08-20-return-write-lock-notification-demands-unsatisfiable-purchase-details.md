@@ -19,11 +19,9 @@ tags:
   - schema-contract
 sources:
   - agent 28e6e1a6-dafd-4b8b-a908-0d72ae408359
-  - run agents/benchmarks/runs/20260820_205641_browser-amazon-return.json
-  - relative 2026-08-03-return-confirmation-absent-from-write-lock-phrases
-  - relative 2026-07-24-request-payment-card-schema-unsatisfiable-on-single-page-merchants
+  - commit 84de4d73d
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write
-status: resolved
+status: fixed
 ---
 
 ## Problem
