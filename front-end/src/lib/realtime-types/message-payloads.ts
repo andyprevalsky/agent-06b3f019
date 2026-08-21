@@ -42,6 +42,8 @@ export interface ToolMessagePayload<T extends ToolMessageMetadata = ToolMessageM
  * Note: Field names use camelCase (from Prisma) not snake_case.
  */
 export interface UpdateAgentPayload {
+  agentId?: string;
+  title?: string | null;
   progress?: number;
   status?: Agent['status'];
   statusMessage?: string | null;

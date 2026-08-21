@@ -21,8 +21,11 @@ import { useState, useMemo, lazy } from 'react';
 
 import {
   AppSidebar,
+  AttentionRequestsProvider,
   NetworkView,
   SIDEBAR_WIDTH_COLLAPSED,
+  unansweredAgentIds,
+  useAttentionRequests,
 } from '@/features/terminal-component-group';
 import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
@@ -124,77 +127,88 @@ interface TerminalLayoutProps {
 
 function TerminalLayout(props: TerminalLayoutProps) {
   const { agents, drip, tileAnimation, currentView, setCurrentView, derived } = props;
+  // THE app-wide attention subscription. Held here because this is the common
+  // ancestor of the header (bell + mobile drawer) and the sidebar; every other
+  // consumer reads it from context or takes the derived id set as a prop.
+  const attention = useAttentionRequests(agents.realtimeReady);
+  const attentionAgentIds = useMemo(
+    () => unansweredAgentIds(attention.requests),
+    [attention.requests],
+  );
   return (
-    <div
-      className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden"
-      style={{ height: '100dvh' }}
-    >
-      <BackgroundPattern
-        patternOffset={props.patternOffset}
-        tileColors={props.tileColors}
-        colorPalette={props.colorPalette}
-        animationResetKey={tileAnimation.animationResetKey}
-        animationComplete={tileAnimation.animationComplete}
-        currentFrame={tileAnimation.currentFrame}
-        selectedAgentId={agents.selectedAgentId}
-      />
-
-      {currentView !== 'browse' && (
-        <TerminalHeader
-          onCreateNewAgent={agents.handleCreateNewAgent}
-          onSelectAgent={agents.handleSelectAgent}
-          onLoginClick={agents.handleLoginClick}
-          onLogout={() => {
-            void agents.handleLogout();
-          }}
-          isSignedIn={agents.isFullySignedIn}
-          clientSource={agents.clientSource}
-          realtimeReady={agents.realtimeReady}
-          agents={agents.agents}
-          isLoadingAgents={agents.isLoadingAgents}
+    <AttentionRequestsProvider value={attention}>
+      <div
+        className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden"
+        style={{ height: '100dvh' }}
+      >
+        <BackgroundPattern
+          patternOffset={props.patternOffset}
+          tileColors={props.tileColors}
+          colorPalette={props.colorPalette}
+          animationResetKey={tileAnimation.animationResetKey}
+          animationComplete={tileAnimation.animationComplete}
+          currentFrame={tileAnimation.currentFrame}
           selectedAgentId={agents.selectedAgentId}
-          onResumeAgent={agents.handleResumeAgent}
-          resumingAgentId={agents.resumingAgentId}
-          dripStyles={drip.dripStyles}
-          blur={drip.blur}
-          backgroundColors={drip.backgroundColors}
-          borderColor={drip.borderColor}
-          shadowIntensity={drip.shadowIntensity}
-        />
-      )}
-
-      {currentView === 'agents' && <InspectionAccountBadge context={agents.inspectionContext} />}
-
-      <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
-        <SidebarSection
-          agents={agents}
-          drip={drip}
-          currentView={currentView}
-          setCurrentView={setCurrentView}
-          showBrowse={currentView === 'browse' || agents.user?.phone === BROWSER_REVIEW_TEST_PHONE}
-          showBenchmarks={IS_DEV_MODE || isAdminOperator(agents.user)}
-          showAdminHealth={derived.showAdminHealth}
         />
 
-        <MainContent
-          agents={agents}
-          drip={drip}
-          currentView={currentView}
-          models={props.models}
-          modelsLoading={props.modelsLoading}
-          pendingApproval={derived.pendingApproval}
-          pendingGates={derived.pendingGates}
-          hasActiveAttention={derived.hasActiveAttention}
-          browserStatusProps={derived.browserStatusProps}
-          systemMessages={derived.systemMessages}
-          BrowserStatusBarCarousel={BrowserStatusBarCarousel}
-          NetworkView={NetworkView}
-          sidebarWidthCollapsed={SIDEBAR_WIDTH_COLLAPSED}
-        />
+        {currentView !== 'browse' && (
+          <TerminalHeader
+            onCreateNewAgent={agents.handleCreateNewAgent}
+            onSelectAgent={agents.handleSelectAgent}
+            onLoginClick={agents.handleLoginClick}
+            onLogout={() => {
+              void agents.handleLogout();
+            }}
+            isSignedIn={agents.isFullySignedIn}
+            clientSource={agents.clientSource}
+            agents={agents.agents}
+            isLoadingAgents={agents.isLoadingAgents}
+            selectedAgentId={agents.selectedAgentId}
+            onRefreshAgents={agents.loadAgents}
+            dripStyles={drip.dripStyles}
+            blur={drip.blur}
+            backgroundColors={drip.backgroundColors}
+            borderColor={drip.borderColor}
+            shadowIntensity={drip.shadowIntensity}
+          />
+        )}
+
+        {currentView === 'agents' && <InspectionAccountBadge context={agents.inspectionContext} />}
+
+        <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
+          <SidebarSection
+            agents={agents}
+            drip={drip}
+            attentionAgentIds={attentionAgentIds}
+            currentView={currentView}
+            setCurrentView={setCurrentView}
+            showBrowse={
+              currentView === 'browse' || agents.user?.phone === BROWSER_REVIEW_TEST_PHONE
+            }
+            showBenchmarks={IS_DEV_MODE || isAdminOperator(agents.user)}
+            showAdminHealth={derived.showAdminHealth}
+          />
+
+          <MainContent
+            agents={agents}
+            drip={drip}
+            currentView={currentView}
+            models={props.models}
+            modelsLoading={props.modelsLoading}
+            pendingApproval={derived.pendingApproval}
+            pendingGates={derived.pendingGates}
+            hasActiveAttention={derived.hasActiveAttention}
+            browserStatusProps={derived.browserStatusProps}
+            systemMessages={derived.systemMessages}
+            BrowserStatusBarCarousel={BrowserStatusBarCarousel}
+            NetworkView={NetworkView}
+            sidebarWidthCollapsed={SIDEBAR_WIDTH_COLLAPSED}
+          />
+        </div>
+
+        <TerminalModals agents={agents} drip={drip} />
       </div>
-
-      <TerminalModals agents={agents} drip={drip} />
-    </div>
+    </AttentionRequestsProvider>
   );
 }
 
@@ -203,6 +217,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
 function SidebarSection({
   agents,
   drip,
+  attentionAgentIds,
   currentView,
   setCurrentView,
   showBrowse,
@@ -211,6 +226,7 @@ function SidebarSection({
 }: {
   agents: ReturnType<typeof useTerminalAgents>;
   drip: ReturnType<typeof useDrippiness>;
+  attentionAgentIds: ReadonlySet<string>;
   currentView: TerminalView;
   setCurrentView: (v: TerminalView) => void;
   showBrowse: boolean;
@@ -228,8 +244,8 @@ function SidebarSection({
       selectedAgentId={agents.selectedAgentId}
       onSelectAgent={agents.handleSelectAgent}
       onCreateAgent={agents.handleCreateNewAgent}
-      onResumeAgent={agents.handleResumeAgent}
-      resumingAgentId={agents.resumingAgentId}
+      onRefreshAgents={agents.loadAgents}
+      attentionAgentIds={attentionAgentIds}
       user={agents.user}
       onLogout={() => {
         void agents.handleLogout();

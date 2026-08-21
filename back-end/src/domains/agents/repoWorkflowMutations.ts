@@ -50,7 +50,8 @@ export async function updateAgentConfigMutation(
   agentId: string,
   data: Prisma.AgentUpdateManyMutationInput,
   toolIds: string[] | undefined,
-  workflowGeneration?: string
+  workflowGeneration?: string,
+  generatedTitle?: string
 ): Promise<boolean> {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
@@ -63,11 +64,21 @@ export async function updateAgentConfigMutation(
         deletedAt: null,
         ...(workflowGeneration === undefined ? {} : { OR: workflowMatches }),
       },
-      select: { id: true, status: true, workflowReplacementState: true },
+      select: {
+        id: true,
+        status: true,
+        workflowReplacementState: true,
+        title: true,
+        parentAgentId: true,
+      },
     });
     if (accepted === null) return false;
 
-    if (Object.keys(data).length > 0) {
+    const generatedTitleUpdate =
+      generatedTitle !== undefined && accepted.title === null && accepted.parentAgentId === null
+        ? { title: generatedTitle }
+        : {};
+    if (Object.keys(data).length > 0 || Object.keys(generatedTitleUpdate).length > 0) {
       const raisedCostLimit =
         (accepted.status === 'COST_LIMIT_REACHED' ||
           (accepted.status === 'STARTING_UP' &&
@@ -80,6 +91,7 @@ export async function updateAgentConfigMutation(
         where: { id: agentId },
         data: {
           ...data,
+          ...generatedTitleUpdate,
           ...(raisedCostLimit
             ? {
                 status: 'ACTIVE',
