@@ -604,12 +604,22 @@ model Integration {
   poolingEnabledOverride Boolean?
   rateLimitedUntil       DateTime?
   lastUsedAt             DateTime?
+  /// Provider-side account identifier, so ONE user can hold several accounts of
+  /// the same `name` (two Claude subscriptions, two ChatGPT ones). Legacy rows
+  /// keep "" — which preserves their old (userId, name) uniqueness exactly.
+  ///
+  /// This column is what lifts the single-account limit WITHOUT touching the
+  /// read path: `fetchComputeTokenForUser` and pooling keep querying by `name`
+  /// and simply see more rows.
+  accountId              String                       @default("")
+  /// Shown on the FE chip.
+  accountEmail           String?
   createdAt              DateTime                     @default(now())
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]
   plaidItems             PlaidItem[]
 
-  @@unique([userId, name])
+  @@unique([userId, name, accountId])
   @@index([userId])
   @@index([type])
   @@index([status])
@@ -642,6 +652,102 @@ model ComputeTokenFastCacheAffinity {
 
   @@index([tokenType])
   @@index([userId])
+}
+
+/// A connected provider account: the DURABLE identity a user links once.
+///
+/// This is the layer that replaces credential syncing. It holds the account
+/// SESSION (e.g. claude.ai cookies), which is what mints compute grants -- so a
+/// dead grant can never block its own replacement. It is also the only
+/// user-visible state: `needs_reconnect` is what turns the FE chip amber.
+///
+/// The unique key is (userId, provider, accountId), mirroring
+/// EmailIntegrationCredential's (userId, provider, email). That is deliberately
+/// NOT (userId, provider): keying on the provider alone is exactly what limited
+/// users to one Claude and one Codex account.
+model ComputeAccountConnection {
+  id           String  @id @default(uuid())
+  userId       String
+  /// "claude" | "codex"
+  provider     String
+  /// Provider-side account identifier (Anthropic account uuid / ChatGPT account_id).
+  accountId    String
+  /// Shown on the FE chip.
+  accountEmail String?
+  /// RSA+AES envelope wrapping the account session (cookies). Never a token.
+  encryptedSession String?
+  /// "connected" | "needs_reconnect"
+  state        String  @default("connected")
+  /// When the underlying session expires (~28d for claude.ai, observed).
+  sessionExpiresAt DateTime?
+  /// Why the connection was last marked unhealthy, for the chip tooltip.
+  lastErrorReason  String?
+  /// Mirrors Integration.poolingEnabled so grants minted from this account can
+  /// serve the shared pool. Inherited from the user's existing compute
+  /// integrations at connect time -- a user who already pools should not have to
+  /// re-enable it per account.
+  poolingEnabled         Boolean  @default(false)
+  /// Explicit user choice, which beats the inherited default in both directions.
+  poolingEnabledOverride Boolean?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  grants ComputeGrant[]
+
+  @@unique([userId, provider, accountId])
+  @@index([userId, provider])
+  @@index([state])
+}
+
+/// A single compute grant: a DISPOSABLE lease derived from a connection.
+///
+/// Grants are minted freely and never shared between surfaces -- proven
+/// necessary for both providers: a Claude refresh is single-use and revokes the
+/// prior access token, and forked Codex lineages die within hours with
+/// `refresh_token_reused`. Each surface therefore gets its own grant, and
+/// recovery means minting a new one rather than repairing an old one.
+///
+/// There is intentionally NO unique constraint scoping grants per user or
+/// provider: many accounts per user, and many grants over time per account
+/// (history is kept so a revocation can be traced). "Exactly one active grant
+/// per surface" is enforced transactionally in the repo layer, not by a
+/// constraint, because Prisma cannot express a partial unique index.
+model ComputeGrant {
+  id           String  @id @default(uuid())
+  connectionId String
+  userId       String
+  provider     String
+  accountId    String
+  /// Which surface owns this grant -- "cloud" | "local" | "sandbox".
+  surface      String  @default("cloud")
+  /// "setup_token" (Claude, 1y, no refresh) | "oauth_refresh" (Codex).
+  grantType    String
+  /// RSA+AES envelope wrapping the token material.
+  encryptedCredentials String
+  /// "active" | "dead"
+  status       String  @default("active")
+  /// Provider's reason when the grant was revoked, from the completion path.
+  deadReason   String?
+  /// Provider's own cooldown for THIS token. A rate limit is not death: the
+  /// grant stays active and simply becomes unselectable until this passes, which
+  /// is what stops a 429 from being mistaken for revocation and burning a mint.
+  rateLimitedUntil DateTime?
+  /// Nominal expiry. A HINT only -- liveness is decided by real traffic, since
+  /// setup-tokens have been observed dying well before their stated lifetime.
+  expiresAt    DateTime?
+  lastUsedAt   DateTime?
+  mintedAt     DateTime @default(now())
+  diedAt       DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  connection ComputeAccountConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, provider, status])
+  @@index([status, rateLimitedUntil])
+  @@index([connectionId, status])
+  @@index([accountId])
+  @@index([status, expiresAt])
 }
 
 model UserDataDocument {
@@ -739,6 +845,22 @@ model EmailIntegrationCredential {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
   email         String?
+  /// Per-ACCOUNT health, mirroring ComputeAccountConnection.state.
+  ///
+  /// Health has to live here rather than on Integration because one `gmail`
+  /// Integration row fans out to N connected addresses: a dead refresh token on
+  /// one address says nothing about the others. Rolling it up to the shared row
+  /// (what we did before) both hid which account broke and marked working
+  /// accounts as failed.
+  ///
+  /// "needs_reconnect" is terminal and user-visible -- it is what turns the FE
+  /// chip amber, and it is only ever set for errors that re-consent can fix
+  /// (invalid_grant and friends). Transient sync errors use "sync_failed" so a
+  /// network blip never asks the user to re-authorize.
+  state         String        @default("connected")
+  /// Human-readable cause of the current non-connected state, for the chip tooltip.
+  lastErrorReason String?
+  lastFailedSyncAt DateTime?
   integration   Integration   @relation(fields: [integrationId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider, email])

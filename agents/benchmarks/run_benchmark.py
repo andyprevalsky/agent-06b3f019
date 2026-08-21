@@ -7167,6 +7167,39 @@ def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     return scores[-1]
 
 
+def _webdecoy_structured_score(data: dict) -> Optional[float]:
+    """Read the terminal browser task's grounded FCaptcha score."""
+    scores: List[float] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") != "spawn_browser_agent"
+            or metadata.get("toolStatus") != "FINISHED"
+            or metadata.get("action_type") != "task_complete"
+        ):
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        raw_score = structured.get("risk_score")
+        if isinstance(raw_score, bool):
+            continue
+        if isinstance(raw_score, (int, float)):
+            scores.append(float(raw_score))
+            continue
+        if isinstance(raw_score, str):
+            match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*", raw_score)
+            if match is not None:
+                scores.append(float(match.group(1)))
+    if not scores:
+        return None
+    return scores[-1]
+
+
 def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str]]:
     text = _agent_data_search_text(data)
     if "webdecoy.com/product/fcaptcha-demo" not in text and "fcaptcha" not in text:
@@ -7189,11 +7222,19 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
                 continue
 
     exact_score = _webdecoy_exact_score_from_recordings(data)
-    if exact_score is None and not scores:
+    structured_score = _webdecoy_structured_score(data)
+    if exact_score is None and structured_score is None and not scores:
         return False, "No FCaptcha risk score was reported"
 
-    final_score = exact_score if exact_score is not None else scores[-1]
-    score_source = "captured API" if exact_score is not None else "visible"
+    if exact_score is not None:
+        final_score = exact_score
+        score_source = "captured API"
+    elif structured_score is not None:
+        final_score = structured_score
+        score_source = "structured output"
+    else:
+        final_score = scores[-1]
+        score_source = "visible"
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
@@ -7955,7 +7996,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8135,6 +8176,67 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
+    """Join transcript + metadata error surfaces for intermediate-failure classifiers.
+
+    Agent GET payloads use `text` (see `extract_message_transcript`); archived
+    run JSON often remaps that to `message`. Read both so live eval and offline
+    replay classify the same ERROR rows.
+    """
+    parts: list[str] = []
+    if isinstance(message, dict):
+        parts.append(
+            str(
+                message.get("text")
+                or message.get("message")
+                or message.get("content")
+                or ""
+            )
+        )
+    for key in ("error", "title", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """Stale DOM indexes / invalid CDP backendNodeIds ERROR then the browser agent retries.
+
+    SPA remounts (Amazon checkout re-auth, etc.) invalidate selector-map indexes. Humanize
+    then refuses click/TypeTextEvent with `Cannot humanize … no coordinates available`
+    (CDP often reports `No node found for given backend id` underneath). The browser
+    agent is expected to re-observe and retry; counting those rows in `no_tool_failures`
+    / `no_browser_agent_failures` fails closed on expected retry noise after a later
+    grounded write-lock / payment boundary.
+    """
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    is_browser = tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+    if not is_browser:
+        return False
+    blob = _message_failure_text(message, candidate).lower()
+    if "cannot humanize" in blob and "no coordinates available" in blob:
+        return True
+    return (
+        "no node found for given backend id" in blob
+        or "no node with given id found" in blob
+    )
+
+
+def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """True when a browser-agent ERROR is expected recovery / retry noise."""
+    return _is_intermediate_challenge_recovery_failure(candidate) or _is_intermediate_stale_dom_node_failure(
+        candidate, message
+    )
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -8149,7 +8251,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
                 continue
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}

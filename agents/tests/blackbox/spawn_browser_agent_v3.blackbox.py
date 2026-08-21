@@ -10603,6 +10603,94 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
     assert await dom.get_used_passkey_credential_ids() == ["cred-1"]
 
+
+async def test_dom_service_passkeys_follow_focus_target_for_sso_transition():
+    """A popup/redirect target must receive a fresh authenticator and the held key union.
+
+    Normal-site passkeys are seeded on the initial page.  When that page opens
+    an SSO target, WebAuthn state from the original CDP target is not visible in
+    the new one.  Re-seeding must therefore follow ``agent_focus_target_id`` and
+    restore both the original key and the newly-fetched IdP key.
+    """
+    from browser_tools.dom_service import DOMService
+
+    class _FakeWebAuthn:
+        def __init__(self, authenticator_id: str):
+            self.credentials = []
+            self.enable = AsyncMock(return_value={})
+            self.addVirtualAuthenticator = AsyncMock(
+                return_value={"authenticatorId": authenticator_id}
+            )
+
+            async def _add_credential(*, params, session_id):
+                self.credentials.append(dict(params["credential"]))
+                return {}
+
+            async def _get_credentials(*, params, session_id):
+                return {"credentials": list(self.credentials)}
+
+            self.addCredential = AsyncMock(side_effect=_add_credential)
+            self.getCredentials = AsyncMock(side_effect=_get_credentials)
+
+    class _FakePage:
+        def __init__(self):
+            self.setInterceptFileChooserDialog = AsyncMock(return_value={})
+
+    def _cdp_session(session_id: str, authenticator_id: str):
+        webauthn = _FakeWebAuthn(authenticator_id)
+        page = _FakePage()
+        return (
+            SimpleNamespace(
+                session_id=session_id,
+                cdp_client=SimpleNamespace(send=SimpleNamespace(WebAuthn=webauthn, Page=page)),
+            ),
+            webauthn,
+        )
+
+    target_a, webauthn_a = _cdp_session("cdp-amazon", "auth-amazon")
+    target_b, webauthn_b = _cdp_session("cdp-google", "auth-google")
+
+    class _FakeSession:
+        agent_focus_target_id = "amazon-target"
+
+        async def get_or_create_cdp_session(self, target_id=None, focus=False):
+            assert focus is False
+            return {
+                "amazon-target": target_a,
+                "google-target": target_b,
+            }[target_id]
+
+    amazon = {
+        "credentialId": "amazon-cred",
+        "privateKey": "amazon-pkcs8",
+        "rpId": "amazon.com",
+        "userHandle": "amazon-user",
+        "signCount": 3,
+    }
+    google = {
+        "credentialId": "google-cred",
+        "privateKey": "google-pkcs8",
+        "rpId": "google.com",
+        "userHandle": "google-user",
+        "signCount": 5,
+    }
+
+    dom = DOMService(cdp_url="")
+    dom._session = _FakeSession()
+    await dom._suppress_browser_overlays()
+    assert await dom.inject_passkeys([amazon]) == 1
+
+    dom._session.agent_focus_target_id = "google-target"
+    assert await dom.inject_passkeys([amazon, google]) == 2
+
+    assert [item["credentialId"] for item in webauthn_a.credentials] == ["amazon-cred"]
+    assert [item["credentialId"] for item in webauthn_b.credentials] == [
+        "amazon-cred",
+        "google-cred",
+    ]
+    assert webauthn_a.addVirtualAuthenticator.await_count == 1
+    assert webauthn_b.addVirtualAuthenticator.await_count == 1
+
 async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
     """A sign-counter advance must be durable before approvals pause the browser task."""
     from domains.spawn_browser_agent_v3 import handler
@@ -11497,6 +11585,7 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.click_at_coords.assert_not_called()
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
+
 
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -16682,6 +16771,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_passkey_webauthn_uses_cdp_client_session_api",
         test_dom_service_passkey_webauthn_uses_cdp_client_session_api,
+    )
+    await r.record_async(
+        "dom_service_passkeys_follow_focus_target_for_sso_transition",
+        test_dom_service_passkeys_follow_focus_target_for_sso_transition,
     )
     await r.record_async(
         "passkey_usage_recorded_before_completion",

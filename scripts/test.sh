@@ -324,6 +324,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|r
 fi
 if auto_rca_changed '^(scripts/(seed-|setup-db|cloud-build)|back-end/(prisma/|scripts/seed))'; then
   run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
+  run_suite "Canonical Seed WhatsApp Content" bash scripts/tests/canonical-seed-whatsapp-content.test.sh
   run_suite "Seed-Dump Toolchain Compatibility" bash scripts/tests/seed-dump-toolchain.test.sh
 fi
 if auto_rca_changed '^(scripts/(run\.sh|setup-db|seed-|fast-mode)|back-end/)'; then

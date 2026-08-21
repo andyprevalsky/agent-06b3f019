@@ -4,7 +4,7 @@ import type { BrowserType } from '@/features/integration-handlers-context';
 
 import { fetchIntegrationsApi } from '../api';
 import { VALID_BROWSER_TYPES } from '../config';
-import type { ConnectedIntegration } from '../types';
+import type { ConnectedIntegration, EmailCredentialState } from '../types';
 
 interface IntegrationSyncState {
   connectedIntegrations: ConnectedIntegration[];
@@ -18,6 +18,52 @@ interface IntegrationSyncState {
   iMessageSynced: boolean;
   whatsAppConnected: boolean;
   telegramConnected: boolean;
+}
+
+export interface GmailAccountView {
+  email: string;
+  state: EmailCredentialState;
+  lastErrorReason: string | null;
+}
+
+/**
+ * The connected Gmail addresses and their individual health.
+ *
+ * Prefers `emailCredentials`, which is the only source that says WHICH address
+ * broke. Falls back to the flat `config.connectedEmails` list (all assumed
+ * healthy) so a backend that predates per-account health still renders chips
+ * rather than an empty row.
+ *
+ * Credentials with no email are dropped: they are half-finished OAuth attempts,
+ * not accounts the user recognises, and showing a blank chip that cannot be
+ * reconnected would be worse than showing nothing.
+ */
+export function gmailAccounts(gmail: ConnectedIntegration | undefined): GmailAccountView[] {
+  const credentials = gmail?.emailCredentials;
+  if (credentials !== undefined && credentials.length > 0) {
+    return credentials
+      .filter((c): c is typeof c & { email: string } => c.email !== null && c.email !== '')
+      .map((c) => ({
+        email: c.email,
+        state: c.state,
+        lastErrorReason: c.lastErrorReason,
+      }));
+  }
+
+  const legacy =
+    gmail?.config?.connectedEmails ??
+    (gmail?.config?.connectedEmail ? [gmail.config.connectedEmail] : []);
+  return (legacy as string[]).map((email) => ({
+    email,
+    state: 'connected' as const,
+    lastErrorReason: null,
+  }));
+}
+
+/** True when at least one connected email account needs the user's attention. */
+export function hasDamagedGmailAccount(integrations: ConnectedIntegration[]): boolean {
+  const gmail = integrations.find((i) => i.name === 'gmail');
+  return gmailAccounts(gmail).some((a) => a.state !== 'connected');
 }
 
 function deriveStateFromIntegrations(integrations: ConnectedIntegration[]): IntegrationSyncState {

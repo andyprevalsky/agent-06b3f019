@@ -629,6 +629,11 @@ class DOMService:
             finally:
                 self._session = None
                 self._selector_map = {}
+                self._armed_targets.clear()
+                self._passkey_authenticator_by_target.clear()
+                self._passkey_seeded_by_target.clear()
+                self._held_passkeys_by_credential_id.clear()
+                self._passkey_seed_counts.clear()
                 logger.info("🔌 Disconnected from browser")
 
     async def _send_cdp_command(
@@ -1008,7 +1013,6 @@ class DOMService:
         navigator.credentials.get() the virtual authenticator signs
         automatically — no agent click required for auto-invoked flows, and the
         agent can also click "Sign in with a passkey" for gated flows.
-
         An empty list is NOT a no-op: it still arms native-UI suppression on the
         live target, which is what keeps a site whose passkey we do not hold from
         raising an unreachable native chooser over the agent.

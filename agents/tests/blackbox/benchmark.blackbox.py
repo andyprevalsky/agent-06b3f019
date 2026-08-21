@@ -3074,6 +3074,92 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
+    """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
+
+    Local repro: browser-agent-amazon-cookie-payment agent
+    b87b27c5-a055-41bf-ab63-8d2e90547f04 reached a grounded Amazon purchase write_lock
+    after `Cannot humanize input_text … no coordinates available` (CDP: no node for
+    backend id 87012), then failed only on no_tool_failures.
+
+    Outcome-proof agent 3cb17215-4a2a-4a13-8afb-52d087da0e27 showed the same class on
+    click (`Cannot humanize click …`); live GET payloads carry the body in `text`,
+    while archived transcripts remap to `message` — both shapes must classify.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                # Live agent GET shape (API field name).
+                "text": "Cannot humanize input_text for element index 87012: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": 'Typed \'[encrypted_data]\' into <input name="password">',
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_4CoEgNcqTgih86rhKhCOCU88",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "Cannot humanize click for element index 91731: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": "Clicked <input #signInSubmit>",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_u8k10geKSNi8U0RrsOGEM1Dr",
+                },
+            },
+            {
+                "role": "TOOL",
+                # Archived run-JSON shape after extract_message_transcript.
+                "message": "No node found for given backend id",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_stale_backend_node",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "write_lock",
+                    "toolCallId": "call_write_lock_ok",
+                    "title": "Purchase write lock requested",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_fails = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Kernel session crashed mid-checkout",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "toolCallId": "call_real_failure",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_fails) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -7120,6 +7206,63 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.44."))
     assert passed is False
     assert "ratchet" in reason.lower()
+
+
+def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
+    """Regex pattern order must not let a prompt example replace the grounded result.
+
+    Browser task instructions contain examples such as ``0.85 / 1.0`` followed by
+    ``risk score``. The evaluator used to append all forward-regex matches and then all
+    reverse-regex matches, so that example became the last score even though the
+    terminal browser row carried a grounded structured response.
+    """
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Task instructions: record the score exactly as shown, for example "
+                    '"0.12", "12", "0.85 / 1.0", "risk score: 42".'
+                ),
+                "created_at": "2026-08-21T01:49:49.633Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_started",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Extracted Output: Risk Score: 0.09."
+                ),
+                "created_at": "2026-08-21T01:51:52.088Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "structured_response": {
+                        "risk_score": "0.09",
+                        "checkbox_passed": True,
+                        "invisible_form_submitted": True,
+                        "verdict_text": "Verified!; Form submission allowed!",
+                    },
+                },
+            },
+        ]
+    }
+
+    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+
+    data["messages"][1]["metadata"]["structured_response"]["risk_score"] = "0.91"
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "structured output risk score 0.910 exceeds ratchet" in reason
 
 
 def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded():
@@ -13635,6 +13778,10 @@ async def run_all_tests():
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
     )
     r.record(
+        "webdecoy_biometrics_grounded_result_precedence",
+        test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples,
+    )
+    r.record(
         "webdecoy_biometrics_exact_network_score",
         test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded,
     )
@@ -14155,6 +14302,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_challenge_recovery",
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_stale_dom_node",
+        test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
     )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
