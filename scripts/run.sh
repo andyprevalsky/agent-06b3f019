@@ -1355,7 +1355,9 @@ if next_page_uri:
         )
         print("done")
         sys.exit(0)
-    print(f"next:{reserved_domains[-1]['id']}")
+    # Double-quoted dict keys keep this string bash-safe even if the body is
+    # ever inlined into a single-quoted python -c again (seed-dump cement).
+    print("next:" + reserved_domains[-1]["id"])
 else:
     print("done")
 PY
