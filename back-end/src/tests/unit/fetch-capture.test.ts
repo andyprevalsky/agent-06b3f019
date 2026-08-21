@@ -211,6 +211,20 @@ async function run(): Promise<void> {
     assert.ok(looksLikeUtf8ReplacementCorruption(corrupted));
     assert.ok(!looksLikeUtf8ReplacementCorruption(jpegFixture));
 
+    // %PDF prefix alone must not skip corruption detection.
+    const pdfCorrupted = Buffer.concat([
+      Buffer.from('%PDF-1.4\n'),
+      Buffer.alloc(400, 0xef),
+    ]);
+    // Fill with EF BF BD triplets above the 15%/100 threshold.
+    for (let i = 9; i + 2 < pdfCorrupted.length; i += 3) {
+      pdfCorrupted[i] = 0xef;
+      pdfCorrupted[i + 1] = 0xbf;
+      pdfCorrupted[i + 2] = 0xbd;
+    }
+    assert.ok(looksLikeUtf8ReplacementCorruption(pdfCorrupted));
+    assert.ok(!looksLikeUtf8ReplacementCorruption(Buffer.from('%PDF-1.4\n%EOF\n')));
+
     const form = new FormData();
     form.append('file', new Blob(['audio-bytes'], { type: 'audio/wav' }), 'voice.wav');
     const multipart = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {

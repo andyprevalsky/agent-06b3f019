@@ -247,16 +247,18 @@ export function resolveClaudeCodeSandboxApiKey(
   if (hostBase && openrouter && /openrouter\.ai/i.test(hostBase)) {
     return { apiKey: openrouter, baseUrl: hostBase };
   }
+  // Prefer funded OpenRouter when: no host base (fleet guest), shared Anthropic
+  // key is on cooldown, or Fast Mode would otherwise tee to api.anthropic.com.
+  const preferOpenRouter =
+    Boolean(openrouter) &&
+    (!hostBase ||
+      Boolean(options?.sharedKeyOnCooldown) ||
+      Boolean(options?.preferOpenRouterGateway));
+  if (preferOpenRouter && openrouter) {
+    return { apiKey: openrouter, baseUrl: openrouterBase };
+  }
   if (hostBase) {
     return { apiKey: shared, baseUrl: hostBase };
-  }
-  // No explicit Anthropic base: prefer funded OpenRouter whenever configured.
-  // Fleet guests decode a staged BACKEND_ENV_B64 that usually has OPENROUTER_API_KEY
-  // but historically lacked ANTHROPIC_BASE_URL / cooldown — Fast Mode then claimed
-  // the session (403 / stale 0-interaction cache). Always preferring OpenRouter
-  // here keeps Claude Code off the tee-proxy without requiring secret refresh.
-  if (openrouter) {
-    return { apiKey: openrouter, baseUrl: openrouterBase };
   }
   return { apiKey: shared, baseUrl: undefined };
 }
@@ -264,13 +266,23 @@ export function resolveClaudeCodeSandboxApiKey(
 /**
  * When the sandbox uses a dedicated gateway key or a non-default Anthropic base
  * URL, the shared Anthropic-org cooldown must not block session creation.
+ * An explicit `api.anthropic.com` base must NOT bypass cooldown — that host is
+ * exactly what the shared-key cooldown protects.
  */
 export function shouldIgnoreAnthropicApiKeyCooldownForSandbox(params: {
   sandboxApiKey: string | undefined;
   sharedAnthropicApiKey: string | undefined;
   sandboxBaseUrl: string | undefined;
 }): boolean {
-  if (params.sandboxBaseUrl) return true;
+  const trimmed = params.sandboxBaseUrl?.trim();
+  if (trimmed) {
+    try {
+      const host = new URL(trimmed).hostname.toLowerCase();
+      if (host !== 'api.anthropic.com') return true;
+    } catch {
+      return true;
+    }
+  }
   const sandbox = params.sandboxApiKey?.trim();
   const shared = params.sharedAnthropicApiKey?.trim();
   return Boolean(sandbox && shared && sandbox !== shared);

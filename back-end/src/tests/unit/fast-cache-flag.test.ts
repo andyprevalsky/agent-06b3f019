@@ -113,6 +113,10 @@ test('write-only injects ANTHROPIC_BASE_URL with record-only path when flag off'
 test('refuses loopback Fast Mode Anthropic proxy base (E2B-unreachable)', () => {
   assert.equal(isE2bReachableProxyBaseUrl('http://localhost:56201/anthropic-proxy'), false);
   assert.equal(isE2bReachableProxyBaseUrl('http://127.0.0.1:3001/anthropic-proxy'), false);
+  assert.equal(isE2bReachableProxyBaseUrl('http://[::1]:3001/anthropic-proxy'), false);
+  assert.equal(isE2bReachableProxyBaseUrl('http://[::]:3001/anthropic-proxy'), false);
+  assert.equal(isE2bReachableProxyBaseUrl('http://[::ffff:127.0.0.1]:3001/anthropic-proxy'), false);
+  assert.equal(isE2bReachableProxyBaseUrl('http://[::ffff:7f00:1]:3001/anthropic-proxy'), false);
   assert.equal(isE2bReachableProxyBaseUrl('https://mid.trycloudflare.com/anthropic-proxy'), true);
   assert.deepStrictEqual(
     buildFastModeAnthropicEnv('tint rs.jpeg', true, 'http://localhost:56201/anthropic-proxy'),
