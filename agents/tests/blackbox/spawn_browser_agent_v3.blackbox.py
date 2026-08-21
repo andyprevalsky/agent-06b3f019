@@ -10592,6 +10592,68 @@ async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
             await _force_close(browser)
 
 
+async def test_hard_recover_frozen_renderer_page_restores_evaluate():
+    """Browser-process Target.closeTarget + new page restores evaluate after freeze."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.handler import _hard_recover_frozen_renderer_page
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    async def _force_close(browser) -> None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=5.0)
+        except Exception:
+            proc = getattr(browser, "process", None)
+            if proc is not None and getattr(proc, "pid", None):
+                with contextlib.suppress(Exception):
+                    proc.kill()
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content("<html><body><h1>waiver</h1></body></html>")
+            cdp = await page.context.new_cdp_session(page)
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.sleep(0.2)
+            stalled = await classify_evaluate_cdp_stall(
+                input_page=page, playwright_browser=browser, timeout_s=1.5
+            )
+            assert stalled["verdict"] == "renderer_main_thread_blocked"
+
+            new_page, actions = await _hard_recover_frozen_renderer_page(
+                input_page=page,
+                playwright_browser=browser,
+                fallback_url="about:blank",
+            )
+            assert new_page is not None
+            assert any(
+                a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions
+            )
+            recovered = await classify_evaluate_cdp_stall(
+                input_page=new_page, playwright_browser=browser, timeout_s=2.0
+            )
+            assert recovered["renderer"] == "ok"
+            cdp2 = await new_page.context.new_cdp_session(new_page)
+            result = await asyncio.wait_for(
+                cdp2.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
+                ),
+                timeout=3.0,
+            )
+            assert (result.get("result") or {}).get("value") == 2
+        finally:
+            await _force_close(browser)
+
+
 async def test_goto_err_aborted_persists_download_to_session():
     """goto net::ERR_ABORTED on attachment URLs must persist bytes under /tmp/downloads."""
     import domains.spawn_browser_agent_v3.download_persist as download_persist
@@ -17445,6 +17507,10 @@ async def run_all_tests():
     await r.record_async(
         "renderer_block_matches_evaluate_timeout_recovery_signature",
         test_renderer_block_matches_evaluate_timeout_recovery_signature,
+    )
+    await r.record_async(
+        "hard_recover_frozen_renderer_page_restores_evaluate",
+        test_hard_recover_frozen_renderer_page_restores_evaluate,
     )
     await r.record_async("execute_action_open_new_tab", test_execute_action_open_new_tab)
     await r.record_async("execute_action_close_tab_focused", test_execute_action_close_tab_via_focused)

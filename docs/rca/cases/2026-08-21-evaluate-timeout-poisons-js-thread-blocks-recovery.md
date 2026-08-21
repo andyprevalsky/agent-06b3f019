@@ -6,11 +6,11 @@ surface: agents
 component: spawn-browser-agent-v3-evaluate
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py — asyncio.wait_for around execute_action(evaluate) times out at BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS, then _recover_browser_step(reload_page=False) only succeed at bring_to_front; Escape/dismiss (JS) time out; next get_browser_state burns another ~330s with no attention terminal
+first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py — asyncio.wait_for around execute_action(evaluate) times out; soft recovery only bring_to_front; Escape/JS paths time out; next get_browser_state burns another ~330s
 symptoms:
   - action_timeout_evaluate_330s
-  - Browser action 'evaluate' timed out after 330s; generic browser supervisor recovery ran.
-  - Action evaluate failed
+  - Browser evaluate timed out; CDP stall classification verdict=renderer_main_thread_blocked
+  - Browser action 'evaluate' timed out after 330s
   - Expected one of ['payment_approval', 'auth_assistance'] attention requests (to ignore) but none was triggered
   - Timeout after 903s (dynamic cap=900s)
 tags:
@@ -23,111 +23,81 @@ tags:
   - momence
   - canvas-signature
   - timeout
+  - reproduced
 sources:
   - agent 01dce6e9-1f2c-4039-90dc-901ed48ce2bf
-repro: agents/tests/e2e/alchemy_evaluate_stall_repro.py + blackbox tests alchemy_evaluate_js_completes_on_healthy_canvas and renderer_block_matches_evaluate_timeout_recovery_signature
+  - agent f666bc05-27bb-4c77-81bf-8048a232741a
+repro: agents/tests/e2e/alchemy_evaluate_stall_repro.py + blackbox tests; live rerun 20260821_215746 reproduced with classification
 status: open
 ---
 
 ## Problem
 
-`scripts/run-bench --local browser-alchemy-springs-sauna` (k=1) timed out at ~909s with
-no `payment_approval` or `auth_assistance`.
+`scripts/run-bench --local browser-alchemy-springs-sauna` times out ~900s with no
+attention terminal after an evaluate hang on the Momence waiver surface.
 
-Agent `01dce6e9-1f2c-4039-90dc-901ed48ce2bf` timeline (worker.log):
+## Reproduction (not transient)
 
-- 19:10:30.653 — step23 `evaluate` **succeeded** in ~88ms (`signed canvas`).
-- 19:10:31.848 — DOM/bbox state still worked (page interactive).
-- 19:10:37.533 — step24 LLM dump; evaluate about to run (exact finite MouseEvent JS).
-- 19:10:37 → 19:16:30 — **no worker logs** until `action_timeout_evaluate_330s`.
-- Recovery actions: `["bring_to_front"]` only. ~22s gap after the 330s cap matches
-  snapshot(5s) + Escape(8s) + dismiss(8s) all timing out under `suppress` (Escape/
-  dismiss never appended). Recovery URL is `fallback_url=current_url`, **not** proof
-  that Playwright `page.evaluate` for the snapshot succeeded.
-- 19:16:30 → 19:22:35 — another ~365s silence until harness PAUSE (no
-  `browser_state_timeout_*` log; activity cancelled mid next-step CDP).
+Two independent local Kernel runs, different evaluate payloads, same class:
 
-Momence waiver signature pad is **react-konva** (`ks=` in `main.c2165e2b.js`): Stage
-`onMouseDown/Move/Up` + `getStage().getPointerPosition()`, not a raw signature_pad.
-Accept stays disabled until Konva point state is non-empty — so step23's PointerEvent
-+ canvas `stroke()` can return `signed canvas` without enabling Accept (matches the
-trajectory).
+| Run | Agent | Hung payload | Classification |
+| --- | --- | --- | --- |
+| 1 | `01dce6e9` | canvas MouseEvent stroke (sha `ded456fc3328`) | inferred from recovery shape |
+| 2 | `f666bc05` | `[role=presentation]` PointerEvent fanout (sha `dcee4bdbb5d2`) | **live** `renderer=frozen browser=ok verdict=renderer_main_thread_blocked` |
+
+Rerun 2 timeline:
+
+- 21:46:21.125 — `Browser evaluate starting` (code_len=475, sha `dcee4bdbb5d2`)
+- 21:51:53.778 — timeout + classification (`renderer_ms=2030`, `browser_ms=60`)
+- 21:52:16.487 — soft recovery `actions=["bring_to_front"]` only
+- Harness FAIL: Timeout 903s, no payment/auth_assistance attention
+
+FE (rerun): `http://localhost:3202/?agent-id=f666bc05-27bb-4c77-81bf-8048a232741a`
+Run JSON: `agents/benchmarks/runs/20260821_215746_browser-alchemy-springs-sauna.json`
+
+Different JS both times ⇒ not a single bad evaluate program. Momence waiver
+signature surface (react-konva) leaves the **renderer main thread** unresponsive
+to page-target CDP while the browser process stays healthy.
 
 ## Diagnosis
 
-Critical path: spawn browser → step23 evaluate OK → step24 CDP
-`Runtime.evaluate(awaitPromise=True)` never returns → soft recovery → next state CDP
-stall → task timeout (no attention).
+Owned defect: evaluate-timeout recovery assumed the page target remained
+interactive. Soft bring_to_front cannot reclaim a frozen renderer; Escape/dismiss
+(JS) time out; budget burns twice.
 
-### What the stall was **not**
-
-1. **Not a bad evaluate program.** Exact step23/24 JS against a healthy canvas/Konva
-   Stage completes in single-digit milliseconds via the same CDP shape
-   (`Runtime.evaluate` + `returnByValue` + `awaitPromise`). Artifact:
-   `/opt/cursor/artifacts/alchemy_konva_evaluate_repro.json` and blackbox
-   `alchemy_evaluate_js_completes_on_healthy_canvas`.
-2. **Not awaitPromise-cancel poison.** Cancelling a long Promise evaluate with
-   `asyncio.wait_for` leaves the same page able to `evaluate(1+1)` and step24 again
-   (mechanism C in `alchemy_evaluate_stall_repro.py`).
-
-### What matches the live recovery signature
-
-**Renderer main thread (or equivalent) unresponsive to page-target CDP**, while the
-browser process stays up:
-
-1. Pre-block renderer (`setTimeout(() => { while(true){} }, 0)` with
-   `awaitPromise:false`), then send exact step24 JS → TimeoutError.
-2. Dual ping: renderer `1+1` frozen, `Browser.getVersion` OK → verdict
-   `renderer_main_thread_blocked`.
-3. Soft recovery: `bring_to_front` succeeds; `Escape` TimeoutError — same shape as
-   prod `actions: ["bring_to_front"]`.
-4. Evaluate after soft still hangs; **new page** evaluate OK.
-
-So the owned harness defect remains: evaluate-timeout recovery assumes the page
-target is still interactive. The **trigger** that pinned Momence/Kernel renderer
-between step23 success and step24 completion is still unknown (not the evaluate
-source text). Next live hit must emit the new stall classification log.
-
-Archive: novel for `action_timeout_evaluate_330s`. Same non-cancellable class as
-EventBus BrowserStateRequest comment in config.py. Not FCaptcha canvasHash.
-
-Step 5a: our-bug / harness recovery contract. Not model-only: model chose a second
-evaluate, but the harness burned the remaining budget without reclaiming a usable
-execution context.
+Local mechanism repro (A healthy JS OK; B preblocked renderer matches live
+recovery; C awaitPromise-cancel does not poison) remains in
+`agents/tests/e2e/alchemy_evaluate_stall_repro.py`.
 
 ## Solution
 
-Implemented (this turn):
+Implemented:
 
-1. Evaluate start/complete logs with `code_len` + `code_sha256_12` + timings
-   (`service_actions._execute_inspection_action`).
-2. On `action_timeout_evaluate_*`, run `classify_evaluate_cdp_stall` (renderer vs
-   browser CDP) before soft recovery and log the verdict (`handler.py`).
-3. Cemented local repro: `agents/tests/e2e/alchemy_evaluate_stall_repro.py` + blackbox
-   `alchemy_evaluate_js_completes_on_healthy_canvas` and
-   `renderer_block_matches_evaluate_timeout_recovery_signature`.
+1. Evaluate start/complete fingerprints + dual CDP classification on timeout.
+2. On `verdict=renderer_main_thread_blocked`: soft recovery with `reload_page=True`,
+   then `_hard_recover_frozen_renderer_page` — close hung page target(s) via
+   **browser-process** `Target.closeTarget`, open a new Playwright page, goto
+   resume URL, nudge browser-use via `NavigateToUrlEvent`, rebind humanizer.
+3. Blackbox: healthy evaluate JS, recovery signature, hard-recover restores
+   evaluate.
 
-Proposed (not implemented — needs outcome proof on the exact bench after):
+Still required for close: re-run exact
+`scripts/run-bench --local browser-alchemy-springs-sauna` and show the run gets
+past evaluate (attention terminal or non-timeout progress) with hard recovery
+logs present. Case stays `open` until that outcome proof.
 
-1. On evaluate timeout when verdict is `renderer_main_thread_blocked` (or Escape
-   soft-recovery timeouts), escalate beyond bring_to_front: reload or recreate the
-   page/target so CDP can run again.
-2. Re-run exact `scripts/run-bench --local browser-alchemy-springs-sauna` for
-   outcome proof.
+Do not raise task/action timeouts to "pass" this.
 
-Do not raise the 900s task timeout or the 330s action supervisor timeout to "fix" this.
-
-10k-agent behavior: per stuck page, one classified hard recovery instead of a second
-full timeout burn; no new shared fan-in.
+10k-agent: one classified hard recovery per stuck page; no shared fan-in.
 
 ## Human feedback
 
-User: evaluate strategy should be fine; dig into the stall; add logs if needed; need a
-CLEAN local repro (reject while(true) *as the evaluate payload* stand-in for Momence).
+User: evaluate is fine; dig into stall; clean local repro. Then: determine if
+transient; rerun bench to reproduce. Rerun proved **not transient**.
 
 ## Reusable lesson
 
-When CDP `Runtime.evaluate` times out under `asyncio.wait_for`, classify renderer vs
-browser process before soft recovery. Finite evaluate JS can still hang if the
-renderer is already wedged — prove the payload healthy separately from the recovery
-contract.
+When page-target `Runtime.evaluate` hangs, classify with browser-process CDP
+before soft recovery. Soft bring_to_front is insufficient for
+`renderer_main_thread_blocked` — close the target from the browser process and
+recreate the page.
