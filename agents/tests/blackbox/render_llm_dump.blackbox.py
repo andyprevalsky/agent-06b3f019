@@ -348,20 +348,95 @@ def test_publish_rendered_dump_copies_html_and_assets():
         html_path = src_dir / "llm_dump_browser_use_step_24.html"
         assets_dir = src_dir / "llm_dump_browser_use_step_24_assets"
         assets_dir.mkdir()
+        (assets_dir / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"png-bytes")
         html_path.write_text(
             '<html><img src="llm_dump_browser_use_step_24_assets/shot.png"></html>',
             encoding="utf-8",
         )
-        (assets_dir / "shot.png").write_bytes(b"png-bytes")
 
         published = renderer.publish_rendered_dump(html_path, artifacts_dir)
 
         assert published == artifacts_dir / "llm_dump_browser_use_step_24.html"
         assert published is not None
-        assert published.read_text(encoding="utf-8") == html_path.read_text(encoding="utf-8")
-        copied_asset = artifacts_dir / "llm_dump_browser_use_step_24_assets" / "shot.png"
-        assert copied_asset.read_bytes() == b"png-bytes"
+        published_html = published.read_text(encoding="utf-8")
+        assert "file://" not in published_html
+        assert "data:image/png;base64," in published_html
+        assert "llm_dump_browser_use_step_24_assets/shot.png" not in published_html
         assert renderer.publish_rendered_dump(html_path, Path(tmp) / "missing") is None
+
+
+def test_published_dump_is_viewable_without_sidecar_assets():
+    """Published HTML must remain viewable even if the _assets directory is deleted."""
+    renderer = _load_renderer()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        recording_dir = tmp_path / "recording"
+        frames_dir = recording_dir / "frames"
+        frames_dir.mkdir(parents=True)
+        (frames_dir / "frame_00001.jpg").write_bytes(b"\xff\xd8\xff\xe0frame-one")
+        (frames_dir / "frame_00002.jpg").write_bytes(b"\xff\xd8\xff\xe0frame-two")
+        (recording_dir / "index.html").write_text("<html>recording</html>")
+        manifest_path = recording_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "frames": [
+                        {
+                            "src": "frames/frame_00001.jpg",
+                            "ts_ms": 100,
+                            "label": "idle",
+                            "action": "idle",
+                            "metadata": {},
+                        },
+                        {
+                            "src": "frames/frame_00002.jpg",
+                            "ts_ms": 1234,
+                            "label": "Clicking Submit",
+                            "action": "click",
+                            "cursor": {"x": 10, "y": 20},
+                            "metadata": {"step": 4, "phase": "start", "action": "click"},
+                        },
+                    ]
+                }
+            )
+        )
+        dump_data = {
+            "call_site": "browser_use_step_4",
+            "agent_id": "agent-repro",
+            "model": "test",
+            "messages": [],
+            "output": {"action": {"action": "click", "index": 7}},
+            "extra": {
+                "browser_recording_manifest_path": str(manifest_path),
+                "iteration": 4,
+                "output": {"action": {"action": "click"}},
+            },
+        }
+        out = tmp_path / "rendered" / "llm_dump_browser_use_step_4.html"
+        out.parent.mkdir(parents=True)
+        source = tmp_path / "dump.json"
+        source.write_text(json.dumps(dump_data))
+        out.write_text(renderer.build_html(dump_data, source, out), encoding="utf-8")
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        published = renderer.publish_rendered_dump(out, artifacts_dir)
+        assert published is not None
+        # Delete every sidecar — the published HTML must still embed the frames.
+        for path in artifacts_dir.iterdir():
+            if path != published:
+                if path.is_dir():
+                    import shutil
+
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+        pub_html = published.read_text(encoding="utf-8")
+        assert "file://" not in pub_html
+        assert "Browser Recording" in pub_html
+        assert "data:image/jpeg;base64," in pub_html
+        assert "_assets/" not in pub_html
 
 
 async def run_all_tests():
@@ -405,5 +480,9 @@ async def run_all_tests():
     r.record(
         "publish_rendered_dump_copies_html_and_assets",
         test_publish_rendered_dump_copies_html_and_assets,
+    )
+    r.record(
+        "published_dump_is_viewable_without_sidecar_assets",
+        test_published_dump_is_viewable_without_sidecar_assets,
     )
     return r.all_passed
