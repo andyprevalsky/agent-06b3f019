@@ -7892,6 +7892,13 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 message_index=message_index,
             ):
                 continue
+            if _is_recoverable_pinned_host_refusal_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
             if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
@@ -8142,6 +8149,57 @@ def _is_recoverable_browser_element_miss_failure(
     return _has_later_browser_recovery(messages, message_index)
 
 
+_PINNED_HOST_REFUSAL_RE = re.compile(
+    r"Refusing (?:to leave pinned page host|click that navigates off pinned host|"
+    r"key chord .+ that would leave pinned host|"
+    r"evaluate that would navigate away from pinned host)",
+    re.IGNORECASE,
+)
+
+
+def _is_browser_pinned_host_refusal(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when the browser guard refused leaving an antibot-pinned host."""
+    if not _browser_tool_candidate(candidate):
+        return False
+    parts = [str(message_text or "").strip()]
+    for key in ("error", "title", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return bool(_PINNED_HOST_REFUSAL_RE.search("\n".join(parts)))
+
+
+def _is_recoverable_pinned_host_refusal_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Pinned-host guard ERRORs during challenge pin are retry noise when later recovered.
+
+    While a Google/Cloudflare (etc.) page is pinned, escape attempts (close_tab,
+    switch_tab, off-host click, navback, Ctrl+W, evaluate navigate) ERROR with
+    `Refusing … pinned host`. Agents often recover and still reach payment.
+    Counting those recovered refusals in `no_tool_failures` fails closed
+    payment-terminal benches. Unrecovered terminal refusals still count.
+    """
+    if not _is_browser_pinned_host_refusal(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
 def _tool_message_body(message: dict) -> str:
     """Return tool/user-visible body text from either API (`text`) or artifact (`message`)."""
     return str(message.get("text") or message.get("message") or "")
@@ -8227,6 +8285,13 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             if _is_recoverable_browser_element_miss_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_pinned_host_refusal_failure(
                 candidate,
                 message_text=message_text,
                 messages=messages,
