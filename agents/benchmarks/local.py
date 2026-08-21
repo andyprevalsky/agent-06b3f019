@@ -773,6 +773,24 @@ def needs_public_tunnel(tasks: Sequence[str]) -> bool:
     return False
 
 
+def apply_public_tunnel_env(env: dict[str, str], tasks: Sequence[str]) -> bool:
+    """Make BENCHMARK_SKIP_PUBLIC_TUNNEL match selected tasks; return skip flag.
+
+    Task selection is authoritative. A parent /deploy shell may export
+    BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for the Step-5 semantic stack (or to avoid
+    ngrok contention across Group 4 lanes). That ambient skip must not leak
+    into an isolated browser/payment stack — Kernel cannot reach localhost, so
+    {frontend_url} would be ERR_CONNECTION_REFUSED for the entire timeout.
+    """
+    skip_public_tunnel = bool(tasks) and not needs_public_tunnel(tasks)
+    if skip_public_tunnel:
+        env["BENCHMARK_SKIP_PUBLIC_TUNNEL"] = "1"
+        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+    else:
+        env.pop("BENCHMARK_SKIP_PUBLIC_TUNNEL", None)
+    return skip_public_tunnel
+
+
 def needs_imessage_relay(tasks: Sequence[str]) -> bool:
     return "message-person" in set(tasks) and sys.platform == "darwin"
 
@@ -1186,7 +1204,7 @@ def start_services(
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
-    skip_public_tunnel = bool(tasks) and not needs_public_tunnel(tasks)
+    skip_public_tunnel = apply_public_tunnel_env(env, tasks)
     if anon_steel_profile:
         env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
         env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
@@ -1279,8 +1297,9 @@ def start_services(
         # run needs to be reachable from the public internet. Skip the quick
         # tunnel (and, with it, the ephemeral-URL publish that would otherwise
         # have nothing to publish) rather than take a per-IP-rate-limited
-        # external dependency for nothing. See needs_public_tunnel().
-        env["BENCHMARK_SKIP_PUBLIC_TUNNEL"] = "1"
+        # external dependency for nothing. See needs_public_tunnel() /
+        # apply_public_tunnel_env() (already applied above; keep EPHEMERAL
+        # pinned off here for the non-isolated path).
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
 
     try:
