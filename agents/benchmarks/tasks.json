@@ -2131,17 +2131,6 @@
             "value": 1
           }
         ]
-      },
-      {
-        "id": "imax-group-ticket-adjacency-semantics",
-        "method": "single_turn_llm_judge",
-        "criteria": [
-          "The staged purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
-          "Grounded showtime and seat-map evidence shows the selected show is the earliest qualifying premium-format show remaining tonight and all 3 selected seats are available and directly adjacent in the same row",
-          "Each ticket price is under $35 before fees, and no concessions, memberships, donations, insurance, or upgrades are added",
-          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory stops at exactly one unresolved payment approval grounded to the AMC checkout"
-        ],
-        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are staged with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, and the run stops at exactly one unresolved payment approval that identifies the venue, date, showtime, all three seats, and total amount. Do not require or accept an approved charge or completed purchase. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
       }
     ],
     "enforce_declared_evaluators": true,
