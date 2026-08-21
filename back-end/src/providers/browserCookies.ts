@@ -60,7 +60,9 @@ export function cookieSelectionWhere(authRealm: string): { OR: Array<Record<stri
 }
 
 /** Chrome's integer SameSite → the string form both Playwright and CDP accept. */
-export function chromeSameSiteToString(value: number | null): 'None' | 'Lax' | 'Strict' | undefined {
+export function chromeSameSiteToString(
+  value: number | null
+): 'None' | 'Lax' | 'Strict' | undefined {
   if (value === 0) return 'None';
   if (value === 1) return 'Lax';
   if (value === 2) return 'Strict';
@@ -86,7 +88,9 @@ export interface CanonicalCookie {
  * browser cannot resolve which host it belongs to and silently drops the whole
  * batch. Scheme is https whenever the cookie requires Secure.
  */
-export function cookieUrlFor(c: Pick<CanonicalCookie, 'domain' | 'path' | 'secure' | 'name'>): string {
+export function cookieUrlFor(
+  c: Pick<CanonicalCookie, 'domain' | 'path' | 'secure' | 'name'>
+): string {
   const host = c.domain.replace(/^\./, '');
   const secure = c.secure || c.name.startsWith('__Host-') || c.name.startsWith('__Secure-');
   return `${secure ? 'https' : 'http'}://${host}${c.path.startsWith('/') ? c.path : '/'}`;
@@ -148,9 +152,7 @@ export function pickCoherentProfile<
       best === null ||
       (coherent && !best.coherent) ||
       (coherent === best.coherent && named(k) && !named(best.k)) ||
-      (coherent === best.coherent &&
-        named(k) === named(best.k) &&
-        list.length > best.rows.length);
+      (coherent === best.coherent && named(k) === named(best.k) && list.length > best.rows.length);
     if (better) best = { k, rows: list, coherent };
   }
   return { rows: best?.rows ?? [], profile: best?.k ?? 'none', total: rows.length };

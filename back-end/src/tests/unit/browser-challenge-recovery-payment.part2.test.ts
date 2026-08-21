@@ -30,11 +30,7 @@ function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
 
 type ProbeArg = { url: string; hostKey: string; loadAsScript: boolean };
 
-function makeProbePage(opts: {
-  fetchOk?: boolean;
-  scriptOk?: boolean;
-  title?: string;
-}): {
+function makeProbePage(opts: { fetchOk?: boolean; scriptOk?: boolean; title?: string }): {
   goto: () => Promise<{ status: () => number }>;
   waitForTimeout: () => Promise<undefined>;
   evaluate: (fn: unknown, arg?: ProbeArg) => Promise<Record<string, boolean> | undefined>;

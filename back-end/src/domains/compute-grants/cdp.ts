@@ -11,6 +11,13 @@
  * production and tests.
  */
 
+import { createCodexCallbackController } from './cdp.codex';
+export {
+  CODEX_HOSTED_LOGIN_SUCCESS_URL,
+  codexCallbackFulfillment,
+  type CodexCallbackFulfillment,
+} from './cdp.codex';
+
 export interface CdpCookie {
   name: string;
   value: string;
@@ -50,67 +57,6 @@ export function countAccepted(
   const key = (n: string, d: string) => `${n}|${d.replace(/^\./, '')}`;
   const have = new Set(present.map((c) => key(c.name, c.domain)));
   return sent.filter((c) => have.has(key(c.name, c.domain))).length;
-}
-
-/** The hosted success destination used by the first-party Codex app server. */
-export const CODEX_HOSTED_LOGIN_SUCCESS_URL =
-  'https://chatgpt.com/codex/open-app?source=login&app_brand=chatgpt';
-
-export interface CodexCallbackFulfillment {
-  responseCode: number;
-  responseHeaders: Array<{ name: string; value: string }>;
-  body?: string;
-}
-
-/**
- * Validate and turn a Codex loopback request into a browser-safe response.
- *
- * This runs synchronously inside the CDP Fetch.requestPaused handler, before
- * Chromium can attempt the remote VM's localhost and paint
- * ERR_CONNECTION_REFUSED. State validation happens here as well as during the
- * token exchange so an unrelated loopback request is never treated as ours.
- */
-export function codexCallbackFulfillment(
-  callbackUrl: string,
-  expectedState: string
-): CodexCallbackFulfillment | null {
-  try {
-    const url = new URL(callbackUrl);
-    if (
-      url.protocol !== 'http:' ||
-      url.hostname !== 'localhost' ||
-      (url.port !== '1455' && url.port !== '1457') ||
-      url.pathname !== '/auth/callback' ||
-      url.searchParams.get('state') !== expectedState
-    ) {
-      return null;
-    }
-    if (url.searchParams.get('code')) {
-      return {
-        responseCode: 302,
-        responseHeaders: [
-          { name: 'Location', value: CODEX_HOSTED_LOGIN_SUCCESS_URL },
-          { name: 'Cache-Control', value: 'no-store' },
-        ],
-      };
-    }
-    if (url.searchParams.get('error')) {
-      const html =
-        '<!doctype html><meta charset="utf-8"><title>Sign-in not completed</title>' +
-        '<main style="font:16px system-ui;padding:40px">Sign-in was not completed. Return to Rose and try again.</main>';
-      return {
-        responseCode: 200,
-        responseHeaders: [
-          { name: 'Content-Type', value: 'text/html; charset=utf-8' },
-          { name: 'Cache-Control', value: 'no-store' },
-        ],
-        body: Buffer.from(html).toString('base64'),
-      };
-    }
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 import { cookieUrlFor, normaliseCookie } from '../../providers/browserCookies';
@@ -191,6 +137,30 @@ type CdpSend = (
   params?: unknown,
   opts?: { raw?: boolean; sessionId?: string }
 ) => Promise<Record<string, unknown>>;
+
+function createCdpSend(ws: WebSocket, page: { sessionId: string | undefined }): CdpSend {
+  let seq = 0;
+  return (method, params = {}, opts = {}) =>
+    new Promise((resolve) => {
+      const id = (seq += 1);
+      const handler = (event: MessageEvent) => {
+        const message = JSON.parse(String(event.data)) as { id?: number };
+        if (message.id !== id) return;
+        ws.removeEventListener('message', handler);
+        resolve(message as Record<string, unknown>);
+      };
+      ws.addEventListener('message', handler);
+      const sessionId = opts.sessionId ?? (opts.raw !== true ? page.sessionId : undefined);
+      ws.send(
+        JSON.stringify({
+          id,
+          method,
+          params,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+        })
+      );
+    });
+}
 
 /**
  * Attach to a page target so Runtime/Network have an execution context.
@@ -316,8 +286,6 @@ async function evaluateOnAllTargets<T>(send: CdpSend, expression: string): Promi
 
 export async function attachCdp(cdpBase: string): Promise<CdpClient> {
   const ws = await openCdpSocket(cdpBase);
-
-  let seq = 0;
   // Remote providers (Kernel, Steel) hand back a BROWSER-level websocket, not a
   // page one. Browser-level connections have no execution context, so
   // Runtime/Network commands silently return nothing -- which presents as
@@ -328,89 +296,8 @@ export async function attachCdp(cdpBase: string): Promise<CdpClient> {
     sessionId: undefined,
     targetId: undefined,
   };
-  const send = (
-    method: string,
-    params: unknown = {},
-    opts: { raw?: boolean; sessionId?: string } = {}
-  ): Promise<Record<string, unknown>> =>
-    new Promise((resolve) => {
-      const id = (seq += 1);
-      const handler = (e: MessageEvent) => {
-        const msg = JSON.parse(String(e.data)) as { id?: number };
-        if (msg.id === id) {
-          ws.removeEventListener('message', handler);
-          resolve(msg as Record<string, unknown>);
-        }
-      };
-      ws.addEventListener('message', handler);
-      ws.send(
-        JSON.stringify({
-          id,
-          method,
-          params,
-          ...(opts.sessionId !== undefined
-            ? { sessionId: opts.sessionId }
-            : opts.raw !== true && page.sessionId !== undefined
-              ? { sessionId: page.sessionId }
-              : {}),
-        })
-      );
-    });
-
-  const codexCallback: { expectedState: string | null; capturedUrl?: string } = {
-    expectedState: null,
-  };
-  const codexPatterns = [
-    { urlPattern: 'http://localhost:1455/auth/callback*', requestStage: 'Request' },
-    { urlPattern: 'http://localhost:1457/auth/callback*', requestStage: 'Request' },
-  ];
-  ws.addEventListener('message', (event: MessageEvent) => {
-    let message: {
-      method?: string;
-      sessionId?: string;
-      params?: {
-        requestId?: string;
-        request?: { url?: string };
-        sessionId?: string;
-        targetInfo?: { type?: string };
-      };
-    };
-    try {
-      message = JSON.parse(String(event.data));
-    } catch {
-      return;
-    }
-
-    // SSO can finish in a different page target. Auto-attach gives us its CDP
-    // session early enough to install the same interception there.
-    if (
-      message.method === 'Target.attachedToTarget' &&
-      codexCallback.expectedState !== null &&
-      message.params?.targetInfo?.type === 'page' &&
-      message.params.sessionId !== undefined
-    ) {
-      void send(
-        'Fetch.enable',
-        { patterns: codexPatterns },
-        { sessionId: message.params.sessionId }
-      );
-      return;
-    }
-
-    if (message.method !== 'Fetch.requestPaused') return;
-    const requestId = message.params?.requestId;
-    const callbackUrl = message.params?.request?.url;
-    const expectedState = codexCallback.expectedState;
-    if (requestId === undefined || callbackUrl === undefined || expectedState === null) return;
-    const fulfillment = codexCallbackFulfillment(callbackUrl, expectedState);
-    const session = message.sessionId !== undefined ? { sessionId: message.sessionId } : {};
-    if (fulfillment === null) {
-      void send('Fetch.continueRequest', { requestId }, session);
-      return;
-    }
-    codexCallback.capturedUrl ??= callbackUrl;
-    void send('Fetch.fulfillRequest', { requestId, ...fulfillment }, session);
-  });
+  const send = createCdpSend(ws, page);
+  const codexCallback = createCodexCallbackController(ws, send);
 
   const attachedPage = await attachToPageTarget(send);
   page.sessionId = attachedPage.sessionId;
@@ -456,19 +343,10 @@ export async function attachCdp(cdpBase: string): Promise<CdpClient> {
       return out.result?.result?.value ?? undefined;
     },
     async armCodexCallback(expectedState: string): Promise<void> {
-      codexCallback.expectedState = expectedState;
-      await send('Fetch.enable', { patterns: codexPatterns });
-      // Also receive any top-level page opened by an SSO handoff. The passkey
-      // path enables the same setting, but callback interception must work even
-      // when this user has no passkeys saved.
-      await send(
-        'Target.setAutoAttach',
-        { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
-        { raw: true }
-      );
+      await codexCallback.arm(expectedState);
     },
     getCapturedCodexCallbackUrl(): string | undefined {
-      return codexCallback.capturedUrl;
+      return codexCallback.getCapturedUrl();
     },
     async getPageUrls(): Promise<string[]> {
       const targetsRes = (await send('Target.getTargets', {}, { raw: true })) as {
@@ -479,59 +357,7 @@ export async function attachCdp(cdpBase: string): Promise<CdpClient> {
         .map((target) => target.url as string);
     },
     async showFinishingPage(callbackUrl: string): Promise<boolean> {
-      const callback = new URL(callbackUrl);
-      if (
-        callback.protocol !== 'http:' ||
-        callback.hostname !== 'localhost' ||
-        (callback.port !== '1455' && callback.port !== '1457') ||
-        callback.pathname !== '/auth/callback'
-      ) {
-        return false;
-      }
-
-      const targetsRes = (await send('Target.getTargets', {}, { raw: true })) as {
-        result?: {
-          targetInfos?: Array<{ targetId: string; type: string; url?: string }>;
-        };
-      };
-      const target = (targetsRes.result?.targetInfos ?? []).find(
-        (candidate) => candidate.type === 'page' && candidate.url === callbackUrl
-      );
-      if (target === undefined) return false;
-
-      const attached = (await send(
-        'Target.attachToTarget',
-        { targetId: target.targetId, flatten: true },
-        { raw: true }
-      )) as { result?: { sessionId?: string } };
-      const sessionId = attached.result?.sessionId;
-      if (sessionId === undefined) return false;
-
-      const html = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Finishing connection</title>
-    <style>
-      :root { color-scheme: light dark; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      body { min-height: 100vh; margin: 0; display: grid; place-items: center; background: #fff; color: #171717; }
-      main { display: flex; align-items: center; gap: 14px; padding: 24px; }
-      .spinner { width: 20px; height: 20px; border: 2px solid #d4d4d4; border-top-color: #537fff; border-radius: 50%; animation: spin .8s linear infinite; }
-      h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
-      p { margin: 0; color: #737373; font-size: 13px; }
-      @keyframes spin { to { transform: rotate(360deg); } }
-      @media (prefers-color-scheme: dark) { body { background: #0a0a0a; color: #fafafa; } p { color: #a3a3a3; } }
-    </style>
-  </head>
-  <body><main><div class="spinner"></div><div><h1>Finishing connection</h1><p>You can keep this window open.</p></div></main></body>
-</html>`;
-      await send(
-        'Page.navigate',
-        { url: `data:text/html;charset=utf-8,${encodeURIComponent(html)}` },
-        { sessionId }
-      );
-      return true;
+      return codexCallback.showFinishingPage(callbackUrl);
     },
     evaluateAnyTarget: <T>(expression: string) => evaluateOnAllTargets<T>(send, expression),
     async seedPasskeys(passkeys: PasskeySeed[]): Promise<number> {
