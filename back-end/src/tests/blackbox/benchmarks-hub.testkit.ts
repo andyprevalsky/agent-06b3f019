@@ -211,6 +211,37 @@ export async function assertEnvironmentReconcileFromFile(): Promise<void> {
     if (!Array.isArray(defEnv.live_targets)) {
       throw new Error('definition.environment.live_targets still missing');
     }
+
+    // Key-order noise must not force another catalog-seed rewrite.
+    const scrambled = {
+      live_targets: defEnv.live_targets,
+      secrets: defEnv.secrets,
+      ...Object.fromEntries(
+        Object.entries(defEnv)
+          .filter(([k]) => k !== 'secrets' && k !== 'live_targets')
+          .reverse()
+      ),
+    };
+    const scrambledDefinition = {
+      ...(healed.definition as Record<string, unknown>),
+      environment: scrambled,
+    };
+    await prisma.benchmarkTask.update({
+      where: { name: 'wait-for-trigger' },
+      data: {
+        environment: scrambled as Prisma.InputJsonObject,
+        definition: scrambledDefinition as Prisma.InputJsonObject,
+        updatedBy: 'test-key-order',
+      },
+    });
+    await seedBenchmarkTasks();
+    const afterOrder = await prisma.benchmarkTask.findUnique({
+      where: { name: 'wait-for-trigger' },
+    });
+    if (!afterOrder) throw new Error('wait-for-trigger missing after key-order seed');
+    if (afterOrder.updatedBy === 'catalog-seed') {
+      throw new Error('stableJson key-order mismatch caused unnecessary environment reconcile');
+    }
   } finally {
     await prisma.$disconnect();
   }
