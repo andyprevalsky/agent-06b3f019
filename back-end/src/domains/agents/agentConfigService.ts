@@ -152,13 +152,17 @@ export async function updateAgentConfig(
     return priceLimitError;
   }
 
-  const hasMutation = Object.keys(agentUpdateData).length > 0 || body.tool_ids !== undefined;
+  const hasMutation =
+    Object.keys(agentUpdateData).length > 0 ||
+    body.tool_ids !== undefined ||
+    body.generated_title !== undefined;
   const accepted = hasMutation
     ? await repo.updateAgentConfigMutation(
         agentId,
         agentUpdateData as Prisma.AgentUpdateManyMutationInput,
         body.tool_ids,
-        workflowGeneration
+        workflowGeneration,
+        body.generated_title
       )
     : true;
 
