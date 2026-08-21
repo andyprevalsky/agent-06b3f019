@@ -46,6 +46,24 @@ export function resolvePromptSecrets(text: string): string {
   });
 }
 
+/**
+ * Post-create work that must not block the create response.
+ *
+ * Fire-and-forget by design: the archive fixture is diagnostic and must not
+ * delay the create response.
+ */
+function runPostCreateSideEffects(
+  agentDbId: string,
+  archiveStartFixture: (() => Promise<void>) | null
+): void {
+  archiveStartFixture?.().catch((error: unknown) => {
+    log.warn('Trace archive start fixture failed', {
+      agent_id: agentDbId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
 /** Start root agent directly in plan/execute (bypass chat). */
 async function startDirectWorkflow(
@@ -115,7 +133,8 @@ async function startChatMode(
     repo
       .failAgentIfStillActive(
         agentDbId,
-        'Chat handler error: ' + (err instanceof Error ? err.message : String(err))
+        'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
+        agentDbId
       )
       .catch((updateErr: unknown) =>
         log.error('Failed to update agent status', {
@@ -202,12 +221,13 @@ export async function createAgent(
 
   const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
 
-  void archiveStartFixture?.();
+  runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
 
   return {
     agent_id: agent.agent.id,
     progress: agent.agent.progress,
     goal: agent.agent.goal,
+    title: agent.agent.title,
     model: agent.agent.model,
     source: body.source,
     reasoning_max_tokens: body.reasoning_max_tokens,
@@ -320,5 +340,22 @@ export async function deleteAgent(agentId: string, userId?: string): Promise<boo
     return false;
   }
   await deleteAgentRecursive(agentId);
+  return true;
+}
+
+/**
+ * Un-archive a soft-deleted agent (and its archived descendants) after
+ * verifying ownership. Returns true if an archived agent was found.
+ *
+ * The run is NOT resumed: archiving terminated the Temporal workflow and tore
+ * down browser/sandbox sessions, so the agent returns readable and stopped.
+ */
+export async function unarchiveAgent(agentId: string, userId?: string): Promise<boolean> {
+  const agent = await repo.findArchivedAgent(agentId, userId);
+  if (!agent) {
+    return false;
+  }
+  await repo.restoreAgentAndDescendants(agentId);
+  log.info('Unarchived agent', { agent_id: agentId });
   return true;
 }

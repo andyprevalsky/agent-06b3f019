@@ -375,7 +375,7 @@ async function syncIntegrations(): Promise<number> {
   for (const uid of poolUserIds) {
     await syncUserRecord(remote.user, local.user, uid);
   }
-  // Integrations are unique by (userId, name). A local credential may have a
+  // Integrations are unique by (userId, name, accountId). A local credential may have a
   // different primary key from its production counterpart, so syncing by id
   // can collide with that compound key and fail every benchmark preflight.
   // Preserve the local id (and any dependent rows) while refreshing the
@@ -418,9 +418,10 @@ async function syncEmailIntegrations(): Promise<Map<string, string>> {
     const { id: remoteId, ...updateData } = integration;
     const synced = await local.integration.upsert({
       where: {
-        userId_name: {
+        userId_name_accountId: {
           userId: integration.userId,
           name: integration.name,
+          accountId: integration.accountId,
         },
       },
       create: integration,
@@ -454,12 +455,18 @@ async function emailIntegrationIdMap(): Promise<Map<string, string>> {
       userId: DEV_USER_ID,
       name: { in: [...EMAIL_INTEGRATION_NAMES] },
     },
-    select: { id: true, userId: true, name: true },
+    select: { id: true, userId: true, name: true, accountId: true },
   });
   const remoteToLocal = new Map<string, string>();
   for (const row of remoteRows) {
     const localRow = await local.integration.findUnique({
-      where: { userId_name: { userId: row.userId, name: row.name } },
+      where: {
+        userId_name_accountId: {
+          userId: row.userId,
+          name: row.name,
+          accountId: row.accountId,
+        },
+      },
       select: { id: true },
     });
     if (localRow) remoteToLocal.set(row.id, localRow.id);

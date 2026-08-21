@@ -14,6 +14,7 @@ import {
   MULTIPART_THRESHOLD_BYTES,
   objectKey,
   planUploadParts,
+  shouldUseMultipartUpload,
 } from '../../../scripts/seed-dump-cache';
 
 /**
@@ -148,6 +149,15 @@ test('multipart plan handles exact-multiple and tiny sizes without empty parts',
   assert.deepEqual(tiny[0], { partNumber: 1, start: 0, end: 10 });
 
   assert.deepEqual(planUploadParts(0), [], 'an empty object needs no parts');
+});
+
+test('compressed canonical base uses retryable multipart upload', () => {
+  // Current pg16 custom-format canonical base after the compute schema rebase.
+  // Sending this 30.8MB artifact through one PutObject stream reproduced
+  // `sslv3 alert bad record mac`; multipart retries only the failed chunk.
+  const compressedCanonicalBytes = 30_781_281;
+  assert.equal(shouldUseMultipartUpload(compressedCanonicalBytes), true);
+  assert.ok(MULTIPART_THRESHOLD_BYTES <= compressedCanonicalBytes);
 });
 
 test('CLI fails closed (exit 1) when R2 is unconfigured — caller cold-syncs', () => {

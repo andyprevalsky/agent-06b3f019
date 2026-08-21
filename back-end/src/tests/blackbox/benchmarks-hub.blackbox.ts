@@ -32,7 +32,11 @@ import { resolve } from 'path';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
 import { z } from 'zod';
-import { assertToastPromptMigration, syntheticBenchmarkBundle } from './benchmarks-hub.testkit';
+import {
+  assertEnvironmentReconcileFromFile,
+  assertToastPromptMigration,
+  syntheticBenchmarkBundle,
+} from './benchmarks-hub.testkit';
 
 config();
 
@@ -225,6 +229,10 @@ async function testCatalog_dailyMigrationUpgradesLegacyMessagePerson(): Promise<
 
 async function testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub(): Promise<void> {
   await assertToastPromptMigration(BASE_URL, internalHeaders);
+}
+
+async function testCatalog_seedReconcilesEnvironmentFromFile(): Promise<void> {
+  await assertEnvironmentReconcileFromFile();
 }
 
 async function testCatalog_statsPresentForTasksWithHistory(): Promise<void> {
@@ -640,6 +648,10 @@ async function runAll(): Promise<void> {
     [
       'catalog: Toast prompt migration updates DB truth',
       testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub,
+    ],
+    [
+      'catalog: seed reconciles environment from tasks.json',
+      testCatalog_seedReconcilesEnvironmentFromFile,
     ],
     ['catalog: stats present from history ledger', testCatalog_statsPresentForTasksWithHistory],
     ['catalog: retired tasks invisible everywhere', testCatalog_retiredTasksInvisible],

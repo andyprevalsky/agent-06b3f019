@@ -25,6 +25,18 @@ import { useTerminalModals } from './useTerminalModals';
 import { useAgentOps } from './useAgentOps';
 import { useQuickQuery } from './useQuickQuery';
 
+export function overlaySelectedAgentTitle(
+  agents: ReturnType<typeof useAgentList>['agents'],
+  selectedAgent: ReturnType<typeof useAgentContext>['agent'],
+) {
+  if (!selectedAgent) return agents;
+  return agents.map((agent) =>
+    agent.agent_id === selectedAgent.agent_id && agent.title !== selectedAgent.title
+      ? { ...agent, title: selectedAgent.title }
+      : agent,
+  );
+}
+
 export function useTerminalAgents(
   _currentView: TerminalView,
   setCurrentView: (view: TerminalView) => void,
@@ -170,7 +182,7 @@ function buildReturn(a: BuildArgs) {
     isLoadingAgent: a.ctx.isLoadingAgent,
     forceResubscribeContext: a.ctx.forceResubscribe,
     isChatMode: a.ctx.isChatMode,
-    agents: a.agentList.agents,
+    agents: overlaySelectedAgentTitle(a.agentList.agents, a.ctx.agent),
     isLoadingAgents: a.agentList.isLoadingAgents,
     resumingAgentId: a.actions.resumingAgentId,
     isPausing: a.actions.isPausing,

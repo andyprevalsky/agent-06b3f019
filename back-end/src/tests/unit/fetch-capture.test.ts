@@ -3,7 +3,16 @@
 import assert from 'node:assert';
 import http from 'node:http';
 import express from 'express';
-import { installFetchCapture, shouldBypassOutboundReplay } from '../../providers/fetchCapture';
+import {
+  installFetchCapture,
+  shouldBypassOutboundReplay,
+  isBinaryContentType,
+  isTextContentType,
+  looksLikeUtf8ReplacementCorruption,
+} from '../../providers/fetchCapture';
+import { shouldPreferSandboxAnthropicBaseUrlOverFastMode } from '../../providers/e2b';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 interface CaptureResponse {
   captures: Array<{
@@ -71,6 +80,29 @@ async function run(): Promise<void> {
   );
   assert.strictEqual(shouldBypassOutboundReplay('not-a-url-api.onkernel.com'), false);
 
+  assert.strictEqual(isBinaryContentType('image/jpeg'), true);
+  assert.strictEqual(isBinaryContentType('image/png; charset=binary'), true);
+  assert.strictEqual(isBinaryContentType('application/pdf'), true);
+  assert.strictEqual(isBinaryContentType('application/octet-stream'), true);
+  assert.strictEqual(isBinaryContentType(null), true);
+  assert.strictEqual(isBinaryContentType(''), true);
+  assert.strictEqual(isBinaryContentType('application/json'), false);
+  assert.strictEqual(isBinaryContentType('text/plain'), false);
+  assert.strictEqual(isTextContentType('application/json'), true);
+  assert.strictEqual(isTextContentType('text/html'), true);
+  assert.strictEqual(isTextContentType(null), false);
+
+  // OpenRouter / gateway base must win over Fast Mode proxy (fleet 403 RCA).
+  assert.strictEqual(
+    shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://openrouter.ai/api'),
+    true
+  );
+  assert.strictEqual(
+    shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://api.anthropic.com'),
+    false
+  );
+  assert.strictEqual(shouldPreferSandboxAnthropicBaseUrlOverFastMode(undefined), false);
+
   const originalFetch = globalThis.fetch;
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
   const oldFakeWhatsApp = process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
@@ -81,6 +113,12 @@ async function run(): Promise<void> {
   process.env.BLACKBOX_TEST_FAKE_SURGE = '1';
   process.env.BLACKBOX_TEST_FAKE_WHATSAPP = '1';
   delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+
+  const jpegFixture = readFileSync(
+    resolve(__dirname, '../../../../front-end/public/test-assets/rs.jpeg')
+  );
+  assert.strictEqual(jpegFixture[0], 0xff);
+  assert.strictEqual(jpegFixture[1], 0xd8);
 
   globalThis.fetch = (async (
     input: string | URL | Request,
@@ -97,6 +135,23 @@ async function run(): Promise<void> {
     });
     if (url.includes('error.e2b.app')) {
       throw new Error('e2b unavailable');
+    }
+    if (url.includes('/storage/v1/object/attachments/')) {
+      if (url.includes('rs-noct.jpeg')) {
+        return new Response(jpegFixture, {
+          status: 200,
+          headers: {
+            'content-length': String(jpegFixture.length),
+          },
+        });
+      }
+      return new Response(jpegFixture, {
+        status: 200,
+        headers: {
+          'content-type': 'image/jpeg',
+          'content-length': String(jpegFixture.length),
+        },
+      });
     }
     if (url.includes('api.example.com/mutable')) {
       mutableVersion += 1;
@@ -129,6 +184,44 @@ async function run(): Promise<void> {
       replayEnabled: false,
     });
 
+    // H-02: capture must not UTF-8-corrupt binary Supabase attachment downloads.
+    const attachment = await fetch(
+      'https://example.supabase.co/storage/v1/object/attachments/user/rs.jpeg',
+      { headers: { Authorization: 'Bearer test-token' } }
+    );
+    assert.strictEqual(attachment.status, 200);
+    const attachmentBytes = Buffer.from(await attachment.arrayBuffer());
+    assert.strictEqual(attachmentBytes.length, jpegFixture.length);
+    assert.strictEqual(attachmentBytes[0], 0xff);
+    assert.strictEqual(attachmentBytes[1], 0xd8);
+    assert.ok(
+      attachmentBytes.equals(jpegFixture),
+      'fetchCapture must preserve JPEG bytes (no U+FFFD expansion)'
+    );
+
+    // Missing Content-Type must still preserve bytes (fleet recurrence).
+    const noCt = await fetch(
+      'https://example.supabase.co/storage/v1/object/attachments/user/rs-noct.jpeg'
+    );
+    assert.strictEqual(noCt.status, 200);
+    const noCtBytes = Buffer.from(await noCt.arrayBuffer());
+    assert.ok(noCtBytes.equals(jpegFixture), 'missing content-type must not UTF-8-corrupt JPEG');
+
+    const corrupted = Buffer.from(jpegFixture.toString('utf8'), 'utf8');
+    assert.ok(looksLikeUtf8ReplacementCorruption(corrupted));
+    assert.ok(!looksLikeUtf8ReplacementCorruption(jpegFixture));
+
+    // %PDF prefix alone must not skip corruption detection.
+    const pdfCorrupted = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(400, 0xef)]);
+    // Fill with EF BF BD triplets above the 15%/100 threshold.
+    for (let i = 9; i + 2 < pdfCorrupted.length; i += 3) {
+      pdfCorrupted[i] = 0xef;
+      pdfCorrupted[i + 1] = 0xbf;
+      pdfCorrupted[i + 2] = 0xbd;
+    }
+    assert.ok(looksLikeUtf8ReplacementCorruption(pdfCorrupted));
+    assert.ok(!looksLikeUtf8ReplacementCorruption(Buffer.from('%PDF-1.4\n%EOF\n')));
+
     const form = new FormData();
     form.append('file', new Blob(['audio-bytes'], { type: 'audio/wav' }), 'voice.wav');
     const multipart = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
@@ -153,7 +246,7 @@ async function run(): Promise<void> {
     });
     assert.strictEqual(surge.status, 200);
     const surgeBody = (await surge.json()) as { id?: string };
-    assert.strictEqual(surgeBody.id, 'blackbox-surge-message-5');
+    assert.strictEqual(surgeBody.id, 'blackbox-surge-message-7');
 
     const whatsappSuccess = await fetch(
       'https://graph.facebook.com/v21.0/blackbox-phone/messages',
@@ -164,7 +257,7 @@ async function run(): Promise<void> {
     );
     assert.strictEqual(whatsappSuccess.status, 200);
     assert.deepStrictEqual(await whatsappSuccess.json(), {
-      messages: [{ id: 'blackbox-whatsapp-message-6' }],
+      messages: [{ id: 'blackbox-whatsapp-message-8' }],
     });
 
     const whatsappUnavailable = await fetch(
@@ -231,27 +324,31 @@ async function run(): Promise<void> {
     assert.deepStrictEqual(agentCardResponses, [1, 2]);
 
     const all = await readCaptures(baseUrl);
-    assert.strictEqual(all.captures.length, 12);
-    assert.strictEqual(all.captures[0].requestBody, '[non-string body]');
-    assert.strictEqual(all.captures[0].responseStatus, 201);
-    assert.strictEqual(all.captures[1].url, 'https://sandbox.e2b.app/health');
-    assert.strictEqual(all.captures[1].requestBody, null);
-    assert.strictEqual(all.captures[2].url, 'https://api.onkernel.com/profiles');
-    assert.strictEqual(all.captures[2].cached, false);
-    assert.strictEqual(all.captures[3].error, 'e2b unavailable');
+    assert.strictEqual(all.captures.length, 14);
+    assert.ok(all.captures[0].url.includes('/storage/v1/object/attachments/'));
+    assert.strictEqual(all.captures[0].responseStatus, 200);
+    assert.ok(all.captures[1].url.includes('rs-noct.jpeg'));
+    assert.strictEqual(all.captures[1].responseStatus, 200);
+    assert.strictEqual(all.captures[2].requestBody, '[non-string body]');
+    assert.strictEqual(all.captures[2].responseStatus, 201);
+    assert.strictEqual(all.captures[3].url, 'https://sandbox.e2b.app/health');
+    assert.strictEqual(all.captures[3].requestBody, null);
+    assert.strictEqual(all.captures[4].url, 'https://api.onkernel.com/profiles');
+    assert.strictEqual(all.captures[4].cached, false);
+    assert.strictEqual(all.captures[5].error, 'e2b unavailable');
     assert.strictEqual(
-      all.captures[4].requestHeaders.Authorization,
+      all.captures[6].requestHeaders.Authorization,
       'Bearer surge-sec...[redacted]'
     );
-    assert.strictEqual(all.captures[4].responseBody, '{"id":"blackbox-surge-message-5"}');
-    assert.strictEqual(all.captures[4].cached, false);
-    assert.strictEqual(all.captures[5].cached, false);
+    assert.strictEqual(all.captures[6].responseBody, '{"id":"blackbox-surge-message-7"}');
     assert.strictEqual(all.captures[6].cached, false);
     assert.strictEqual(all.captures[7].cached, false);
-    assert.strictEqual(all.captures[5].responseStatus, 200);
-    assert.strictEqual(all.captures[6].responseStatus, 503);
-    assert.strictEqual(all.captures[7].responseStatus, 503);
-    const requestHeaderCapture = all.captures[8];
+    assert.strictEqual(all.captures[8].cached, false);
+    assert.strictEqual(all.captures[9].cached, false);
+    assert.strictEqual(all.captures[7].responseStatus, 200);
+    assert.strictEqual(all.captures[8].responseStatus, 503);
+    assert.strictEqual(all.captures[9].responseStatus, 503);
+    const requestHeaderCapture = all.captures[10];
     assert.strictEqual(requestHeaderCapture.url, 'https://api.example.com/request-headers');
     assert.match(
       requestHeaderCapture.requestHeaders.authorization ??
@@ -264,7 +361,7 @@ async function run(): Promise<void> {
         requestHeaderCapture.requestHeaders['Content-Type'],
       'application/json'
     );
-    const overrideCapture = all.captures[9];
+    const overrideCapture = all.captures[11];
     assert.strictEqual(overrideCapture.url, 'https://api.example.com/request-headers-override');
     assert.match(
       overrideCapture.requestHeaders.authorization ??
@@ -281,19 +378,19 @@ async function run(): Promise<void> {
       overrideCapture.requestHeaders['x-trace'] ?? overrideCapture.requestHeaders['X-Trace'],
       'from-init'
     );
-    assert.strictEqual(all.captures[10].cached, false);
-    assert.strictEqual(all.captures[11].cached, false);
+    assert.strictEqual(all.captures[12].cached, false);
+    assert.strictEqual(all.captures[13].cached, false);
     assert.strictEqual(
-      all.captures[10].requestHeaders.Authorization,
+      all.captures[12].requestHeaders.Authorization,
       'Bearer agentcard...[redacted]'
     );
     assert.deepStrictEqual(
       upstreamCalls.map((call) => call.bodyType),
-      ['FormData', 'none', 'none', 'none', 'String', 'String', 'String', 'String']
+      ['none', 'none', 'FormData', 'none', 'none', 'none', 'String', 'String', 'String', 'String']
     );
 
     const afterFirst = await readCaptures(baseUrl, '?after=1');
-    assert.strictEqual(afterFirst.captures.length, 11);
+    assert.strictEqual(afterFirst.captures.length, 13);
 
     const cleared = await fetch(`${baseUrl}/captures`, { method: 'DELETE' });
     assert.strictEqual(cleared.status, 200);

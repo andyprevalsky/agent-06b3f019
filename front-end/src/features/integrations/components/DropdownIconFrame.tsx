@@ -27,6 +27,14 @@ export const dropdownIconImageClassName = 'h-8 w-8 object-cover';
 export const connectedRoseGlowGradient =
   'linear-gradient(to bottom left, rgba(254, 117, 3, 0.5), rgba(252, 88, 92, 0.45), rgba(224, 98, 204, 0.45), rgba(122, 107, 236, 0.5))';
 
+/**
+ * Amber glow for a connected-but-damaged integration. Same shape and opacity as
+ * the rose glow so the row reads as "still connected, needs attention" rather
+ * than as a different kind of element; only the hue changes.
+ */
+export const warningGlowGradient =
+  'linear-gradient(to bottom left, rgba(245, 158, 11, 0.5), rgba(251, 191, 36, 0.45), rgba(252, 211, 77, 0.45), rgba(245, 158, 11, 0.5))';
+
 export const DropdownIconPreset = {
   browserMain: { iconScale: 62, iconFit: 'contain' },
   chrome: { iconScale: 100, iconFit: 'cover' },

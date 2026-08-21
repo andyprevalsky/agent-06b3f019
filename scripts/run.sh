@@ -13,22 +13,27 @@ done
 # scripts/cloud-build.sh during Cord's build phase). When .cloud-env exists,
 # it is authoritative for the shared worktree identity — always source it so
 # the cloud-generated workspace name cannot be overridden by stale env vars.
-# Isolated benchmark runs are the exception: local.py assigns a unique
-# CONDUCTOR_PORT + CONDUCTOR_WORKSPACE_NAME per run. Re-sourcing .cloud-env
-# must not clobber those, or every isolated stack collapses onto the shared
-# ports and SIGTERMs the Step 5 /deploy stack (observed as smoke exit 143).
+# Exceptions that must keep a pre-set CONDUCTOR_PORT + CONDUCTOR_WORKSPACE_NAME:
+# - Isolated benchmark runs (local.py / AgentCard / run-bench): unique per-run
+#   ports. Re-sourcing .cloud-env must not clobber those, or every isolated
+#   stack collapses onto the shared ports and SIGTERMs the Step 5 /deploy
+#   stack (observed as smoke exit 143).
+# - Strict Conductor port mode (RUN_SH_STRICT_CONDUCTOR_PORT=1 from
+#   configure_deploy_local_env): /deploy Step 5 pins an explicit port range
+#   and forbids reassignment; .cloud-env must not silently move it to 3001.
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 if [ -f "$SCRIPT_DIR/../.cloud-env" ]; then
     _cloud_env_saved_port="${CONDUCTOR_PORT:-}"
     _cloud_env_saved_workspace="${CONDUCTOR_WORKSPACE_NAME:-}"
     _cloud_env_isolated="${BENCHMARK_ISOLATED_RUN:-false}"
+    _cloud_env_strict="${RUN_SH_STRICT_CONDUCTOR_PORT:-0}"
     . "$SCRIPT_DIR/../.cloud-env"
-    if [ "$_cloud_env_isolated" = "true" ]; then
+    if [ "$_cloud_env_isolated" = "true" ] || [ "$_cloud_env_strict" = "1" ]; then
         [ -n "$_cloud_env_saved_port" ] && CONDUCTOR_PORT="$_cloud_env_saved_port"
         [ -n "$_cloud_env_saved_workspace" ] && CONDUCTOR_WORKSPACE_NAME="$_cloud_env_saved_workspace"
     fi
-    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated
+    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated _cloud_env_strict
 elif [ -z "${CONDUCTOR_PORT:-}" ]; then
     echo '❌ CONDUCTOR_PORT not set. Run via Conductor, or run scripts/cloud-build.sh first on cloud envs.'
     exit 1
@@ -1036,8 +1041,23 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
     if PGPASSWORD=postgres bash scripts/restore-seed-dump.sh \
         "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
         "$_SEED_RESTORE_CONTAINER" >/dev/null; then
-        DB_RESTORED=true
-        echo "   ✅ DB restored from dump"
+        # Custom-format archives of the good WhatsApp fixture and of a bare
+        # cold-sync are both ~30MiB, so size cannot detect a poisoned publish.
+        # Row-content check is the only trustworthy gate (see
+        # scripts/validate-canonical-seed-dump.sh).
+        if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
+           ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
+                "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
+            echo "   ⚠️ restored dump failed canonical WhatsApp content check — invalidating"
+            rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
+            DB_RESTORED=false
+            if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
+                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history; refusing to continue on a poisoned substitute."
+            fi
+        else
+            DB_RESTORED=true
+            echo "   ✅ DB restored from dump"
+        fi
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
         # The target database's own pg_restore just proved this archive bad.
@@ -1158,8 +1178,14 @@ if [ -n "$_SEED_DUMP" ]; then
         # Canonical base publication is an explicit operator action: an ordinary
         # cold sync must never overwrite reviewed fixture rows such as WhatsApp
         # history. The opt-in exists for the dedicated publication workflow only.
+        # Re-validate content before put so a cold-sync without WhatsApp history
+        # cannot poison the shared R2 object under the whatsapp-v2 revision.
         if [ "$_SEED_CACHE_ENABLED" = 1 ] && [ "${BENCHMARK_PUBLISH_SEED_DUMP:-0}" = "1" ]; then
-            if (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
+            if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
+               ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
+                    "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
+                echo "   ❌ refusing to publish: DB failed canonical WhatsApp content check"
+            elif (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
                 printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"
             fi
@@ -1289,7 +1315,15 @@ ensure_ngrok_domain_reserved() {
         fi
         # ngrok CLI may prefix JSON with an HTTP status line (e.g. "200 OK");
         # locate the first JSON object before parsing.
-        page_parse=$(printf '%s\n' "$page_body" | python3 -c '
+        # Capture parser stderr separately — a full reserved-domain dump alone
+        # hides the one-line malformed:* reason when pagination hits an empty
+        # cursor page or a truncated CLI response. Use a heredoc so nested
+        # Python quotes cannot break the surrounding bash single-quoted -c
+        # string (SC1078/SC2026).
+        local page_parse_err page_parse_py
+        page_parse_err=$(mktemp)
+        page_parse_py=$(mktemp)
+        cat >"$page_parse_py" <<'PY'
 import json
 import sys
 
@@ -1314,23 +1348,41 @@ if not isinstance(reserved_domains, list):
 if any(item.get("domain") == requested_domain for item in reserved_domains if isinstance(item, dict)):
     print("found")
     sys.exit(0)
-if data.get("next_page_uri"):
+next_page_uri = data.get("next_page_uri")
+if next_page_uri:
+    # An empty page with a next_page_uri cannot advance; treat as exhausted so
+    # we fall through to create instead of failing the whole stack.
     if not reserved_domains or not isinstance(reserved_domains[-1], dict) or not reserved_domains[-1].get("id"):
-        print("malformed:missing before_id cursor", file=sys.stderr)
-        sys.exit(2)
-    # Use double-quoted dict keys only: this python -c body is wrapped in
-    # bash single quotes, so a single-quoted dict key would terminate the
-    # shell string early and become KeyError(id) at runtime.
+        print(
+            "malformed:missing before_id cursor "
+            f"(domains={len(reserved_domains)} next={next_page_uri!r})",
+            file=sys.stderr,
+        )
+        print("done")
+        sys.exit(0)
+    # Double-quoted dict keys keep this string bash-safe even if the body is
+    # ever inlined into a single-quoted python -c again (seed-dump cement).
     print("next:" + reserved_domains[-1]["id"])
 else:
     print("done")
-' "$domain") || {
+PY
+        page_parse=$(printf '%s\n' "$page_body" | python3 "$page_parse_py" "$domain" 2>"$page_parse_err") || {
             parse_rc=$?
-            echo "$page_body"
-            echo "❌ Could not parse ngrok reserved-domains listing for $domain."
+            echo "❌ Could not parse ngrok reserved-domains listing for $domain (rc=$parse_rc)."
+            if [ -s "$page_parse_err" ]; then
+                echo "   parser: $(tr '\n' ' ' <"$page_parse_err")"
+            fi
+            rm -f "$page_parse_err" "$page_parse_py"
+            echo "$page_body" | tail -n 40
             [ "$failure_mode" = "soft" ] && return 1
             exit 1
         }
+        # Soft diagnostics (e.g. empty-page exhaustion) exit 0 with stdout
+        # "done"; surface them before cleanup so they are not silent.
+        if [ -s "$page_parse_err" ]; then
+            echo "   parser: $(tr '\n' ' ' <"$page_parse_err")"
+        fi
+        rm -f "$page_parse_err" "$page_parse_py"
         case "$page_parse" in
             found)
                 echo "🌐 Reserved domain already exists: $domain"
@@ -2275,10 +2327,20 @@ fi
 # DISABLE_FAST_MODE_PROXY=1 empties both URLs so the sandbox falls back to the
 # direct claudeAuth path (codeAgentFastModeEnv treats "" as "no proxy"). This is
 # a local-only convenience — prod code agents never route through this proxy.
+#
+# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 sets PUBLIC_BASE_URL=http://localhost:<frontend>.
+# E2B sandboxes cannot reach that loopback — injecting it as ANTHROPIC_BASE_URL
+# yields `Unable to connect to API (ConnectionRefused)` (files-in-sub-agents).
+# Clear the proxy in that case so code agents use direct Anthropic OAuth instead
+# of a dead loopback tee (cache capture requires a publicly reachable URL).
 if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then
     export FAST_MODE_ANTHROPIC_PROXY_URL=""
     export FAST_MODE_CODEX_PROXY_URL=""
     echo "⚡ DISABLE_FAST_MODE_PROXY=1 — fast-mode proxy off; sandbox code agents use the direct claudeAuth path"
+elif [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ] || [[ "${PUBLIC_BASE_URL:-}" == http://localhost:* ]] || [[ "${PUBLIC_BASE_URL:-}" == http://127.* ]]; then
+    export FAST_MODE_ANTHROPIC_PROXY_URL=""
+    export FAST_MODE_CODEX_PROXY_URL=""
+    echo "⚡ Fast-mode proxy off — PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-unset} is not E2B-reachable; sandbox code agents use direct Anthropic OAuth"
 else
     export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
     export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
