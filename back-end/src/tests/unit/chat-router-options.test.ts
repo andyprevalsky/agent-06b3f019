@@ -9,7 +9,10 @@ import {
   streamBeforeRouterCompletionDeadline,
 } from '../../providers/chat/routerCompletionDeadline';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
-import { parsePartialRouterDecisionJson } from '../../providers/chat/routerDecision';
+import {
+  parsePartialRouterDecisionJson,
+  parseRouterDecisionAfterDeadline,
+} from '../../providers/chat/routerDecision';
 
 async function run(): Promise<void> {
   const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');
@@ -67,6 +70,27 @@ async function run(): Promise<void> {
       mode: 'execute',
       reasoning: 'closed explanation',
     }
+  );
+  assert.deepEqual(
+    parseRouterDecisionAfterDeadline(
+      '{"reasoning":"complete response","action":"start_superintelligence","goal":"inspect the workspace"}',
+      '{"reasoning":"complete response","action":"start_superintelligence","goal":"inspect the workspace"}'
+    ),
+    {
+      action: 'start_superintelligence',
+      goal: 'inspect the workspace',
+      mode: 'plan',
+      reasoning: 'complete response',
+    },
+    'deadline recovery must prefer a complete response with strict-parser defaults'
+  );
+  assert.deepEqual(
+    parseRouterDecisionAfterDeadline(
+      '{"reasoning":"truncated",',
+      '{"reasoning":"closed explanation","action":"direct_answer"'
+    ),
+    { action: 'direct_answer', reasoning: 'closed explanation' },
+    'deadline recovery must fall back to complete fields from a partial response'
   );
 
   const deadline = createRouterCompletionDeadline(5);

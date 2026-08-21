@@ -41,7 +41,7 @@ import {
 } from './routerCompletionDeadline';
 import {
   isValidRouterCacheJson,
-  parsePartialRouterDecisionJson,
+  parseRouterDecisionAfterDeadline,
   parseRouterDecisionJson,
   type RouterDecision,
 } from './routerDecision';
@@ -586,7 +586,10 @@ export async function callRouterLlm(params: {
   }
 
   if (completionDeadline.expired()) {
-    deadlineDecision = parsePartialRouterDecisionJson(accumulatedJson);
+    deadlineDecision = parseRouterDecisionAfterDeadline(
+      structuredOutput.finalText(),
+      accumulatedJson
+    );
     if (!deadlineDecision) {
       throw completionDeadline.signal.reason ?? new Error('Chat router completion expired');
     }

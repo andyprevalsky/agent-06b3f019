@@ -106,6 +106,21 @@ export function parsePartialRouterDecisionJson(json: string): RouterDecision | n
   return null;
 }
 
+/** Prefer a complete response before recovering an actionable partial one. */
+export function parseRouterDecisionAfterDeadline(
+  finalizedJson: string,
+  accumulatedJson: string
+): RouterDecision | null {
+  if (finalizedJson) {
+    try {
+      return parseRouterDecisionJson(finalizedJson);
+    } catch {
+      // The deadline can interrupt a response before its structured output closes.
+    }
+  }
+  return parsePartialRouterDecisionJson(accumulatedJson);
+}
+
 export function isValidRouterCacheJson(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0) return false;
   try {
