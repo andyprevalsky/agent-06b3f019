@@ -4,10 +4,8 @@
  *
  * The +52 variant of the dev credentials exercises the country-selector →
  * E.164 → OTP path end to end without sending a real Mexican SMS. The bypass
- * is dev-only (IS_DEV && !IS_BLACKBOX_TEST — see auth/service.twilio.ts), so
- * assertions are lenient the same way auth.blackbox.ts is for the +1 dev
- * phone: 200 when the bypass is active, 400/500 when the backend runs with
- * outbound capture (real Twilio required) or outside dev.
+ * is dev-only (IS_DEV — see auth/service.twilio.ts). Capture mode no longer
+ * disables the bypass, so these credentials never hit live Twilio Verify.
  *
  * Usage:
  *   bash scripts/run-blackbox-tests.sh auth-latam-dev-phone
@@ -61,10 +59,9 @@ async function testSendOtp_latamDevPhone() {
     method: 'POST',
     body: JSON.stringify({ phone: LATAM_DEV_PHONE }),
   });
-  // 200 when the dev bypass is active; 400/500 when capture mode forces real Twilio
-  if (res.status !== 200 && res.status !== 400 && res.status !== 500) {
+  if (res.status !== 200) {
     throw new Error(
-      `Expected 200/400/500 for LATAM dev send-otp, got ${res.status}: ${JSON.stringify(res.data)}`
+      `Expected 200 for LATAM dev send-otp (Twilio bypass), got ${res.status}: ${JSON.stringify(res.data)}`
     );
   }
 }
@@ -74,9 +71,9 @@ async function testVerifyOtp_latamDevPhone() {
     method: 'POST',
     body: JSON.stringify({ phone: LATAM_DEV_PHONE, token: DEV_OTP }),
   });
-  if (res.status !== 200 && res.status !== 400 && res.status !== 500) {
+  if (res.status !== 200) {
     throw new Error(
-      `Expected 200/400/500 for LATAM dev verify-otp, got ${res.status}: ${JSON.stringify(res.data)}`
+      `Expected 200 for LATAM dev verify-otp (Twilio bypass), got ${res.status}: ${JSON.stringify(res.data)}`
     );
   }
 }
