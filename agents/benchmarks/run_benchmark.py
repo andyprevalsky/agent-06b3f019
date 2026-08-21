@@ -5772,29 +5772,25 @@ async def _refresh_local_compute_tokens_for_run(
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    # Claude-Code-required tasks must not inherit the Anthropic API-key
-    # tolerance — spawn_claude_code_agent cannot use that fallback.
-    tolerate_missing_claude = False
+    #
+    # Claude Code sessions DO use the shared ANTHROPIC_API_KEY when no OAuth
+    # envelope is available (see resolveClaudeCodeAuthEnvs). Tolerate a missing
+    # claude_code sync only when that funded-key path is confirmed healthy —
+    # otherwise require_claude_code tasks would start, discover an unfunded key
+    # mid-run, and burn the suite. Never pair this with credential-skip-as-PASS.
+    has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
+    tolerate_missing_claude = has_anthropic_key_fallback
     required_token_types: tuple[str, ...] | None = None
-    # Probed at most ONCE per run and reused for the cost warning below. Asking
-    # again is a second live HTTP round-trip and breaks the awaited-once contract
-    # its tests pin.
-    has_anthropic_key_fallback = False
-    if require_claude_code:
+    if require_claude_code and not has_anthropic_key_fallback:
         required_token_types = ("claude",)
-    else:
-        has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
-        tolerate_missing_claude = has_anthropic_key_fallback
+        tolerate_missing_claude = False
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
         required_token_types=required_token_types,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
-    # Only meaningful on the tolerant path: a `require_claude_code` run hard-gates
-    # on a real claude token above, so it always has a claudeAuth path and this
-    # warning would be false.
-    if not require_claude_code and not has_anthropic_key_fallback:
+    if not has_anthropic_key_fallback:
         print(
             "    ⚠️  No claudeAuth compute path (expired/rate-limited claude_code and no funded "
             "Anthropic key): this run bills the paid waterfall. Cost figures are NOT comparable "
@@ -9866,13 +9862,11 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
     """Check whether Claude Code can actually create a code session.
 
     A GPT/Codex compute token is not sufficient for a task that explicitly calls
-    ``spawn_claude_code_agent``. The runtime may have valid GPT credentials for
-    ordinary agent turns while Claude Code still has no user token or pool token.
-    Do not treat the shared Anthropic API-key fallback as sufficient here:
-    credential-health is the live funded-key probe, and Anthropic failures are
-    intentionally warn-only. This smoke gate is skippable when there is no real
-    Claude Code credential, so it should not launch a task that may discover an
-    unfunded or cooled-down fallback only after the benchmark starts.
+    ``spawn_claude_code_agent``. Prefer a live OAuth access token when present.
+    When OAuth is absent, accept the shared ANTHROPIC_API_KEY only if the
+    backend reports it configured and not on cooldown — that is the same funded
+    fallback ``resolveClaudeCodeAuthEnvs`` uses inside E2B. Do not launch when
+    both are missing; discovering an unfunded key mid-run burns the suite.
     """
     try:
         headers = await _api_headers()
@@ -9884,8 +9878,9 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return bool(data.get("accessToken"))
-        return False
+                if bool(data.get("accessToken")):
+                    return True
+        return await _has_usable_anthropic_api_key_fallback(base_url)
     except Exception:
         return False
 
