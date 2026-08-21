@@ -65,8 +65,8 @@ async def _run(source, probe, *, live_commit_clean=True, allow_logged_out_cookie
         committed.extend(keys)
         return live_commit_clean
 
-    async def search_configs(state):
-        config_inputs.append(state)
+    async def search_configs(lanes):
+        config_inputs.append(lanes)
         return {"provider": "steel", "proxy_mode": "fixed", "ws_url": "wss://winner"}
 
     result = await recover_from_challenge(
@@ -116,8 +116,8 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
     async def forbidden_commit(_keys):
         raise AssertionError("an explicitly rejected IP must not mutate live cookies")
 
-    async def search_configs(state):
-        config_inputs.append(copy.deepcopy(state))
+    async def search_configs(lanes):
+        config_inputs.append(copy.deepcopy(lanes))
         return {"provider": "kernel", "proxy_mode": "isp_city", "ws_url": "wss://winner"}
 
     async def progress(stage, message):
@@ -136,9 +136,11 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
 
     assert solver_calls == 1, "provider-native CAPTCHA solving must remain first"
     assert [stage for stage, _ in events] == ["captcha_solver", "browser_config_search"]
-    assert config_inputs == [
-        _state(_cookie("authState"), _cookie("opaque_state"))
-    ], "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
+    assert len(config_inputs) == 1 and len(config_inputs[0]) == 1
+    assert config_inputs[0][0]["key"] == "auth_kept"
+    assert config_inputs[0][0]["storage_state"] == _state(
+        _cookie("authState"), _cookie("opaque_state")
+    ), "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
     assert source == before
     assert result.recovery == "config_selected"
     assert result.removed_cookie_keys == ()
@@ -165,7 +167,7 @@ async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == [], "unclassified cookies are diagnostic-only and never deleted"
-    assert config_inputs == [before], "config search must retain every opaque cookie"
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]], "config search must retain every opaque cookie"
     assert source == before
     assert max_active >= 2, "cookie variants must probe concurrently in one wave"
     assert probe_calls <= 5, "cookie wave must stay within the parallel LLM budget"
@@ -221,7 +223,7 @@ async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
     assert result.recovery == "config_selected"
     assert committed == []
     assert result.removed_cookie_keys == ()
-    assert config_inputs == [before]
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]]
     assert source == before
     assert "preserve_auth_state" in [event[1] for event in events]
     assert all("opaque_state" not in event[2] for event in events)
@@ -237,7 +239,7 @@ async def test_auth_smelling_poison_is_preserved_and_silently_escalated():
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == []
-    assert config_inputs == [before], "config search must receive the complete auth-bearing state"
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]], "config search must receive the complete auth-bearing state"
     assert source == before
     assert all("authState" not in event[2] for event in events), "auth suspects are not surfaced"
     assert [event[1] for event in events][-1] == "browser_config_search"
@@ -252,7 +254,7 @@ async def test_cookie_independent_challenge_goes_directly_to_config_search():
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == []
-    assert config_inputs == [source]
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": source}]]
     stages = [event[1] for event in events]
     assert stages == ["captcha_solver", "cookie_probe_wave", "browser_config_search"]
 
@@ -273,9 +275,15 @@ async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fa
     assert result.recovery == "config_selected"
     assert committed == []
     assert result.removed_cookie_keys == ()
-    assert config_inputs == [_state(_cookie("authState"), _cookie("cart"))]
-    assert "cf_clearance" not in {c["name"] for c in config_inputs[0]["cookies"]}
-    assert "__cf_bm" not in {c["name"] for c in config_inputs[0]["cookies"]}
+    assert config_inputs == [
+        [{"key": "auth_kept", "storage_state": _state(_cookie("authState"), _cookie("cart"))}]
+    ]
+    assert "cf_clearance" not in {
+        c["name"] for c in config_inputs[0][0]["storage_state"]["cookies"]
+    }
+    assert "__cf_bm" not in {
+        c["name"] for c in config_inputs[0][0]["storage_state"]["cookies"]
+    }
     assert [event[1] for event in events][-1] == "browser_config_search"
 
 
@@ -294,7 +302,7 @@ async def test_isolated_cookie_pass_must_still_pass_in_the_live_context():
     assert result.recovery == "config_selected"
     assert committed == [cookie_key(_cookie("cf_clearance"))]
     assert config_inputs == [
-        _state(_cookie("authState"), _cookie("cart"))
+        [{"key": "auth_kept", "storage_state": _state(_cookie("authState"), _cookie("cart"))}]
     ], "an unstable live fix must retain auth while keeping proven challenge poison filtered"
     assert result.removed_cookie_keys == (cookie_key(_cookie("cf_clearance")),)
     assert [event[1] for event in events][-1] == "browser_config_search"
@@ -311,7 +319,7 @@ async def test_other_site_cookies_are_never_candidates():
     result, _events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == []
-    assert config_inputs == [source]
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": source}]]
 
 
 def test_auth_classifier_is_conservative():

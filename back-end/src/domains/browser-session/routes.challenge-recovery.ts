@@ -42,9 +42,15 @@ export function registerBrowserChallengeRecoveryRoutes(router: Router): void {
           userId: req.isInternal === true ? undefined : req.user?.id,
           currentUrl: input.current_url,
           storageState: input.storage_state,
+          storageLanes: input.storage_lanes?.map((lane) => ({
+            key: lane.key,
+            storageState: lane.storage_state,
+          })),
           userAgent: input.user_agent,
           blockedResourceUrl: input.blocked_resource_url,
+          recoveryReason: input.recovery_reason,
           requirePaymentCdn: input.require_payment_cdn,
+          preserveAuth: input.preserve_auth,
         });
         res.json({ success: true, ...result });
       } catch (error) {

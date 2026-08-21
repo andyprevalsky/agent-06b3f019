@@ -7378,7 +7378,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         extra_metadata={"recoveryStage": stage},
                     )
 
-                async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
+                async def search_browser_configs(storage_lanes: list) -> Dict[str, Any]:
                     nonlocal require_payment_cdn, payment_cdn_verify_url
                     user_agent = ""
                     with contextlib.suppress(Exception):
@@ -7392,17 +7392,28 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         unified_action.get("params", {}).get("blocked_resource_url") or ""
                     ).strip()
                     if blocked_resource_requires_payment_cdn(blocked_resource_url):
+                        # Sticky URL is still useful as LLM evidence; hard CDN filter is gone.
                         require_payment_cdn = True
                         payment_cdn_verify_url = blocked_resource_url or payment_cdn_verify_url
                     verify_url = blocked_resource_url or payment_cdn_verify_url
+                    lanes = list(storage_lanes or [])
+                    primary_state = (
+                        lanes[0].get("storage_state")
+                        if lanes and isinstance(lanes[0], dict)
+                        else recovery_storage_state
+                    )
+                    preserve_auth = not goal_allows_logged_out_cookie_commit(goal)
                     result = await recover_browser_challenge(
                         config,
                         task_id,
                         current_url,
-                        storage_state,
+                        primary_state if isinstance(primary_state, dict) else recovery_storage_state,
                         user_agent,
+                        storage_lanes=lanes,
+                        recovery_reason=str(recovery_reason or "") or "",
                         blocked_resource_url=verify_url,
                         require_payment_cdn=require_payment_cdn,
+                        preserve_auth=preserve_auth,
                     )
                     if result.get("rate_limited"):
                         raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
@@ -7598,27 +7609,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 f"Promoted {config_key} passed candidate probes but the live tab "
                                 "is still challenged"
                             )
-                        blocked_resource_url = str(
-                            unified_action.get("params", {}).get("blocked_resource_url") or ""
-                        ).strip()
-                        if blocked_resource_url:
-                            await emit_recovery_progress(
-                                "live_verify",
-                                "Verifying the blocked third-party resource loads on the "
-                                "promoted tab.",
-                            )
-                            if not await verify_live_blocked_resources(
-                                input_page, [blocked_resource_url]
-                            ):
-                                provider = config_result.get("provider")
-                                proxy_tier = config_result.get("proxy_tier")
-                                config_key = (
-                                    config_result.get("config_key") or f"{provider}/{proxy_tier}"
-                                )
-                                raise RuntimeError(
-                                    f"Promoted {config_key} cleared the challenge but blocked "
-                                    f"resource still fails: {blocked_resource_url}"
-                                )
+                        # Blocked-resource CDN hard-verify removed: the LLM live
+                        # gate already receives blocked_resource_url via recovery_reason.
 
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_url = browser_state.get("url", current_url)

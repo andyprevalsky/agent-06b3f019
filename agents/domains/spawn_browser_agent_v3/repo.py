@@ -503,24 +503,31 @@ async def recover_browser_challenge(
     storage_state: Dict[str, Any],
     user_agent: str = "",
     *,
+    storage_lanes: Optional[List[Dict[str, Any]]] = None,
+    recovery_reason: str = "",
     blocked_resource_url: str = "",
     require_payment_cdn: bool = False,
+    preserve_auth: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Run the backend's parallel Kernel/Steel browser-configuration search."""
-    # A challenged candidate can spend up to two 45s navigations plus two 45s
-    # provider-solver windows. The six candidates run concurrently, so this is
-    # a bounded wall-clock allowance for one search rather than six serial waits.
+    """Run the backend cookie-lane + sequential browser-configuration search."""
     payload: Dict[str, Any] = {
         "task_id": task_id,
         "current_url": current_url,
         "storage_state": storage_state,
     }
+    if storage_lanes:
+        payload["storage_lanes"] = storage_lanes
     if user_agent:
         payload["user_agent"] = user_agent
+    if recovery_reason:
+        payload["recovery_reason"] = recovery_reason
     if blocked_resource_url:
         payload["blocked_resource_url"] = blocked_resource_url
     if require_payment_cdn:
+        # Deprecated: accepted for wire compatibility; backend ignores it.
         payload["require_payment_cdn"] = True
+    if preserve_auth is not None:
+        payload["preserve_auth"] = preserve_auth
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/recover-challenge",

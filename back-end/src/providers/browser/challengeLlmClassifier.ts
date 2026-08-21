@@ -66,10 +66,12 @@ Return challenged=true when:
 - Navigation failed into a block page even if some marketing text leaked into the DOM
 - Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
 - The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
+- A blocked third-party resource cited in the recovery reason (payment script/CDN, required widget) is still missing or failing in network evidence
 
 Return challenged=false ONLY when:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
 - AND if an agent recovery reason is provided, that specific failure mode is cleared (network + DOM evidence)
+- AND any cited blocked third-party resource is no longer failing in the provided evidence
 
 Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use the agent DOM tree + network metadata (including HTTP status and truncated response bodies) as supporting evidence. Prefer challenged=true when uncertain.`;
 

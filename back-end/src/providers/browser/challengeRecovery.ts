@@ -16,7 +16,6 @@ import {
   type KernelRecoveryProxySpecificity,
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
-import { blockedResourceRequiresPaymentCdn, probePaymentCdnReachable } from './paymentCdnProbe';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import type { BrowserProviderName } from './types';
 
@@ -31,7 +30,6 @@ export {
 import {
   bestSpecificity,
   browserRecoveryCandidates,
-  recoverySearchPlan,
   shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
 } from './challengeRecoveryCandidates';
@@ -107,7 +105,8 @@ export interface ConfigSearchDependencies {
   create: (config: BrowserRecoveryConfig) => Promise<RecoveryCandidateSession>;
   probe: (
     config: BrowserRecoveryConfig,
-    session: RecoveryCandidateSession
+    session: RecoveryCandidateSession,
+    lane: RecoveryStorageLane
   ) => Promise<CandidateProbeResult>;
   promote: (winner: SuccessfulRecoveryCandidate) => Promise<void>;
   release: (config: BrowserRecoveryConfig, session: RecoveryCandidateSession) => Promise<void>;
@@ -121,15 +120,9 @@ export interface BrowserConfigSearchRuntimeDependencies {
   probe: typeof probeCandidateBrowser;
 }
 
-function candidateScore(
-  candidate: SuccessfulRecoveryCandidate,
-  avoidConfigKey?: string
-): [number, number, number] {
-  // Hard filters (CF-stable, optional paymentCdnOk) already applied. Among
-  // survivors: prefer the currently-failing exit least, then lowest latency.
-  // No soft payment-CDN ranking — a config either passed the hard filter or not.
-  const isAvoided = Boolean(avoidConfigKey && candidate.config.key === avoidConfigKey);
-  return [-candidate.probe.stablePasses, isAvoided ? 1 : 0, candidate.probe.latencyMs];
+export interface RecoveryStorageLane {
+  key: string;
+  storageState: Record<string, unknown>;
 }
 
 /** Map a live session's provider + proxyTier back to a recovery candidate key. */
@@ -161,138 +154,179 @@ export function recoveryConfigKeyForSession(
   return undefined;
 }
 
-export interface ParallelConfigSearchOptions {
-  /** Deprioritize this candidate key (e.g. the live exit that just failed payment CDN). */
-  avoidConfigKey?: string;
-  /**
-   * When true (checkout / payment URLs), refuse to promote a winner that did not
-   * clear Stripe.js — CF-only clears are not recovery success for payment docs.
-   */
-  requirePaymentCdn?: boolean;
+/** Order configs so the currently-failing exit is tried last within a lane. */
+export function orderConfigsForLane(
+  configs: BrowserRecoveryConfig[],
+  avoidConfigKey?: string
+): BrowserRecoveryConfig[] {
+  if (!avoidConfigKey) return [...configs];
+  const preferred = configs.filter((config) => config.key !== avoidConfigKey);
+  const avoided = configs.filter((config) => config.key === avoidConfigKey);
+  return [...preferred, ...avoided];
 }
 
-/** Create/probe all candidates concurrently, then atomically promote one winner. */
-export async function runParallelBrowserConfigSearch(
+export interface LaneConfigSearchOptions {
+  /** Deprioritize this candidate key (tried last inside each lane). */
+  avoidConfigKey?: string;
+}
+
+/**
+ * Cookie-lane tournament:
+ * - lanes run in parallel (each lane = distinct cookie signature)
+ * - inside a lane, browser configs are tried one at a time
+ * - first fully-stable probe (stablePasses === attempts) wins; siblings cancel
+ * - partial clears are never promoted
+ */
+export async function runLaneConfigSearch(
   configs: BrowserRecoveryConfig[],
+  lanes: RecoveryStorageLane[],
   dependencies: ConfigSearchDependencies,
-  options: ParallelConfigSearchOptions = {}
+  options: LaneConfigSearchOptions = {}
 ): Promise<SuccessfulRecoveryCandidate> {
+  if (lanes.length === 0) {
+    throw new Error('Challenge recovery requires at least one cookie storage lane');
+  }
   const avoidConfigKey = options.avoidConfigKey;
-  const requirePaymentCdn = Boolean(options.requirePaymentCdn);
-  const attempts = await Promise.allSettled(
-    configs.map(async (config) => {
+  const orderedConfigs = orderConfigsForLane(configs, avoidConfigKey);
+  const abort = new AbortController();
+  let claimed: SuccessfulRecoveryCandidate | undefined;
+  const claimLock = { claimed: false };
+
+  const runLane = async (lane: RecoveryStorageLane): Promise<SuccessfulRecoveryCandidate> => {
+    for (const config of orderedConfigs) {
+      if (abort.signal.aborted || claimLock.claimed) {
+        throw new Error('lane_aborted');
+      }
+      let session: RecoveryCandidateSession;
       try {
-        const session = await dependencies.create(config);
-        try {
-          const probe = await dependencies.probe(config, session);
-          log.info('Challenge recovery candidate probed', {
-            configKey: config.key,
-            provider: config.provider,
-            proxyMode: config.proxyMode,
-            stablePasses: probe.stablePasses,
-            attempts: probe.attempts,
-            paymentCdnOk: probe.paymentCdnOk,
-            paymentCdnHosts: probe.paymentCdnHosts ?? {},
-            latencyMs: probe.latencyMs,
-          });
-          return { config, session, probe };
-        } catch (error) {
-          log.warn('Challenge recovery candidate probe failed', {
-            configKey: config.key,
-            provider: config.provider,
-            proxyMode: config.proxyMode,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          await dependencies.release(config, session).catch(() => {});
-          throw error;
-        }
+        session = await dependencies.create(config);
       } catch (error) {
-        log.warn('Challenge recovery candidate create/probe failed', {
+        log.warn('Challenge recovery lane candidate create failed', {
+          laneKey: lane.key,
           configKey: config.key,
           provider: config.provider,
           proxyMode: config.proxyMode,
           error: error instanceof Error ? error.message : String(error),
         });
+        continue;
+      }
+      if (abort.signal.aborted || claimLock.claimed) {
+        await dependencies.release(config, session).catch(() => {});
+        throw new Error('lane_aborted');
+      }
+      try {
+        const probe = await dependencies.probe(config, session, lane);
+        log.info('Challenge recovery lane candidate probed', {
+          laneKey: lane.key,
+          configKey: config.key,
+          provider: config.provider,
+          proxyMode: config.proxyMode,
+          stablePasses: probe.stablePasses,
+          attempts: probe.attempts,
+          latencyMs: probe.latencyMs,
+        });
+        if (probe.stablePasses === probe.attempts && probe.attempts > 0) {
+          return { config, session, probe };
+        }
+        await dependencies.release(config, session).catch(() => {});
+      } catch (error) {
+        log.warn('Challenge recovery lane candidate probe failed', {
+          laneKey: lane.key,
+          configKey: config.key,
+          provider: config.provider,
+          proxyMode: config.proxyMode,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await dependencies.release(config, session).catch(() => {});
+        if (abort.signal.aborted || claimLock.claimed) {
+          throw new Error('lane_aborted');
+        }
+      }
+    }
+    throw new Error(`No stable browser configuration in lane ${lane.key}`);
+  };
+
+  const laneResults = await Promise.allSettled(
+    lanes.map(async (lane) => {
+      const candidate = await runLane(lane);
+      if (claimLock.claimed) {
+        await dependencies.release(candidate.config, candidate.session).catch(() => {});
+        throw new Error('lane_aborted');
+      }
+      claimLock.claimed = true;
+      claimed = candidate;
+      abort.abort();
+      log.info('Challenge recovery promoting lane winner', {
+        laneKey: lane.key,
+        configKey: candidate.config.key,
+        provider: candidate.config.provider,
+        proxyMode: candidate.config.proxyMode,
+        stablePasses: candidate.probe.stablePasses,
+        attempts: candidate.probe.attempts,
+        avoidConfigKey: avoidConfigKey ?? null,
+        latencyMs: candidate.probe.latencyMs,
+      });
+      try {
+        await dependencies.promote(candidate);
+      } catch (error) {
+        await dependencies.release(candidate.config, candidate.session).catch(() => {});
+        claimLock.claimed = false;
+        claimed = undefined;
         throw error;
       }
+      return candidate;
     })
   );
-  const successful = attempts.flatMap((attempt) =>
-    attempt.status === 'fulfilled' ? [attempt.value] : []
-  );
-  const ranked = successful
-    .filter((candidate) => candidate.probe.stablePasses > 0)
-    .filter((candidate) => !requirePaymentCdn || candidate.probe.paymentCdnOk)
-    .sort((left, right) => {
-      const leftScore = candidateScore(left, avoidConfigKey);
-      const rightScore = candidateScore(right, avoidConfigKey);
-      for (let index = 0; index < leftScore.length; index += 1) {
-        const delta = leftScore[index]! - rightScore[index]!;
-        if (delta !== 0) return delta;
-      }
-      return 0;
-    });
-  // Prefer fully-stable (passes === attempts). If Cloudflare only clears one of
-  // two probe loads, still promote the best partial winner — the agent live
-  // navigation verify remains the hard gate before recovery success. On payment
-  // documents, Stripe.js must also have loaded (requirePaymentCdn).
-  const winner =
-    ranked.find((candidate) => candidate.probe.stablePasses === candidate.probe.attempts) ??
-    ranked[0];
-  if (winner === undefined) {
-    const stableWithoutStripe = successful.filter(
-      (candidate) => candidate.probe.stablePasses > 0 && !candidate.probe.paymentCdnOk
-    );
-    log.error('Challenge recovery found no stable browser configuration', {
-      candidateCount: configs.length,
-      successfulProbeCount: successful.length,
-      requirePaymentCdn,
-      stableWithoutStripeCount: stableWithoutStripe.length,
-      configKeys: configs.map((config) => config.key),
-      paymentCdnHosts: stableWithoutStripe.map((candidate) => ({
-        configKey: candidate.config.key,
-        hosts: candidate.probe.paymentCdnHosts ?? {},
-      })),
-    });
-    await Promise.allSettled(
-      successful.map((candidate) => dependencies.release(candidate.config, candidate.session))
-    );
-    if (requirePaymentCdn && stableWithoutStripe.length > 0) {
-      throw new Error(
-        'No browser configuration cleared the challenge with blocked resource reachable ' +
-          `(${stableWithoutStripe.length} CF-stable candidate(s) failed blocked-resource CDN verify)`
-      );
-    }
-    throw new Error('No stable browser configuration cleared the challenge');
+
+  if (claimed) {
+    return claimed;
   }
 
-  log.info('Challenge recovery promoting stable winner', {
-    configKey: winner.config.key,
-    provider: winner.config.provider,
-    proxyMode: winner.config.proxyMode,
-    stablePasses: winner.probe.stablePasses,
-    attempts: winner.probe.attempts,
-    paymentCdnOk: winner.probe.paymentCdnOk,
-    paymentCdnHosts: winner.probe.paymentCdnHosts ?? {},
-    requirePaymentCdn,
-    avoidConfigKey: avoidConfigKey ?? null,
-    partial: winner.probe.stablePasses < winner.probe.attempts,
-    latencyMs: winner.probe.latencyMs,
-  });
-  try {
-    await dependencies.promote(winner);
-  } catch (error) {
-    await Promise.allSettled(
-      successful.map((candidate) => dependencies.release(candidate.config, candidate.session))
+  const errors = laneResults
+    .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+    .map((result) =>
+      result.reason instanceof Error ? result.reason.message : String(result.reason)
     );
-    throw error;
-  }
-  await Promise.allSettled(
-    successful
-      .filter((candidate) => candidate !== winner)
-      .map((candidate) => dependencies.release(candidate.config, candidate.session))
+  log.error('Challenge recovery found no stable browser configuration', {
+    candidateCount: configs.length,
+    laneCount: lanes.length,
+    laneKeys: lanes.map((lane) => lane.key),
+    configKeys: configs.map((config) => config.key),
+    errors: errors.slice(0, 8),
+  });
+  throw new Error('No stable browser configuration cleared the challenge');
+}
+
+/**
+ * @deprecated Prefer ``runLaneConfigSearch``. Single-lane wrapper for older
+ * call sites/tests; configs are sequential (no all-config parallel storm).
+ */
+export async function runParallelBrowserConfigSearch(
+  configs: BrowserRecoveryConfig[],
+  dependencies: {
+    create: ConfigSearchDependencies['create'];
+    probe: (
+      config: BrowserRecoveryConfig,
+      session?: RecoveryCandidateSession
+    ) => Promise<CandidateProbeResult>;
+    promote: ConfigSearchDependencies['promote'];
+    release: ConfigSearchDependencies['release'];
+  },
+  options: LaneConfigSearchOptions & { requirePaymentCdn?: boolean } = {}
+): Promise<SuccessfulRecoveryCandidate> {
+  // requirePaymentCdn intentionally ignored — single LLM gate only.
+  void options.requirePaymentCdn;
+  return runLaneConfigSearch(
+    configs,
+    [{ key: 'default', storageState: {} }],
+    {
+      create: dependencies.create,
+      probe: async (config, session, _lane) => dependencies.probe(config, session),
+      promote: dependencies.promote,
+      release: dependencies.release,
+    },
+    { avoidConfigKey: options.avoidConfigKey }
   );
-  return winner;
 }
 
 export async function probeCandidateBrowser(
@@ -303,21 +337,33 @@ export async function probeCandidateBrowser(
     configKey?: string;
     provider?: string;
     proxyMode?: string;
-    /** When false/omitted, skip blocked-resource re-nav + probe (CF-only recovery). */
-    requirePaymentCdn?: boolean;
-    /** Absolute URL of the blocked third-party resource to re-verify. */
+    laneKey?: string;
+    /** Absolute URL of the blocked third-party resource (folded into LLM reason). */
     blockedResourceUrl?: string;
+    /** Agent recovery reason forwarded to the LLM classifier. */
+    recoveryReason?: string | null;
+    /** @deprecated Ignored — promote uses the LLM gate only. */
+    requirePaymentCdn?: boolean;
+    /** Test-only solver override (avoids live LLM in unit probes). */
+    waitForSolver?: typeof waitForProviderSolver;
   } = {},
   billing: ChallengeClassifierBilling = {}
 ): Promise<CandidateProbeResult> {
   const started = Date.now();
   let stablePasses = 0;
-  let paymentCdnOk = false;
-  let paymentCdnHosts: Record<string, boolean> = {};
   const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [];
   const attempts = 2;
-  const requirePaymentCdn = Boolean(logContext.requirePaymentCdn);
   const blockedResourceUrl = (logContext.blockedResourceUrl || '').trim();
+  const recoveryReasonParts = [
+    (logContext.recoveryReason || '').trim(),
+    blockedResourceUrl
+      ? `Blocked third-party resource that must become reachable/usable: ${blockedResourceUrl}`
+      : '',
+  ].filter(Boolean);
+  const recoveryReason = recoveryReasonParts.join('\n') || null;
+  // requirePaymentCdn ignored — kept on the type for older callers.
+  void logContext.requirePaymentCdn;
+  const solve = logContext.waitForSolver ?? waitForProviderSolver;
   try {
     const context = session.validationBrowser.contexts()[0];
     if (context === undefined) {
@@ -330,7 +376,6 @@ export async function probeCandidateBrowser(
       await context.addInitScript(recoveryOriginStorageScript(storageState));
     }
     const page = context.pages()[0] ?? (await context.newPage());
-    let lastAttemptClean = false;
     for (let index = 0; index < attempts; index += 1) {
       const response = await page
         .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
@@ -343,10 +388,9 @@ export async function probeCandidateBrowser(
           await recoveryGlobal.__naviRestoreRecoveryStorage?.();
         });
       }
-      const attempt = await waitForProviderSolver(page, response, billing);
+      const attempt = await solve(page, response, billing, { recoveryReason });
       if (attempt.usage) classifierLlmUsage.push(attempt.usage);
       if (!attempt.clean) {
-        lastAttemptClean = false;
         log.info('Challenge recovery candidate probe attempt still challenged', {
           ...logContext,
           attempt: index + 1,
@@ -356,13 +400,8 @@ export async function probeCandidateBrowser(
           actual_model: attempt.usage?.actual_model ?? null,
           prompt_tokens: attempt.usage?.prompt_tokens ?? null,
         });
-        // Do NOT abort the remaining attempts — CF often clears on the second
-        // load (Eventim steel_managed under parallel k=4). Breaking here left
-        // stablePasses=0 after a single "Just a moment..." and discarded the
-        // only Stripe-capable config while Kernels CF-cleared without Stripe.js.
         continue;
       }
-      lastAttemptClean = true;
       log.info('Challenge recovery candidate probe attempt clean', {
         ...logContext,
         attempt: index + 1,
@@ -373,40 +412,6 @@ export async function probeCandidateBrowser(
       });
       stablePasses += 1;
     }
-    // Blocked-resource re-nav + probe only when recovery requires it —
-    // CF-only recoveries must not pay the CDN probe cost or latch on ORB.
-    if (requirePaymentCdn && stablePasses > 0) {
-      // A clean first attempt + challenged second leaves stablePasses > 0 while
-      // `page` is still the challenge document — script CDNs then fail CSP/ORB
-      // and paymentCdnOk falsely rejects. Re-nav to a clean doc before probing.
-      let paymentPageClean = lastAttemptClean;
-      if (!paymentPageClean) {
-        const response = await page
-          .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-          .catch(() => null);
-        const retry = await waitForProviderSolver(page, response, billing);
-        if (retry.usage) classifierLlmUsage.push(retry.usage);
-        paymentPageClean = retry.clean;
-        log.info('Challenge recovery payment CDN pre-probe navigation', {
-          ...logContext,
-          clean: retry.clean,
-          reason: retry.reason,
-          title: retry.title.slice(0, 200),
-          actual_model: retry.usage?.actual_model ?? null,
-        });
-      }
-      if (paymentPageClean) {
-        const paymentProbe = await probePaymentCdnReachable(page, blockedResourceUrl || null);
-        paymentCdnOk = paymentProbe.paymentCdnOk;
-        paymentCdnHosts = paymentProbe.paymentCdnHosts;
-        log.info('Challenge recovery candidate payment CDN probe', {
-          ...logContext,
-          blockedResourceUrl: blockedResourceUrl || null,
-          paymentCdnOk,
-          paymentCdnHosts,
-        });
-      }
-    }
   } finally {
     // Closing this CDP client leaves the remote default context (including any
     // solver-refreshed challenge cookies) alive for atomic promotion.
@@ -416,8 +421,9 @@ export async function probeCandidateBrowser(
     stablePasses,
     attempts,
     latencyMs: Date.now() - started,
-    paymentCdnOk,
-    paymentCdnHosts,
+    // CDN hard-filter removed; field retained for wire/log compatibility.
+    paymentCdnOk: true,
+    paymentCdnHosts: {},
     classifierLlmUsage,
   };
 }
@@ -470,15 +476,16 @@ export async function searchAndPromoteBrowserConfig(
     userId?: string;
     targetUrl: string;
     storageState: Record<string, unknown>;
+    /** Parallel cookie-signature lanes; defaults to a single lane from storageState. */
+    storageLanes?: RecoveryStorageLane[];
     userAgent?: string;
     /** Failure-driven: blocked third-party URL that triggered this recovery. */
     blockedResourceUrl?: string;
-    /**
-     * Sticky hard filter from the agent after a prior payment-CDN failure on
-     * this task. When true (or when blockedResourceUrl is a payment CDN), only
-     * paymentCdnOk candidates are eligible.
-     */
+    /** Agent recover_from_challenge reason for the LLM gate. */
+    recoveryReason?: string | null;
+    /** @deprecated Ignored — single LLM gate only. */
     requirePaymentCdn?: boolean;
+    preserveAuth?: boolean;
   },
   dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
 ) {
@@ -506,21 +513,18 @@ export async function searchAndPromoteBrowserConfig(
       }
     : DEFAULT_GEOLOCATION;
   const sessionAvoidConfigKey = recoveryConfigKeyForSession(current.provider, current.proxyTier);
-  // Hard filter from the failure that triggered recovery (or sticky agent flag).
-  // Never from target URL path heuristics — verify the blocked resource itself.
-  const requirePaymentCdn =
-    Boolean(input.requirePaymentCdn) || blockedResourceRequiresPaymentCdn(input.blockedResourceUrl);
-  const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, { requirePaymentCdn });
+  // Payment-CDN hard filter removed. blockedResourceUrl is evidence for the LLM gate.
+  void input.requirePaymentCdn;
+  const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
+    requirePaymentCdn: false,
+  });
   const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
-  if (requirePaymentCdn) {
-    log.info('Challenge recovery requiring blocked-resource CDN hard filter', {
-      taskId: input.taskId,
-      blockedResourceUrl: input.blockedResourceUrl ?? null,
-      stickyRequirePaymentCdn: Boolean(input.requirePaymentCdn),
-      sessionAvoidConfigKey: sessionAvoidConfigKey ?? null,
-      preferSteel,
-    });
-  } else if (sessionAvoidConfigKey) {
+  const lanes: RecoveryStorageLane[] =
+    input.storageLanes && input.storageLanes.length > 0
+      ? input.storageLanes
+      : [{ key: 'default', storageState: input.storageState }];
+
+  if (sessionAvoidConfigKey) {
     log.info('Challenge recovery will deprioritize current failing exit', {
       taskId: input.taskId,
       avoidConfigKey: sessionAvoidConfigKey,
@@ -528,6 +532,15 @@ export async function searchAndPromoteBrowserConfig(
       proxyTier: current.proxyTier,
     });
   }
+  log.info('Challenge recovery lane search', {
+    taskId: input.taskId,
+    laneKeys: lanes.map((lane) => lane.key),
+    configKeys: configs.map((config) => config.key),
+    avoidConfigKey: sessionAvoidConfigKey ?? null,
+    preserveAuth: input.preserveAuth ?? null,
+    blockedResourceUrl: input.blockedResourceUrl ?? null,
+    agent_id: billing.agentId,
+  });
 
   const searchDependencies: ConfigSearchDependencies = {
     create: async (config) => {
@@ -549,17 +562,18 @@ export async function searchAndPromoteBrowserConfig(
       });
       return { provider: 'steel', ...session };
     },
-    probe: async (config, session) =>
+    probe: async (config, session, lane) =>
       dependencies.probe(
         session,
         input.targetUrl,
-        input.storageState,
+        lane.storageState,
         {
           configKey: config.key,
           provider: config.provider,
           proxyMode: config.proxyMode,
-          requirePaymentCdn,
+          laneKey: lane.key,
           blockedResourceUrl: input.blockedResourceUrl,
+          recoveryReason: input.recoveryReason,
         },
         billing
       ),
@@ -606,48 +620,12 @@ export async function searchAndPromoteBrowserConfig(
     },
   };
 
-  const phases = recoverySearchPlan({
-    configs,
-    requirePaymentCdn,
+  const winner = await runLaneConfigSearch(configs, lanes, searchDependencies, {
     avoidConfigKey: sessionAvoidConfigKey,
   });
-  let winner: SuccessfulRecoveryCandidate | undefined;
-  let lastError: unknown;
-  const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [];
-  for (let index = 0; index < phases.length; index += 1) {
-    const phase = phases[index]!;
-    log.info('Challenge recovery search phase', {
-      taskId: input.taskId,
-      phase: phase.label,
-      configKeys: phase.configs.map((config) => config.key),
-      avoidConfigKey: phase.avoidConfigKey ?? null,
-      requirePaymentCdn,
-      agent_id: billing.agentId,
-    });
-    try {
-      winner = await runParallelBrowserConfigSearch(phase.configs, searchDependencies, {
-        avoidConfigKey: phase.avoidConfigKey,
-        requirePaymentCdn,
-      });
-      classifierLlmUsage.push(...(winner.probe.classifierLlmUsage ?? []));
-      break;
-    } catch (error) {
-      lastError = error;
-      const hasNext = index < phases.length - 1;
-      log.warn('Challenge recovery search phase failed', {
-        taskId: input.taskId,
-        phase: phase.label,
-        hasNext,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      if (!hasNext) throw error;
-    }
-  }
-  if (winner === undefined) {
-    throw lastError instanceof Error
-      ? lastError
-      : new Error('No stable browser configuration cleared the challenge');
-  }
+  const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [
+    ...(winner.probe.classifierLlmUsage ?? []),
+  ];
 
   return {
     task_id: current.id,
@@ -661,9 +639,7 @@ export async function searchAndPromoteBrowserConfig(
     storage_state_preloaded: true,
     recovery_action:
       winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
-    recovery_message: winner.probe.paymentCdnOk
-      ? `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes (payment CDN reachable).`
-      : `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
+    recovery_message: `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
     classifier_llm_usage: classifierLlmUsage,
     browser_session_metadata: {
       provider: winner.config.provider,
@@ -676,3 +652,4 @@ export async function searchAndPromoteBrowserConfig(
     },
   };
 }
+

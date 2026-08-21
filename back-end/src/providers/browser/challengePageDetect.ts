@@ -142,14 +142,17 @@ async function challengeSnapshot(page: Page, response: Response | null) {
 export async function waitForProviderSolver(
   page: Page,
   response: Response | null,
-  billing: ChallengeClassifierBilling = {}
+  billing: ChallengeClassifierBilling = {},
+  options?: { recoveryReason?: string | null }
 ): Promise<{
   clean: boolean;
   reason: string | null;
   title: string;
   usage: ChallengeClassifierLlmUsage | null;
 }> {
-  const result = await classifyPageAfterSettle(page, response, undefined, billing);
+  const result = await classifyPageAfterSettle(page, response, undefined, billing, {
+    recoveryReason: options?.recoveryReason,
+  });
   return {
     clean: result.clean,
     reason: result.clean ? null : result.reason,

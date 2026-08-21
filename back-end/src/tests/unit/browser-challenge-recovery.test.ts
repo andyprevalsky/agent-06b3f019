@@ -10,7 +10,8 @@ import {
   isUsableDocumentTitle,
   pageLooksChallenged,
   recoveryConfigKeyForSession,
-  runParallelBrowserConfigSearch,
+  runLaneConfigSearch,
+  orderConfigsForLane,
   shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
@@ -116,7 +117,7 @@ function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
   );
 }
 
-async function testParallelSearchPromotesStableFastestAndReleasesLosers(): Promise<void> {
+async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
   const created: string[] = [];
   const probed: string[] = [];
@@ -125,93 +126,125 @@ async function testParallelSearchPromotesStableFastestAndReleasesLosers(): Promi
   let activeCreates = 0;
   let maxActiveCreates = 0;
 
-  const winner = await runParallelBrowserConfigSearch(configs, {
-    create: async (config) => {
-      activeCreates += 1;
-      maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      created.push(config.key);
-      activeCreates -= 1;
-      return fakeSession(config);
-    },
-    probe: async (config) => {
-      probed.push(config.key);
-      if (config.key === 'kernel_mobile') {
-        return { stablePasses: 1, attempts: 2, latencyMs: 1, paymentCdnOk: false };
-      }
-      return {
-        stablePasses: 2,
-        attempts: 2,
-        latencyMs: config.key === 'steel_fixed' ? 10 : 100,
-        paymentCdnOk: false,
-      };
-    },
-    promote: async (candidate) => {
-      promoted.push(candidate.config.key);
-      assert.strictEqual(
-        released.length,
-        0,
-        'winner is promoted before any live candidate is released'
-      );
-    },
-    release: async (config) => {
-      released.push(config.key);
-    },
-  });
-
-  assert.strictEqual(
-    maxActiveCreates,
-    configs.length,
-    'all provider browsers must spawn concurrently'
+  const winner = await runLaneConfigSearch(
+    configs,
+    [{ key: 'auth_kept', storageState: {} }],
+    {
+      create: async (config) => {
+        activeCreates += 1;
+        maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        created.push(config.key);
+        activeCreates -= 1;
+        return fakeSession(config);
+      },
+      probe: async (config, _session, lane) => {
+        assert.strictEqual(lane.key, 'auth_kept');
+        probed.push(config.key);
+        // First config fails; second fully clears — sequential, no partial promote.
+        if (probed.length === 1) {
+          return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+      },
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async (config) => {
+        released.push(config.key);
+      },
+    }
   );
-  assert.deepStrictEqual(new Set(created), new Set(configs.map((candidate) => candidate.key)));
-  assert.deepStrictEqual(new Set(probed), new Set(configs.map((candidate) => candidate.key)));
-  assert.strictEqual(winner.config.key, 'steel_fixed');
-  assert.deepStrictEqual(promoted, ['steel_fixed']);
-  assert.strictEqual(released.length, configs.length - 1);
-  assert.ok(!released.includes('steel_fixed'));
+
+  assert.strictEqual(maxActiveCreates, 1, 'configs within a lane must be sequential');
+  assert.strictEqual(probed.length, 2);
+  assert.strictEqual(winner.config.key, probed[1]);
+  assert.deepStrictEqual(promoted, [winner.config.key]);
+  assert.ok(released.includes(probed[0]!));
+}
+
+async function testParallelCookieLanesFirstFullClearWins(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 2);
+  const promoted: string[] = [];
+  const probedLanes: string[] = [];
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: { cookies: [{ name: 'a' }] } },
+      { key: 'stripped', storageState: { cookies: [] } },
+    ],
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config, _session, lane) => {
+        probedLanes.push(`${lane.key}:${config.key}`);
+        await new Promise((resolve) => setTimeout(resolve, lane.key === 'stripped' ? 1 : 30));
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        return { stablePasses: 0, attempts: 2, latencyMs: 50, paymentCdnOk: true };
+      },
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    }
+  );
+  assert.ok(probedLanes.some((entry) => entry.startsWith('stripped:')));
+  assert.deepStrictEqual(promoted, [winner.config.key]);
 }
 
 async function testNoStableCandidateCleansEverything(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US' });
   const released: string[] = [];
   await assert.rejects(
-    runParallelBrowserConfigSearch(configs, {
-      create: async (config) => fakeSession(config),
-      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: false }),
-      promote: async () => assert.fail('zero-pass candidate must never be promoted'),
-      release: async (config) => {
-        released.push(config.key);
-      },
-    }),
+    runLaneConfigSearch(
+      configs,
+      [{ key: 'default', storageState: {} }],
+      {
+        create: async (config) => fakeSession(config),
+        probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true }),
+        promote: async () => assert.fail('zero-pass candidate must never be promoted'),
+        release: async (config) => {
+          released.push(config.key);
+        },
+      }
+    ),
     /No stable browser configuration/
   );
   assert.strictEqual(released.length, configs.length);
 }
 
-async function testPartialStableCandidateIsPromotedWhenNoneFullyStable(): Promise<void> {
+async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US' });
   const promoted: string[] = [];
-  const released: string[] = [];
-  const winner = await runParallelBrowserConfigSearch(configs, {
-    create: async (config) => fakeSession(config),
-    probe: async (config) => ({
-      stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
-      attempts: 2,
-      latencyMs: config.key === 'kernel_mobile' ? 5 : 1,
-      paymentCdnOk: false,
-    }),
-    promote: async (candidate) => {
-      promoted.push(candidate.config.key);
-    },
-    release: async (config) => {
-      released.push(config.key);
-    },
-  });
-  assert.strictEqual(winner.config.key, 'kernel_mobile');
-  assert.deepStrictEqual(promoted, ['kernel_mobile']);
-  assert.strictEqual(released.length, configs.length - 1);
-  assert.ok(!released.includes('kernel_mobile'));
+  await assert.rejects(
+    runLaneConfigSearch(
+      configs,
+      [{ key: 'default', storageState: {} }],
+      {
+        create: async (config) => fakeSession(config),
+        probe: async (config) => ({
+          stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
+          attempts: 2,
+          latencyMs: 1,
+          paymentCdnOk: true,
+        }),
+        promote: async (candidate) => {
+          promoted.push(candidate.config.key);
+        },
+        release: async () => undefined,
+      }
+    ),
+    /No stable browser configuration/
+  );
+  assert.deepStrictEqual(promoted, []);
+}
+
+function testOrderConfigsForLane(): void {
+  const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
+  const ordered = orderConfigsForLane(configs, 'kernel_residential_city');
+  assert.strictEqual(ordered[ordered.length - 1]?.key, 'kernel_residential_city');
+  assert.ok(ordered[0]?.key !== 'kernel_residential_city');
 }
 
 function testRecoveryConfigKeyForSession(): void {
@@ -677,12 +710,13 @@ function testChallengeLlmClassifierCostRouting(): void {
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
-  await testParallelSearchPromotesStableFastestAndReleasesLosers();
+  await testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear();
   await testNoStableCandidateCleansEverything();
-  await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
+  await testPartialStableCandidateIsNeverPromoted();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
+  testOrderConfigsForLane();
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
   testChallengeLlmClassifierCostRouting();

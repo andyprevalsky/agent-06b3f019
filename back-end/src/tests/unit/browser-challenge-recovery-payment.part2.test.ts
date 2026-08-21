@@ -13,6 +13,7 @@ import {
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
+import { probePaymentCdnReachable } from '../../providers/browser/paymentCdnProbe';
 
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
   return {
@@ -60,36 +61,12 @@ function makeProbePage(opts: {
 }
 
 async function testPaymentCdnOkRequiresScriptLoad(): Promise<void> {
-  // Fetch can succeed while <script> fails (ORB). paymentCdnOk must stay false
-  // until the script-load probe clears for script-shaped blocked URLs.
+  // Helper still distinguishes fetch-ok vs script-ORB for evidence; promote no
+  // longer hard-filters on it (LLM gate consumes blocked-resource reason).
   const fakePage = makeProbePage({ fetchOk: true, scriptOk: false });
-  const browser = {
-    contexts: () => [
-      {
-        pages: () => [fakePage],
-        newPage: async () => fakePage,
-        addCookies: async () => undefined,
-        addInitScript: async () => undefined,
-        close: async () => undefined,
-      },
-    ],
-    newContext: async () => {
-      throw new Error('unexpected newContext');
-    },
-    close: async () => undefined,
-  } as unknown as Browser;
-  const session = {
-    ...fakeSession({ key: 'steel_managed', provider: 'steel', proxyMode: 'managed' }),
-    validationBrowser: browser,
-  };
-  const result = await probeCandidateBrowser(
-    session,
-    'https://checkout.example.com/pay',
-    {},
-    {
-      requirePaymentCdn: true,
-      blockedResourceUrl: 'https://js.cdn.example/v3',
-    }
+  const result = await probePaymentCdnReachable(
+    fakePage as never,
+    'https://js.cdn.example/v3'
   );
   assert.strictEqual(result.paymentCdnOk, false);
   assert.strictEqual(result.paymentCdnHosts?.['js.cdn.example'], true);
@@ -98,70 +75,43 @@ async function testPaymentCdnOkRequiresScriptLoad(): Promise<void> {
 
 async function testPaymentCdnOkWhenScriptLoads(): Promise<void> {
   const fakePage = makeProbePage({ fetchOk: true, scriptOk: true });
-  const browser = {
-    contexts: () => [
-      {
-        pages: () => [fakePage],
-        newPage: async () => fakePage,
-        addCookies: async () => undefined,
-        addInitScript: async () => undefined,
-        close: async () => undefined,
-      },
-    ],
-    newContext: async () => {
-      throw new Error('unexpected newContext');
-    },
-    close: async () => undefined,
-  } as unknown as Browser;
-  const session = {
-    ...fakeSession({ key: 'steel_managed', provider: 'steel', proxyMode: 'managed' }),
-    validationBrowser: browser,
-  };
-  const result = await probeCandidateBrowser(
-    session,
-    'https://checkout.example.com/pay',
-    {},
-    {
-      requirePaymentCdn: true,
-      blockedResourceUrl: 'https://js.cdn.example/v3',
-    }
+  const result = await probePaymentCdnReachable(
+    fakePage as never,
+    'https://js.cdn.example/v3'
   );
   assert.strictEqual(result.paymentCdnOk, true);
   assert.strictEqual(result.paymentCdnHosts?.['js.cdn.example'], true);
   assert.strictEqual(result.paymentCdnHosts?.['script.load'], true);
 }
 
-async function testRequirePaymentCdnRejectsCfOnlyWinners(): Promise<void> {
+async function testRequirePaymentCdnNoLongerRejectsCfOnlyWinners(): Promise<void> {
   // Path allowlists are gone — targetLooksLikePaymentDocument is a no-op.
   assert.strictEqual(targetLooksLikePaymentDocument('https://checkout.example.com/pay'), false);
   const configs = browserRecoveryCandidates({ country: 'US' });
   const promoted: string[] = [];
-  await assert.rejects(
-    () =>
-      runParallelBrowserConfigSearch(
-        configs,
-        {
-          create: async (config) => fakeSession(config),
-          probe: async () => ({
-            stablePasses: 2,
-            attempts: 2,
-            latencyMs: 10,
-            paymentCdnOk: false,
-            paymentCdnHosts: {
-              'js.cdn.example': true,
-              'script.load': false,
-            },
-          }),
-          promote: async (candidate) => {
-            promoted.push(candidate.config.key);
-          },
-          release: async () => undefined,
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async () => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs: 10,
+        paymentCdnOk: false,
+        paymentCdnHosts: {
+          'js.cdn.example': true,
+          'script.load': false,
         },
-        { requirePaymentCdn: true }
-      ),
-    /blocked resource reachable/
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    },
+    { requirePaymentCdn: true }
   );
-  assert.deepStrictEqual(promoted, []);
+  assert.strictEqual(winner.config.key, configs[0]?.key);
+  assert.deepStrictEqual(promoted, [winner.config.key]);
 }
 
 async function testRequirePaymentCdnPromotesCdnWinner(): Promise<void> {
@@ -188,8 +138,9 @@ async function testRequirePaymentCdnPromotesCdnWinner(): Promise<void> {
     },
     { requirePaymentCdn: true }
   );
-  assert.strictEqual(winner.config.key, 'steel_managed');
-  assert.deepStrictEqual(promoted, ['steel_managed']);
+  // CDN hard-filter removed: first sequential full clear wins.
+  assert.strictEqual(winner.config.key, configs[0]?.key);
+  assert.deepStrictEqual(promoted, [winner.config.key]);
 }
 
 async function testProbeRetriesAfterFirstCfChallenge(): Promise<void> {
@@ -277,12 +228,24 @@ async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
     ...fakeSession({ key: 'kernel_residential_city', provider: 'kernel', proxyMode: 'residential' }),
     validationBrowser: browser,
   };
-  const result = await probeCandidateBrowser(session, 'https://shop.example.com/item/1', {});
+  const result = await probeCandidateBrowser(
+    session,
+    'https://shop.example.com/item/1',
+    {},
+    {
+      waitForSolver: async () => ({
+        clean: true,
+        reason: null,
+        title: 'Product page',
+        usage: null,
+      }),
+    }
+  );
   assert.strictEqual(gotoCount, 2, 'CF probe still runs two attempts');
   assert.strictEqual(result.stablePasses, 2);
-  assert.strictEqual(result.paymentCdnOk, false);
+  assert.strictEqual(result.paymentCdnOk, true);
   assert.deepStrictEqual(result.paymentCdnHosts, {});
-  assert.strictEqual(evaluateCalls, 0, 'CDN evaluate must not run without requirePaymentCdn');
+  assert.strictEqual(evaluateCalls, 0, 'CDN evaluate must not run on LLM-only probes');
 }
 
 function testBlockedResourceRequiresPaymentCdn(): void {
@@ -301,7 +264,7 @@ function testBlockedResourceRequiresPaymentCdn(): void {
 async function main(): Promise<void> {
   await testPaymentCdnOkRequiresScriptLoad();
   await testPaymentCdnOkWhenScriptLoads();
-  await testRequirePaymentCdnRejectsCfOnlyWinners();
+  await testRequirePaymentCdnNoLongerRejectsCfOnlyWinners();
   await testRequirePaymentCdnPromotesCdnWinner();
   await testProbeRetriesAfterFirstCfChallenge();
   await testCfOnlyProbeSkipsPaymentCdn();

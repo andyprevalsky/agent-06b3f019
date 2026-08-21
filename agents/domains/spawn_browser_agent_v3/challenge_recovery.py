@@ -28,7 +28,7 @@ CookieKey = Tuple[str, str, str]
 Probe = Callable[[StorageState], Awaitable[bool]]
 Progress = Callable[[str, str], Awaitable[None]]
 CommitCookies = Callable[[Sequence[CookieKey]], Awaitable[bool]]
-ConfigSearch = Callable[[StorageState], Awaitable[Mapping[str, Any]]]
+ConfigSearch = Callable[[Sequence[Mapping[str, Any]]], Awaitable[Mapping[str, Any]]]
 WaitForSolver = Callable[[], Awaitable[None]]
 
 
@@ -204,6 +204,47 @@ def storage_without_cookies(storage_state: Mapping[str, Any], removed: Iterable[
         if not isinstance(cookie, Mapping) or cookie_key(cookie) not in removed_set
     ]
     return candidate
+
+
+def build_config_search_lanes(
+    source_state: StorageState,
+    *,
+    preserve_auth: bool,
+    proven_safe_removals: Sequence[CookieKey] = (),
+) -> List[Dict[str, Any]]:
+    """Build parallel cookie-signature lanes for browser-config search.
+
+    ``auth_kept`` strips known challenge cookies (plus any proven-safe removals)
+    while retaining auth/opaque cookies. When ``preserve_auth`` is false, also
+    include a fully ``stripped`` lane so guest recoveries can clear soft-blocks
+    without transplanting poisoned session cookies onto new exits.
+    """
+    cookies_by_key = {
+        cookie_key(cookie): cookie
+        for cookie in source_state.get("cookies") or []
+        if isinstance(cookie, Mapping)
+    }
+    challenge_keys = tuple(
+        key
+        for key, cookie in cookies_by_key.items()
+        if is_known_challenge_cookie(cookie) and not is_auth_cookie(cookie)
+    )
+    strip_keys = tuple(dict.fromkeys((*proven_safe_removals, *challenge_keys)))
+    lanes: List[Dict[str, Any]] = [
+        {
+            "key": "auth_kept",
+            "storage_state": storage_without_cookies(source_state, strip_keys),
+        }
+    ]
+    if not preserve_auth:
+        all_keys = tuple(cookies_by_key.keys())
+        lanes.append(
+            {
+                "key": "stripped",
+                "storage_state": storage_without_cookies(source_state, all_keys),
+            }
+        )
+    return lanes
 
 
 def is_usable_document_title(title: str) -> bool:
@@ -846,21 +887,16 @@ async def recover_from_challenge(
             raise RuntimeError("Challenge recovery refused an unproven cookie removal")
         await progress(
             "browser_config_search",
-            "Searching permission-compatible Kernel and Steel browser/IP configurations in parallel.",
+            "Searching permission-compatible Kernel and Steel browser/IP configurations "
+            "across cookie lanes (configs sequential within each lane).",
         )
-        # Never transplant IP-bound clearance cookies onto a new provider/proxy.
-        # Keep auth + opaque cookies; strip every known challenge cookie even when
-        # cookie-stage probes did not prove a live commit.
-        challenge_keys = tuple(
-            key
-            for key, cookie in cookies_by_key.items()
-            if is_known_challenge_cookie(cookie) and not is_auth_cookie(cookie)
-        )
-        config_state = storage_without_cookies(
+        preserve_auth = not allow_logged_out_cookie_commit
+        lanes = build_config_search_lanes(
             source_state,
-            tuple(dict.fromkeys((*proven_safe_removals, *challenge_keys))),
+            preserve_auth=preserve_auth,
+            proven_safe_removals=proven_safe_removals,
         )
-        config_result = await search_configs(config_state)
+        config_result = await search_configs(lanes)
         return ChallengeRecoveryResult(
             "config_selected",
             tuple(proven_safe_removals),
