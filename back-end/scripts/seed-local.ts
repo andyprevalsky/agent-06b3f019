@@ -352,6 +352,7 @@ async function upsertById(model: any, records: any[]): Promise<number> {
 const PROD_INTEGRATION_COLUMNS = {
   id: true,
   userId: true,
+  accountId: true,
   type: true,
   name: true,
   status: true,

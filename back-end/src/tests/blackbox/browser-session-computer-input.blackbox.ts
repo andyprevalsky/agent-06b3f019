@@ -15,6 +15,14 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const { isValidBrowserKeySymbols } =
+    await import('../../domains/browser-session/service.browser-input');
+  assert.equal(
+    isValidBrowserKeySymbols(new Array(1)),
+    false,
+    'sparse arrays must not bypass per-key validation'
+  );
+
   const previousApiKey = process.env.BACKEND_API_KEY;
   const apiKey = previousApiKey?.trim() || `computer-input-${randomUUID()}`;
   process.env.BACKEND_API_KEY = apiKey;
@@ -91,7 +99,7 @@ async function main(): Promise<void> {
     else process.env.BACKEND_API_KEY = previousApiKey;
   }
 
-  process.stdout.write('PASS browser-session computer input route (5 cases)\n');
+  process.stdout.write('PASS browser-session computer input route (6 cases)\n');
 }
 
 main().catch(async (error: unknown) => {

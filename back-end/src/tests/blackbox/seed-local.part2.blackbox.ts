@@ -193,6 +193,9 @@ test('passkeys-only seed mode never enters browser state or password sync', asyn
 
 test('email-credentials-only seed mode syncs integrations and email rows then returns', async () => {
   const source = readSeedLocalSource();
+  const integrationProjectionStart = source.indexOf('const PROD_INTEGRATION_COLUMNS = {');
+  const integrationProjectionEnd = source.indexOf('} as const;', integrationProjectionStart);
+  const integrationProjection = source.slice(integrationProjectionStart, integrationProjectionEnd);
   const flag = source.indexOf("process.argv.includes('--email-credentials-only')");
   const branch = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)');
   const integrations = source.indexOf('await syncEmailIntegrations()', branch);
@@ -222,6 +225,10 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
   assert(
     source.includes('name: { in: [...EMAIL_INTEGRATION_NAMES] }'),
     'expected email-credentials-only to scope integrations to Gmail/Yahoo'
+  );
+  assert(
+    integrationProjection.includes('accountId: true'),
+    'expected production integration reads to preserve multi-account identity'
   );
   assert(
     !/await syncTable\('Integrations',\s*syncIntegrations\)/.test(

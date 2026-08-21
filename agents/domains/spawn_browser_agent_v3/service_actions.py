@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import ipaddress
 import json
 import re
+import socket
 import time as time_module
 from contextlib import suppress
 from dataclasses import dataclass
@@ -74,6 +76,10 @@ _API_SURFACE_PATHS = frozenset(
         "/status",
         "/ping",
     }
+)
+_NUMERIC_IPV4_HOST_RE = re.compile(
+    r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
+    re.IGNORECASE,
 )
 
 
@@ -579,20 +585,64 @@ async def _refuse_navigation(
     return result
 
 
+def _non_public_navigation_reason(url: str) -> Optional[str]:
+    """Explain why a URL is not safe for browser navigation, if applicable."""
+    if url == "about:blank":
+        return None
+
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return "the URL is malformed"
+
+    if parsed.scheme not in {"http", "https"}:
+        return "only public HTTP(S) pages may be opened"
+    if not host:
+        return "the URL has no hostname"
+
+    normalized_host = host.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        return "localhost pages are not allowed"
+
+    address = None
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        # inet_aton recognizes legacy numeric IPv4 forms such as 127.1,
+        # 2130706433, and 0x7f000001 that urlparse leaves looking like names.
+        if _NUMERIC_IPV4_HOST_RE.fullmatch(normalized_host):
+            try:
+                address = ipaddress.ip_address(socket.inet_aton(normalized_host))
+            except (OSError, ValueError):
+                return "the numeric hostname is malformed"
+
+    if address is not None and not address.is_global:
+        return f"the destination address {address} is not public"
+    return None
+
+
 def _navigation_guard_error(
     context: _ActionContext,
     *,
     action: str,
     target_url: Optional[str] = None,
 ) -> Optional[str]:
-    """Refuse navigation to API/non-document URL shapes only.
+    """Refuse non-public destinations and API/non-document URL shapes.
 
     Host pinning (recovery / cross-origin handoff) was removed: it trapped
     legitimate merchant → third-party order flows (e.g. bluebottlecoffee.com →
     order.online) after challenge recovery on the merchant host.
     """
-    del action  # kept for call-site stability
-    if target_url and url_looks_like_api_surface(target_url):
+    navigation_url = target_url
+    if action == "goto" and target_url and not urlparse(target_url).scheme:
+        # Match _execute_goto's long-standing convenience for bare hostnames.
+        navigation_url = f"https://{target_url}"
+    if target_url:
+        unsafe_reason = _non_public_navigation_reason(navigation_url or target_url)
+        if unsafe_reason:
+            return f"Refusing unsafe navigation to {target_url!r}: {unsafe_reason}."
+    if navigation_url and url_looks_like_api_surface(navigation_url):
         return (
             f"Refusing navigation to API/non-document URL {target_url!r}. "
             "Network request hosts are not pages — stay on the current document "

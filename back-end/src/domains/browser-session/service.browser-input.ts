@@ -3,7 +3,9 @@ export function isValidBrowserKeySymbols(value: unknown): value is string[] {
     Array.isArray(value) &&
     value.length > 0 &&
     value.length <= 16 &&
-    value.every((key: unknown) => typeof key === 'string' && key.length > 0 && key.length <= 64)
+    Array.from(value).every(
+      (key: unknown) => typeof key === 'string' && key.length > 0 && key.length <= 64
+    )
   );
 }
 
