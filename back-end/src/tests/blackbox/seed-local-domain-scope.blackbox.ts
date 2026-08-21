@@ -237,7 +237,7 @@ test('authoritative passkey reconciliation is limited to the selected domains', 
   const start = source.indexOf('if (options.authoritative)');
   const end = source.indexOf('async function syncBrowserAuthForCurrentMode', start);
   const reconciliation = source.slice(start, end);
-  const scopedWhere = 'passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS)';
+  const scopedWhere = 'passkeySyncWhere(SEED_USER_ID, SEED_COOKIE_DOMAINS)';
 
   assert(start > 0 && end > start, 'expected authoritative passkey reconciliation block');
   assert.equal(
@@ -246,7 +246,7 @@ test('authoritative passkey reconciliation is limited to the selected domains', 
     'remote and local reconciliation reads must share the domain-scoped selector'
   );
   assert(
-    !reconciliation.includes('where: { userId: DEV_USER_ID }'),
+    !reconciliation.includes('where: { userId: SEED_USER_ID }'),
     'authoritative reconciliation must not fall back to an unscoped user-wide read'
   );
 });

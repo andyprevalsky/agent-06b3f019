@@ -57,6 +57,8 @@ export const KNOWN_TAGS = [
   'regression',
   // Ecommerce / real-world task category slices (see tasks.json).
   'ecommerce',
+  'purchase',
+  'passkey',
   'grocery',
   'lodging',
   'reservation',

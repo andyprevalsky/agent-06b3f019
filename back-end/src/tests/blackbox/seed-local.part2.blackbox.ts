@@ -363,7 +363,7 @@ test('synthetic benchmark compute access uses the isolated pool without changing
   const optIn = source.indexOf('SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS');
   const helper = source.indexOf('async function poolRequiredDevComputeTokensForSyntheticUsers');
   const isolationGuard = source.indexOf('if (!ISOLATED_BENCHMARK_RUN)', helper);
-  const ownerBoundary = source.indexOf('userId: DEV_USER_ID', helper);
+  const ownerBoundary = source.indexOf('userId: SEED_USER_ID', helper);
   const requiredNames = source.indexOf('COMPUTE_TOKEN_REQUIRED_TYPES', helper);
   const poolUpdate = source.indexOf('data: { poolingEnabled: true }', helper);
   const syncCall = source.indexOf('const count = await syncIntegrations()', helper);
@@ -375,7 +375,7 @@ test('synthetic benchmark compute access uses the isolated pool without changing
   assert(optIn > 0, 'expected an explicit synthetic-user pool opt-in');
   assert(helper > optIn, 'expected a narrowly named pooling helper');
   assert(isolationGuard > helper, 'expected pooling to fail closed outside isolated benchmarks');
-  assert(ownerBoundary > helper, 'expected the integration to retain the dev-user owner');
+  assert(ownerBoundary > helper, 'expected the integration to retain the seed-user owner');
   assert(requiredNames > helper, 'expected pooling to be limited to required provider types');
   assert(poolUpdate > isolationGuard, 'expected the isolated-stack guard before the pool update');
   assert(poolUpdate > ownerBoundary, 'expected only the local pooling flag to change');
