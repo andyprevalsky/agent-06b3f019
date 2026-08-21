@@ -3,8 +3,10 @@
 /**
  * Source contract: when chat escalation fails after the Cloud Agent tool is
  * marked IN_PROGRESS (rejected start or acceptance throw), the handler must
- * persist a terminal FINISHED/error tool message and return complete — never
- * leave the UI spinning or claim status "escalated".
+ * persist a terminal FINISHED/error tool message and never claim status
+ * "escalated". Post-acceptance broadcast failures must not be treated as
+ * rejected starts. Unaccepted-workflow cleanup must retry before callers can
+ * report a clean rejection.
  */
 
 import assert from 'node:assert';
@@ -42,10 +44,10 @@ assert.ok(
   'false-start path must finish the tool with an ineligibility message'
 );
 assert.ok(
-  /catch\s*\([^)]*\)\s*\{[\s\S]*finishRejectedCloudAgentTool[\s\S]*return\s*\{\s*status:\s*'complete'/.test(
+  /catch\s*\([^)]*\)\s*\{[\s\S]*finishRejectedCloudAgentTool[\s\S]*throw error/.test(
     escalationBranch
   ),
-  'acceptance failure must return complete after finishing the tool'
+  'start failure must rethrow after attempting to finish the tool'
 );
 assert.ok(
   /if\s*\(\s*!started\s*\)\s*\{[\s\S]*finishRejectedCloudAgentTool[\s\S]*return\s*\{\s*status:\s*'complete'/.test(
@@ -58,6 +60,27 @@ assert.ok(
     handler
   ),
   'finishRejectedCloudAgentTool must mark the tool FINISHED with error:true'
+);
+
+const startHelper = handler.slice(
+  handler.indexOf('async function startTemporalWorkflowForChat'),
+  handler.indexOf('async function terminateUnacceptedChatWorkflow')
+);
+assert.ok(
+  /try\s*\{\s*await broadcastAgentModeStarted\(agentId\);[\s\S]*\}\s*catch/.test(startHelper),
+  'post-acceptance broadcast must be best-effort and not fail the start'
+);
+assert.ok(
+  startHelper.includes('terminateUnacceptedChatWorkflow'),
+  'rejected acceptance must use retried terminate helper'
+);
+assert.ok(
+  /UNACCEPTED_TERMINATE_ATTEMPTS\s*=\s*3/.test(handler),
+  'unaccepted workflow cleanup must use a bounded retry budget'
+);
+assert.ok(
+  escalationBranch.includes('Failed to terminalize Cloud Agent tool after start failure'),
+  'terminalization failure must be logged without replacing the original error'
 );
 
 process.stdout.write('PASS chat escalation finishes Cloud Agent tool on acceptance failure\n');
