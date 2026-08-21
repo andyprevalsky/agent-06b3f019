@@ -125,5 +125,8 @@ require_text "$MEASUREMENT" \
 require_text "$MEASUREMENT" \
     'SRC_RESTORE_STATUS' \
     "pg_restore exit status must be preserved, never discarded with || true"
+require_text "$MEASUREMENT" \
+    'restore that original mode before measuring' \
+    "restore validation must not leave errexit enabled for the measured seed"
 
 echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 230MB ratchet"
