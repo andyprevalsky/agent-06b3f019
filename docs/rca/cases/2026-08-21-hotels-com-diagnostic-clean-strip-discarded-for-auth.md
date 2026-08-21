@@ -116,3 +116,26 @@ run did not guest-checkout.
 When a challenge cookie probe reports clean for an all-target / logged-out
 strip on a guest checkout path, commit and re-verify that strip — do not discard
 it solely to preserve auth and then fail config search.
+
+
+## Follow-up (2026-08-21 evening)
+
+Implemented guest `all_target` commit (`allow_logged_out_cookie_commit` from goal
+text) + blackbox `guest_path_commits_clean_all_target`. Exact
+`scripts/run-bench --local browser-hotel-booking` still **FAIL**ed:
+
+- Agent `2da69edc-2852-4a90-9d0f-dbc257e1302b`, run
+  `agents/benchmarks/runs/20260821_190847_browser-hotel-booking.json`
+- Timeout 904s; still `Expected payment_approval…none was triggered`
+- First recovery used **known_challenge** strip and reported
+  `Browser challenge recovered` (not the preserve_auth discard path)
+- Later recoveries skipped cookie probes via
+  `escalate_after_cookie_false_stable` (config search only) after the first
+  cookie success — so the new guest `all_target` commit path often never ran
+  on the second/third challenge wall
+- Recording: stitched Kernel MP4 at
+  `/opt/cursor/artifacts/browser_hotel_booking_2da69edc_recording.mp4`
+
+Status remains **open** — owning-boundary fix landed but did not clear the
+exact benchmark outcome; next boundary is post-first-success recovery
+escalation / repeated hotels.com challenge after config promote.
