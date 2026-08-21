@@ -265,10 +265,11 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
   let current = wallet;
   let recoveredCents = 0;
   if (deps.recoverResidual !== undefined) {
-    const emptySweep: { settledCents: number; pendingCents: number; oldestPendingAgeMs?: number } = {
-      settledCents: 0,
-      pendingCents: 0,
-    };
+    const emptySweep: { settledCents: number; pendingCents: number; oldestPendingAgeMs?: number } =
+      {
+        settledCents: 0,
+        pendingCents: 0,
+      };
     const sweep = await deps.recoverResidual().catch((error: unknown) => {
       // Never let a recovery problem block the top-up; the treasury path is the backstop.
       log.warn('Residual recovery failed; falling back to treasury top-up', {

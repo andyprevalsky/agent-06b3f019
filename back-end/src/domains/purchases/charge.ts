@@ -36,6 +36,52 @@ import {
 
 const log = createLogger('Purchases');
 
+type MintedCard = Awaited<ReturnType<typeof mintCompanyFlowCard>>['minted'];
+
+/**
+ * Persist the mint outcome and record it on `state` for rollback. Returns whether the issued card
+ * is the static Rose Agent Card, which has no company transfer to record or reclaim.
+ */
+async function persistMintedCard(
+  state: ChargeState,
+  purchase: PurchaseSpend,
+  minted: MintedCard,
+  transferId: string | undefined
+): Promise<boolean> {
+  const purchaseId = purchase.id;
+  if (minted.metadata?.staticCard === true) {
+    await discardPendingPurchaseWalletCollection(purchaseId);
+    state.walletFundingPrepared = false;
+    state.issuedCardId = minted.cardId;
+    state.issuedStaticCard = true;
+    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
+      cardId: minted.cardId,
+    });
+    return true;
+  }
+  if (transferId === undefined || transferId.trim() === '') {
+    throw new PurchaseError(
+      'AgentCard issued a card without a company transfer id',
+      502,
+      'agentcard_company_transfer_missing'
+    );
+  }
+  // Card + transfer are one durable fact. If the process dies before this transaction, replaying
+  // create_card with the same purchase idempotency key recovers them; after it commits, cleanup
+  // always has both identifiers required to close and release the card.
+  await recordIssuedPurchaseCardFunding(
+    purchase,
+    'usd',
+    minted.cardId,
+    transferId,
+    minted.metadata
+  );
+  state.issuedCardId = minted.cardId;
+  state.issuedStaticCard = false;
+  state.walletWasFunded = true;
+  return false;
+}
+
 /**
  * Mint the company-funded card, capture the user's charge (when there is one), and mark the
  * purchase HELD. `paymentIntent` is `undefined` for the admin no-charge flow: the card is funded
@@ -63,38 +109,12 @@ export async function mintCaptureAndIssue(
     state.activeWalletFundingProvider,
     preparedFunding.providerTransferId ?? undefined
   );
-  const transferId = minted.providerTransferId ?? providerTransferId;
-  const isStaticCard = minted.metadata?.staticCard === true;
-  if (isStaticCard) {
-    await discardPendingPurchaseWalletCollection(purchaseId);
-    state.walletFundingPrepared = false;
-    state.issuedCardId = minted.cardId;
-    state.issuedStaticCard = true;
-    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
-      cardId: minted.cardId,
-    });
-  } else {
-    if (transferId === undefined || transferId.trim() === '') {
-      throw new PurchaseError(
-        'AgentCard issued a card without a company transfer id',
-        502,
-        'agentcard_company_transfer_missing'
-      );
-    }
-    // Card + transfer are one durable fact. If the process dies before this transaction, replaying
-    // create_card with the same purchase idempotency key recovers them; after it commits, cleanup
-    // always has both identifiers required to close and release the card.
-    await recordIssuedPurchaseCardFunding(
-      purchase,
-      'usd',
-      minted.cardId,
-      transferId,
-      minted.metadata
-    );
-    state.issuedCardId = minted.cardId;
-    state.issuedStaticCard = false;
-    state.walletWasFunded = true;
-  }
+  const isStaticCard = await persistMintedCard(
+    state,
+    purchase,
+    minted,
+    minted.providerTransferId ?? providerTransferId
+  );
   // Org mint already fetched get_card_details; reusing those secrets avoids a second MCP read that
   // has hung the HTTP request for 15+ minutes (client ReadTimeout, purchase stuck CHARGING → 409).
   const details = await resolveIssuedCardDetails(minted, state.activeCardProvider);

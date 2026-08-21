@@ -382,7 +382,8 @@ async function testSendGuards(): Promise<void> {
     // Live failure: idem "manual-send:1787337116132" -> 400 "Invalid input parameter. Param: Idem".
     // The rail used "rose-topup:<uuid>", so EVERY automated top-up would have died at the send.
     await assert.rejects(
-      () => treasury.transferUsdcCents({ toAddress: to, cents: 100, idempotencyKey: 'rose-topup:abc' }),
+      () =>
+        treasury.transferUsdcCents({ toAddress: to, cents: 100, idempotencyKey: 'rose-topup:abc' }),
       /bare UUID/
     );
   });
