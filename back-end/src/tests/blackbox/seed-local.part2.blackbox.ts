@@ -191,6 +191,46 @@ test('passkeys-only seed mode never enters browser state or password sync', asyn
   );
 });
 
+test('email-credentials-only seed mode syncs integrations and email rows then returns', async () => {
+  const source = readSeedLocalSource();
+  const flag = source.indexOf("process.argv.includes('--email-credentials-only')");
+  const branch = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)');
+  const integrations = source.indexOf('await syncEmailIntegrations()', branch);
+  const emailRows = source.indexOf("await syncTable('Email Credentials'", branch);
+  const remoteFind = source.indexOf('remote.emailIntegrationCredential.findMany', emailRows);
+  const remap = source.indexOf('remapEmailCredentialIntegrationIds', emailRows);
+  const branchReturn = source.indexOf('return;', remoteFind);
+  const toolsBranch = source.indexOf("await syncTable('Tools'", branchReturn);
+
+  assert(flag > 0, 'expected a dedicated --email-credentials-only CLI flag');
+  assert(branch > flag, 'expected email-credentials-only branch after flag declaration');
+  assert(
+    integrations > branch,
+    'expected email-only integrations sync inside email-credentials-only'
+  );
+  assert(emailRows > integrations, 'expected EmailIntegrationCredential sync after integrations');
+  assert(remoteFind > emailRows, 'expected prod email credential rows to be fetched');
+  assert(
+    remap > remoteFind && remap < branchReturn,
+    'expected remote→local integrationId remapping before credential upsert'
+  );
+  assert(branchReturn > remoteFind, 'expected email-credentials-only branch to return immediately');
+  assert(
+    toolsBranch > branchReturn,
+    'expected email-credentials-only mode to return before the full seed graph'
+  );
+  assert(
+    source.includes('name: { in: [...EMAIL_INTEGRATION_NAMES] }'),
+    'expected email-credentials-only to scope integrations to Gmail/Yahoo'
+  );
+  assert(
+    !/await syncTable\('Integrations',\s*syncIntegrations\)/.test(
+      source.slice(branch, branchReturn)
+    ),
+    'email-credentials-only must not call full syncIntegrations (compute-token churn)'
+  );
+});
+
 test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
   const source = readSeedLocalSource();
   const validation = source.indexOf('if (requestedSeedModes.length > 1)');

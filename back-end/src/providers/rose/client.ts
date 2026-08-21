@@ -332,7 +332,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
   };
 
-  // Chat prefers low-latency GLM-4.7 on Cerebras. If that route produces no
+  // Chat prefers low-latency Gemma-4-31B on Cerebras. If that route produces no
   // caller-visible content before its deadline, we race the same-model
   // OpenRouter spill against the REAL multi-provider waterfall. Neither branch
   // is pinned to the stalled Cerebras host, so a slow/empty provider can never
@@ -350,7 +350,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   }
   if (cerebrasRoute !== null) {
     // Cerebras low-latency chat with fallover: on a pre-content quota/rate cap
-    // (402/429) it keeps the chat on GLM-4.7 via OpenRouter (unpinned); on a
+    // (402/429) it keeps the chat on Gemma-4-31B via OpenRouter (unpinned); on a
     // stall it races that spill against the generic multi-provider waterfall.
     try {
       yield* runCerebrasChatWithWaterfallFallback({
