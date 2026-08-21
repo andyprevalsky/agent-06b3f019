@@ -1523,6 +1523,70 @@ if payload != "x-access-token:ghp_test_token_for_sync_cmd":
 print("controller-token git-sync contract ok")
 PY
 
+# ── ssh_exec must controller-bound flyctl (descend I-07) ──
+# Guest timeout alone is insufficient: flyctl ssh hung after warm machine stop.
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "ssh_exec controller-side timeout contract failed"
+import pathlib, re, subprocess, sys, textwrap, time
+
+src = pathlib.Path(sys.argv[1]).read_text()
+
+def extract_bash_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.find(marker)
+    if start < 0:
+        m = re.search(rf"^{name}\(\)[^\n]*\n\{{", source, flags=re.M)
+        if not m:
+            raise SystemExit(f"{name} helper is missing")
+        start = m.start()
+        brace_at = source.find("{", m.start())
+    else:
+        brace_at = source.find("{", start)
+    depth = 0
+    for idx in range(brace_at, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise SystemExit(f"{name} helper is missing closing brace")
+
+ssh_exec = extract_bash_function(src, "ssh_exec")
+if "_with_timeout" not in ssh_exec:
+    raise SystemExit("ssh_exec must wrap flyctl ssh via _with_timeout")
+if "FLY ssh console" in ssh_exec:
+    raise SystemExit("ssh_exec must call flyctl directly (Popen cannot resolve FLY wrapper)")
+if "flyctl ssh console" not in ssh_exec:
+    raise SystemExit("ssh_exec must invoke flyctl ssh console")
+
+ws = extract_bash_function(src, "warm_source_fetch_ref")
+if "CLOUDBENCH_GIT_SYNC_TIMEOUT" not in ws and "GIT_SYNC_TO" not in ws:
+    raise SystemExit("warm_source_fetch_ref must pass an explicit git-sync ssh_exec timeout")
+if '"$GIT_SYNC_TO"' not in ws:
+    raise SystemExit("warm_source_fetch_ref must call ssh_exec with GIT_SYNC_TO")
+
+fetch_ref = (pathlib.Path(sys.argv[1]).parent / "cloudbench-fetch-ref.sh").read_text()
+if "already-at" not in fetch_ref:
+    raise SystemExit("cloudbench-fetch-ref.sh must short-circuit when HEAD already matches SHA")
+
+wt = extract_bash_function(src, "_with_timeout")
+script = wt + textwrap.dedent(
+    """
+    _with_timeout 2 sleep 30
+    exit $?
+    """
+)
+t0 = time.time()
+proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+elapsed = time.time() - t0
+if proc.returncode != 124:
+    raise SystemExit(f"_with_timeout must exit 124 on overrun, got rc={proc.returncode}")
+if elapsed > 8 or elapsed < 1.5:
+    raise SystemExit(f"_with_timeout wall {elapsed:.1f}s not ~2s")
+print("ssh_exec controller-side timeout contract ok")
+PY
+
 # An unprovisioned worktree (plain `git worktree add`, no credentials copied)
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
@@ -1612,5 +1676,19 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'return "$sync_rc"' \
   "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
+
+# --single-box must print the parallel-safety rejection even in a scripts-only
+# sandbox (no agents/), matching cloudbench-multi-workstream scenario 14.
+single_box_root="$TMP_ROOT/scripts-only-sandbox"
+mkdir -p "$single_box_root"
+cp -R "$ROOT_DIR/scripts" "$single_box_root/scripts"
+single_box_log="$TMP_ROOT/single-box.log"
+set +e
+bash "$single_box_root/scripts/run-bench" --single-box some-bench >"$single_box_log" 2>&1
+single_box_ec=$?
+set -e
+[ "$single_box_ec" -ne 0 ] || fail "--single-box must be rejected in a scripts-only sandbox"
+grep -qiF "parallel-safe" "$single_box_log" ||
+  fail "--single-box rejection must explain the parallel-safety hazard without requiring agents/"
 
 echo "All cloud benchmark environment checks passed."
