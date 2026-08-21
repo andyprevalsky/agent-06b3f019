@@ -39,6 +39,9 @@ const BROWSER_REVIEW_TEST_OTP = '191919';
  */
 function normalizeDevPhone(phone: string): string {
   // Collapse formatting so "+1 972 977 7432" still matches the E.164 allowlist.
+  // Guard non-strings so invalid request bodies still return validation/OTP
+  // errors instead of throwing inside the bypass check.
+  if (typeof phone !== 'string') return '';
   return phone.replace(/[\s\-()]/g, '');
 }
 
