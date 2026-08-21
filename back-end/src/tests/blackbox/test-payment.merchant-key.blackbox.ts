@@ -20,7 +20,10 @@
  */
 
 import 'dotenv/config';
-import { createTestPaymentCheckoutSession } from '../../domains/test-payment/checkout';
+import {
+  createTestPaymentCheckoutSession,
+  settleTestPaymentCheckoutSession,
+} from '../../domains/test-payment/checkout';
 import {
   TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV,
   getTestPaymentMerchantStripeClient,
@@ -28,6 +31,12 @@ import {
   stripe,
   type Stripe,
 } from '../../providers/stripe';
+import { assertMerchantClientIsolation } from './test-payment.merchant-key-structural';
+import {
+  FAKE_MERCHANT_KEY,
+  withBothCheckoutClientsStubbed,
+  withMerchantKey,
+} from './test-payment.merchant-key-support';
 
 interface TestResult {
   name: string;
@@ -52,89 +61,6 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
       duration: Date.now() - start,
       error: error instanceof Error ? error.message : String(error),
     };
-  }
-}
-
-/**
- * A merchant key that is syntactically a Stripe key but belongs to no account: the SDK is never
- * actually called over the wire in this suite (every method under test is stubbed), so this can
- * never authorize anything.
- */
-const FAKE_MERCHANT_KEY = 'sk_test_merchant_blackbox_never_dialed';
-
-function withMerchantKey<T>(key: string | undefined, fn: () => T): T {
-  const previous = process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
-  const restore = () => {
-    if (previous === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
-    else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = previous;
-  };
-  if (key === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
-  else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = key;
-  try {
-    const result = fn();
-    if (result instanceof Promise) return result.finally(restore) as T;
-    restore();
-    return result;
-  } catch (error) {
-    restore();
-    throw error;
-  }
-}
-
-interface CheckoutSessionsResource {
-  create: (params: unknown) => Promise<{ id: string; url: string | null }>;
-  retrieve: (id: string, params?: unknown) => Promise<unknown>;
-}
-
-function checkoutSessions(client: Stripe): CheckoutSessionsResource {
-  return client.checkout.sessions as unknown as CheckoutSessionsResource;
-}
-
-interface StubbedCall {
-  client: 'merchant' | 'billing';
-  op: 'create' | 'retrieve';
-  params?: unknown;
-}
-
-/**
- * Stub `checkout.sessions.{create,retrieve}` on BOTH the merchant and billing clients and record
- * which one the code under test reached for. The billing stubs are the inversion detector: if the
- * checkout path ever regresses back to the `stripe` singleton, it lands in `calls` tagged
- * `billing` and every assertion below fails.
- */
-async function withBothCheckoutClientsStubbed<T>(
-  merchant: Stripe,
-  session: { id: string; url: string | null; retrieved: unknown },
-  fn: (calls: StubbedCall[]) => Promise<T>
-): Promise<T> {
-  const calls: StubbedCall[] = [];
-  const targets: Array<{ label: 'merchant' | 'billing'; resource: CheckoutSessionsResource }> = [
-    { label: 'merchant', resource: checkoutSessions(merchant) },
-    { label: 'billing', resource: checkoutSessions(stripe) },
-  ];
-  const originals = targets.map(({ resource }) => ({
-    create: resource.create,
-    retrieve: resource.retrieve,
-  }));
-
-  for (const { label, resource } of targets) {
-    resource.create = async (params) => {
-      calls.push({ client: label, op: 'create', params });
-      return { id: session.id, url: session.url };
-    };
-    resource.retrieve = async () => {
-      calls.push({ client: label, op: 'retrieve' });
-      return session.retrieved;
-    };
-  }
-
-  try {
-    return await fn(calls);
-  } finally {
-    targets.forEach(({ resource }, index) => {
-      resource.create = originals[index].create;
-      resource.retrieve = originals[index].retrieve;
-    });
   }
 }
 
@@ -606,6 +532,47 @@ const tests: Array<[string, () => Promise<void>]> = [
           }
         );
       });
+    },
+  ],
+  [
+    'settling a checkout session reads it back on the MERCHANT key, never billing',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_test_merchant',
+            url: null,
+            // Deliberately unpaid: settlement then short-circuits on the payment_status the
+            // MERCHANT client returned, which both proves the stubbed body was the one consumed and
+            // keeps this suite free of any database round-trip.
+            retrieved: { payment_status: 'unpaid', amount_total: 100 },
+          },
+          async (calls) => {
+            let failure: unknown;
+            try {
+              await settleTestPaymentCheckoutSession('cs_test_merchant');
+            } catch (error) {
+              failure = error;
+            }
+            assert(
+              failure instanceof Error && /unpaid/.test(failure.message),
+              `settlement must consume the session the merchant client returned, got ${String(failure)}`
+            );
+            assert(
+              calls.length === 1 && calls[0].client === 'merchant' && calls[0].op === 'retrieve',
+              `the session must be read back on the merchant client, got ${JSON.stringify(calls)}`
+            );
+          }
+        );
+      });
+    },
+  ],
+  [
+    'only the /test_payment checkout path may reach for the merchant client',
+    async () => {
+      assertMerchantClientIsolation();
     },
   ],
 ];

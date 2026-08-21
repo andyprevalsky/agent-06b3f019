@@ -79,7 +79,7 @@ export interface PersistPlaidItemInput {
 
 async function upsertIntegrationRow(tx: PlaidTx, userId: string): Promise<{ id: string }> {
   return tx.integration.upsert({
-    where: { userId_name: { userId, name: 'plaid' } },
+    where: { userId_name_accountId: { userId, name: 'plaid', accountId: '' } },
     create: {
       userId,
       type: IntegrationType.DATA_SOURCE,

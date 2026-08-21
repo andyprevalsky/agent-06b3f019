@@ -294,7 +294,7 @@ export async function findUserPoolTokensByDefault(userId: string): Promise<boole
  */
 export async function findIntegrationPoolingState(userId: string, name: string) {
   return prisma.integration.findUnique({
-    where: { userId_name: { userId, name } },
+    where: { userId_name_accountId: { userId, name, accountId: '' } },
     select: { poolingEnabled: true, poolingEnabledOverride: true },
   });
 }
