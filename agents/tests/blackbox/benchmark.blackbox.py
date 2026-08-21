@@ -5399,6 +5399,7 @@ def test_minted_x_benchmark_uses_live_x_default_target():
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind == "write_lock"
     assert task.expected_approval_count == 1
+    assert task.min_steps == {"browser": 1}
     assert task.enforce_declared_evaluators is True
     assert task.environment["live_fixtures"] == ["live"]
     assert task.environment["live_cookie_domains"] == ["x.com"]

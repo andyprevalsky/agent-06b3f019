@@ -2383,6 +2383,9 @@
     "approval_handling": "auto_approve",
     "expected_approval_count": 1,
     "expected_attention_kind": "write_lock",
+    "min_steps": {
+      "browser": 1
+    },
     "start_phase": "execute",
     "bench": "pipeline-e2e",
     "group": "daily",
