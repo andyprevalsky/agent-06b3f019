@@ -78,7 +78,8 @@ export async function closeInterruptedAttentionRequests(
     select: { id: true, gateKey: true, metadata: true },
   });
   const closable = open.filter(
-    (row) => row.gateKey === null || !hasForeignGateWaiter(row.metadata, agentId)
+    (row) =>
+      row.gateKey === null || !hasForeignGateWaiter(row.metadata, agentId, workflowGeneration)
   );
   if (closable.length === 0) return 0;
 
@@ -101,8 +102,12 @@ export async function closeInterruptedAttentionRequests(
   return closed;
 }
 
-/** True when a deduped gate is also holding a waiter belonging to another agent. */
-function hasForeignGateWaiter(metadata: Prisma.JsonValue | null, agentId: string): boolean {
+/** True when a deduped gate is also holding a waiter outside the sealed generation. */
+function hasForeignGateWaiter(
+  metadata: Prisma.JsonValue | null,
+  agentId: string,
+  workflowGeneration: string | null
+): boolean {
   const record = metadataRecord(metadata);
   const waiters = record?.gateWaiters;
   if (!Array.isArray(waiters)) return false;
@@ -111,7 +116,13 @@ function hasForeignGateWaiter(metadata: Prisma.JsonValue | null, agentId: string
     if (entry === null) return false;
     const waiterAgentId = metadataString(entry, 'agentId');
     const waiterWorkflowId = metadataString(entry, 'workflowId');
-    return waiterAgentId !== null && waiterWorkflowId !== null && waiterAgentId !== agentId;
+    return (
+      waiterAgentId !== null &&
+      waiterWorkflowId !== null &&
+      (waiterAgentId !== agentId ||
+        workflowGeneration === null ||
+        waiterWorkflowId !== workflowGeneration)
+    );
   });
 }
 

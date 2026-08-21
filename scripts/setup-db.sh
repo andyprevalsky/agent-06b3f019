@@ -205,11 +205,13 @@ fi
 # a bounded grace period followed by KILL. INT and TERM stay ignored throughout
 # cleanup: a second Ctrl-C must not strand the lock or let a surviving child
 # overlap the next reset.
-setup_db_child_pids() {
+setup_db_child_records() {
     local group="$1"
     if [ -n "$group" ] && [ "$group" = "$$" ]; then
-        ps -axo pid=,pgid=,stat= 2>/dev/null | awk -v self="$$" -v group="$group" '
-            $2 == group && $1 != self && $3 !~ /^Z/ { print $1 }
+        ps -axo pid=,ppid=,pgid=,stat=,lstart= 2>/dev/null | awk -v self="$$" -v group="$group" '
+            $3 == group && $1 != self && $4 !~ /^Z/ {
+                print $1 "|" $2 "|" $3 "|" $5 " " $6 " " $7 " " $8 " " $9
+            }
         '
         return
     fi
@@ -217,11 +219,13 @@ setup_db_child_pids() {
     # setup-db normally shares its caller's process group, which must never be
     # signalled wholesale. Resolve the full descendant tree from one ps snapshot
     # instead; this includes wrappers such as npx plus the seed process beneath.
-    ps -axo pid=,ppid=,stat= 2>/dev/null | awk -v root="$$" '
+    ps -axo pid=,ppid=,pgid=,stat=,lstart= 2>/dev/null | awk -v root="$$" '
         {
             order[NR] = $1
             parent[$1] = $2
-            state[$1] = $3
+            group[$1] = $3
+            state[$1] = $4
+            started[$1] = $5 " " $6 " " $7 " " $8 " " $9
         }
         END {
             for (i = 1; i <= NR; i++) {
@@ -230,7 +234,7 @@ setup_db_child_pids() {
                 ancestor = parent[candidate]
                 for (hops = 0; ancestor != "" && ancestor != 1 && hops < NR; hops++) {
                     if (ancestor == root) {
-                        print candidate
+                        print candidate "|" parent[candidate] "|" group[candidate] "|" started[candidate]
                         break
                     }
                     ancestor = parent[ancestor]
@@ -240,15 +244,48 @@ setup_db_child_pids() {
     '
 }
 
+setup_db_pid_matches_record() {
+    local record="$1"
+    local pid expected_parent expected_group expected_started
+    local current current_parent current_group current_state current_started
+    IFS='|' read -r pid expected_parent expected_group expected_started <<< "$record"
+    [ -n "$pid" ] && [ -n "$expected_started" ] || return 1
+    current="$(ps -o ppid=,pgid=,stat=,lstart= -p "$pid" 2>/dev/null | awk '
+        NR == 1 { print $1 "|" $2 "|" $3 "|" $4 " " $5 " " $6 " " $7 " " $8 }
+    ')"
+    [ -n "$current" ] || return 1
+    IFS='|' read -r current_parent current_group current_state current_started <<< "$current"
+    [[ "$current_state" != Z* ]] || return 1
+    [ "$current_started" = "$expected_started" ] || return 1
+    [ "$current_group" = "$expected_group" ] || [ "$current_parent" = "$expected_parent" ]
+}
+
 setup_db_pid_is_running() {
     local state
     state="$(ps -o stat= -p "$1" 2>/dev/null | awk 'NR == 1 { print $1 }')"
     [ -n "$state" ] && [[ "$state" != Z* ]]
 }
 
+setup_db_remember_records() {
+    local records="$1"
+    local record remembered_pid
+    while IFS= read -r record; do
+        [ -n "$record" ] || continue
+        case $'\n'"$targets"$'\n' in
+            *$'\n'"$record"$'\n'*) ;;
+            *) targets="${targets}${targets:+$'\n'}${record}" ;;
+        esac
+        remembered_pid="${record%%|*}"
+        case " $reap_pids " in
+            *" $remembered_pid "*) ;;
+            *) reap_pids="$reap_pids $remembered_pid" ;;
+        esac
+    done <<< "$records"
+}
+
 setup_db_teardown() {
     local exit_code=$?
-    local group targets current pid any_running
+    local group targets current record pid reap_pids any_running
     local grace="${SETUP_DB_TEARDOWN_GRACE_SECONDS:-10}"
     local grace_started force_started
 
@@ -261,39 +298,48 @@ setup_db_teardown() {
     esac
 
     group="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
-    targets="$(setup_db_child_pids "$group")"
+    targets=""
+    reap_pids=""
+    current="$(setup_db_child_records "$group")"
+    setup_db_remember_records "$current"
     if [ -n "$group" ] && [ "$group" = "$$" ]; then
         # This shell ignores TERM above, so signalling its private group safely
         # reaches every current descendant and any child spawned during cleanup.
         kill -TERM -"$group" 2>/dev/null || true
     else
-        for pid in $targets; do
+        while IFS= read -r record; do
+            [ -n "$record" ] || continue
+            setup_db_pid_matches_record "$record" || continue
+            pid="${record%%|*}"
             kill -TERM "$pid" 2>/dev/null || true
-        done
+        done <<< "$targets"
     fi
 
     grace_started=$SECONDS
     while [ $((SECONDS - grace_started)) -lt "$grace" ]; do
-        current="$(setup_db_child_pids "$group")"
-        targets="$targets $current"
+        current="$(setup_db_child_records "$group")"
+        setup_db_remember_records "$current"
         any_running=false
-        for pid in $targets; do
-            if setup_db_pid_is_running "$pid"; then
+        while IFS= read -r record; do
+            [ -n "$record" ] || continue
+            if setup_db_pid_matches_record "$record"; then
                 any_running=true
                 break
             fi
-        done
+        done <<< "$targets"
         $any_running || break
         sleep 0.1
     done
 
     # Re-scan immediately before escalation so late descendants are included.
-    current="$(setup_db_child_pids "$group")"
-    targets="$targets $current"
-    for pid in $targets; do
-        setup_db_pid_is_running "$pid" || continue
+    current="$(setup_db_child_records "$group")"
+    setup_db_remember_records "$current"
+    while IFS= read -r record; do
+        [ -n "$record" ] || continue
+        setup_db_pid_matches_record "$record" || continue
+        pid="${record%%|*}"
         kill -KILL "$pid" 2>/dev/null || true
-    done
+    done <<< "$targets"
 
     # Give KILL a short bounded window to take effect. Zombies do not write and
     # are excluded by setup_db_pid_is_running; reap direct children below.
@@ -303,19 +349,21 @@ setup_db_teardown() {
         # discovering and force-stopping late descendants until the whole tree is
         # gone, otherwise the lock can be released while that new child still
         # writes into the database.
-        current="$(setup_db_child_pids "$group")"
-        targets="$targets $current"
+        current="$(setup_db_child_records "$group")"
+        setup_db_remember_records "$current"
         any_running=false
-        for pid in $targets; do
-            if setup_db_pid_is_running "$pid"; then
+        while IFS= read -r record; do
+            [ -n "$record" ] || continue
+            if setup_db_pid_matches_record "$record"; then
                 any_running=true
+                pid="${record%%|*}"
                 kill -KILL "$pid" 2>/dev/null || true
             fi
-        done
+        done <<< "$targets"
         $any_running || break
         sleep 0.1
     done
-    for pid in $targets; do
+    for pid in $reap_pids; do
         setup_db_pid_is_running "$pid" || wait "$pid" 2>/dev/null || true
     done
 
