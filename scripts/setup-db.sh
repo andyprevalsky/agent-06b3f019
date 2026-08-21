@@ -302,9 +302,10 @@ setup_db_term_records() {
 SETUP_DB_TEARDOWN_SIGNAL=""
 
 setup_db_signal_teardown() {
-    # First interactive signal wins the exit status. A follow-up INT during a
-    # TERM teardown (or the reverse) must not rewrite 143↔130 mid-cleanup.
-    if [ -z "${SETUP_DB_TEARDOWN_SIGNAL}" ]; then
+    # First signal wins once masked. Callers register traps as
+    # `trap 'trap "" INT TERM; setup_db_signal_teardown N' SIG` so a second
+    # signal cannot overwrite TERM→143 with INT→130 mid-handler.
+    if [ -z "$SETUP_DB_TEARDOWN_SIGNAL" ]; then
         SETUP_DB_TEARDOWN_SIGNAL="$1"
     fi
     setup_db_teardown
@@ -315,13 +316,6 @@ setup_db_teardown() {
     local group targets current record pid reap_pids any_running
     local grace="${SETUP_DB_TEARDOWN_GRACE_SECONDS:-10}"
     local grace_started force_started
-
-    # Idempotent: INT+TERM can both fire before traps are masked; only the first
-    # entry runs descendant cleanup and lock release.
-    if [ -n "${SETUP_DB_TEARING_DOWN:-}" ]; then
-        return 0
-    fi
-    SETUP_DB_TEARING_DOWN=1
 
     # Remove the recursive EXIT handler, but keep both interactive termination
     # signals masked until descendants are gone and the lock is released.
@@ -337,6 +331,17 @@ setup_db_teardown() {
     group="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
     targets=""
     reap_pids=""
+    # Prefer the known interruptible child — process-group scans can miss a
+    # just-orphaned TERM-resistant seed while the shell is mid-signal teardown.
+    if [ -n "$SETUP_DB_INTERRUPTIBLE_PID" ]; then
+        setup_db_remember_records "$(setup_db_child_records "$group")"
+        if setup_db_pid_is_running "$SETUP_DB_INTERRUPTIBLE_PID"; then
+            case " $reap_pids " in
+                *" $SETUP_DB_INTERRUPTIBLE_PID "*) ;;
+                *) reap_pids="$reap_pids $SETUP_DB_INTERRUPTIBLE_PID" ;;
+            esac
+        fi
+    fi
     current="$(setup_db_child_records "$group")"
     setup_db_remember_records "$current"
     if [ -n "$group" ] && [ "$group" = "$$" ]; then
@@ -421,12 +426,14 @@ setup_db_teardown() {
     done <<< "$targets"
 
     release_workspace_db_lock
-    trap - INT TERM
+    # Keep INT/TERM ignored through exit. Restoring the default disposition here
+    # lets a queued second Ctrl-C (case 6 sends INT 100ms after TERM) fire with
+    # the default handler and overwrite cooperative 143 with 130.
     exit "$exit_code"
 }
 trap setup_db_teardown EXIT
-trap 'setup_db_signal_teardown 2' INT
-trap 'setup_db_signal_teardown 15' TERM
+trap 'trap "" INT TERM; setup_db_signal_teardown 2' INT
+trap 'trap "" INT TERM; setup_db_signal_teardown 15' TERM
 
 # Reset local schema, push schema, then sync data. This must be a true reset,
 # not an upsert-only refresh, so removed/disabled remote rows disappear locally.
@@ -448,21 +455,46 @@ else
         -c 'GRANT ALL ON SCHEMA public TO public;' >/dev/null
 fi
 
+# Run a long critical-section command so INT/TERM traps can fire mid-flight.
+# A foreground child keeps bash from delivering TERM until that child exits, so a
+# TERM'd setup-db never tore down an in-flight seed — only a later INT interrupted
+# (exit 130). `wait` also defers traps until the job completes on some bash builds,
+# which returned 143 via set -e without running teardown (orphaning TERM-resistant
+# seed children). Poll with sleep so traps run, then reap descendants before exit.
+SETUP_DB_INTERRUPTIBLE_PID=""
+setup_db_run_interruptible() {
+    "$@" &
+    SETUP_DB_INTERRUPTIBLE_PID=$!
+    local pid="$SETUP_DB_INTERRUPTIBLE_PID"
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.05
+    done
+    wait "$pid" 2>/dev/null || return $?
+    SETUP_DB_INTERRUPTIBLE_PID=""
+    return 0
+}
+
 echo "🐘 Syncing Prisma schema..."
-(cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+setup_db_run_interruptible bash -c \
+    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3' \
+    "$LOCAL_DB_URL"
 if $USE_SYSTEM_PG; then
-    (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        LOCAL_DB_NAME=victoria \
-        bash scripts/apply-local-workflow-ddl.sh)
+    setup_db_run_interruptible bash -c \
+        'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh' \
+        "$LOCAL_DB_URL"
 else
-    (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME=victoria \
-        bash scripts/apply-local-workflow-ddl.sh)
+    setup_db_run_interruptible bash -c \
+        'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" DB_CONTAINER="$1" LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh' \
+        "$LOCAL_DB_URL" "$DB_CONTAINER"
 fi
-(cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx tsx scripts/ensure-agent-network-grep-indexes.ts)
+setup_db_run_interruptible bash -c \
+    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx tsx scripts/ensure-agent-network-grep-indexes.ts' \
+    "$LOCAL_DB_URL"
 
 echo "🌱 Syncing production data to local database..."
-(cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx tsx scripts/seed-local.ts)
+setup_db_run_interruptible bash -c \
+    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx tsx scripts/seed-local.ts' \
+    "$LOCAL_DB_URL"
 
 echo "🗜️  Publishing synchronized DB for isolated local benchmarks..."
 BENCHMARK_SEED_PATH="$(
