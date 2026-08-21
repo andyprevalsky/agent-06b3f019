@@ -10649,6 +10649,116 @@ def test_write_lock_purchase_button_excludes_buynow_dom_identifiers():
     assert is_purchase_button("buynow-email-si\nBuy Now")
 
 
+def test_click_write_lock_eligible_only_buttons_and_form_submits():
+    """Plain inputs never raise click write locks — only buttons / form submits.
+
+    Andy (2026-08-21) on H-01: an email/text input must never trigger write
+    lock even if its label or id looks like Buy Now / Send. ``input
+    type=submit|button|image`` remains eligible as a form submit.
+    """
+    from types import SimpleNamespace
+
+    from browser_tools.write_lock import is_click_write_lock_eligible_control
+
+    assert is_click_write_lock_eligible_control(None) is True
+    assert is_click_write_lock_eligible_control(SimpleNamespace(tag_name="button", attributes={}))
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(node_name="INPUT", attributes={"type": "submit"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "button"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="a", attributes={"role": "button"})
+    )
+
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "email", "id": "buynow-email-si"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="INPUT", attributes={"type": "text"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="textarea", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="select", attributes={})
+    )
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_skips_plain_email_input():
+    """Email/text inputs never return needs_write_approval even if labels match."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "email", "id": "buynow-email-si"},
+        parent_node=None,
+        get_all_children_text=lambda: "Buy Now",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="buynow-email-si\nBuy Now"),
+        ),
+        patch("browser_tools.write_lock.is_purchase_button", return_value=True),
+        patch("browser_tools.write_lock.is_email_send_button", return_value=True),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://tickets.fandango.com/checkout",
+            system_name="Rose",
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_still_locks_submit_input():
+    """Form-submit inputs remain eligible for purchase write lock."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "submit"},
+        parent_node=None,
+        get_all_children_text=lambda: "Place Order",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="Place Order"),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+            return_value="Place Order",
+        ),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://shop.example.com/checkout",
+            system_name="Rose",
+        )
+    assert out is not None
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "purchase"
+
+
 def test_write_lock_email_send_excludes_marketing_opt_in_controls():
     """Marketing opt-in checkboxes never trigger the outbound-send write lock.
 
@@ -16939,6 +17049,18 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_excludes_buynow_dom_identifiers",
         test_write_lock_purchase_button_excludes_buynow_dom_identifiers,
+    )
+    r.record(
+        "click_write_lock_eligible_only_buttons_and_form_submits",
+        test_click_write_lock_eligible_only_buttons_and_form_submits,
+    )
+    await r.record_async(
+        "click_write_lock_result_skips_plain_email_input",
+        test_click_write_lock_result_skips_plain_email_input,
+    )
+    await r.record_async(
+        "click_write_lock_result_still_locks_submit_input",
+        test_click_write_lock_result_still_locks_submit_input,
     )
     r.record(
         "write_lock_email_send_excludes_marketing_opt_in_controls",
