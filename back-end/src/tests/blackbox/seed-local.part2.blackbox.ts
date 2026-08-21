@@ -262,6 +262,23 @@ test('every seed mode hydrates the selected user before dependent writes', async
   assert(identity < emailMode, 'expected selected-user hydration before email-credential writes');
 });
 
+test('compute-token cleanup cannot delete integrations owned by unrelated local users', async () => {
+  const source = readSeedLocalSource();
+  const helperStart = source.indexOf('async function syncIntegrations()');
+  const helperEnd = source.indexOf('/** Email providers refreshed', helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert(helperStart > 0 && helperEnd > helperStart, 'expected syncIntegrations helper');
+  assert(
+    /OR:\s*\[\s*\{\s*userId:\s*SEED_USER_ID\s*\}/.test(helper),
+    'expected stale cleanup to target only the selected seed user by default'
+  );
+  assert(
+    /\{\s*userId:\s*\{\s*in:\s*poolUserIds\s*\},\s*poolingEnabled:\s*true\s*\}/.test(helper),
+    'expected stale cleanup to target only active pool owners among imported pool users'
+  );
+});
+
 test('email credential seed reads remain compatible before production migration', async () => {
   const source = readSeedLocalSource();
   const projectionStart = source.indexOf('const PROD_EMAIL_CREDENTIAL_COLUMNS = {');

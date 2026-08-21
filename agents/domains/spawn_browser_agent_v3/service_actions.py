@@ -19,6 +19,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
+import httpx
 import structlog
 from PIL import Image
 
@@ -81,6 +82,7 @@ _NUMERIC_IPV4_HOST_RE = re.compile(
     r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
     re.IGNORECASE,
 )
+_PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES = frozenset({400, 401, 403, 404})
 
 
 def url_looks_like_api_surface(url: str) -> bool:
@@ -122,6 +124,7 @@ def _kernel_computer_key(key: str) -> str:
         "del": "Delete",
         "pageup": "Prior",
         "pagedown": "Next",
+        "tab": "Tab",
         "escape": "Escape",
         "esc": "Escape",
     }
@@ -810,19 +813,31 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
     if context.action_name == "press_key":
         key = context.params.get("key", "")
         provider_pressed = False
-        if context.config is not None and context.session_id:
+        if context.config is not None and context.session_id and context.user_id.strip():
             from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
 
-            # Only an explicit provider "unsupported" response may fall back to
-            # renderer-level input. A timeout or lost response is ambiguous: the
-            # browser-process key may already have executed, and replaying a
-            # state-changing key such as Enter through CDP could submit twice.
-            provider_pressed = await press_browser_computer_key(
-                context.config,
-                context.session_id,
-                context.user_id,
-                _kernel_computer_key(str(key)),
-            )
+            # Fall back only when the provider reports unsupported input or the
+            # backend explicitly rejects the request before provider execution.
+            # A timeout, transport error, or 5xx is ambiguous: the key may already
+            # have executed, and replaying Enter through CDP could submit twice.
+            try:
+                provider_pressed = await press_browser_computer_key(
+                    context.config,
+                    context.session_id,
+                    context.user_id,
+                    _kernel_computer_key(str(key)),
+                )
+            except httpx.HTTPStatusError as error:
+                if (
+                    error.response.status_code
+                    not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES
+                ):
+                    raise
+                logger.info(
+                    "Provider computer input rejected before execution; falling back",
+                    key=key,
+                    status=error.response.status_code,
+                )
         if provider_pressed:
             logger.info("Pressed key through provider computer input", key=key)
         elif context.humanizer:

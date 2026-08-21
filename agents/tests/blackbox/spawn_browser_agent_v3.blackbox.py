@@ -9494,6 +9494,127 @@ def test_kernel_computer_key_maps_playwright_names_to_x11_keysyms():
     assert _kernel_computer_key("PageUp") == "Prior"
     assert _kernel_computer_key("PageDown") == "Next"
     assert _kernel_computer_key("Control+Shift+PageUp") == "Ctrl+Shift+Prior"
+    assert _kernel_computer_key("Shift+Alt+tab") == "Shift+Alt+Tab"
+
+
+async def test_execute_action_press_key_without_user_skips_provider_input():
+    """Provider input requires the owner identity used by the backend route."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock()
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+        )
+
+        assert out == {"success": True, "message": ""}
+        repo.press_browser_computer_key.assert_not_awaited()
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_pre_execution_rejection_falls_back():
+    """An explicit backend rejection proves the provider did not press the key."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    rejection = httpx.HTTPStatusError(
+        "invalid key",
+        request=request,
+        response=httpx.Response(400, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=rejection)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out == {"success": True, "message": ""}
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_provider_server_error_does_not_replay():
+    """A provider 5xx is ambiguous and must not be replayed through CDP."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    failure = httpx.HTTPStatusError(
+        "provider failure",
+        request=request,
+        response=httpx.Response(500, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=failure)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out["success"] is False
+        assert "provider failure" in out["error"]
+        hu.press_key.assert_not_awaited()
+        ah.record_action.assert_awaited_once()
+    finally:
+        repo.press_browser_computer_key = original
 
 
 async def test_execute_action_press_key_ambiguous_provider_failure_does_not_replay():
@@ -17476,6 +17597,18 @@ async def run_all_tests():
     r.record(
         "kernel_computer_key_maps_playwright_names_to_x11_keysyms",
         test_kernel_computer_key_maps_playwright_names_to_x11_keysyms,
+    )
+    await r.record_async(
+        "execute_action_press_key_without_user_skips_provider_input",
+        test_execute_action_press_key_without_user_skips_provider_input,
+    )
+    await r.record_async(
+        "execute_action_press_key_pre_execution_rejection_falls_back",
+        test_execute_action_press_key_pre_execution_rejection_falls_back,
+    )
+    await r.record_async(
+        "execute_action_press_key_provider_server_error_does_not_replay",
+        test_execute_action_press_key_provider_server_error_does_not_replay,
     )
     await r.record_async(
         "execute_action_press_key_ambiguous_provider_failure",

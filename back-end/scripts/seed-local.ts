@@ -449,6 +449,7 @@ async function syncIntegrations(): Promise<number> {
     where: {
       name: { in: ['claude_code', 'gpt_code'] },
       id: { notIn: syncedIds.length > 0 ? syncedIds : ['__none__'] },
+      OR: [{ userId: SEED_USER_ID }, { userId: { in: poolUserIds }, poolingEnabled: true }],
     },
   });
   if (deleted.count > 0) {
