@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { extractCompleteTopLevelStringFields, extractPartialStringField } from './routerJsonStream';
+
 export const RouterDecisionSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('direct_answer'),
@@ -19,6 +21,8 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
 ]);
 
 export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
+
+const DEADLINE_REASONING = 'Route selected before the provider stream finished.';
 
 interface RawRouterDecision {
   reasoning?: unknown;
@@ -72,6 +76,34 @@ export function parseRouterDecisionJson(json: string): RouterDecision {
     default:
       throw new Error(`Unknown action: ${String(raw.action)}`);
   }
+}
+
+/**
+ * Recover only decisions whose action-specific fields are already complete.
+ * This deliberately never guesses a query, goal, or mode from truncated JSON.
+ */
+export function parsePartialRouterDecisionJson(json: string): RouterDecision | null {
+  const fields = extractCompleteTopLevelStringFields(json);
+  if (!fields) return null;
+  const action = fields.action;
+  const reasoning =
+    fields.reasoning ?? extractPartialStringField(json, 'reasoning') ?? DEADLINE_REASONING;
+
+  if (action === 'direct_answer') return { action, reasoning };
+
+  if (action === 'web_search') {
+    const query = fields.query?.trim();
+    return query ? { action, reasoning, query } : null;
+  }
+
+  if (action === 'start_superintelligence') {
+    const goal = fields.goal?.trim();
+    const mode = fields.mode;
+    if (!goal || (mode !== 'plan' && mode !== 'execute')) return null;
+    return { action, reasoning, goal, mode };
+  }
+
+  return null;
 }
 
 export function isValidRouterCacheJson(value: unknown): value is string {
