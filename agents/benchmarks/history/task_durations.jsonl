@@ -2783,3 +2783,12 @@
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 239.3, "cost_cents": 58.0, "timestamp": "2026-08-21T20:50:49.470797+00:00", "agent_id": "cad75045-62b7-40dd-a0ab-b0be72a4eb4f"}
 {"task": "chat-mode", "duration_seconds": 13.5, "cost_cents": 0.0, "timestamp": "2026-08-21T20:50:49.470797+00:00", "agent_id": "5f92f668-c1e1-4e2a-b715-1e585b2388ee"}
 {"task": "claude-code-agent", "duration_seconds": 57.6, "cost_cents": 1.0, "timestamp": "2026-08-21T20:50:49.470797+00:00", "agent_id": "74edd55e-758b-4658-90ad-b6dfa13a2ba4"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 329.7, "cost_cents": 0.0, "timestamp": "2026-08-21T21:23:00.370385+00:00", "agent_id": "3d204307-0e7b-46a6-9e96-1bfbd74c6e7e"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 365.7, "cost_cents": 0.0, "timestamp": "2026-08-21T21:23:00.370385+00:00", "agent_id": "deec8c58-f98a-4124-ae23-60af77745aca"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 406.8, "cost_cents": 0.0, "timestamp": "2026-08-21T21:23:00.370385+00:00", "agent_id": "8960a478-61fa-4b07-9c3b-b26697faec17"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 473.1, "cost_cents": 0.0, "timestamp": "2026-08-21T21:23:00.370385+00:00", "agent_id": "8caeda6d-15de-4efd-9dd9-ef7f9c28ed97"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 325.9, "cost_cents": 0.0, "timestamp": "2026-08-21T21:38:57.360937+00:00", "agent_id": "6a947ffe-ed8c-4aa9-a146-47400ef8ed27"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 325.4, "cost_cents": 0.0, "timestamp": "2026-08-21T21:38:57.360937+00:00", "agent_id": "d46b64a3-edb0-498c-af6d-60ce1a2cbcb6"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 462.4, "cost_cents": 0.0, "timestamp": "2026-08-21T21:38:57.360937+00:00", "agent_id": "8ba5f841-6341-434a-8fb1-65be300f79f0"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 488.4, "cost_cents": 0.0, "timestamp": "2026-08-21T21:38:57.360937+00:00", "agent_id": "cc0f152e-f803-4e46-a360-f805dc01fb6c"}
+{"task": "browser-imax-group-tickets", "duration_seconds": 518.7, "cost_cents": 0.0, "timestamp": "2026-08-21T21:38:57.360937+00:00", "agent_id": "d19a3f6f-1701-45ed-90ee-10032da8739b"}
