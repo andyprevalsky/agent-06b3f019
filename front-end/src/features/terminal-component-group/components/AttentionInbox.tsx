@@ -32,15 +32,15 @@ import { Bell } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ModalWrapper } from './attention-inbox/ModalWrapper';
 import { AttentionInboxContent } from './attention-inbox/AttentionInboxContent';
-import { unansweredCount, useAttentionRequests } from './attention-inbox/useAttentionRequests';
+import { unansweredCount } from './attention-inbox/useAttentionRequests';
+import { useAttentionRequestsContext } from './attention-inbox/attentionRequestsContext';
 import type { AttentionInboxProps } from './attention-inbox/types';
 
-export default function AttentionInbox({
-  onSelectAgent,
-  realtimeReady = false,
-}: AttentionInboxProps) {
+export default function AttentionInbox({ onSelectAgent }: AttentionInboxProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const { requests, refetch } = useAttentionRequests(realtimeReady);
+  // Shared app-wide subscription (see AttentionRequestsProvider). The bell and
+  // the mobile drawer previously ran one channel + poll loop each.
+  const { requests, refetch } = useAttentionRequestsContext();
   const badgeCount = unansweredCount(requests);
 
   return (

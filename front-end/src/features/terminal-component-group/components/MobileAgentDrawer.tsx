@@ -7,26 +7,30 @@
  *
  * TAB STATE (while OPEN):
  * [AGENTS] <--tap "Agents"--         --tap "Notifications"--> [NOTIFICATIONS]
- *   |  Create Agent + SidebarAgentList        |  AttentionInboxContent
+ *   |  New Agent + Search + SidebarAgentList  |  AttentionInboxContent
  *
  * Mobile-only slide-over (opens from the RIGHT) that surfaces BOTH the agent
  * list (the desktop AppSidebar is `hidden md:flex`, so it's otherwise
  * unreachable) AND the attention/notification inbox behind tabs. The unanswered
  * notification count trails as a red badge on BOTH the hamburger trigger and the
- * Notifications tab, driven by a single useAttentionRequests subscription.
+ * Notifications tab.
  *
  * SYSTEM CONTEXT:
  * mobile user tap -> TerminalHeader (mobile bar) -> MobileAgentDrawer
  *   -> onSelectAgent (agent list, same handler as the desktop rail)
  *   -> AttentionInboxContent (respond/skip/reject, same handlers as the bell modal)
  *
+ * Attention data comes from the app-wide AttentionRequestsProvider, not a local
+ * subscription: this drawer and the desktop bell used to open a realtime channel
+ * and a 10s poll each. The same feed also drives the agent rows' needs-help
+ * indicator via `attentionAgentIds`.
+ *
  * Desktop is unaffected: TerminalHeader renders this only below the md
- * breakpoint, so the drawer + its subscription never mount on desktop (the
- * desktop AttentionInbox bell owns notifications there).
+ * breakpoint (the desktop AttentionInbox bell owns notifications there).
  */
 
 import { useRef, useState } from 'react';
-import { LogOut, Menu, Plus } from 'lucide-react';
+import { LogOut, Menu } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -39,8 +43,15 @@ import {
 import { cn } from '@/lib/utils';
 
 import SidebarAgentList from './SidebarAgentList';
+import { SidebarCreateAgentButton, SidebarSearch } from './SidebarChrome';
+import { useAgentRowActions } from './useAgentRowActions';
+import { useSidebarSearch } from './useSidebarSearch';
 import { AttentionInboxContent } from './attention-inbox/AttentionInboxContent';
-import { unansweredCount, useAttentionRequests } from './attention-inbox/useAttentionRequests';
+import { unansweredCount } from './attention-inbox/useAttentionRequests';
+import {
+  unansweredAgentIds,
+  useAttentionRequestsContext,
+} from './attention-inbox/attentionRequestsContext';
 import type { Agent } from '../hooks';
 
 type DrawerTab = 'agents' | 'notifications';
@@ -51,9 +62,8 @@ interface MobileAgentDrawerProps {
   selectedAgentId: string | null;
   onSelectAgent: (agentId: string | null) => void;
   onCreateAgent: () => void;
-  onResumeAgent: (agentId: string) => Promise<void>;
-  resumingAgentId: string | null;
-  realtimeReady: boolean;
+  /** Reload the agent list after a row mutation (rename/pin/archive). */
+  onRefreshAgents: () => void | Promise<void>;
   isSignedIn: boolean;
   onLoginClick: () => void;
   onLogout: () => void;
@@ -107,19 +117,27 @@ export default function MobileAgentDrawer({
   selectedAgentId,
   onSelectAgent,
   onCreateAgent,
-  onResumeAgent,
-  resumingAgentId,
-  realtimeReady,
+  onRefreshAgents,
   isSignedIn,
   onLoginClick,
   onLogout,
 }: MobileAgentDrawerProps) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DrawerTab>('agents');
+  const [searchQuery, setSearchQuery] = useState('');
+  const search = useSidebarSearch(agents, searchQuery);
   const loginAfterCloseRef = useRef(false);
+  const { handlers, renameDialog } = useAgentRowActions({
+    onRefresh: onRefreshAgents,
+    selectedAgentId,
+    onSelectAgent,
+  });
 
-  const { requests, refetch } = useAttentionRequests(isSignedIn && realtimeReady);
+  // Shared app-wide subscription (see AttentionRequestsProvider) — the drawer
+  // used to open its own channel + poll loop alongside the desktop bell's.
+  const { requests, refetch } = useAttentionRequestsContext();
   const notifCount = isSignedIn ? unansweredCount(requests) : 0;
+  const attentionAgentIds = isSignedIn ? unansweredAgentIds(requests) : undefined;
 
   const handleSelectAgent = (agentId: string | null) => {
     onSelectAgent(agentId);
@@ -190,20 +208,24 @@ export default function MobileAgentDrawer({
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               {tab === 'agents' ? (
                 <>
-                  <div className="p-3">
-                    <Button onClick={handleCreateAgent} className="w-full">
-                      <Plus className="mr-2 h-4 w-4" />
-                      Create Agent
-                    </Button>
-                  </div>
+                  <SidebarCreateAgentButton isCollapsed={false} onCreateAgent={handleCreateAgent} />
+                  <SidebarSearch
+                    isCollapsed={false}
+                    value={searchQuery}
+                    onChange={setSearchQuery}
+                  />
                   <SidebarAgentList
-                    agents={agents}
+                    agents={search.agents}
                     isLoadingAgents={isLoadingAgents}
                     selectedAgentId={selectedAgentId}
                     onSelectAgent={handleSelectAgent}
-                    onResumeAgent={onResumeAgent}
-                    resumingAgentId={resumingAgentId}
+                    attentionAgentIds={attentionAgentIds}
                     isCollapsed={false}
+                    query={searchQuery}
+                    contentMatchAgentIds={search.contentMatchAgentIds}
+                    isSearching={search.isSearching}
+                    searchError={search.searchError}
+                    {...handlers}
                   />
                 </>
               ) : (
@@ -239,6 +261,10 @@ export default function MobileAgentDrawer({
           )}
         </div>
       </SheetContent>
+      {/* Mounted as a Sheet sibling, not inside SheetContent: nesting a modal
+          Dialog inside the Sheet's focus scope makes the input lose focus the
+          moment it opens (same class of handoff bug as handleCloseAutoFocus). */}
+      {renameDialog}
     </Sheet>
   );
 }

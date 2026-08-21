@@ -28,9 +28,11 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
-import { startAgentWorkflow } from '../temporal';
+import { startAgentWorkflowExecution, type TemporalWorkflowExecutionRef } from '../temporal';
 import { normalizeWorldModelMode } from '../worldModelMode';
 import { createMessage } from '../messages';
+import { acceptChatWorkflowExecution } from '../workflowGeneration';
+import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
 import { selectChatPhaseModels } from './phaseModels';
@@ -172,12 +174,58 @@ export async function handleChatMessage(config: {
 
     // Start Temporal workflow immediately - NO more LLM calls
     // Pass mode to determine whether to skip PLAN phase
-    await startTemporalWorkflowForChat(
-      config.agentId,
-      config.userId,
-      decision.goal,
-      decision.mode // 'plan' or 'execute'
-    );
+    let started: boolean;
+    try {
+      started = await startTemporalWorkflowForChat(
+        config.agentId,
+        config.userId,
+        decision.goal,
+        decision.mode // 'plan' or 'execute'
+      );
+    } catch (error) {
+      // Pre-acceptance failures only: startTemporalWorkflowForChat swallows
+      // post-acceptance broadcast errors and returns true after acceptance.
+      // Always rethrow after terminalizing so we never claim `complete` while an
+      // unaccepted Temporal execution may still be running (cleanup failure).
+      log.error('[ChatHandler] Cloud Agent escalation failed after tool start', {
+        agentId: config.agentId,
+        error,
+      });
+      try {
+        await finishRejectedCloudAgentTool({
+          agentId: config.agentId,
+          toolCallId: cloudAgentToolCallId,
+          startPhase: decision.mode,
+          text: 'Could not start Cloud Agent — workflow acceptance failed',
+        });
+      } catch (terminalError) {
+        log.error('[ChatHandler] Failed to terminalize Cloud Agent tool after start failure', {
+          agentId: config.agentId,
+          error,
+          terminalError,
+        });
+      }
+      throw error;
+    }
+    if (!started) {
+      // Agent became ineligible between router decision and start (already has a
+      // workflow, or left ACTIVE). Do not report escalation that did not occur.
+      try {
+        await finishRejectedCloudAgentTool({
+          agentId: config.agentId,
+          toolCallId: cloudAgentToolCallId,
+          startPhase: decision.mode,
+          text: 'Could not start Cloud Agent — agent is no longer eligible to escalate',
+        });
+      } catch (terminalError) {
+        log.error('[ChatHandler] Failed to terminalize Cloud Agent tool after rejected start', {
+          agentId: config.agentId,
+          terminalError,
+        });
+        throw terminalError;
+      }
+      return { status: 'complete', decision };
+    }
 
     return { status: 'escalated', decision };
   }
@@ -335,6 +383,31 @@ export async function handleChatMessage(config: {
 }
 
 // ============================================
+// Helper: Terminalize a rejected Cloud Agent tool
+// ============================================
+async function finishRejectedCloudAgentTool(params: {
+  agentId: string;
+  toolCallId: string;
+  startPhase: 'plan' | 'execute';
+  text: string;
+}): Promise<void> {
+  await createMessage({
+    agentId: params.agentId,
+    role: 'TOOL',
+    text: params.text,
+    skipDuplicateToolCheck: true,
+    metadata: {
+      toolCallId: params.toolCallId,
+      toolName: CLOUD_AGENT_TOOL_NAME,
+      toolStatus: 'FINISHED',
+      title: CREATING_CLOUD_AGENT_TITLE,
+      startPhase: params.startPhase,
+      error: true,
+    },
+  });
+}
+
+// ============================================
 // Helper: Start Temporal Workflow on Escalation
 // ============================================
 interface ChatTemporalAgentConfig {
@@ -373,23 +446,24 @@ async function startTemporalWorkflowForChat(
   userId: string,
   goal: string,
   startPhase: 'plan' | 'execute' = 'plan'
-): Promise<void> {
+): Promise<boolean> {
   // Fetch agent to get model and verifier
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     include: { verifier: true },
   });
 
-  if (!agent) {
+  if (agent === null) {
     throw new Error(`Agent ${agentId} not found`);
   }
 
-  if (!agent.verifier) {
+  if (agent.verifier === null) {
     throw new Error(`Agent ${agentId} has no verifier`);
   }
+  if (agent.temporalWorkflowId !== null || agent.status !== 'ACTIVE') return false;
 
   // Start Temporal workflow (existing function)
-  const workflowId = await startAgentWorkflow(
+  const execution = await startAgentWorkflowExecution(
     buildChatTemporalStartParams({
       agentId,
       userId,
@@ -406,21 +480,76 @@ async function startTemporalWorkflowForChat(
       },
     })
   );
+  let accepted: boolean;
+  try {
+    accepted = await acceptChatWorkflowExecution(agentId, execution);
+  } catch (error) {
+    await terminateUnacceptedChatWorkflow(execution, agentId).catch((cleanupError: unknown) =>
+      log.error('[ChatHandler] Failed to terminate unaccepted workflow after accept throw', {
+        agentId,
+        cleanupError,
+      })
+    );
+    throw error;
+  }
+  if (!accepted) {
+    // Cleanup must succeed before callers report a clean rejected start; otherwise
+    // Temporal may still be running while chat claims the escalation finished.
+    await terminateUnacceptedChatWorkflow(execution, agentId);
+    return false;
+  }
 
-  // Update agent with workflow ID
-  await prisma.agent.update({
-    where: { id: agentId },
-    data: { temporalWorkflowId: workflowId },
-  });
-
-  // Broadcast that agent mode started (FE can show different UI)
-  await broadcastAgentModeStarted(agentId);
+  // Broadcast is best-effort after acceptance is persisted. A transport failure
+  // must not be treated as a rejected start (workflow already owns the agent).
+  try {
+    await broadcastAgentModeStarted(agentId);
+  } catch (error) {
+    log.error('[ChatHandler] Failed to broadcast agent mode started after acceptance', {
+      agentId,
+      workflowId: execution.workflowId,
+      error,
+    });
+  }
 
   log.info('[ChatHandler] Escalated to agent mode', {
     agentId,
-    workflowId,
+    workflowId: execution.workflowId,
     goal: goal.substring(0, 100),
   });
+  return true;
+}
+
+const UNACCEPTED_TERMINATE_ATTEMPTS = 3;
+
+async function terminateUnacceptedChatWorkflow(
+  execution: TemporalWorkflowExecutionRef,
+  agentId: string
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= UNACCEPTED_TERMINATE_ATTEMPTS; attempt += 1) {
+    try {
+      await terminateStaleTemporalWorkflow(execution, agentId);
+      return;
+    } catch (error) {
+      lastError = error;
+      log.error('[ChatHandler] Unaccepted workflow terminate attempt failed', {
+        agentId,
+        workflowId: execution.workflowId,
+        attempt,
+        attempts: UNACCEPTED_TERMINATE_ATTEMPTS,
+        error,
+      });
+    }
+  }
+  log.error('[ChatHandler] Unaccepted workflow cleanup exhausted retries', {
+    agentId,
+    workflowId: execution.workflowId,
+    attempts: UNACCEPTED_TERMINATE_ATTEMPTS,
+    error: lastError,
+  });
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('Failed to terminate unaccepted chat workflow');
 }
 
 function recordChatUsage(

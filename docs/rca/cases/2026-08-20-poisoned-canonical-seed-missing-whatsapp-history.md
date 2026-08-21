@@ -20,8 +20,8 @@ tags:
   - fixtures
   - whatsapp-history-recall
 sources:
-  - agent 76b73506-a102-4ebc-a623-c69f5c279206
   - fleet run 20260820_211517_whatsapp-history-recall
+  - agent 76b73506-a102-4ebc-a623-c69f5c279206
   - memory:poisoned-canonical-whatsapp-v2-seed-r2-cc104a3f
   - memory:prior-good-whatsapp-v2-seed-r2-2667c51
 repro: bash scripts/tests/canonical-seed-whatsapp-content.test.sh

@@ -125,12 +125,8 @@ describe('Terminal page', () => {
       const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
-      // Sidebar starts collapsed (compact mode shows only icons, no text).
-      // Expand it by clicking the toggle button.
-      const expandBtn = await screen.findByLabelText('Expand sidebar');
-      await user.click(expandBtn);
-
-      // After expanding, agent goal text should be visible
+      // The sidebar now renders expanded by default (drag-to-resize replaced
+      // the collapse toggle), so goal text is visible without any interaction.
       await waitFor(() => {
         expect(screen.getByText('Test agent')).toBeInTheDocument();
       });
@@ -315,7 +311,6 @@ describe('Terminal page', () => {
       );
 
       renderWithProviders(<Terminal />);
-      await user.click(await screen.findByLabelText('Expand sidebar'));
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
@@ -441,8 +436,7 @@ describe('Terminal page', () => {
       const user = userEvent.setup({ delay: null });
       renderWithProviders(<Terminal />);
 
-      await user.click(await screen.findByLabelText('Expand sidebar'));
-
+      expect(await screen.findByText('Integrations')).toBeInTheDocument();
       expect(screen.queryByText('Browse')).not.toBeInTheDocument();
       expect(screen.getByText('Integrations')).toBeInTheDocument();
     });

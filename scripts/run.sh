@@ -13,22 +13,27 @@ done
 # scripts/cloud-build.sh during Cord's build phase). When .cloud-env exists,
 # it is authoritative for the shared worktree identity — always source it so
 # the cloud-generated workspace name cannot be overridden by stale env vars.
-# Isolated benchmark runs are the exception: local.py assigns a unique
-# CONDUCTOR_PORT + CONDUCTOR_WORKSPACE_NAME per run. Re-sourcing .cloud-env
-# must not clobber those, or every isolated stack collapses onto the shared
-# ports and SIGTERMs the Step 5 /deploy stack (observed as smoke exit 143).
+# Exceptions that must keep a pre-set CONDUCTOR_PORT + CONDUCTOR_WORKSPACE_NAME:
+# - Isolated benchmark runs (local.py / AgentCard / run-bench): unique per-run
+#   ports. Re-sourcing .cloud-env must not clobber those, or every isolated
+#   stack collapses onto the shared ports and SIGTERMs the Step 5 /deploy
+#   stack (observed as smoke exit 143).
+# - Strict Conductor port mode (RUN_SH_STRICT_CONDUCTOR_PORT=1 from
+#   configure_deploy_local_env): /deploy Step 5 pins an explicit port range
+#   and forbids reassignment; .cloud-env must not silently move it to 3001.
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 if [ -f "$SCRIPT_DIR/../.cloud-env" ]; then
     _cloud_env_saved_port="${CONDUCTOR_PORT:-}"
     _cloud_env_saved_workspace="${CONDUCTOR_WORKSPACE_NAME:-}"
     _cloud_env_isolated="${BENCHMARK_ISOLATED_RUN:-false}"
+    _cloud_env_strict="${RUN_SH_STRICT_CONDUCTOR_PORT:-0}"
     . "$SCRIPT_DIR/../.cloud-env"
-    if [ "$_cloud_env_isolated" = "true" ]; then
+    if [ "$_cloud_env_isolated" = "true" ] || [ "$_cloud_env_strict" = "1" ]; then
         [ -n "$_cloud_env_saved_port" ] && CONDUCTOR_PORT="$_cloud_env_saved_port"
         [ -n "$_cloud_env_saved_workspace" ] && CONDUCTOR_WORKSPACE_NAME="$_cloud_env_saved_workspace"
     fi
-    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated
+    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated _cloud_env_strict
 elif [ -z "${CONDUCTOR_PORT:-}" ]; then
     echo '❌ CONDUCTOR_PORT not set. Run via Conductor, or run scripts/cloud-build.sh first on cloud envs.'
     exit 1
@@ -2322,10 +2327,20 @@ fi
 # DISABLE_FAST_MODE_PROXY=1 empties both URLs so the sandbox falls back to the
 # direct claudeAuth path (codeAgentFastModeEnv treats "" as "no proxy"). This is
 # a local-only convenience — prod code agents never route through this proxy.
+#
+# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 sets PUBLIC_BASE_URL=http://localhost:<frontend>.
+# E2B sandboxes cannot reach that loopback — injecting it as ANTHROPIC_BASE_URL
+# yields `Unable to connect to API (ConnectionRefused)` (files-in-sub-agents).
+# Clear the proxy in that case so code agents use direct Anthropic OAuth instead
+# of a dead loopback tee (cache capture requires a publicly reachable URL).
 if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then
     export FAST_MODE_ANTHROPIC_PROXY_URL=""
     export FAST_MODE_CODEX_PROXY_URL=""
     echo "⚡ DISABLE_FAST_MODE_PROXY=1 — fast-mode proxy off; sandbox code agents use the direct claudeAuth path"
+elif [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ] || [[ "${PUBLIC_BASE_URL:-}" == http://localhost:* ]] || [[ "${PUBLIC_BASE_URL:-}" == http://127.* ]]; then
+    export FAST_MODE_ANTHROPIC_PROXY_URL=""
+    export FAST_MODE_CODEX_PROXY_URL=""
+    echo "⚡ Fast-mode proxy off — PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-unset} is not E2B-reachable; sandbox code agents use direct Anthropic OAuth"
 else
     export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
     export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"

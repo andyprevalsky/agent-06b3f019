@@ -425,7 +425,7 @@ export async function importEmailsToDb(
 
   // Get or create integration
   const integration = await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'email' } },
+    where: { userId_name_accountId: { userId, name: 'email', accountId: '' } },
     create: {
       userId,
       name: 'email',

@@ -2364,8 +2364,8 @@
       "browser_url": "https://connect.steel.dev/v1/sessions/645c47ec-b367-4e2b-9396-8d6e4648f7bb/player?interactive=false",
       "console_log_path": "/tmp/rose-browser-agent-recordings/7f354640-ffab-4098-b7ae-041ddf246c6f/ba744d18-063f-40be-aa23-1f20cd7ce4ff/console/index.json",
       "trace_archive_refs": {
-        "console": "TRACE_ARCHIVE_BUCKET/7f354640-ffab-4098-b7ae-041ddf246c6f/diagnostics/browser/ba744d18-063f-40be-aa23-1f20cd7ce4ff/console/index.json",
-        "network": "TRACE_ARCHIVE_BUCKET/7f354640-ffab-4098-b7ae-041ddf246c6f/diagnostics/browser/ba744d18-063f-40be-aa23-1f20cd7ce4ff/network/index.json"
+        "console": "trace-archive/7f354640-ffab-4098-b7ae-041ddf246c6f/diagnostics/browser/ba744d18-063f-40be-aa23-1f20cd7ce4ff/console/index.json",
+        "network": "trace-archive/7f354640-ffab-4098-b7ae-041ddf246c6f/diagnostics/browser/ba744d18-063f-40be-aa23-1f20cd7ce4ff/network/index.json"
       },
       "workflowGeneration": "7f354640-ffab-4098-b7ae-041ddf246c6f",
       "diagnostics_redacted": true,
