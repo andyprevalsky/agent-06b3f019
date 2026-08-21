@@ -5433,6 +5433,41 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     return True
 
 
+def _sync_email_credentials() -> bool:
+    """Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential from prod.
+
+    The canonical base-image dump can freeze abandoned OAuth rows (null email /
+    null accessToken). Connected Integrations then omits every send-from address
+    and ``message_person`` fails closed with ``Missing from_email`` before any
+    email_send approval can fire. Same pattern as ``_sync_compute_tokens``.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Email credential sync skipped: local Victoria DB not found")
+        return False
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-local.ts", "--email-credentials-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(f"    ⚠ Email credential sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Email credential sync error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Email credential sync failed: {_seed_sync_error_detail(result)}")
+        return False
+    print("    ✉️  Refreshed email credentials from prod")
+    return True
+
+
 def _sync_passkeys() -> None:
     """Refresh only passkeys from prod into the isolated benchmark DB.
 
@@ -5710,6 +5745,8 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         )
     if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
+    if not _sync_email_credentials():
+        raise RuntimeError("Live fixture could not refresh email credentials")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     # A green sync only proves the command exited 0. For domains whose task
@@ -10152,6 +10189,15 @@ async def main_async(args):
             require_claude_code=bool(claude_code_tasks_for_refresh)
             and not allow_claude_code_credential_skip,
         )
+        # Base-image dumps can freeze unusable Gmail OAuth rows; any local task
+        # that must send email (message_person) needs a fresh credential overlay
+        # or Connected Integrations never lists a from_email and the harness
+        # fails before an email_send approval can fire.
+        if any("message_person" in (t.expected_tools or []) for t in tasks):
+            if not _sync_email_credentials():
+                raise RuntimeError(
+                    "Benchmark run could not refresh email credentials for message_person tasks"
+                )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     # Default (fleet/cloud): missing Claude Code credentials after a required
