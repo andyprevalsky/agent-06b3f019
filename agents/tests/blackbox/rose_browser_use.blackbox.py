@@ -235,6 +235,19 @@ def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
     assert "Browser-specific notes:" not in prompt
 
 
+def test_build_browser_use_system_prompt_requires_ordered_option_set_capture():
+    """Cement: earliest/cheapest picks must leave a grounded filtered option set."""
+    prompt = build_browser_use_system_prompt([])
+
+    assert "choosing among ordered options" in prompt
+    assert "earliest/latest showtime" in prompt
+    assert "capture the full filtered option set" in prompt
+    assert "Enumerate every option in display order" in prompt
+    assert "scrollable or virtualized lists" in prompt
+    assert "Do not select until the complete set and the selected option are recorded" in prompt
+    assert "`extract`" not in prompt
+
+
 def test_build_browser_use_tools_preserves_catalog_descriptions():
     tools = build_browser_use_tools(
         [
@@ -1887,6 +1900,10 @@ async def run_all_tests():
     r.record(
         "build_browser_use_system_prompt_reuses_main_grading_prompt",
         test_build_browser_use_system_prompt_reuses_main_grading_prompt,
+    )
+    r.record(
+        "build_browser_use_system_prompt_requires_ordered_option_set_capture",
+        test_build_browser_use_system_prompt_requires_ordered_option_set_capture,
     )
     r.record(
         "browser_attempt_completion_uses_canonical_prompt_and_empty_schema",
