@@ -489,7 +489,7 @@ def test_claude_code_required_preflight_tolerates_funded_anthropic_key():
 
 
 def test_claude_code_required_preflight_is_strict_without_anthropic_key():
-    """Without a funded Anthropic key, Claude Code tasks still require OAuth sync."""
+    """Without a funded Anthropic key, code-agent tasks require Claude OR Codex."""
     captured: dict[str, object] = {}
 
     def fake_sync(
@@ -521,7 +521,7 @@ def test_claude_code_required_preflight_is_strict_without_anthropic_key():
             )
         )
 
-    assert captured == {"gpt": True, "claude": False, "required": ("claude",)}
+    assert captured == {"gpt": True, "claude": False, "required": ("any",)}
 
 
 def test_claude_code_required_preflight_fails_closed_when_sync_fails():

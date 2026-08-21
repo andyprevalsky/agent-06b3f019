@@ -358,6 +358,27 @@ test('compute-token sync can require GPT without requiring Claude OAuth', async 
   );
 });
 
+test('compute-token sync any-mode accepts Claude Code OR Codex', async () => {
+  const source = readSeedLocalSource();
+  const anyHelper = source.indexOf('function requireAnyComputeTokenType');
+  const anyParser = source.indexOf("value.toLowerCase() === 'any'");
+  const anyBranch = source.indexOf('if (requireAnyComputeTokenType())');
+  const eitherOk = source.indexOf(
+    'usableClaudeCodeCount > 0 || usableGptCodeCount > 0',
+    anyBranch
+  );
+  const eitherFailure = source.indexOf(
+    "throw new Error('No usable claude_code or gpt_code integrations after sync')",
+    anyBranch
+  );
+
+  assert(anyHelper > 0, 'expected an explicit any-mode helper');
+  assert(anyParser > 0, 'expected parseComputeTokenRequiredTypes to accept any');
+  assert(anyBranch > anyHelper, 'expected sync to branch on any-mode');
+  assert(eitherOk > anyBranch, 'expected any-mode to accept either provider');
+  assert(eitherFailure > eitherOk, 'expected any-mode to fail only when both providers are missing');
+});
+
 test('synthetic benchmark compute access uses the isolated pool without changing ownership', async () => {
   const source = readSeedLocalSource();
   const optIn = source.indexOf('SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS');

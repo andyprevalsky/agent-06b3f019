@@ -5815,11 +5815,16 @@ async def _refresh_local_compute_tokens_for_run(
     # claude_code sync only when that funded-key path is confirmed healthy —
     # otherwise require_claude_code tasks would start, discover an unfunded key
     # mid-run, and burn the suite. Never pair this with credential-skip-as-PASS.
+    #
+    # Code-agent tasks (requires_claude_code) can also run via Codex: the
+    # spawn_claude_code_agent tool selects provider=codex when the workflow holds
+    # a GPT compute token. Without a funded Anthropic key, require *either*
+    # claude_code or gpt_code rather than hard-requiring Claude OAuth alone.
     has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
     tolerate_missing_claude = has_anthropic_key_fallback
     required_token_types: tuple[str, ...] | None = None
     if require_claude_code and not has_anthropic_key_fallback:
-        required_token_types = ("claude",)
+        required_token_types = ("any",)
         tolerate_missing_claude = False
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
