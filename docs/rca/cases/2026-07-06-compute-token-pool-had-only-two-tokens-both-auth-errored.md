@@ -86,7 +86,6 @@ Runtime evidence from local `scripts/run-bench --local files-in-sub-agents`:
 - Task contract requires Claude Code (`requires_claude_code: true`); Anthropic API-key fallback is intentionally refused for this class of task.
 
 Why the earlier remediation did not hold: the 2026-07-06 record left the case **open** with "re-auth or add fresh pool tokens" as the next step; supply was never replenished, so any `requires_claude_code` benchmark still fails closed at the same credential boundary.
-
 ## Recurrence — 2026-08-20T22:54Z (credentials restored; Fast Mode loopback)
 
 After claude_code OAuth was restored (`CONNECTED`, poolingEnabled, encryptedCredentials),
@@ -103,4 +102,3 @@ and Claude Code failed with `Unable to connect to API (ConnectionRefused)` after
 Fix: refuse loopback Fast Mode proxy bases in `buildFastModeAnthropicEnv` /
 `buildFastModeCodexEnv`, and clear Fast Mode proxy exports in `run.sh` when the
 public URL is not E2B-reachable. Cemented in `fast-cache-flag.test.ts`.
-

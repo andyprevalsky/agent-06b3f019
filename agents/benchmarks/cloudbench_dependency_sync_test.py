@@ -7132,13 +7132,22 @@ printf '%s' "$tok"
 def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
     """Owning-boundary repro: empty AUTH_HDR fails private fetch; controller
     header succeeds. Mirrors the warm-box failure mode without Fly."""
-    cfg = subprocess.check_output(
-        ["git", "config", "--get-regexp", r"url\..*\.insteadof"],
+    resolver = ROOT / "scripts/lib/cloudbench-github-token.sh"
+    resolved = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"source {shlex.quote(str(resolver))}; "
+            f"cloudbench_resolve_github_token {shlex.quote(str(ROOT))}",
+        ],
         text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
     )
-    match = re.search(r"https://x-access-token:([^@]+)@github\.com/", cfg)
-    assert match, "controller workspace must expose a git insteadOf GitHub token"
-    token = match.group(1)
+    assert resolved.returncode == 0, "canonical controller GitHub token resolver failed"
+    token = resolved.stdout.strip()
+    assert token, "canonical controller GitHub token resolver returned an empty token"
     auth = "Authorization: Basic " + base64.b64encode(
         f"x-access-token:{token}".encode()
     ).decode()

@@ -414,14 +414,15 @@ export async function closeSession(
 ): Promise<void> {
   log.info(`${pause ? 'Pausing' : 'Closing'} Steel session ${sessionId}...`);
 
+  let releaseError: unknown = null;
   try {
     // Release the Steel session
     await releaseSteelRemoteSession(sessionId);
   } catch (error) {
+    releaseError = error;
     log.error('Failed to close session in Steel', {
       error: error instanceof Error ? error.message : String(error),
     });
-    // Continue to update DB even if Steel call fails
   }
 
   // Update DB
@@ -429,11 +430,15 @@ export async function closeSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: pause ? 'PAUSED' : 'CLOSED',
-      closedAt: pause ? undefined : new Date(),
+      // ERROR means remote release is still owed. Terminal-agent reconciliation
+      // will retry it; CLOSED must only mean billing is known to have stopped.
+      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      closedAt: releaseError === null && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined,
     },
   });
+
+  if (releaseError !== null) throw releaseError;
 
   log.info(`✓ Session ${pause ? 'paused (resumable)' : 'closed (terminal)'}`);
   if (currentUrl) {
@@ -445,6 +450,10 @@ export async function closeSession(
 
 /** Release only the remote Steel browser without mutating BrowserSession. */
 export async function releaseSteelRemoteSession(sessionId: string): Promise<void> {
+  // Local benchmark/browser sessions have no rented Steel resource to release.
+  // Treating their synthetic IDs as remote turns a successful local close into
+  // a permanent retry obligation.
+  if (sessionId.startsWith('local-')) return;
   await retryWithBackoff(
     async () => {
       try {

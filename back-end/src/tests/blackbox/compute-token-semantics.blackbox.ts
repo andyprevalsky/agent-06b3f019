@@ -672,7 +672,7 @@ function readLastLiveRun(): number | null {
     if (!existsSync(LEDGER_PATH)) return DOCUMENTED_LIVE_BASELINE_MS;
     const parsed = JSON.parse(readFileSync(LEDGER_PATH, 'utf8')) as { lastLiveRunMs?: number };
     return typeof parsed.lastLiveRunMs === 'number'
-      ? parsed.lastLiveRunMs
+      ? Math.max(parsed.lastLiveRunMs, DOCUMENTED_LIVE_BASELINE_MS)
       : DOCUMENTED_LIVE_BASELINE_MS;
   } catch {
     return DOCUMENTED_LIVE_BASELINE_MS;

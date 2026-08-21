@@ -156,6 +156,7 @@ export async function closeSession(
 ): Promise<void> {
   log.info(pause ? 'Pausing browser session' : 'Closing browser session', { sessionId });
 
+  let releaseError: unknown = null;
   try {
     // Close in Steel by requesting release (saves context state, stops billing)
     await bb.sessions.update(sessionId, {
@@ -163,11 +164,11 @@ export async function closeSession(
       status: 'REQUEST_RELEASE',
     });
   } catch (error) {
+    releaseError = error;
     log.error('Failed to close session in Steel', {
       error: error instanceof Error ? error.message : String(error),
       sessionId,
     });
-    // Continue to update DB even if Steel call fails
   }
 
   // Update DB
@@ -175,11 +176,13 @@ export async function closeSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: pause ? 'PAUSED' : 'CLOSED',
-      closedAt: pause ? undefined : new Date(), // Only set closedAt for terminal close
+      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      closedAt: releaseError === null && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined, // Save URL if provided
     },
   });
+
+  if (releaseError !== null) throw releaseError;
 
   log.info(pause ? 'Session paused (resumable)' : 'Session closed (terminal)', { sessionId });
   if (currentUrl) {
