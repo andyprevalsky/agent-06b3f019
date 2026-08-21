@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Sandbox } from 'e2b';
 import { Prisma } from '@prisma/client';
 import { prisma } from './database';
@@ -13,8 +14,13 @@ export interface BrowserSessionReleaseDependencies {
 }
 
 export interface TerminalBrowserReleaseDependencies {
-  findTerminalAgentIds: () => Promise<string[]>;
+  findTerminalAgentIds: (batchSize: number) => Promise<string[]>;
   releaseBrowserSessions: typeof releaseAgentBrowserSessions;
+}
+
+export interface TerminalBrowserReleaseOptions {
+  batchSize?: number;
+  deadlineAtMs?: number;
 }
 
 export interface TerminalBrowserReleaseSummary {
@@ -22,6 +28,21 @@ export interface TerminalBrowserReleaseSummary {
   released: number;
   failed: number;
 }
+
+export type TerminalBrowserReleaseLeasedResult =
+  { acquired: false; summary: null } | { acquired: true; summary: TerminalBrowserReleaseSummary };
+
+interface TerminalBrowserReleaseLeaseDependencies {
+  acquireLease: (ownerId: string) => Promise<boolean>;
+  releaseLease: (ownerId: string) => Promise<void>;
+  reconcile: typeof reconcileTerminalAgentBrowserSessions;
+}
+
+export const TERMINAL_BROWSER_RELEASE_LEASE_KEY = 'scheduled-job:terminal-browser-release';
+const TERMINAL_BROWSER_RELEASE_LEASE_TYPE = 'TERMINAL_BROWSER_RELEASE_JOB_LEASE';
+const TERMINAL_BROWSER_RELEASE_LEASE_MS = 5 * 60 * 1000;
+const TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE = 500;
+const TERMINAL_BROWSER_RELEASE_MAX_RUN_MS = 50_000;
 
 function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies {
   return {
@@ -42,13 +63,15 @@ function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies 
 
 function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencies {
   return {
-    findTerminalAgentIds: async () => {
+    findTerminalAgentIds: async (batchSize) => {
       const agents = await prisma.$queryRaw<Array<{ agentId: string }>>(Prisma.sql`
         SELECT DISTINCT browser_session."agentId" AS "agentId"
         FROM "BrowserSession" AS browser_session
         INNER JOIN "Agent" AS agent ON agent.id = browser_session."agentId"
         WHERE browser_session.status::text IN ('ACTIVE', 'PAUSED', 'ERROR')
           AND agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
+        ORDER BY browser_session."agentId" ASC
+        LIMIT ${batchSize}
       `);
       return agents.map((agent) => agent.agentId);
     },
@@ -62,10 +85,20 @@ function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencie
  * failed terminal-transition release needs its own durable retry path.
  */
 export async function reconcileTerminalAgentBrowserSessions(
-  overrides: Partial<TerminalBrowserReleaseDependencies> = {}
+  overrides: Partial<TerminalBrowserReleaseDependencies> = {},
+  options: TerminalBrowserReleaseOptions = {}
 ): Promise<TerminalBrowserReleaseSummary> {
   const dependencies = { ...terminalBrowserReleaseDependencies(), ...overrides };
-  const agentIds = await dependencies.findTerminalAgentIds();
+  const startedAtMs = Date.now();
+  const batchSize = Math.min(
+    TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE,
+    Math.max(1, Math.floor(options.batchSize ?? 100))
+  );
+  const deadlineAtMs = Math.min(
+    options.deadlineAtMs ?? startedAtMs + TERMINAL_BROWSER_RELEASE_MAX_RUN_MS,
+    startedAtMs + TERMINAL_BROWSER_RELEASE_MAX_RUN_MS
+  );
+  const agentIds = await dependencies.findTerminalAgentIds(batchSize);
   let released = 0;
   let failed = 0;
   let next = 0;
@@ -75,7 +108,7 @@ export async function reconcileTerminalAgentBrowserSessions(
     Array.from({ length: workerCount }, async () => {
       let workerReleased = 0;
       let workerFailed = 0;
-      while (next < agentIds.length) {
+      while (next < agentIds.length && Date.now() < deadlineAtMs) {
         const agentId = agentIds[next++];
         try {
           workerReleased += await dependencies.releaseBrowserSessions(agentId);
@@ -95,6 +128,78 @@ export async function reconcileTerminalAgentBrowserSessions(
   }
 
   return { discovered: agentIds.length, released, failed };
+}
+
+async function acquireTerminalBrowserReleaseLease(ownerId: string): Promise<boolean> {
+  const now = new Date();
+  const liveCutoff = new Date(now.getTime() - TERMINAL_BROWSER_RELEASE_LEASE_MS);
+  const expiresAt = new Date(now.getTime() + TERMINAL_BROWSER_RELEASE_LEASE_MS);
+  const rows = await prisma.$queryRaw<Array<{ externalId: string }>>(Prisma.sql`
+    INSERT INTO "ToolSideEffect"
+      (id, "operationKey", "operationType", status, "externalId", request, "createdAt", "updatedAt")
+    VALUES
+      (${randomUUID()}, ${TERMINAL_BROWSER_RELEASE_LEASE_KEY},
+       ${TERMINAL_BROWSER_RELEASE_LEASE_TYPE}, 'STARTED', ${ownerId},
+       ${JSON.stringify({ expiresAt: expiresAt.toISOString() })}::jsonb, ${now}, ${now})
+    ON CONFLICT ("operationKey") DO UPDATE SET
+      "operationType" = EXCLUDED."operationType",
+      status = 'STARTED',
+      "externalId" = EXCLUDED."externalId",
+      request = EXCLUDED.request,
+      response = NULL,
+      error = NULL,
+      "updatedAt" = EXCLUDED."updatedAt"
+    WHERE "ToolSideEffect".status <> 'STARTED'
+       OR "ToolSideEffect"."updatedAt" <= ${liveCutoff}
+    RETURNING "externalId"
+  `);
+  return rows[0]?.externalId === ownerId;
+}
+
+async function releaseTerminalBrowserReleaseLease(ownerId: string): Promise<void> {
+  await prisma.toolSideEffect.updateMany({
+    where: {
+      operationKey: TERMINAL_BROWSER_RELEASE_LEASE_KEY,
+      operationType: TERMINAL_BROWSER_RELEASE_LEASE_TYPE,
+      status: 'STARTED',
+      externalId: ownerId,
+    },
+    data: {
+      status: 'RELEASED',
+      response: { releasedAt: new Date().toISOString() },
+    },
+  });
+}
+
+function terminalBrowserReleaseLeaseDependencies(): TerminalBrowserReleaseLeaseDependencies {
+  return {
+    acquireLease: acquireTerminalBrowserReleaseLease,
+    releaseLease: releaseTerminalBrowserReleaseLease,
+    reconcile: reconcileTerminalAgentBrowserSessions,
+  };
+}
+
+export async function runTerminalAgentBrowserReleaseReconcileWithLease(
+  options: TerminalBrowserReleaseOptions = {},
+  overrides: Partial<TerminalBrowserReleaseLeaseDependencies> = {}
+): Promise<TerminalBrowserReleaseLeasedResult> {
+  const dependencies = { ...terminalBrowserReleaseLeaseDependencies(), ...overrides };
+  const ownerId = randomUUID();
+  if (!(await dependencies.acquireLease(ownerId))) {
+    return { acquired: false, summary: null };
+  }
+  try {
+    return { acquired: true, summary: await dependencies.reconcile({}, options) };
+  } finally {
+    try {
+      await dependencies.releaseLease(ownerId);
+    } catch (error) {
+      log.error('Failed to release terminal browser reconciliation lease', {
+        ownerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 /**

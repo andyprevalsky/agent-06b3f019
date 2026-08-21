@@ -398,6 +398,17 @@ setup_db_teardown() {
         setup_db_pid_is_running "$pid" || wait "$pid" 2>/dev/null || true
     done
 
+    # Keep the bounded teardown guarantee, but never release the destructive DB
+    # lock silently if an uninterruptible descendant survives SIGKILL.
+    current="$(setup_db_child_records "$group")"
+    setup_db_remember_records "$current"
+    while IFS= read -r record; do
+        [ -n "$record" ] || continue
+        setup_db_pid_matches_record "$record" || continue
+        pid="${record%%|*}"
+        echo "⚠️  setup-db descendant PID $pid survived SIGKILL; releasing DB lock" >&2
+    done <<< "$targets"
+
     release_workspace_db_lock
     trap - INT TERM
     exit "$exit_code"

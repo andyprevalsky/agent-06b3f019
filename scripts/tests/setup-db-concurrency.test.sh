@@ -354,6 +354,17 @@ printf '%s\n' "$force_loop" | grep -q 'setup_db_child_records' || fail \
 printf '%s\n' "$force_loop" | grep -q 'kill -KILL' || fail \
   "case 8: force-cleanup loop discovers descendants but does not stop late arrivals"
 
+# ── Case 8b: surviving descendants must be visible before lock release ───────
+post_force="$({
+  sed -n '/for pid in \$reap_pids; do/,/release_workspace_db_lock/p' "$SETUP_DB"
+} 2>/dev/null)"
+printf '%s\n' "$post_force" | grep -q 'setup_db_child_records' || fail \
+  "case 8b: teardown does not make a final descendant scan before releasing the DB lock"
+printf '%s\n' "$post_force" | grep -q 'setup_db_pid_matches_record' || fail \
+  "case 8b: teardown warns about descendants without revalidating process identity"
+printf '%s\n' "$post_force" | grep -q 'survived SIGKILL.*PID\|PID .*survived SIGKILL' || fail \
+  "case 8b: teardown silently releases the DB lock while a descendant survives SIGKILL"
+
 # ── Case 9: retained PIDs must be identity-checked before force cleanup ───────
 # A short-lived child can exit during the grace phase and its numeric PID can be
 # reused before a later force-loop iteration. PID plus start time distinguish the

@@ -264,6 +264,20 @@ test('email credential seed reads remain compatible before production migration'
     projectionUses.length === 2,
     `both full and email-only seed paths must use the stable projection (found ${projectionUses.length})`
   );
+  const remapStart = source.indexOf('function remapEmailCredentialIntegrationIds<');
+  const remapEnd = source.indexOf('\n}\n', remapStart);
+  const remapHelper = source.slice(remapStart, remapEnd);
+  assert(remapStart > 0 && remapEnd > remapStart, 'expected email credential remap helper');
+  for (const healthDefault of [
+    "state: 'connected'",
+    'lastErrorReason: null',
+    'lastFailedSyncAt: null',
+  ]) {
+    assert(
+      remapHelper.includes(healthDefault),
+      `both seed paths must reset local email health via ${healthDefault}`
+    );
+  }
 });
 
 test('integration seed discovers account columns before selecting them', async () => {

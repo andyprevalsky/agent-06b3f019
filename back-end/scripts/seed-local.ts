@@ -485,15 +485,21 @@ async function syncEmailIntegrations(): Promise<Map<string, string>> {
   return remoteToLocal;
 }
 
-/** Rewrite credential.integrationId onto the local Integration id when IDs diverge. */
+/**
+ * Rewrite credential.integrationId onto the local Integration id when IDs diverge.
+ * Production may not have the health columns yet, so every authoritative sync
+ * must also clear stale local failures instead of preserving them through upsert.
+ */
 function remapEmailCredentialIntegrationIds<
   T extends { integrationId: string; [key: string]: unknown },
 >(creds: T[], remoteToLocal: Map<string, string>): T[] {
-  return creds.map((cred) => {
-    const localId = remoteToLocal.get(cred.integrationId);
-    if (!localId || localId === cred.integrationId) return cred;
-    return { ...cred, integrationId: localId };
-  });
+  return creds.map((cred) => ({
+    ...cred,
+    integrationId: remoteToLocal.get(cred.integrationId) ?? cred.integrationId,
+    state: 'connected',
+    lastErrorReason: null,
+    lastFailedSyncAt: null,
+  }));
 }
 
 /**
