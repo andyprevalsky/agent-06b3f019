@@ -9442,6 +9442,13 @@ def test_run_bench_routes_production_only_batches_off_fly_fleet() -> None:
     assert run_bench.index("cloudbench-production-only-tasks.py") < run_bench.index(
         'exec bash "$ROOT_DIR/scripts/run-bench-fleet"'
     )
+    # RCA (2026-08-21): --single-box must reject before the production-only
+    # classifier. Sandbox multi-workstream has no tasks.json; classifier exit-2
+    # otherwise masks the parallel-safe message (scenario 14).
+    assert run_bench.index('if [[ "${1:-}" == "--single-box" ]]') < run_bench.index(
+        "cloudbench-production-only-tasks.py"
+    )
+    assert "not parallel-safe" in run_bench
     assert "production_only" in helper
 
     result = subprocess.run(
