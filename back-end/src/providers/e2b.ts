@@ -221,15 +221,31 @@ export function resolveHostAnthropicBaseUrl(hostBaseUrl: string | undefined): st
 }
 
 /**
- * Fast Mode tee-proxy must not run for Claude Code when OpenRouter is configured —
- * the proxy forwards to api.anthropic.com and 403s gateway keys / replays stale
- * 0-interaction cache entries (files-in-sub-agents fleet, 2026-08-21).
+ * Fast Mode tee-proxy for Claude Code is opt-in only.
+ *
+ * The benchmark user (Andy) is in `FAST_MODE_WRITE_THROUGH_USER_IDS`, which used
+ * to force Fast Mode on every Claude Code session. Local stacks often skip the
+ * proxy because `FAST_MODE_ANTHROPIC_PROXY_URL` is loopback-unreachable; fleet
+ * proxies are public, so write-through alone produced HTTP 403 / stale
+ * 0-interaction cache hits on files-in-sub-agents (2026-08-21). OpenRouter
+ * recovery is also incompatible with the tee-proxy (forwards to api.anthropic.com).
+ *
+ * Set `CLAUDE_CODE_FAST_MODE_ENABLED=1` to re-enable when the proxy speaks a
+ * funded Anthropic-compatible upstream.
  */
 export function shouldEnableClaudeCodeFastMode(params: {
   openrouterApiKey?: string;
   fastModeCacheEnabled?: boolean;
   fastModeWriteEnabled?: boolean;
+  /** process.env.CLAUDE_CODE_FAST_MODE_ENABLED — injected for tests */
+  claudeCodeFastModeEnabled?: string;
 }): boolean {
+  const enabledFlag = (params.claudeCodeFastModeEnabled ?? process.env.CLAUDE_CODE_FAST_MODE_ENABLED)
+    ?.trim()
+    .toLowerCase();
+  if (enabledFlag !== '1' && enabledFlag !== 'true' && enabledFlag !== 'yes' && enabledFlag !== 'on') {
+    return false;
+  }
   if (params.openrouterApiKey?.trim()) return false;
   return params.fastModeCacheEnabled === true || params.fastModeWriteEnabled === true;
 }

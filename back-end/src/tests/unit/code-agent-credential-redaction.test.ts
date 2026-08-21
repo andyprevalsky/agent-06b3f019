@@ -218,12 +218,14 @@ function main(): void {
   );
   assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode(undefined), false);
 
-  // Andy write-through + OpenRouter must still disable Fast Mode for Claude Code.
+  // Andy write-through + OpenRouter must still disable Fast Mode for Claude Code
+  // unless CLAUDE_CODE_FAST_MODE_ENABLED is explicitly on.
   assert.equal(
     shouldEnableClaudeCodeFastMode({
       openrouterApiKey: 'sk-or-gateway',
       fastModeCacheEnabled: true,
       fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: '1',
     }),
     false
   );
@@ -231,15 +233,26 @@ function main(): void {
     shouldEnableClaudeCodeFastMode({
       fastModeCacheEnabled: true,
       fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: '1',
     }),
     true
+  );
+  // Default (no opt-in): Fast Mode off even for Andy write-through.
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      fastModeCacheEnabled: true,
+      fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: '',
+    }),
+    false
   );
   assert.equal(
     shouldEnableClaudeCodeFastMode({
       openrouterApiKey: '  ',
       fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: undefined,
     }),
-    true
+    false
   );
 
   process.stdout.write('Code-agent credential redaction tests passed\n');
