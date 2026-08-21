@@ -45,9 +45,7 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
-import { createHash, randomUUID } from 'node:crypto';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { retryWithBackoff } from '../../providers/retry';
 config();
 
@@ -56,21 +54,6 @@ const API_KEY = process.env.BACKEND_API_KEY || '';
 const CASE_CONCURRENCY = Number(process.env.BLACKBOX_TEST_CASE_CONCURRENCY || '30');
 const TWILIO_VERIFY_SERVICE_SID = process.env.TWILIO_VERIFY_SERVICE_SID || '';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
-
-// Fast-forward cache directory used by fetchCapture.ts at runtime. Seeding
-// entries here lets us drive Twilio Verify and Supabase Admin responses
-// deterministically without making real outbound calls. The path mirrors
-// fetchCapture.ts: `<repo-root>/.context/fast-forward-cache/outbound-fetch`.
-//
-// The blackbox runner spawns each test with cwd=<repo-root> (see run.ts), but
-// when this file is executed directly the cwd is back-end/. We resolve from
-// __dirname (this file's directory) to handle both cases — `__dirname` is
-// .../back-end/src/tests/blackbox so `../../../../.context/...` lands at the
-// repo root regardless of cwd.
-const FF_CACHE_DIR = resolvePath(
-  __dirname,
-  '../../../../.context/fast-forward-cache/outbound-fetch'
-);
 
 // ==================== RESPONSE SCHEMAS ====================
 
@@ -389,29 +372,6 @@ function ffCacheKey(url: string, method: string, body: string | null): string {
   return `call:${JSON.stringify([url, method, body])}`;
 }
 
-function ffCacheFilePath(key: string): string {
-  const hash = createHash('sha256').update(key).digest('hex');
-  return resolvePath(FF_CACHE_DIR, `${hash}.json`);
-}
-
-function seedFastForward(
-  url: string,
-  method: string,
-  body: string | null,
-  response: SerializedFFResponse
-): void {
-  if (!existsSync(FF_CACHE_DIR)) {
-    mkdirSync(FF_CACHE_DIR, { recursive: true });
-  }
-  const key = ffCacheKey(url, method, body);
-  const entry = {
-    key,
-    value: { __ff_promise_result: true, value: response },
-    timestamp: Date.now(),
-  };
-  writeFileSync(ffCacheFilePath(key), JSON.stringify(entry, null, 2), 'utf8');
-}
-
 /**
  * Seed through the running backend so an already-memoized key is replaced in
  * memory as well as on disk. Use this for shared keys that earlier auth cases
@@ -435,13 +395,18 @@ async function seedLiveFastForward(
 /**
  * Seed a Twilio Verify VerificationCheck response for (phone, code).
  * Returns whether seeding succeeded (false if TWILIO_VERIFY_SERVICE_SID is unset).
+ *
+ * Always seeds through the live backend cache (not disk-only). Disk-only writes
+ * race with NonBlockingFileCache memoization when another case already touched
+ * the key, and with multi-second gaps (e.g. createAgent before verify-otp) under
+ * a shared suite cache — producing a live Twilio "Invalid code" 400.
  */
-function seedTwilioVerifyCheck(
+async function seedTwilioVerifyCheck(
   phone: string,
   code: string,
   approved: boolean,
   options: { httpStatus?: number; twilioCode?: number; twilioMessage?: string } = {}
-): boolean {
+): Promise<boolean> {
   if (TWILIO_VERIFY_SERVICE_SID === '') return false;
   const url = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`;
   const body = new URLSearchParams({ To: phone, Code: code }).toString();
@@ -462,7 +427,7 @@ function seedTwilioVerifyCheck(
           message: options.twilioMessage ?? 'Seeded error',
           status: httpStatus,
         });
-  seedFastForward(url, 'POST', body, {
+  await seedLiveFastForward(url, 'POST', body, {
     status: httpStatus,
     statusText: httpStatus === 200 ? 'OK' : 'Error',
     body: responseBody,
@@ -474,10 +439,10 @@ function seedTwilioVerifyCheck(
 /**
  * Seed a Twilio Verify Verifications (send) response for a phone.
  */
-function seedTwilioVerifySend(
+async function seedTwilioVerifySend(
   phone: string,
   options: { httpStatus?: number; twilioCode?: number; twilioMessage?: string } = {}
-): boolean {
+): Promise<boolean> {
   if (TWILIO_VERIFY_SERVICE_SID === '') return false;
   const url = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/Verifications`;
   const body = new URLSearchParams({ To: phone, Channel: 'sms' }).toString();
@@ -498,7 +463,7 @@ function seedTwilioVerifySend(
           to: phone,
           valid: false,
         });
-  seedFastForward(url, 'POST', body, {
+  await seedLiveFastForward(url, 'POST', body, {
     status: httpStatus,
     statusText: httpStatus < 400 ? 'OK' : 'Error',
     body: responseBody,
@@ -510,10 +475,10 @@ function seedTwilioVerifySend(
 /**
  * Seed a Supabase Admin POST /auth/v1/admin/users response for a phone.
  */
-function seedSupabaseAdminCreate(
+async function seedSupabaseAdminCreate(
   phone: string,
   options: { httpStatus?: number; userId?: string; errorCode?: string; msg?: string } = {}
-): boolean {
+): Promise<boolean> {
   if (SUPABASE_URL === '') return false;
   const url = `${SUPABASE_URL}/auth/v1/admin/users`;
   const body = JSON.stringify({ phone, phone_confirm: true });
@@ -525,7 +490,7 @@ function seedSupabaseAdminCreate(
           error_code: options.errorCode ?? 'unknown',
           msg: options.msg ?? 'Seeded error',
         });
-  seedFastForward(url, 'POST', body, {
+  await seedLiveFastForward(url, 'POST', body, {
     status: httpStatus,
     statusText: httpStatus < 400 ? 'OK' : 'Error',
     body: responseBody,
@@ -1207,7 +1172,7 @@ async function testBoundary_reviewOtpBypassNoTwilio() {
   const phone = REVIEW_TEST_PHONE;
   const userId = randomUUID();
   if (SUPABASE_URL !== '') {
-    seedSupabaseAdminCreate(phone, { userId });
+    await seedSupabaseAdminCreate(phone, { userId });
   }
 
   const sendToken = captureToken('review-send-otp-bypass');
@@ -1998,8 +1963,8 @@ async function testVerifyOtp_seededHappyPath_newUser() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, { userId });
 
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
@@ -2027,8 +1992,8 @@ async function testVerifyOtp_seededHappyPath_newUserBothNames() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, { userId });
 
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
@@ -2055,8 +2020,8 @@ async function testVerifyOtp_seededExistingUser_noUpdates() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, { userId });
 
   // First verify creates the user
   const r1 = await request(`${BASE_URL}/api/auth/verify-otp`, {
@@ -2084,8 +2049,8 @@ async function testVerifyOtp_seededExistingUser_nameUpdate() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, { userId });
 
   // First call: creates user with NO name
   const r1 = await request(`${BASE_URL}/api/auth/verify-otp`, {
@@ -2105,6 +2070,10 @@ async function testVerifyOtp_seededExistingUser_nameUpdate() {
 /**
  * verify-otp with an anonymousUserId that owns agents → triggers the merge path
  * AND drives handleNewUser for the authenticated user.
+ *
+ * Seed Twilio/Supabase AFTER createAgentWithRetry. A multi-second gap between a
+ * disk seed and verify-otp let concurrent suite cache churn / memoization miss
+ * the fixture and fall through to live Twilio ("Invalid code").
  */
 async function testVerifyOtp_seededMergeAnonymousResources() {
   if (!canSeedAuthFlow()) return;
@@ -2123,38 +2092,8 @@ async function testVerifyOtp_seededMergeAnonymousResources() {
     );
   }
 
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
-  // Also push into the live backend memo so a concurrent miss cannot stick.
-  const twilioUrl = `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`;
-  const twilioBody = new URLSearchParams({ To: phone, Code: SEED_OTP }).toString();
-  await seedLiveFastForward(twilioUrl, 'POST', twilioBody, {
-    status: 200,
-    statusText: 'OK',
-    body: JSON.stringify({
-      account_sid: 'ACseed',
-      channel: 'sms',
-      service_sid: TWILIO_VERIFY_SERVICE_SID,
-      sid: `VE${randomUUID().replace(/-/g, '')}`.slice(0, 34),
-      status: 'approved',
-      to: phone,
-      valid: true,
-    }),
-    headers: { 'content-type': 'application/json' },
-  });
-  if (SUPABASE_URL !== '') {
-    await seedLiveFastForward(
-      `${SUPABASE_URL}/auth/v1/admin/users`,
-      'POST',
-      JSON.stringify({ phone, phone_confirm: true }),
-      {
-        status: 200,
-        statusText: 'OK',
-        body: JSON.stringify({ id: userId, phone }),
-        headers: { 'content-type': 'application/json' },
-      }
-    );
-  }
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, { userId });
 
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
@@ -2186,8 +2125,8 @@ async function testCompleteOnboarding_seededPhoneVerifySendsSms() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, { userId });
 
   const verifyRes = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
@@ -2256,7 +2195,7 @@ async function testCompleteOnboarding_seededPhoneVerifySendsSms() {
 async function testVerifyOtp_seededTooManyAttempts() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
-  seedTwilioVerifyCheck(phone, SEED_OTP, false, {
+  await seedTwilioVerifyCheck(phone, SEED_OTP, false, {
     httpStatus: 400,
     twilioCode: 60202,
     twilioMessage: 'Max check attempts reached',
@@ -2281,7 +2220,7 @@ async function testVerifyOtp_seededTooManyAttempts() {
 async function testVerifyOtp_seededCodeExpired() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
-  seedTwilioVerifyCheck(phone, SEED_OTP, false, {
+  await seedTwilioVerifyCheck(phone, SEED_OTP, false, {
     httpStatus: 404,
     twilioCode: 20404,
     twilioMessage: 'Verification not found',
@@ -2303,7 +2242,7 @@ async function testVerifyOtp_seededCodeExpired() {
 async function testVerifyOtp_seededGenericTwilioError() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
-  seedTwilioVerifyCheck(phone, SEED_OTP, false, {
+  await seedTwilioVerifyCheck(phone, SEED_OTP, false, {
     httpStatus: 400,
     twilioCode: 60100, // some unrelated Twilio code
     twilioMessage: 'Generic Twilio error',
@@ -2327,8 +2266,8 @@ async function testVerifyOtp_seededSupabasePhoneExists() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, {
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, {
     httpStatus: 422,
     errorCode: 'phone_exists',
     msg: 'Phone already in use',
@@ -2359,8 +2298,8 @@ async function testVerifyOtp_seededSupabasePhoneExists() {
 async function testVerifyOtp_seededSupabaseGenericError() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, {
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, {
     httpStatus: 500,
     errorCode: 'server_error',
     msg: 'Supabase down',
@@ -2382,7 +2321,7 @@ async function testVerifyOtp_seededSupabaseGenericError() {
 async function testSendOtp_seededTwilioError() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
-  seedTwilioVerifySend(phone, {
+  await seedTwilioVerifySend(phone, {
     httpStatus: 400,
     twilioCode: 60200,
     twilioMessage: 'Invalid To parameter',
@@ -2404,7 +2343,7 @@ async function testSendOtp_seededTwilioError() {
 async function testSendOtp_seededHappyPath() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
-  seedTwilioVerifySend(phone, { httpStatus: 201 });
+  await seedTwilioVerifySend(phone, { httpStatus: 201 });
 
   const res = await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
@@ -2425,8 +2364,8 @@ async function testVerifyOtp_seededExistingDbUser() {
   if (!canSeedAuthFlow()) return;
   const phone = uniqueFakePhone();
   const userId = randomUUID();
-  seedTwilioVerifyCheck(phone, SEED_OTP, true);
-  seedSupabaseAdminCreate(phone, { userId });
+  await seedTwilioVerifyCheck(phone, SEED_OTP, true);
+  await seedSupabaseAdminCreate(phone, { userId });
 
   // First verify creates the user
   const r1 = await request(`${BASE_URL}/api/auth/verify-otp`, {
@@ -2437,7 +2376,7 @@ async function testVerifyOtp_seededExistingDbUser() {
 
   // Re-seed Supabase create to error so we can prove the second call doesn't
   // reach Supabase (it should hit findUserByPhone in our DB and short-circuit).
-  seedSupabaseAdminCreate(phone, { httpStatus: 500, errorCode: 'should_not_be_called' });
+  await seedSupabaseAdminCreate(phone, { httpStatus: 500, errorCode: 'should_not_be_called' });
 
   const r2 = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
@@ -2620,10 +2559,6 @@ async function runAll() {
       fn: testVerifyOtp_seededExistingUser_nameUpdate,
     },
     {
-      name: 'POST /verify-otp -- seeded merge anonymous resources',
-      fn: testVerifyOtp_seededMergeAnonymousResources,
-    },
-    {
       name: 'POST /verify-otp -- seeded too-many-attempts (60202)',
       fn: testVerifyOtp_seededTooManyAttempts,
     },
@@ -2668,6 +2603,12 @@ async function runAll() {
   // running it in parallel let the SMS HTTP call leak into a later boundary
   // test's capture window and break its no-outbound assertion.
   const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
+    {
+      // Agent creation + merge is slow and previously raced parallel seeded OTP
+      // fixtures under full-suite concurrency ("Invalid code").
+      name: 'POST /verify-otp -- seeded merge anonymous resources',
+      fn: testVerifyOtp_seededMergeAnonymousResources,
+    },
     {
       name: 'POST /complete-onboarding -- happy then idempotent',
       fn: testCompleteOnboarding_happyThenIdempotent,
