@@ -3046,6 +3046,74 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors():
+    """Host-pin evaluate refusals may ERROR then continue to write_lock; do not fail closed.
+
+    Local repro: browser-doordash-usb-c-cable agent
+    b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached Place Order write_lock after
+    call_F5UFL3phdf5e1hNqYAizEq1T evaluate pin-guard ERROR, then failed only on
+    no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": (
+                    "Refusing evaluate that would navigate away from pinned host "
+                    "'www.doordash.com'. Current page URL: "
+                    "https://www.doordash.com/consumer/checkout/?lat=37.79184297658503"
+                    "&lng=-122.39233201369643&order_cart_id=8cb87c3b-a1d2-4eb1-a381-6356e100cb19"
+                    "&overridePageType=nv_checkout. Use input_text/click on this page "
+                    "instead of location/history/window.open scripts."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_F5UFL3phdf5e1hNqYAizEq1T",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "toolCallId": "call_LZiLVA70u6O8RU855bnoqaZ5",
+                    "title": 'Clicked <button "Place Order\\n$21.30">',
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_terminal = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Browser crashed while evaluating page state",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_real_failure",
+                    "title": "evaluate",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_terminal) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, still_terminal)[0] is False
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
