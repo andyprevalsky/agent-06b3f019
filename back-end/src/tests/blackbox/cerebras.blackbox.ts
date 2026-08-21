@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
+import { retryWithBackoff } from '../../providers/retry';
 
 const OK_SSE = [
   'data: {"choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"brief\\",\\"response\\":\\"done\\"}"}}]}',
@@ -133,34 +134,38 @@ async function run(): Promise<void> {
       stream: false,
     };
     delete (probeBody as { stream_options?: unknown }).stream_options;
-    const maxAttempts = 5;
-    let liveStatus = 0;
-    let liveText = '';
     let elapsedMs = 0;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const started = Date.now();
-      const live = await fetch(CEREBRAS_API_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${liveKey}`,
-          'Content-Type': 'application/json',
+    const probe = await retryWithBackoff(
+      async () => {
+        const started = Date.now();
+        const live = await fetch(CEREBRAS_API_URL, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${liveKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(probeBody),
+        });
+        elapsedMs = Date.now() - started;
+        const liveText = await live.text();
+        return { ok: live.ok, status: live.status, text: liveText };
+      },
+      {
+        maxRetries: 5,
+        // Preserve the prior quadratic schedule: 1s, 4s, 9s, 16s between attempts.
+        fixedDelays: [1_000, 4_000, 9_000, 16_000],
+        shouldRetryResult: (result) => {
+          if (result.ok || result.status === 404) return false;
+          return (
+            result.status === 429 ||
+            /too_many_requests|queue_exceeded|high traffic/i.test(result.text)
+          );
         },
-        body: JSON.stringify(probeBody),
-      });
-      elapsedMs = Date.now() - started;
-      liveStatus = live.status;
-      liveText = await live.text();
-      const queueExceeded =
-        liveStatus === 429 || /too_many_requests|queue_exceeded|high traffic/i.test(liveText);
-      if (live.ok || liveStatus === 404 || !queueExceeded || attempt === maxAttempts) {
-        break;
+        component: 'cerebras-chat-probe',
       }
-      const backoffMs = 1_000 * attempt * attempt;
-      process.stdout.write(
-        `WARN Cerebras chat probe attempt ${attempt}/${maxAttempts} got HTTP ${liveStatus}; retrying in ${backoffMs}ms\n`
-      );
-      await new Promise((resolve) => setTimeout(resolve, backoffMs));
-    }
+    );
+    const liveStatus = probe.status;
+    const liveText = probe.text;
     assert.notEqual(
       liveStatus,
       404,
