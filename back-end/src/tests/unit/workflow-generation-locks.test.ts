@@ -2,9 +2,10 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { resolveAndSignal } from '../../providers/gateResolution';
 import {
+  acceptChatWorkflowExecution,
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   lockAgentWorkflowGeneration,
   lockAgentWorkflowGenerationShared,
@@ -94,6 +95,60 @@ async function main(): Promise<void> {
       } finally {
         releaseFirst();
         releaseSecond();
+        await Promise.allSettled(transactions);
+      }
+    });
+  });
+
+  await test('a delayed chat escalation cannot overwrite a deployment cutover', async () => {
+    await withAgent(async (agentId) => {
+      const replacement = `${agentId}:replacement:${randomUUID()}`;
+      let announceCutover = () => {};
+      let releaseCutover = () => {};
+      const cutoverLocked = new Promise<void>((resolve) => {
+        announceCutover = resolve;
+      });
+      const cutoverMayContinue = new Promise<void>((resolve) => {
+        releaseCutover = resolve;
+      });
+      const transactions: Promise<unknown>[] = [];
+
+      try {
+        const cutover = runTransactionWithRetry(async (tx) => {
+          await lockAgentWorkflowGeneration(tx, agentId);
+          announceCutover();
+          await cutoverMayContinue;
+          await tx.agent.update({
+            where: { id: agentId },
+            data: { temporalWorkflowId: replacement },
+          });
+        });
+        transactions.push(cutover);
+        await cutoverLocked;
+
+        let chatCommitSettled = false;
+        const chatCommit = acceptChatWorkflowExecution(agentId, {
+          workflowId: agentId,
+          firstExecutionRunId: `run-${randomUUID()}`,
+        }).finally(() => {
+          chatCommitSettled = true;
+        });
+        transactions.push(chatCommit);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.strictEqual(
+          chatCommitSettled,
+          false,
+          'chat workflow ownership must wait behind the cutover lock'
+        );
+
+        releaseCutover();
+        const [, accepted] = await Promise.all([cutover, chatCommit]);
+        assert.strictEqual(accepted, false);
+        const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+        assert.strictEqual(stored.temporalWorkflowId, replacement);
+        assert.strictEqual(stored.temporalFirstExecutionRunId, null);
+      } finally {
+        releaseCutover();
         await Promise.allSettled(transactions);
       }
     });
