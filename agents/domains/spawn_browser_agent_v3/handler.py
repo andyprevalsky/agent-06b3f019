@@ -7585,9 +7585,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             live_verify_dom_tree = (
                                 str(live_verify_state.get("dom_tree") or "") or None
                             )
+                        # Prefer the probe's settled same-site URL (soft-redirect
+                        # resume) so live verify does not re-punch a poisoned
+                        # deep link that already redirected cleanly during probes.
+                        live_verify_url = str(
+                            config_result.get("saved_url") or current_url or ""
+                        ).strip() or current_url
                         if not await verify_live_page_cleared_challenge(
                             input_page,
-                            current_url,
+                            live_verify_url,
                             agent_id=agent_id,
                             user_id=user_id,
                             claude_token=token_state.access_token,
@@ -7615,6 +7621,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_url = browser_state.get("url", current_url)
                     if config_result is not None:
+                        saved_resume = str(config_result.get("saved_url") or "").strip()
+                        if saved_resume.startswith(("http://", "https://")) and not str(
+                            current_url or ""
+                        ).startswith(("http://", "https://")):
+                            current_url = saved_resume
                         provider = config_result.get("provider")
                         proxy_tier = config_result.get("proxy_tier")
                         config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"

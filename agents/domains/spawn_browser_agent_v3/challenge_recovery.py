@@ -404,6 +404,40 @@ async def _wait_for_clean_page(
     return bool(result.get("clean"))
 
 
+def _registrable_host(hostname: str) -> str:
+    host = (hostname or "").lower().strip(".")
+    if host.startswith("www."):
+        return host[4:]
+    return host
+
+
+def same_site_navigation_url(target_url: str, settled_url: str) -> str | None:
+    """Return settled_url when it is a same-site http(s) sibling of target_url.
+
+    Soft-block recoveries (Hotels.com) often clear on a same-host redirect away
+    from a poisoned deep link. Later stability checks must re-nav that settled
+    document — re-punching the original deep link re-triggers 429 / Bot or Not
+    even though the promoted exit is usable.
+    """
+    settled = (settled_url or "").strip()
+    if not settled.startswith(("http://", "https://")):
+        return None
+    target_host = _registrable_host(urlparse(target_url).hostname or "")
+    settled_host = _registrable_host(urlparse(settled).hostname or "")
+    if not target_host or not settled_host or target_host != settled_host:
+        return None
+    return settled
+
+
+def settled_probe_url_after_clean(target_url: str, page: Any) -> str:
+    """Pick the URL for the next probe attempt after a clean settle."""
+    try:
+        settled = str(getattr(page, "url", "") or "")
+    except Exception:
+        settled = ""
+    return same_site_navigation_url(target_url, settled) or target_url
+
+
 async def _probe_page(
     page: Any,
     target_url: str,
@@ -439,10 +473,16 @@ async def _probe_page(
         except Exception:
             on_fn = None
     try:
+        # After a clean settle, subsequent attempts re-nav the settled same-site
+        # URL instead of re-hitting a poisoned deep link that soft-redirected
+        # away (Hotels.com Hotel Kabuki → city search; live verify 429).
+        navigate_url = target_url
         for _ in range(attempts):
             response = None
             try:
-                response = await page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
+                response = await page.goto(
+                    navigate_url, wait_until="domcontentloaded", timeout=45_000
+                )
             except Exception:
                 pass
             if not await _wait_for_clean_page(
@@ -465,6 +505,7 @@ async def _probe_page(
                 recovery_reason=recovery_reason,
             ):
                 return False
+            navigate_url = settled_probe_url_after_clean(target_url, page)
         return True
     finally:
         if callable(on_fn) and callable(off_fn):
@@ -542,7 +583,11 @@ async def verify_live_page_cleared_challenge(
     Candidate probes can false-stable: a remote session's already-loaded probe
     content looks clean, then a fresh same-host navigation lands on Access Denied
     (Eventim Cloudflare). Never accept a static snapshot of preloaded content —
-    always navigation-probe the target URL on the live tab via the LLM classifier.
+    always navigation-probe on the live tab via the LLM classifier.
+
+    When ``target_url`` soft-redirects to a same-site settled document (Hotels.com
+    poisoned deep link → city search), follow-up attempts re-nav that settled URL
+    instead of re-punching the original deep link (which re-triggers 429).
     """
     return await _probe_page(
         page,

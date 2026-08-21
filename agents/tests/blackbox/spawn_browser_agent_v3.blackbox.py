@@ -5746,6 +5746,9 @@ def test_recovery_requires_live_tab_verify_before_success():
     assert "configKey" in recovery_block
     # Preloaded winners must not rewrite challenged origin state onto the clean session.
     assert "if not bool(config_result.get(\"storage_state_preloaded\")):" in recovery_block
+    # Soft-redirect resume: live verify prefers probe saved_url over poisoned deep link.
+    assert 'config_result.get("saved_url")' in recovery_block
+    assert "live_verify_url" in recovery_block
 
 
 def test_recovery_restore_failure_is_not_suppressed():

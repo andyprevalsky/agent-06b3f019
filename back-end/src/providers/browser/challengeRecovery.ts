@@ -93,6 +93,34 @@ export interface CandidateProbeResult {
    * agent ToolUsage ledger via recover-challenge → usage_by_model).
    */
   classifierLlmUsage?: ChallengeClassifierLlmUsage[];
+  /** Final same-site URL after the last clean probe settle (soft-redirect resume). */
+  settledUrl?: string;
+}
+
+function registrableHost(hostname: string | null | undefined): string {
+  const host = String(hostname || '')
+    .toLowerCase()
+    .replace(/^\.+|\.+$/g, '');
+  return host.startsWith('www.') ? host.slice(4) : host;
+}
+
+/** Same-site settled URL for follow-up probe / resume navigations. */
+export function sameSiteNavigationUrl(
+  targetUrl: string,
+  settledUrl: string | null | undefined
+): string | null {
+  const settled = String(settledUrl || '').trim();
+  if (!settled.startsWith('http://') && !settled.startsWith('https://')) return null;
+  let targetHost = '';
+  let settledHost = '';
+  try {
+    targetHost = registrableHost(new URL(targetUrl).hostname);
+    settledHost = registrableHost(new URL(settled).hostname);
+  } catch {
+    return null;
+  }
+  if (!targetHost || !settledHost || targetHost !== settledHost) return null;
+  return settled;
 }
 
 export interface SuccessfulRecoveryCandidate {
@@ -364,6 +392,7 @@ export async function probeCandidateBrowser(
   // requirePaymentCdn ignored — kept on the type for older callers.
   void logContext.requirePaymentCdn;
   const solve = logContext.waitForSolver ?? waitForProviderSolver;
+  let settledUrl: string | undefined;
   try {
     const context = session.validationBrowser.contexts()[0];
     if (context === undefined) {
@@ -376,9 +405,12 @@ export async function probeCandidateBrowser(
       await context.addInitScript(recoveryOriginStorageScript(storageState));
     }
     const page = context.pages()[0] ?? (await context.newPage());
+    // Soft-redirect resume: after a clean settle, follow-up attempts re-nav the
+    // settled same-site URL instead of re-punching a poisoned deep link.
+    let navigateUrl = targetUrl;
     for (let index = 0; index < attempts; index += 1) {
       const response = await page
-        .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+        .goto(navigateUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
         .catch(() => null);
       if (origins.length > 0) {
         await page.evaluate(async () => {
@@ -402,11 +434,17 @@ export async function probeCandidateBrowser(
         });
         continue;
       }
+      const pageUrl = sameSiteNavigationUrl(targetUrl, page.url());
+      if (pageUrl) {
+        settledUrl = pageUrl;
+        navigateUrl = pageUrl;
+      }
       log.info('Challenge recovery candidate probe attempt clean', {
         ...logContext,
         attempt: index + 1,
         attempts,
         title: attempt.title.slice(0, 200),
+        settledUrl: settledUrl ?? null,
         actual_model: attempt.usage?.actual_model ?? null,
         prompt_tokens: attempt.usage?.prompt_tokens ?? null,
       });
@@ -425,6 +463,7 @@ export async function probeCandidateBrowser(
     paymentCdnOk: true,
     paymentCdnHosts: {},
     classifierLlmUsage,
+    ...(settledUrl ? { settledUrl } : {}),
   };
 }
 
@@ -627,12 +666,14 @@ export async function searchAndPromoteBrowserConfig(
     ...(winner.probe.classifierLlmUsage ?? []),
   ];
 
+  const resumeUrl =
+    sameSiteNavigationUrl(input.targetUrl, winner.probe.settledUrl) ?? input.targetUrl;
   return {
     task_id: current.id,
     session_id: winner.session.sessionId,
     debug_url: winner.session.debugUrl,
     ws_url: winner.session.wsUrl,
-    saved_url: input.targetUrl,
+    saved_url: resumeUrl,
     provider: winner.config.provider,
     proxy_tier: winner.config.proxyMode,
     config_key: winner.config.key,

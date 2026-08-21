@@ -12,6 +12,7 @@ import {
   recoveryConfigKeyForSession,
   runLaneConfigSearch,
   orderConfigsForLane,
+  sameSiteNavigationUrl,
   shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
@@ -683,6 +684,21 @@ function testRecoveryRequestSchema(): void {
   );
 }
 
+function testSameSiteNavigationUrl(): void {
+  const kabuki =
+    'https://www.hotels.com/Hotel-Search?destination=Hotel%20Kabuki%2C%20San%20Francisco';
+  const city =
+    'https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California';
+  assert.equal(sameSiteNavigationUrl(kabuki, city), city);
+  assert.equal(
+    sameSiteNavigationUrl(kabuki, 'https://hotels.com/Hotel-Search?destination=SF'),
+    'https://hotels.com/Hotel-Search?destination=SF'
+  );
+  assert.equal(sameSiteNavigationUrl(kabuki, 'https://evil.example/x'), null);
+  assert.equal(sameSiteNavigationUrl(kabuki, 'not-a-url'), null);
+  assert.equal(sameSiteNavigationUrl(kabuki, ''), null);
+}
+
 function testChallengeLlmClassifierCostRouting(): void {
   assert.equal(CHALLENGE_LLM_MODEL, 'rose-labs/rose-1-mini');
   const paid = challengeClassifierCostCents({
@@ -711,6 +727,7 @@ async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
   await testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear();
+  await testParallelCookieLanesFirstFullClearWins();
   await testNoStableCandidateCleansEverything();
   await testPartialStableCandidateIsNeverPromoted();
   // Payment-CDN / Stripe.js ranking + hard gates live in
@@ -718,6 +735,7 @@ async function main(): Promise<void> {
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
   testOrderConfigsForLane();
   testRecoveryConfigKeyForSession();
+  testSameSiteNavigationUrl();
   testChallengeDetection();
   testChallengeLlmClassifierCostRouting();
   testSteelPreferredWhenCdnHardFilterActive();

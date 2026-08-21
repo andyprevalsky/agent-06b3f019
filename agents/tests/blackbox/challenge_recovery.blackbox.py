@@ -451,6 +451,8 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
             self.body_text = body_text
             self._html = html
             self.goto_count = 0
+            self.goto_urls: list[str] = []
+            self.url = ""
             self.flip_to_denied_on_goto = flip_to_denied_on_goto
 
         async def title(self):
@@ -463,8 +465,10 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
         async def content(self):
             return self._html
 
-        async def goto(self, *_args, **_kwargs):
+        async def goto(self, url, *_args, **_kwargs):
             self.goto_count += 1
+            self.goto_urls.append(url)
+            self.url = url
             if self.flip_to_denied_on_goto:
                 self._title = "Access Denied"
                 self.body_text = "Access Denied"
@@ -512,6 +516,109 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
             solver_timeout_seconds=0,
         )
         assert false_stable.goto_count == 1
+
+
+async def test_live_tab_verify_follows_same_site_soft_redirect():
+    """Hotels.com: clean soft-redirect must not re-punch the poisoned deep link.
+
+    Repro of agent 3a1423a0: stripped+residential probes settled on city search
+    (200), then live verify attempt-2 re-hit Hotel Kabuki URL → 429 Bot or Not.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_browser_agent_v3.challenge_recovery import same_site_navigation_url
+
+    kabuki = (
+        "https://www.hotels.com/Hotel-Search?destination=Hotel%20Kabuki%2C%20San%20Francisco"
+        "&flexibility=0_DAY&d1=2026-08-22&startDate=2026-08-22&d2=2026-08-23&endDate=2026-08-23"
+        "&adults=1&rooms=1&typeaheadCollationId=b2c18f3d-bd0d-4ed8-a9e3-049b903ce7b6"
+    )
+    city = (
+        "https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California"
+        "%2C%20United%20States%20of%20America&flexibility=0_DAY&d1=2026-08-22"
+        "&startDate=2026-08-22&d2=2026-08-23&endDate=2026-08-23&adults=1&rooms=1"
+    )
+    assert same_site_navigation_url(kabuki, city) == city
+    assert same_site_navigation_url(kabuki, "https://evil.example/x") is None
+
+    class SoftRedirectPage:
+        def __init__(self):
+            self.goto_urls: list[str] = []
+            self.url = ""
+            self._title = "Bot or Not?"
+            self.body_text = "Show us your human side"
+            self._html = "<h1>Bot or Not?</h1>"
+            self.kabuki_hits = 0
+
+        async def title(self):
+            return self._title
+
+        async def content(self):
+            return self._html
+
+        async def goto(self, url, *_args, **_kwargs):
+            self.goto_urls.append(url)
+            if "Hotel%20Kabuki" in url or "Hotel Kabuki" in url:
+                self.kabuki_hits += 1
+                if self.kabuki_hits == 1:
+                    # Soft-redirect to usable city search (probe/live attempt 1).
+                    self.url = city
+                    self._title = "San Francisco, California, United States of America Hotel Search Results"
+                    self.body_text = "300+ properties filters listings pricing interactive search"
+                    self._html = "<main>hotel search results</main>"
+                else:
+                    # Re-punching the poisoned deep link re-triggers soft-block.
+                    self.url = url
+                    self._title = "Bot or Not?"
+                    self.body_text = "Show us your human side"
+                    self._html = "<h1>Bot or Not?</h1>"
+            else:
+                self.url = url
+                self._title = "San Francisco, California, United States of America Hotel Search Results"
+                self.body_text = "300+ properties filters listings pricing interactive search"
+                self._html = "<main>hotel search results</main>"
+            return None
+
+    async def classify_from_page(page, response=None, **_kwargs):
+        title = await page.title()
+        challenged = title == "Bot or Not?"
+        return {
+            "clean": not challenged,
+            "reason": "bot" if challenged else "search-ui",
+            "title": title,
+            "usage": {},
+        }
+
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(side_effect=classify_from_page),
+    ):
+        page = SoftRedirectPage()
+        assert await verify_live_page_cleared_challenge(
+            page, kabuki, attempts=2, solver_timeout_seconds=0
+        )
+        assert page.goto_urls == [kabuki, city]
+        assert page.kabuki_hits == 1
+
+        # Without settled-URL follow-up, a second Kabuki hit would fail closed.
+        poisoned = SoftRedirectPage()
+
+        async def always_kabuki(page_obj, target, **kwargs):
+            # Simulate pre-fix behavior: always navigate target_url.
+            from domains.spawn_browser_agent_v3 import challenge_recovery as cr
+
+            collected = []
+            for _ in range(kwargs.get("attempts", 2)):
+                await page_obj.goto(target)
+                if not await cr._wait_for_clean_page(
+                    page_obj, None, kwargs.get("solver_timeout_seconds", 0)
+                ):
+                    return False
+            return True
+
+        # Document the failure mode the fix closes (2× Kabuki → Bot or Not).
+        assert not await always_kabuki(poisoned, kabuki, attempts=2, solver_timeout_seconds=0)
+        assert poisoned.kabuki_hits == 2
 
 
 def test_payment_document_url_detection():
@@ -923,6 +1030,10 @@ async def run_all_tests():
     await result.record_async(
         "live_tab_verify_access_denied",
         test_live_tab_verify_accepts_clean_and_rejects_access_denied,
+    )
+    await result.record_async(
+        "live_tab_verify_same_site_soft_redirect",
+        test_live_tab_verify_follows_same_site_soft_redirect,
     )
     result.record("payment_document_url_detection", test_payment_document_url_detection)
     result.record(
