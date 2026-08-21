@@ -53,6 +53,7 @@ export {
   ensureKernelSessionFileDirectories,
   getKernelCaptchaTelemetry,
   listKernelSessionFiles,
+  pressKernelKeys,
   readKernelSessionFile,
   resizeKernelViewport,
   uploadKernelSessionFile,
