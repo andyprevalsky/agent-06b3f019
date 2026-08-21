@@ -4684,7 +4684,53 @@ def test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted(
     assert "exhausted" in reason
     assert snapshot["email_otp"]["attempted"] is True
     assert snapshot["minted"]["attempted"] is True
-    assert snapshot["guest"]["unavailable"] is True
+    # Guest is N/A until a guest CTA is observed on the page.
+    assert snapshot["guest"]["option_seen"] is False
+    assert snapshot["guest"]["unavailable"] is False
+    assert snapshot["guest"]["exhausted_or_unavailable"] is True
+
+
+def test_auth_runtime_state_blocks_assistance_until_seen_guest_path_attempted():
+    """Booking-style: guest CTA seen, no credentials → must try guest before step 8."""
+    from domains.spawn_browser_agent_v3.service import AuthRuntimeState
+
+    state = AuthRuntimeState.from_auth_options(
+        {
+            "passwords": [],
+            "email_otp": {"available": False},
+            "minted": None,
+        }
+    )
+
+    allowed, reason, snapshot = state.user_assistance_guard()
+    assert allowed
+    assert snapshot["guest"]["exhausted_or_unavailable"] is True
+
+    state.observe_page_text(
+        "[8817]<button>I'll reserve</button>\nYou won't be charged yet · Pay at the property"
+    )
+    allowed, reason, snapshot = state.user_assistance_guard()
+    assert not allowed
+    assert "guest" in reason
+    assert snapshot["guest"]["option_seen"] is True
+    assert snapshot["guest"]["attempted"] is False
+    assert snapshot["guest"]["exhausted_or_unavailable"] is False
+
+    state.observe_clicked_element_text("I'll reserve")
+    allowed, reason, snapshot = state.user_assistance_guard()
+    assert allowed
+    assert snapshot["guest"]["attempted"] is True
+    assert snapshot["guest"]["exhausted_or_unavailable"] is True
+
+
+def test_text_indicates_guest_completion_option_matches_booking_cta():
+    from domains.spawn_browser_agent_v3.service import text_indicates_guest_completion_option
+
+    assert text_indicates_guest_completion_option("I'll reserve")
+    assert text_indicates_guest_completion_option("Continue as guest")
+    assert not text_indicates_guest_completion_option("Sign in")
+    assert not text_indicates_guest_completion_option("Homes guests love")
+
 
 def test_auth_runtime_state_does_not_block_on_unmatched_connected_email():
     from domains.spawn_browser_agent_v3.service import AuthRuntimeState
@@ -14676,101 +14722,142 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         auth_boundary_calls.append("create_assistance")
         return await create_auth_mock(*args, **kwargs)
 
-    with (
-        patch(
-            "domains.spawn_browser_agent_v3.handler.load_config",
-            return_value=_fake_config(),
-        ),
-        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_session_info",
-            AsyncMock(return_value=session_info),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_recent_otps",
-            AsyncMock(return_value=[]),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
-            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
-            AsyncMock(
-                side_effect=[
-                    {
-                        "action": {
-                            "action": "request_user_assistance_for_authentication",
-                            "thinking": "",
-                            "params": {},
+    from contextlib import ExitStack
+
+    # ExitStack keeps this under Python's nested-block limit. Also stub the
+    # challenge classifier: fake empty pages raise and fail closed as challenged.
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged",
+                AsyncMock(return_value=False),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.load_config",
+                return_value=_fake_config(),
+            )
+        )
+        stack.enter_context(patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"))
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.fetch_session_info",
+                AsyncMock(return_value=session_info),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.fetch_recent_otps",
+                AsyncMock(return_value=[]),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+                AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
+                AsyncMock(
+                    side_effect=[
+                        {
+                            "action": {
+                                "action": "request_user_assistance_for_authentication",
+                                "thinking": "",
+                                "params": {},
+                            },
+                            "usage": {},
+                            "mode": "waterfall",
                         },
-                        "usage": {},
-                        "mode": "waterfall",
-                    },
-                    {
-                        "action": {
-                            "action": "attempt_completion",
-                            "thinking": "The signed-in page confirms completion.",
-                            "params": {"reasoning": "confirmed"},
+                        {
+                            "action": {
+                                "action": "attempt_completion",
+                                "thinking": "The signed-in page confirms completion.",
+                                "params": {"reasoning": "confirmed"},
+                            },
+                            "usage": {},
+                            "mode": "waterfall",
                         },
+                    ]
+                ),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.create_user_auth_assistance_request",
+                create_auth,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler._restart_after_failed_steel_auth",
+                restart,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler._reconnect_browser_stack_after_rotation",
+                reconnect_mock,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context",
+                AsyncMock(return_value=[]),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+                AsyncMock(
+                    return_value={
+                        "score": 1.0,
+                        "reasoning": "completed",
+                        "structured_response": {"result": "ride requested"},
                         "usage": {},
-                        "mode": "waterfall",
-                    },
-                ]
-            ),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.create_user_auth_assistance_request",
-            create_auth,
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler._restart_after_failed_steel_auth",
-            restart,
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler._reconnect_browser_stack_after_rotation",
-            reconnect_mock,
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context",
-            AsyncMock(return_value=[]),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
-            AsyncMock(
-                return_value={
-                    "score": 1.0,
-                    "reasoning": "completed",
-                    "structured_response": {"result": "ride requested"},
-                    "usage": {},
-                }
-            ),
-        ),
-        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
-            AsyncMock(),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
-        ),
-        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
-            AsyncMock(),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message",
-            AsyncMock(),
-        ),
-        patch("browser_tools.dom_service.DOMService", _FakeDomService),
-        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
-        patch(
-            "playwright.async_api.async_playwright",
-            return_value=_FakeAsyncPlaywright(fake_playwright),
-        ),
-    ):
+                    }
+                ),
+            )
+        )
+        stack.enter_context(
+            patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[]))
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
+                AsyncMock(),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+                AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+            )
+        )
+        stack.enter_context(patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock))
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                AsyncMock(),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message",
+                AsyncMock(),
+            )
+        )
+        stack.enter_context(patch("browser_tools.dom_service.DOMService", _FakeDomService))
+        stack.enter_context(patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer))
+        stack.enter_context(
+            patch(
+                "playwright.async_api.async_playwright",
+                return_value=_FakeAsyncPlaywright(fake_playwright),
+            )
+        )
         result = await spawn_browser_agent_activity_v3(
             user_id="user-1",
             agent_id="agent-1",
@@ -16455,6 +16542,14 @@ async def run_all_tests():
     r.record(
         "auth_runtime_state_guard",
         test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted,
+    )
+    r.record(
+        "auth_runtime_state_guest_cta_gate",
+        test_auth_runtime_state_blocks_assistance_until_seen_guest_path_attempted,
+    )
+    r.record(
+        "guest_completion_option_text",
+        test_text_indicates_guest_completion_option_matches_booking_cta,
     )
     r.record(
         "auth_runtime_state_unmatched_email",

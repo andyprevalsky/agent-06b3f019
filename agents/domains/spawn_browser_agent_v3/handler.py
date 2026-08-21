@@ -6253,6 +6253,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 raise
             current_url = browser_state.get("url", "")
             await record_passkey_usage_once()
+            auth_runtime_state.observe_page_text(
+                f"{browser_state.get('title') or ''}\n{browser_state.get('dom_tree') or ''}"
+            )
 
             # Sticky cross-origin handoff pin: once the live page leaves the
             # session origin registrable domain, remember that host/URL and
@@ -8075,6 +8078,16 @@ Based on this feedback, I need to continue working on the task and address the i
                 element = dom_service.selector_map.get(idx)
                 if element:
                     element_desc = get_element_description(element)
+                    guest_click_text = element_desc
+                    try:
+                        children_text = element.get_all_children_text()
+                        if children_text and str(children_text).strip():
+                            guest_click_text = str(children_text)
+                    except Exception:
+                        attrs = getattr(element, "attributes", None) or {}
+                        aria = attrs.get("aria-label") or attrs.get("ariaLabel") or ""
+                        guest_click_text = f"{element_desc} {aria}".strip()
+                    auth_runtime_state.observe_clicked_element_text(guest_click_text)
 
             title_progress, title_done, action_name = build_action_titles(
                 action_name, unified_action, element_desc, coords, secret_refs

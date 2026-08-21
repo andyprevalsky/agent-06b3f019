@@ -220,6 +220,9 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "  - 3. Saved passwords" in prompt
     assert "  - 4. Email OTP" in prompt
     assert "  - 5. SMS OTP" in prompt
+    assert "  - 6. Minted account" in prompt
+    assert "  - 7. Guest/anonymous completion, if viable" in prompt
+    assert "  - 8. request_user_assistance_for_authentication" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
     assert "call request_user_assistance_for_authentication" in prompt
     assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt

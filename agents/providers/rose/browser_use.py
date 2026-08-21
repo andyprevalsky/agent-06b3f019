@@ -173,9 +173,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "request_user_assistance_for_authentication": {
         "description": (
-            "Request user help signing in only after every automated auth option in the current session is exhausted. "
+            "Waterfall step 8: request user help signing in only after steps 1–7 are exhausted or unavailable. "
             "Before calling, you must have tried every saved password, email OTP if available, SMS OTP if "
-            "available, the minted agent account when it has an email, and guest/anonymous completion if possible. Cookie and "
+            "available, the minted agent account when it has an email, and guest/anonymous completion when the "
+            "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages — those are not authentication blockers; call recover_from_challenge instead."
@@ -650,14 +651,16 @@ action envelope in text; use the provided tool call.
   - 4. Email OTP
   - 5. SMS OTP
   - 6. Minted account
-  - 7. Guest/anonymous completion, if viable
+  - 7. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear)
+  - 8. request_user_assistance_for_authentication — only after 1–7 are exhausted or unavailable
 - Cookie-based and existing Steel-session auth are applied automatically before you start.
 - If a passkey is listed for this site and you are not already logged in, you MUST try the passkey path before any saved password. The passkey is pre-loaded into the browser's authenticator and signs silently once the site starts WebAuthn; no browser passkey popup is expected. First focus/click the username, email, or account field to trigger any passkey autofill/conditional WebAuthn. If the site asks for an identifier, enter the relevant account email/username from the page or saved credentials and continue, but do not type a password yet. If a "Sign in with a passkey", "Use passkey", or similar option appears, choose it. Wait briefly for navigation, OTP, or account access. Only fall through to saved passwords after the passkey option is absent, unavailable, or visibly fails.
 - For saved passwords, type the listed ref (for example, pwd:andy@email.com) into password fields; the browser tool decrypts it and records credential usage.
 - For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
 - When a site offers OTP delivery options, prefer email over SMS.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
-- If authentication blocks the task after all available automated auth options are exhausted, call request_user_assistance_for_authentication. Do not call attempt_completion, send_message_to_user, or report a status instead.
+- Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
+- When authentication still blocks the task after steps 1–7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
 - CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. Call recover_from_challenge for those. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
