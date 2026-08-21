@@ -1590,7 +1590,7 @@
   {
     "name": "browser-doordash-usb-c-cable",
     "title": "DoorDash USB-C Cable Delivery",
-    "description": "Buy a constrained electronics item through rapid local retail delivery.",
+    "description": "Stage a constrained DoorDash electronics checkout and stop at the unresolved place-order write lock.",
     "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -1608,12 +1608,9 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kind_any_of": [
-      "payment_approval",
-      "write_lock"
-    ],
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1637,7 +1634,7 @@
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, delivery timing, and one auto-approved checkout boundary. The task may exercise guest checkout and does not require an injected cookie bundle.",
+      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and delivery timing. The runner treats the final place-order write lock as completion, leaves that request unresolved, and does not place the order. The task may exercise guest checkout and does not require an injected cookie bundle.",
       "live_cookie_domains": [
         "doordash.com"
       ]
@@ -1649,7 +1646,8 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved attention request"
+          "Exactly one final DoorDash place-order write lock is triggered and left unresolved",
+          "The approval request identifies a USB-C cable and its price"
         ],
         "checks": [
           {
@@ -1661,12 +1659,15 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "approval_request_count",
             "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "USB-C"
+            ],
+            "require_amount": true
           }
         ]
       },
@@ -1676,9 +1677,11 @@
         "criteria": [
           "The selected item is one USB-C to USB-C cable at least 6 feet long with at least 60W charging support",
           "The selected item costs no more than $30 before taxes and fees and is not an adapter, multi-pack, USB-A cable, or attached charger",
-          "The agent reaches the payment/write-lock or completed checkout with the earliest available delivery"
+          "Delivery is to the saved San Francisco address with a grounded delivery window from the write-lock or checkout transcript",
+          "The final Place order or Pay action triggers exactly one unresolved write_lock request",
+          "The order is not placed and no order confirmation is produced"
         ],
-        "judge_prompt": "Review product details, cart evidence, and attention requests. Pass only when every connector, length, wattage, quantity, price, exclusion, and delivery constraint is grounded in the transcript."
+        "judge_prompt": "Pass only when grounded evidence shows one USB-C to USB-C cable that is at least 6 feet long, supports at least 60W, costs no more than $30 before taxes and fees, excludes adapter/multi-pack/USB-A/attached-charger items, delivers to the saved San Francisco address with a delivery window, and stops at exactly one unresolved final DoorDash place-order write lock. The write-lock attention request itself is valid grounding for item, price, quantity, address, and delivery facts. Prefer the earliest available delivery when the transcript shows a choice, but do not fail solely because the write-lock shipping line does not literally say earliest. Fail for authentication assistance, payment-card approval, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2096,13 +2099,13 @@
       ],
       "services": [
         "amctheatres.com",
-        "write_lock"
+        "request_payment_card"
       ],
       "secrets": [],
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase.",
+      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
       "live_cookie_domains": [
         "amctheatres.com"
       ]
@@ -2114,7 +2117,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
+          "The run stops after exactly one unresolved payment-card approval on the grounded AMC Theatres checkout",
           "The approval identifies AMC Metreon 16, the date, showtime, all three seat assignments, and total amount"
         ],
         "checks": [
@@ -2127,25 +2130,10 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "approval_request_count",
             "value": 1
           }
         ]
-      },
-      {
-        "id": "imax-group-ticket-adjacency-semantics",
-        "method": "single_turn_llm_judge",
-        "criteria": [
-          "The staged purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
-          "Grounded showtime and seat-map evidence shows the selected show is the earliest qualifying premium-format show remaining tonight and all 3 selected seats are available and directly adjacent in the same row",
-          "Each ticket price is under $35 before fees, and no concessions, memberships, donations, insurance, or upgrades are added",
-          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory stops at exactly one unresolved payment approval grounded to the AMC checkout"
-        ],
-        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are staged with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, and the run stops at exactly one unresolved payment approval that identifies the venue, date, showtime, all three seats, and total amount. Do not require or accept an approved charge or completed purchase. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2794,7 +2782,7 @@
         "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
       ],
       "live_targets": [],
-      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
+      "context_notes": "Local isolated stack only. The harness runs these tasks as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 so credit checks use the admin unlimited path. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces resolveAndIssuePurchaseCard onto chargeAndIssueCard instead of issueAdminCompanyCard, so stripeHold / payment_approval remain reachable. back-end/scripts/setup-benchmark-payment.ts seeds that same admin user on the isolated local DB with a Stripe test customer + default card, an active subscription, and the org-managed AgentCard integration. The admin no-force path keeps its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "group": "daily",
@@ -2918,7 +2906,7 @@
         "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
       ],
       "live_targets": [],
-      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
+      "context_notes": "Local isolated stack only. The harness runs these tasks as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 so credit checks use the admin unlimited path. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces resolveAndIssuePurchaseCard onto chargeAndIssueCard instead of issueAdminCompanyCard, so stripeHold / payment_approval remain reachable. back-end/scripts/setup-benchmark-payment.ts seeds that same admin user on the isolated local DB with a Stripe test customer + default card, an active subscription, and the org-managed AgentCard integration. The admin no-force path keeps its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3044,7 +3032,7 @@
         "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
       ],
       "live_targets": [],
-      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
+      "context_notes": "Local isolated stack only. The harness runs these tasks as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 so credit checks use the admin unlimited path. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces resolveAndIssuePurchaseCard onto chargeAndIssueCard instead of issueAdminCompanyCard, so stripeHold / payment_approval remain reachable. back-end/scripts/setup-benchmark-payment.ts seeds that same admin user on the isolated local DB with a Stripe test customer + default card, an active subscription, and the org-managed AgentCard integration. The admin no-force path keeps its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3193,7 +3181,7 @@
         "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
       ],
       "live_targets": [],
-      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
+      "context_notes": "Local isolated stack only. The harness runs these tasks as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 so credit checks use the admin unlimited path. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces resolveAndIssuePurchaseCard onto chargeAndIssueCard instead of issueAdminCompanyCard, so stripeHold / payment_approval remain reachable. back-end/scripts/setup-benchmark-payment.ts seeds that same admin user on the isolated local DB with a Stripe test customer + default card, an active subscription, and the org-managed AgentCard integration. The admin no-force path keeps its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e"
   },
@@ -3390,6 +3378,9 @@
       "spawn_browser_agent": 1,
       "spawn_claude_code_agent": 1,
       "message_person": 1
+    },
+    "min_steps": {
+      "browser": 2
     },
     "tool_count_scope": "root",
     "bench": "pipeline-e2e",
@@ -3908,7 +3899,9 @@
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "write_lock",
     "start_phase": "execute",
     "status": "ready",
     "source": [
@@ -3916,7 +3909,18 @@
       "user-label:daily-immediate-bitcoin-trigger"
     ],
     "bench": "pipeline-e2e",
-    "group": "daily"
+    "group": "daily",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Pass when wait_for fires and the agent opens a phone-call write_lock. approval_handling=ignore leaves that lock unresolved so no real outbound call is placed; agent COMPLETED is not required."
+    }
   },
   {
     "name": "phone-call-client-intake",

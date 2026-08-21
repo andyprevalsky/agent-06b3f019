@@ -54,6 +54,7 @@ async function run(): Promise<void> {
   process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = '1';
   installFetchCapture();
 
+  let cleanupError: unknown;
   try {
     assert.strictEqual((await fetch(url)).status, 429);
     assert.strictEqual((await fetch(url)).status, 200);
@@ -73,12 +74,15 @@ async function run(): Promise<void> {
     // namespace can remove this uniquely-named file between an existsSync check
     // and the unlink. Tolerate that race instead of guarding with existsSync
     // (which is itself a TOCTOU window) — the assertions above are the test.
+    // Defer any non-ENOENT throw until after finally so no-unsafe-finally does
+    // not swallow the original assertion error.
     try {
       unlinkSync(cacheFile);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') cleanupError = error;
     }
   }
+  if (cleanupError !== undefined) throw cleanupError;
 
   process.stdout.write('fetch-capture retry cache tests passed\n');
 }

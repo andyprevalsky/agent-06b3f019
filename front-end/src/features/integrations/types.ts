@@ -1,3 +1,20 @@
+/**
+ * Health of ONE connected email address.
+ *
+ * `needs_reconnect` is terminal — only re-consent fixes it. `sync_failed` is
+ * transient, so it warns without pushing the user through an OAuth flow that
+ * would not have helped.
+ */
+export type EmailCredentialState = 'connected' | 'needs_reconnect' | 'sync_failed';
+
+export interface EmailCredentialHealth {
+  id: string;
+  email: string | null;
+  state: EmailCredentialState;
+  lastErrorReason: string | null;
+  lastFailedSyncAt: string | null;
+}
+
 export interface ConnectedIntegration {
   id: string;
   name: string;
@@ -13,6 +30,19 @@ export interface ConnectedIntegration {
     [key: string]: unknown;
   };
   lastSuccessfulSyncAt?: string;
+  /**
+   * Per-account health. A `gmail` row fans out to N addresses, so a single
+   * integration status cannot say which address broke.
+   */
+  emailCredentials?: EmailCredentialHealth[];
+}
+
+export interface GmailResyncResult {
+  email: string;
+  /** Retry cannot fix this; the client must run the OAuth connect flow. */
+  needsReauth: boolean;
+  state: EmailCredentialState;
+  reason: string | null;
 }
 
 export type AccordionSection = 'browsers' | 'passwords' | 'messagesSync' | 'compute' | 'socials';

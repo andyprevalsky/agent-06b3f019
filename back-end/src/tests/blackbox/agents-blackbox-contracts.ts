@@ -7,6 +7,11 @@ export const ErrorResponse = z.object({ error: z.string(), details: z.array(z.an
 export const AgentListItem = z.object({
   agent_id: z.string().uuid(),
   goal: z.string(),
+  // Sidebar organization. `title` is the rename override (null falls back to
+  // `goal`), `pinned_at` the pin marker, `archived_at` the soft-delete marker.
+  title: z.string().nullable(),
+  pinned_at: DATE_LIKE.nullable(),
+  archived_at: DATE_LIKE.nullable(),
   model: z.string(),
   source: z.enum(['WEB', 'MAC_APP', 'SMS']),
   reasoning_max_tokens: z.number(),
@@ -27,6 +32,11 @@ export const AgentListItem = z.object({
 export const ListAgentsResponse = z.object({
   agents: z.array(AgentListItem),
 });
+
+// GET /api/agents/archived. Same row shape as the active list — both views map
+// through agentQueryService.toListItem — so the contract is deliberately shared:
+// a field that drifts on one list must drift on the other or this schema fails.
+export const ArchivedAgentsResponse = ListAgentsResponse;
 
 export const TreeAgentItem = z.object({
   agent_id: z.string().uuid(),
@@ -91,6 +101,9 @@ export const AgentDetail = z.object({
   parent_agent_id: z.string().uuid().nullable(),
   parent_goal: z.string().nullable(),
   goal: z.string(),
+  title: z.string().nullable(),
+  pinned_at: DATE_LIKE.nullable(),
+  archived_at: DATE_LIKE.nullable(),
   model: z.string(),
   source: z.enum(['WEB', 'MAC_APP', 'SMS']),
   reasoning_max_tokens: z.number(),
@@ -172,6 +185,9 @@ export const UpdateAgentResponse = z.object({
   agent: z.object({
     agent_id: z.string().uuid(),
     goal: z.string().optional(),
+    title: z.string().nullable(),
+    pinned_at: DATE_LIKE.nullable(),
+    archived_at: DATE_LIKE.nullable(),
     model: z.string(),
     reasoning_max_tokens: z.number(),
     progress: z.number(),

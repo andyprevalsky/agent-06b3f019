@@ -72,7 +72,7 @@ export function cacheRequestTimeoutMs(
   return Math.min(Math.max(Math.floor(configured), 100), 60_000);
 }
 
-// The canonical base fixture is ~150MB. One TLS stream that large under the
+// The canonical base fixture is tens to hundreds of MB. One TLS stream that large under the
 // 30s probe timeout and maxAttempts:1 either times out or dies mid-flight with
 // an `sslv3 alert bad record mac`, which is how a republication silently fails
 // and every consumer then refuses to boot. Bulk transfers get their own budget
@@ -98,8 +98,14 @@ export function bulkTransferTimeoutMs(
 // part is cheap to retry.
 export const MULTIPART_CHUNK_BYTES = 16 * 1024 * 1024;
 
-// Below this, a single PutObject is strictly simpler and just as reliable.
-export const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
+// Canonical custom-format dumps compress to roughly 30MB. Keep the cutoff at one
+// legal chunk so even a highly-compressed base gets per-part retries instead of
+// one fragile PutObject stream (`sslv3 alert bad record mac` in production R2).
+export const MULTIPART_THRESHOLD_BYTES = MULTIPART_CHUNK_BYTES;
+
+export function shouldUseMultipartUpload(size: number): boolean {
+  return size >= MULTIPART_THRESHOLD_BYTES;
+}
 
 export function planUploadParts(
   size: number,
@@ -250,7 +256,7 @@ async function put(token: string, inFile: string): Promise<number> {
   const key = objectKey(token);
   const s3 = client(true);
 
-  if (size >= MULTIPART_THRESHOLD_BYTES) {
+  if (shouldUseMultipartUpload(size)) {
     await uploadMultipart(s3, bucket, key, inFile, size);
     return 0;
   }

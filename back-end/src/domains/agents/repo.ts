@@ -13,6 +13,8 @@ export {
   failAgentIfStillActive,
   clearWorkflowForTerminalAgent,
   softDeleteAgent,
+  restoreAgentAndDescendants,
+  findArchivedAgent,
   deleteAttentionRequests,
   createGithubRepoAccess,
   deleteAgentTools,
@@ -21,6 +23,11 @@ export {
 } from './repoMutations';
 export type { BatchCreateAgentParams } from './repoMutations';
 export { findExistingAgentsByIds } from './repoDescendantStarts';
+export {
+  findTopLevelAgents,
+  findTopLevelAgentsMatching,
+  findArchivedTopLevelAgents,
+} from './repoSidebarLists';
 export {
   pauseAgentUnderWorkflowLock,
   updateAgentConfigMutation,
@@ -31,40 +38,6 @@ export {
 // ---------------------------------------------------------------------------
 // Agent queries
 // ---------------------------------------------------------------------------
-
-/** Fetch top-level agents for a user (no parent, not deleted). */
-export async function findTopLevelAgents(userId: string) {
-  return prisma.agent.findMany({
-    where: {
-      userId,
-      parentAgentId: null,
-      deletedAt: null,
-    },
-    select: {
-      id: true,
-      goal: true,
-      model: true,
-      reasoningMaxTokens: true,
-      source: true,
-      progress: true,
-      status: true,
-      statusMessage: true,
-      temporalWorkflowId: true,
-      tokenCount: true,
-      tokensIn: true,
-      tokensOut: true,
-      contextSize: true,
-      messageCount: true,
-      fastModeCacheEnabled: true,
-      worldModelMode: true,
-      createdAt: true,
-      updatedAt: true,
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
-  });
-}
 
 /** Fetch agents in a sub-agent tree by busId. */
 export async function findAgentsByBusId(busId: string) {

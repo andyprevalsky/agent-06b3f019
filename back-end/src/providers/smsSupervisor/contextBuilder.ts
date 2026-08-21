@@ -361,7 +361,7 @@ async function fetchSmsSession(userId: string) {
 
 async function fetchBrowserFingerprint(userId: string) {
   return prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
     select: { config: true },
   });
 }

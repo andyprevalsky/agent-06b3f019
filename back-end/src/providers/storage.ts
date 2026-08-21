@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import WebSocket from 'ws';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
+import { looksLikeUtf8ReplacementCorruption } from './fetchCapture';
 
 const log = createLogger('Storage');
 
@@ -163,7 +164,21 @@ export async function downloadFromStorage(storagePath: string): Promise<Buffer> 
     throw new Error(`Failed to download file: ${error.message}`);
   }
 
-  return Buffer.from(await data.arrayBuffer());
+  const buf = Buffer.from(await data.arrayBuffer());
+  // Last-line guard: fetchCapture used to UTF-8-corrupt binary bodies under
+  // BLACKBOX_TEST_CAPTURE_OUTBOUND=1 (207364→369851 JPEG). Refuse to hand a
+  // corrupted buffer to E2B so Claude Code never sees EF BF BD "images".
+  if (looksLikeUtf8ReplacementCorruption(buf)) {
+    log.error('Downloaded attachment looks UTF-8-corrupted; refusing to use bytes', {
+      storagePath,
+      size: buf.length,
+    });
+    throw new Error(
+      `Downloaded attachment at ${storagePath} looks UTF-8-corrupted (${buf.length} bytes); ` +
+        'refusing to upload to code-agent sandbox'
+    );
+  }
+  return buf;
 }
 
 /**

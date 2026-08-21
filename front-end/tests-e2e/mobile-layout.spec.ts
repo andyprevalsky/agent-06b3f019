@@ -92,7 +92,11 @@ test.describe('mobile-layout', () => {
     await assertWithinViewport(page.locator('header').first(), 'TerminalHeader');
 
     // ── Query textarea accessible and within bounds ───────────────────────
-    const textarea = page.locator('textarea').first();
+    // Prefer the goal/composer placeholders — never `textarea.first()`, which
+    // can match an off-screen Codex/cloud-agent terminal input (x≈-160k).
+    const textarea = page.locator(
+      'textarea[placeholder="Enter any goal"], textarea[placeholder="Type your message..."]',
+    );
     await expect(textarea).toBeVisible();
     await assertWithinViewport(textarea, 'Query textarea');
 
@@ -171,7 +175,11 @@ test.describe('mobile-layout', () => {
       ).toEqual([]);
 
       // ── Invariant 3: query input still reachable ─────────────────────────
-      const textarea = page.locator('textarea').first();
+      // Prefer the goal/composer placeholders — never `textarea.first()`, which
+      // can match an off-screen Codex/cloud-agent terminal input (x≈-160k).
+      const textarea = page.locator(
+        'textarea[placeholder="Enter any goal"], textarea[placeholder="Type your message..."]',
+      );
       await expect(textarea).toBeVisible();
       await assertWithinViewport(textarea, 'Query textarea (agent active)');
 

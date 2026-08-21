@@ -24,11 +24,11 @@ sources:
   - agent 1bffacc0-a587-48f9-8282-3f39fe584ddb
   - agent 0b3b582b-19d6-4aea-ad4f-df81248b27c3
   - agent d2a9805f-5b00-4874-9ed4-e8cd9cde0c65
-  - fleet run 20260819-002102-843616 ref e277cf645
-  - fleet run 20260819-004041-887409 ref a239a2b36
-  - fleet run 20260819-033204-1139373 ref be4c560af
-  - fleet run 20260819-040130-1177499 ref d143e0b47
-  - fleet run 20260819-043024-1215179 ref 06fc101b6
+  - commit e277cf645
+  - commit a239a2b36
+  - commit be4c560af
+  - commit d143e0b47
+  - commit 06fc101b6
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py (test_live_tab_looks_challenged_helpers, test_recovery_skips_when_live_tab_already_clear, test_url_looks_like_api_surface_and_navigation_pin, test_execute_goto_refuses_api_surface_urls, test_execute_navback_refuses_when_host_pinned, test_execute_navback_refuses_on_cross_origin_handoff, test_execute_close_tab_refuses_on_cross_origin_handoff, test_navigation_guard_has_no_endpoint_path_allowlists)
 status: open
 ---

@@ -452,8 +452,8 @@ def test_blanket_preflight_uses_tolerant_sync():
     assert captured == {"gpt": True, "claude": True, "required": None}
 
 
-def test_claude_code_required_preflight_is_strict():
-    """Claude Code tasks must not inherit ANTHROPIC_API_KEY tolerance."""
+def test_claude_code_required_preflight_tolerates_funded_anthropic_key():
+    """Claude Code tasks may proceed on ANTHROPIC_API_KEY when OAuth sync is empty."""
     captured: dict[str, object] = {}
 
     def fake_sync(
@@ -472,7 +472,7 @@ def test_claude_code_required_preflight_is_strict():
         patch.object(
             rb,
             "_has_usable_anthropic_api_key_fallback",
-            new=AsyncMock(side_effect=AssertionError("Anthropic fallback must not gate Claude Code")),
+            new=AsyncMock(return_value=True),
         ),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
@@ -485,7 +485,43 @@ def test_claude_code_required_preflight_is_strict():
             )
         )
 
-    assert captured == {"gpt": True, "claude": False, "required": ("claude",)}
+    assert captured == {"gpt": True, "claude": True, "required": None}
+
+
+def test_claude_code_required_preflight_is_strict_without_anthropic_key():
+    """Without a funded Anthropic key, code-agent tasks require Claude OR Codex."""
+    captured: dict[str, object] = {}
+
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
+    ) -> bool:
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
+        captured["required"] = required_token_types
+        return True
+
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=False),
+    ):
+        asyncio.run(
+            rb._refresh_local_compute_tokens_for_run(
+                "http://127.0.0.1:3999",
+                require_claude_code=True,
+            )
+        )
+
+    assert captured == {"gpt": True, "claude": False, "required": ("any",)}
 
 
 def test_claude_code_required_preflight_fails_closed_when_sync_fails():
@@ -713,6 +749,7 @@ def test_anthropic_excluded_live_fixture_prefers_gpt_without_requiring_codex():
         patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
         patch.object(rb, "_is_simulate_mode", return_value=False),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_sync_email_credentials", return_value=True),
         patch.object(rb, "_sync_browser_credentials", return_value=True),
     ):
         rb._apply_live_fixture(ctx)
@@ -937,6 +974,7 @@ def test_live_fixture_sync_tolerates_missing_gpt_code():
     with (
         patch.object(rb, "_is_simulate_mode", return_value=False),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_sync_email_credentials", return_value=True),
         patch.object(rb, "_sync_browser_credentials", return_value=True),
     ):
         rb._apply_live_fixture(ctx)
@@ -964,6 +1002,26 @@ def test_live_fixture_still_fails_closed_when_claude_code_sync_fails():
             raise AssertionError("expected RuntimeError when compute-token sync fails")
         except RuntimeError as exc:
             assert "compute tokens" in str(exc).lower()
+
+
+def test_live_fixture_fails_closed_when_email_credential_sync_fails():
+    """message_person paths need usable from_email; a failed overlay must abort."""
+    ctx = rb.LiveFixtureContext(
+        base_url="http://127.0.0.1:3999",
+        user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
+        auth_realm="local",
+    )
+    with (
+        patch.object(rb, "_is_simulate_mode", return_value=False),
+        patch.object(rb, "_sync_compute_tokens", return_value=True),
+        patch.object(rb, "_sync_email_credentials", return_value=False),
+        patch.object(rb, "_sync_browser_credentials", return_value=True),
+    ):
+        try:
+            rb._apply_live_fixture(ctx)
+            raise AssertionError("expected RuntimeError when email-credential sync fails")
+        except RuntimeError as exc:
+            assert "email credentials" in str(exc).lower()
 
 
 def test_preflight_raises_when_sync_fails():

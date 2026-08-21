@@ -8,10 +8,25 @@ import { MemoryRouter, type MemoryRouterProps } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppDataProvider } from '@/hooks/useAppData';
+import {
+  AttentionRequestsProvider,
+  useAttentionRequests,
+} from '@/features/terminal-component-group';
 
 interface TestWrapperOptions {
   route?: string;
   routerProps?: MemoryRouterProps;
+}
+
+/**
+ * Mirrors the real TerminalLayout wiring: one attention subscription held above
+ * the tree, fanned out via context. Runs the actual hook (MSW serves the
+ * endpoint) rather than a stub, so components under test exercise the same path
+ * they do in the app.
+ */
+function AttentionScope({ children }: { children: React.ReactNode }) {
+  const attention = useAttentionRequests(false);
+  return <AttentionRequestsProvider value={attention}>{children}</AttentionRequestsProvider>;
 }
 
 function createTestWrapper(options: TestWrapperOptions = {}) {
@@ -29,12 +44,14 @@ function createTestWrapper(options: TestWrapperOptions = {}) {
       <QueryClientProvider client={queryClient}>
         <AppDataProvider>
           <TooltipProvider>
-            <MemoryRouter
-              initialEntries={options.route ? [options.route] : ['/']}
-              {...options.routerProps}
-            >
-              {children}
-            </MemoryRouter>
+            <AttentionScope>
+              <MemoryRouter
+                initialEntries={options.route ? [options.route] : ['/']}
+                {...options.routerProps}
+              >
+                {children}
+              </MemoryRouter>
+            </AttentionScope>
           </TooltipProvider>
         </AppDataProvider>
       </QueryClientProvider>
