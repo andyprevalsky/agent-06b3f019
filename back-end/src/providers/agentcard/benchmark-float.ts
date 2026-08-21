@@ -107,9 +107,7 @@ export async function resolveBenchmarkCardholderId(
   }
 
   for (const email of BENCHMARK_CARDHOLDER_EMAILS) {
-    const byEmail = cardholders.find(
-      (cardholder) => cardholder.email?.toLowerCase() === email
-    );
+    const byEmail = cardholders.find((cardholder) => cardholder.email?.toLowerCase() === email);
     if (byEmail !== undefined) return byEmail.id;
   }
   return cardholders[0].id;
