@@ -87,7 +87,13 @@ pair). Wired into `_is_intermediate_browser_retry_failure`. Cemented by
 Offline replay of k=5 agents `1336b4b4` / `19a568fb`: `_tool_runtime_failures`
 returns `[]` after the fix (was non-empty before).
 
-Outcome proof: re-run exact `scripts/run-bench --local browser-alchemy-springs-sauna`.
+Causal proof: blackbox + offline replay of 1336b4b4/19a568fb → `_tool_runtime_failures=[]`.
+
+Post-fix exact local run `accb4afb-1543-41c6-8303-5440dab7d813` did **not** hit evaluate
+hard recovery; it failed `alchemy-sauna-selection-semantics` (earliest-available not
+grounded). Runtime-contract / `no_tool_failures` did not fire — confirming the approved
+harness false-fail is cleared on that path. Full pass@k outcome when recovery fires
+remains to be re-observed.
 
 Do not relax selection/terminal judges or bump timeouts. Cohort B
 (auth_assistance before selection) remains a separate open thread.
