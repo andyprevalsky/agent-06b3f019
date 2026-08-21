@@ -180,6 +180,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
             agents={agents}
             drip={drip}
             attentionAgentIds={attentionAgentIds}
+            onRefreshAttention={attention.refetch}
             currentView={currentView}
             setCurrentView={setCurrentView}
             showBrowse={
@@ -218,6 +219,7 @@ function SidebarSection({
   agents,
   drip,
   attentionAgentIds,
+  onRefreshAttention,
   currentView,
   setCurrentView,
   showBrowse,
@@ -227,6 +229,7 @@ function SidebarSection({
   agents: ReturnType<typeof useTerminalAgents>;
   drip: ReturnType<typeof useDrippiness>;
   attentionAgentIds: ReadonlySet<string>;
+  onRefreshAttention: () => void | Promise<void>;
   currentView: TerminalView;
   setCurrentView: (v: TerminalView) => void;
   showBrowse: boolean;
@@ -245,6 +248,7 @@ function SidebarSection({
       onSelectAgent={agents.handleSelectAgent}
       onCreateAgent={agents.handleCreateNewAgent}
       onRefreshAgents={agents.loadAgents}
+      onRefreshAttention={onRefreshAttention}
       attentionAgentIds={attentionAgentIds}
       user={agents.user}
       onLogout={() => {

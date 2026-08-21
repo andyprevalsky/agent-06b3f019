@@ -166,6 +166,10 @@ export async function deleteAgentRecursive(agentId: string): Promise<void> {
     }
   }
 
+  // Match agentLifecycleService.deleteAgentRecursive: archive must drop this
+  // agent's attention requests or the inbox keeps prompting for a dead run.
+  await prisma.agentAttentionRequest.deleteMany({ where: { agentId } });
+
   await prisma.agent.update({
     where: { id: agentId },
     data: { deletedAt: new Date() },
