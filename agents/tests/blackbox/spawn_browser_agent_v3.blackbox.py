@@ -10677,7 +10677,7 @@ async def test_dom_service_passkeys_follow_focus_target_for_sso_transition():
 
     dom = DOMService(cdp_url="")
     dom._session = _FakeSession()
-    await dom._suppress_browser_overlays()
+    await dom.ensure_browser_overlays_suppressed()
     assert await dom.inject_passkeys([amazon]) == 1
 
     dom._session.agent_focus_target_id = "google-target"
