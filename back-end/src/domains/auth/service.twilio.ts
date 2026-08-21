@@ -12,8 +12,9 @@ import {
 } from './config';
 import type { TwilioVerifyResponse, SupabaseAdminUserResponse } from './types';
 
-// Dev-mode test credentials: bypass Twilio for fast local login
-// Disabled when BLACKBOX_TEST_CAPTURE_OUTBOUND is set (tests need real Twilio calls)
+// Dev-mode test credentials: bypass Twilio for fast local login AND for every
+// blackbox/capture/benchmark run. These numbers share the prod Twilio Verify
+// service; live hits rate-limit the admin phone out of production login.
 // The +52 variant exercises the LATAM country-selector path without a real MX SMS.
 const DEV_TEST_PHONES = ['+19729777432', '+529729777432'];
 const DEV_TEST_OTP = '181818';
@@ -27,20 +28,30 @@ const BROWSER_REVIEW_TEST_OTP = '191919';
  * Whether the dev test-phone OTP bypass applies. Pure + exported for unit tests.
  *
  * The `isDev` gate makes this impossible in production (NODE_ENV=production →
- * IS_DEV=false), so it can never weaken real auth. Benchmark stacks set
- * BLACKBOX_TEST_CAPTURE_OUTBOUND=1 to capture the agent's outbound SMS, which
- * flips `isBlackboxTest` and would otherwise disable the bypass — but the
- * message-person benchmark's iMessage relay needs it to auto-login the benchmark
- * user. `benchmarkAllowDevOtpLogin` (run.sh's BENCHMARK_ALLOW_DEV_OTP_LOGIN=1)
- * re-enables the login bypass while capture stays on. Normal blackbox runs don't
- * set that flag, so their real-Twilio expectation is unchanged.
+ * IS_DEV=false), so it can never weaken real auth.
+ *
+ * Capture/blackbox flags are intentionally ignored: the shared admin/test phones
+ * must never call live Twilio Verify (same account + Verify service as prod).
+ * Boundary tests that need real outbound Twilio shapes use a synthetic phone
+ * with seeded/replayed responses instead. `isBlackboxTest` /
+ * `benchmarkAllowDevOtpLogin` remain on the opts object for call-site
+ * compatibility but no longer gate the bypass.
  */
+function normalizeDevPhone(phone: string): string {
+  // Collapse formatting so "+1 972 977 7432" still matches the E.164 allowlist.
+  // Guard non-strings so invalid request bodies still return validation/OTP
+  // errors instead of throwing inside the bypass check.
+  if (typeof phone !== 'string') return '';
+  return phone.replace(/[\s\-()]/g, '');
+}
+
 export function devTestPhoneBypassApplies(
   phone: string,
   opts: { isDev: boolean; isBlackboxTest: boolean; benchmarkAllowDevOtpLogin: boolean }
 ): boolean {
-  const blockedByBlackbox = opts.isBlackboxTest && !opts.benchmarkAllowDevOtpLogin;
-  return opts.isDev && !blockedByBlackbox && DEV_TEST_PHONES.includes(phone);
+  void opts.isBlackboxTest;
+  void opts.benchmarkAllowDevOtpLogin;
+  return opts.isDev && DEV_TEST_PHONES.includes(normalizeDevPhone(phone));
 }
 
 function isDevTestPhone(phone: string): boolean {
@@ -55,11 +66,25 @@ function shouldBypassOtpSend(phone: string): boolean {
   return phone === BROWSER_REVIEW_TEST_PHONE || isDevTestPhone(phone);
 }
 
-function shouldBypassOtpCheck(phone: string, code: string): boolean {
-  return (
-    (phone === BROWSER_REVIEW_TEST_PHONE && code === BROWSER_REVIEW_TEST_OTP) ||
-    (isDevTestPhone(phone) && code === DEV_TEST_OTP)
-  );
+/**
+ * Resolve a fixed-credential OTP check without calling Twilio.
+ * Returns null when the phone is not a fixed test/review credential.
+ */
+function bypassOtpCheckResult(
+  phone: string,
+  code: string
+): { approved: boolean; error?: string } | null {
+  if (phone === BROWSER_REVIEW_TEST_PHONE) {
+    if (code === BROWSER_REVIEW_TEST_OTP) return { approved: true };
+    return { approved: false, error: 'Invalid OTP' };
+  }
+  if (isDevTestPhone(phone)) {
+    if (code === DEV_TEST_OTP) return { approved: true };
+    // Wrong code on the admin/test phone must still skip Twilio — a failed
+    // VerificationCheck still consumes Twilio rate-limit budget.
+    return { approved: false, error: 'Invalid OTP' };
+  }
+  return null;
 }
 
 const log = createLogger('Auth');
@@ -190,10 +215,14 @@ export async function checkTwilioVerifyOTP(
   phone: string,
   code: string
 ): Promise<{ approved: boolean; error?: string }> {
-  // Bypass Twilio only for fixed internal/review evaluation credentials.
-  if (shouldBypassOtpCheck(phone, code)) {
-    log.info('OTP bypass: auto-approving test OTP');
-    return { approved: true };
+  // Bypass Twilio for fixed internal/review evaluation credentials — including
+  // wrong-code attempts, which must not burn live Verify rate-limit budget.
+  const bypassed = bypassOtpCheckResult(phone, code);
+  if (bypassed !== null) {
+    log.info('OTP bypass: resolved test/review OTP without Twilio', {
+      approved: bypassed.approved,
+    });
+    return bypassed;
   }
 
   /* c8 ignore next 10 -- config validation: env vars always set in test environment */

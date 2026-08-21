@@ -1119,6 +1119,15 @@ def _validate_payment_receipt(
     if not receipt:
         return "missing requestPaymentCard metadata"
 
+    # Catalog `expected_payment_receipt: true` means "any well-formed payment-card request"
+    # (e.g. gate-subscription-card-mint-admin-bypass). Calling `.get` on the bool raised
+    # AttributeError, which the poll loop swallowed as "Approval check error" and delayed
+    # auto-approve + never set expected_payment_receipt_seen on that first sighting.
+    if expected is True:
+        return None
+    if not isinstance(expected, dict):
+        return f"invalid expected_payment_receipt type: {type(expected).__name__}"
+
     required_fields = expected.get("requiredFields", [])
     for field in required_fields:
         if field not in receipt:
@@ -8297,7 +8306,7 @@ def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
                 or ""
             )
         )
-    for key in ("error", "title", "detail", "details"):
+    for key in ("error", "title", "detail", "details", "message"):
         value = candidate.get(key)
         if isinstance(value, str) and value:
             parts.append(value)
@@ -8334,10 +8343,33 @@ def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[d
     )
 
 
+def _is_intermediate_navigation_pin_guard_failure(
+    candidate: dict,
+    message: Optional[dict] = None,
+) -> bool:
+    """Explicit `navigation_pin_guard` action rows are intermediate coaching only.
+
+    Textual `Refusing … pinned host` ERRORs are handled by
+    `_is_recoverable_pinned_host_refusal_failure` (requires a later browser
+    recovery). Do not treat every pinned-host refusal string as retry noise —
+    unrecovered terminal refusals must still fail `no_tool_failures`.
+
+    Local repro: browser-doordash-usb-c-cable agent
+    b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached an unresolved Place Order write_lock
+    after an evaluate pin-guard ERROR; recovery-gated pinned-host classification
+    covers that path.
+    """
+    _ = message  # signature matches sibling intermediate classifiers
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+    return action_type == "navigation_pin_guard"
+
+
 def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
     """True when a browser-agent ERROR is expected recovery / retry noise."""
-    return _is_intermediate_challenge_recovery_failure(candidate) or _is_intermediate_stale_dom_node_failure(
-        candidate, message
+    return (
+        _is_intermediate_challenge_recovery_failure(candidate)
+        or _is_intermediate_stale_dom_node_failure(candidate, message)
+        or _is_intermediate_navigation_pin_guard_failure(candidate, message)
     )
 
 
