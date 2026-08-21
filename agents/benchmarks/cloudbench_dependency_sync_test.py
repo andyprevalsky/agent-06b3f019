@@ -7777,6 +7777,36 @@ def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
     assert cloud.count('park_warm_source "${mid:-${maintenance_mid:-}}" || true') == 2
 
 
+def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
+    """Parallel fleet launches must wait out concurrent warm maintenance instead
+    of hard-failing the first non-stopped sample into INFRA."""
+    fleet = FLEET_SCRIPT.read_text()
+    wait_log = fleet.index(
+        "warm source is $warm_state; waiting until stopped before fleet provisioning"
+    )
+    wait_helper = fleet.index(
+        'cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID"',
+        wait_log,
+    )
+    gate = fleet.index("warm source must be stopped before fleet provisioning")
+    park_at = fleet.index("parking warm source at $WARM_PARKED_VM_SIZE")
+    fanout_at = fleet.index("# ── Phase 1:")
+    # Wait log → shared helper → timeout gate → parking → Phase-1 fanout.
+    assert wait_log < wait_helper < gate < park_at < fanout_at
+    assert 'warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"' in fleet
+    assert 'warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"' in fleet
+    # Must re-list machines after the wait settles (not cache the first sample).
+    relist_at = fleet.index(
+        'warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo \'[]\')"',
+        wait_helper,
+    )
+    assert wait_helper < relist_at < park_at
+    # Never stop/destroy the shared warm donor from the fleet wait path.
+    wait_block = fleet[wait_log:park_at]
+    assert "machine stop" not in wait_block
+    assert "machines destroy" not in wait_block
+
+
 def test_controller_names_the_signal_that_killed_it() -> None:
     """Silent teardowns (children mass-TERM'd, no error, no barrier release)
     repeatedly masqueraded as infra failures when the controller was signalled
@@ -9412,6 +9442,13 @@ def test_run_bench_routes_production_only_batches_off_fly_fleet() -> None:
     assert run_bench.index("cloudbench-production-only-tasks.py") < run_bench.index(
         'exec bash "$ROOT_DIR/scripts/run-bench-fleet"'
     )
+    # RCA (2026-08-21): --single-box must reject before the production-only
+    # classifier. Sandbox multi-workstream has no tasks.json; classifier exit-2
+    # otherwise masks the parallel-safe message (scenario 14).
+    assert run_bench.index('if [[ "${1:-}" == "--single-box" ]]') < run_bench.index(
+        "cloudbench-production-only-tasks.py"
+    )
+    assert "not parallel-safe" in run_bench
     assert "production_only" in helper
 
     result = subprocess.run(
