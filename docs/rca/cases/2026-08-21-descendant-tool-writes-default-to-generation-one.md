@@ -22,8 +22,8 @@ tags:
   - descendant-writes
 sources:
   - agent 219dd80e-c2ed-4dc1-a40e-b2b9ea7e0a87
-repro: back-end/src/tests/blackbox/agents-messages.cases.ts — "POST /:id/messages — a header-less descendant TOOL write is never fenced as a stale deployment"
-status: open
+repro: back-end/src/tests/blackbox/agents-cutover-subagent-close.cases.ts + agents-messages.cases.ts — "POST /:id/messages — a header-less descendant TOOL write is never fenced as a stale deployment"
+status: fixed
 ---
 
 ## Problem
@@ -201,8 +201,33 @@ write* is mis-attributed.
 
 ## Solution
 
-Not yet implemented — RCA stopped for agreement on the fix shape. The repro is
-checked in and failing.
+Shipped. Both defects, verified by `222 passed, 0 failed` in the agents blackbox
+domain — the three captured failures flip to pass with their assertions unchanged.
+
+**Defect B — the cutover never closed the sub-agent.** `sealClaimedReplacement`
+now calls `releaseAgentBrowserSessions(agentId)` after sealing, so the replaced
+generation's rented browsers are closed instead of orphaned. Failure is logged,
+never fatal: a browser-provider outage must not block a cutover.
+`completeDescendantCleanup` had the same hole from the other side — it marks a
+child FAILED with a raw `tx.agent.updateMany`, bypassing `updateAgentStatus` and
+therefore `releaseTerminalBrowserSessions` — so a compensating release was added
+there too, mirroring `workflowLivenessReconciler`.
+
+**Defect A — live writes mislabeled as generation 1.** `routes.messages.ts` no
+longer defaults a missing generation header to `req.params.id`; the header is
+passed through as `undefined` and `agentMessageService` attributes the write to
+the agent's live generation via `repo.currentAgentWorkflowGeneration`. All four
+agent-side domain writers (`spawn_browser_agent_v3`, `spawn_agent`,
+`spawn_claude_code_agent`, `call_phone_number`) now send
+`workflow_generation_headers()`, so attribution is explicit rather than inferred.
+
+**Still open — deterministic restart.** The sub-agent is now closed, but nothing
+re-issues it: re-spawning remains the replacement LLM's decision, and the browser
+resume machinery (`fetch_session_info(validate_live=True)` + `resume_browser_session`)
+is still only reachable from the write-lock/payment path. The same silent
+`?? agentId` default also survives at `routes.status.ts`, `routes.ts`, and
+`domains/tool-usage/routes.ts` — untouched here because their fence semantics
+differ and no test covers them yet.
 
 Candidate fixes, in Step 6a order:
 
@@ -229,13 +254,13 @@ broadcast; one agent generated 105 of them from a single replacement. Removing
 the mislabel removes that per-step write amplification. The change is per-request
 header handling with no new fan-in, shared state, or per-agent polling.
 
-## Open — defect B has no repro yet
+## Open — deterministic restart, and the sibling default sites
 
-Defect B (a replaced generation keeps executing for 90 minutes; descendants are
-killed rather than restarted; browser activities and paid sessions are never
-stopped) is **evidenced but not reproduced**. It is the larger of the two by agent
-count (445 vs 81) and is a live cost leak. It needs its own repro at the
-Temporal/agent boundary before any fix. Do not close this case on defect A alone.
+Closing the sub-agent is shipped and tested. **Restarting** it is not: there is
+still no deterministic re-issue of an interrupted browser/explore tool call
+(`_resume_interrupted_wait` covers `wait_for` timestamps only). Proving the
+in-flight activity actually stops also needs a live-worker e2e — no DB artifact
+exists for an orphaned activity, so the blackbox cannot see it.
 
 ## Human feedback
 
