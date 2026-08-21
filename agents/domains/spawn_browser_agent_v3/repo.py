@@ -21,6 +21,7 @@ from domains.spawn_browser_agent_v3.config import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
 

@@ -37,10 +37,44 @@ class TestPrompt:
     required_env: Optional[list[str]] = None  # Live-service prerequisites for this e2e
     live_fixture: Optional[str] = None  # TTL-backed generated fixture name
     live_fixture_ttl_seconds: Optional[int] = None  # Per-fixture cache TTL override
+    workflow_cutover: Optional[str] = None  # Sub-agent tool to cut over mid-flight
 
 
 # All test prompts - mirroring front-end/src/components/terminal/TestPromptsSelector.tsx
 TEST_PROMPTS: dict[str, TestPrompt] = {
+    # Deploy cutover must CLOSE a live sub-agent, not clobber its steps.
+    # Excluded from --basic by requires_browser_agent; reach with --test.
+    "browser-cutover": TestPrompt(
+        name="browser-cutover",
+        title="Deploy cutover closes a live browser agent",
+        description=(
+            "Starts a long browser task, triggers a real workflow replacement mid-flight, "
+            "and asserts the old browser sub-agent is closed and its rented session released"
+        ),
+        prompt=(
+            "Use a browser agent to go to https://news.ycombinator.com and read the titles "
+            "of the top 20 stories one at a time, then summarize the themes."
+        ),
+        timeout=900,
+        requires_browser_agent=True,
+        start_phase="execute",
+        workflow_cutover="spawn_browser_agent",
+    ),
+    "explore-cutover": TestPrompt(
+        name="explore-cutover",
+        title="Deploy cutover closes a live explore agent",
+        description=(
+            "Starts a long explore task, triggers a real workflow replacement mid-flight, "
+            "and asserts the old explore sub-agent is closed"
+        ),
+        prompt=(
+            "Spawn an explore agent to research the history of the Apollo program in depth, "
+            "covering each mission from Apollo 1 through Apollo 17."
+        ),
+        timeout=900,
+        start_phase="execute",
+        workflow_cutover="spawn_agent",
+    ),
     "chat-mode": TestPrompt(
         name="chat-mode",
         title="Test Chat Mode",

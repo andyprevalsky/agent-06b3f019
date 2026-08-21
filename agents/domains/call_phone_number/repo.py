@@ -10,7 +10,10 @@ import structlog
 
 from config import load_config
 from domains.call_phone_number.config import HTTP_TIMEOUT_MESSAGE
-from helpers.workflow_generation import stamp_tool_workflow_generation
+from helpers.workflow_generation import (
+    stamp_tool_workflow_generation,
+    workflow_generation_headers,
+)
 from tools.base import MessageStatus
 
 logger = structlog.get_logger()

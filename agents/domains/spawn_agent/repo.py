@@ -19,7 +19,10 @@ from domains.spawn_agent.config import (
 )
 from helpers.attachments import FilePointer, resolve_attachments_for_llm
 from helpers.http_client import get_http_client
-from helpers.workflow_generation import stamp_tool_workflow_generation
+from helpers.workflow_generation import (
+    stamp_tool_workflow_generation,
+    workflow_generation_headers,
+)
 from tools.base import MessageStatus
 
 logger = structlog.get_logger()
