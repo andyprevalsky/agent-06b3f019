@@ -196,6 +196,7 @@ export default function MobilePreview() {
             /* preview */
           }}
           resumingAgentId={null}
+          onRefreshAgents={noop}
           realtimeReady={false}
           isSignedIn
           onLoginClick={noop}
