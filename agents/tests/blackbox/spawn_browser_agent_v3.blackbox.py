@@ -10494,8 +10494,6 @@ async def test_evaluate_awaits_promises():
         session_id="s",
         humanizer=None,
         browser_network_recorder=None,
-        navigation_pin_host=None,
-        navigation_origin_base_domain=None,
         current_url="https://tinypng.com/",
         current_auth_realm="",
         prepare_credentials_for_url=None,
@@ -12732,11 +12730,9 @@ async def test_live_tab_looks_challenged_helpers():
     assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
-def test_url_looks_like_api_surface_and_navigation_pin():
-    """Shape-only API refuse + recovery pin + cross-origin handoff pin (no path allowlists)."""
+def test_url_looks_like_api_surface_guard():
+    """Shape-only API refuse remains; host pinning is gone (Blue Bottle → order.online)."""
     from domains.spawn_browser_agent_v3.service_actions import (
-        effective_navigation_pin_host,
-        navigation_leaves_pinned_host,
         url_looks_like_api_surface,
         _navigation_guard_error,
         _ActionContext,
@@ -12750,105 +12746,12 @@ def test_url_looks_like_api_surface_and_navigation_pin():
     # Single-letter / vendor CDN labels are not special-cased.
     assert url_looks_like_api_surface("https://r.example.com/") is False
 
-    pin = "checkout.example.com"
-    current = "https://checkout.example.com/c/pay/cs_live_x"
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="navback",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://api.example.com/",
-            pin_host=pin,
-            action="goto",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://www.merchant.com/cart",
-            pin_host=pin,
-            action="goto",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://checkout.example.com/c/pay/other",
-            pin_host=pin,
-            action="goto",
-        )
-        is False
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="close_tab",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="switch_tab",
-        )
-        is True
-    )
-    # Off the pin already — do not trap.
-    assert (
-        navigation_leaves_pinned_host(
-            current_url="https://www.merchant.com/cart",
-            target_url="https://elsewhere.com/",
-            pin_host=pin,
-            action="goto",
-        )
-        is False
-    )
-
-    # Cross-origin handoff: live host ≠ session origin → pin to live host.
-    assert (
-        effective_navigation_pin_host(
-            current_url=current,
-            recovery_pin_host=None,
-            origin_base_domain="merchant.com",
-        )
-        == "checkout.example.com"
-    )
-    assert (
-        effective_navigation_pin_host(
-            current_url="https://www.merchant.com/cart",
-            recovery_pin_host=None,
-            origin_base_domain="merchant.com",
-        )
-        is None
-    )
-    assert (
-        effective_navigation_pin_host(
-            current_url="https://www.merchant.com/cart",
-            recovery_pin_host="www.merchant.com",
-            origin_base_domain="merchant.com",
-        )
-        == "www.merchant.com"
-    )
-
     ctx = _ActionContext(
         user_id="user-1",
         dom_service=None,  # type: ignore[arg-type]
         action_history=None,  # type: ignore[arg-type]
         session=None,
-        action_name="navback",
+        action_name="goto",
         index=None,
         params={},
         thinking=None,
@@ -12861,7 +12764,7 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         secret_refs=None,
         password_origins=None,
         credential_refs_by_secret_ref=None,
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        current_url="https://www.bluebottlecoffee.com/us/eng/cafes/ferry-building",
         trusted_page_urls=None,
         write_lock_enabled=False,
         write_lock_approvals=None,
@@ -12869,32 +12772,25 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         browser_network_recorder=None,
         current_auth_realm="",
         prepare_credentials_for_url=None,
-        navigation_pin_host=None,
-        navigation_origin_base_domain="merchant.com",
     )
-    assert "leave pinned page host" in (_navigation_guard_error(ctx, action="navback") or "")
-    ctx.action_name = "goto"
+    # Cross-origin merchant → order platform must be allowed (no host pin).
     assert (
         _navigation_guard_error(
-            ctx, action="goto", target_url="https://www.merchant.com/about"
+            ctx,
+            action="goto",
+            target_url="https://order.online/business/BlueBottleCoffee-156787",
+        )
+        is None
+    )
+    assert _navigation_guard_error(ctx, action="navback") is None
+    assert _navigation_guard_error(ctx, action="close_tab") is None
+    assert _navigation_guard_error(ctx, action="open_new_tab", target_url="https://order.online/") is None
+    # API surfaces still refused.
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://api.example.com/"
         )
         is not None
-    )
-    # Same handoff host stays allowed.
-    assert (
-        _navigation_guard_error(
-            ctx, action="goto", target_url="https://checkout.example.com/c/pay/other"
-        )
-        is None
-    )
-    # Still on origin domain — no handoff pin; free to navigate.
-    ctx.current_url = "https://www.merchant.com/cart"
-    assert _navigation_guard_error(ctx, action="navback") is None
-    assert (
-        _navigation_guard_error(
-            ctx, action="goto", target_url="https://www.merchant.com/other"
-        )
-        is None
     )
 
 
@@ -12920,7 +12816,8 @@ async def test_execute_goto_refuses_api_surface_urls():
     ah.record_action.assert_awaited_once()
 
 
-async def test_execute_navback_refuses_when_host_pinned():
+async def test_execute_allows_cross_origin_navigation():
+    """Host pin removed: cross-origin navback/goto/open_new_tab must not refuse."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
@@ -12929,21 +12826,74 @@ async def test_execute_navback_refuses_when_host_pinned():
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
+
     out = await service_actions.execute_action(
         dom_service=dom,
         action_history=ah,
         action={"action": "navback", "params": {}},
         current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_pin_host="checkout.example.com",
     )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
-    ah.record_action.assert_awaited_once()
+    err = str(out.get("error") or "").lower()
+    assert "leave pinned" not in err
+    assert "pinned page host" not in err
+    session.event_bus.dispatch.assert_called()
+
+    # Guard-level cement for merchant → order.online (the Blue Bottle failure).
+    ctx = service_actions._ActionContext(
+        user_id="user-1",
+        dom_service=dom,
+        action_history=ah,
+        session=session,
+        action_name="goto",
+        index=None,
+        params={},
+        thinking=None,
+        coords=None,
+        element=None,
+        available_file_paths=None,
+        session_id=None,
+        config=None,
+        humanizer=None,
+        secret_refs=None,
+        password_origins=None,
+        credential_refs_by_secret_ref=None,
+        current_url="https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
+        trusted_page_urls=None,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        system_name="Rose",
+        browser_network_recorder=None,
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+    )
+    order_url = "https://order.online/business/BlueBottleCoffee-156787"
+    assert (
+        service_actions._navigation_guard_error(ctx, action="goto", target_url=order_url)
+        is None
+    )
+    assert (
+        service_actions._navigation_guard_error(
+            ctx, action="open_new_tab", target_url=order_url
+        )
+        is None
+    )
+    assert service_actions._navigation_guard_error(ctx, action="close_tab") is None
+    assert service_actions._navigation_guard_error(ctx, action="switch_tab") is None
+    assert service_actions._navigation_guard_error(ctx, action="navback") is None
+
+    # Click-off-host path: press_key no longer consults a pin.
+    out_key = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+    )
+    assert "pinned" not in str(out_key.get("error") or "").lower()
+    assert "key chord" not in str(out_key.get("error") or "").lower()
 
 
-async def test_execute_navback_refuses_on_cross_origin_handoff():
-    """Place-order handoff sticks without recovery pin or path allowlists (ea340c81)."""
+async def test_execute_click_and_evaluate_allow_leave_hosts():
+    """Off-host href clicks and navigation evaluate are no longer refused by a pin."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
@@ -12952,158 +12902,45 @@ async def test_execute_navback_refuses_on_cross_origin_handoff():
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "navback", "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
 
-    out_goto = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={
-            "action": "goto",
-            "params": {"url": "https://www.merchant.com/test_payment"},
-        },
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_goto["success"] is False
-    assert "leave pinned page host" in out_goto["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-
-async def test_execute_close_tab_refuses_on_cross_origin_handoff():
-    """Fleet 1bffacc0: close_tab on handoff host crashed the browser session."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.ensure_browser_overlays_suppressed = AsyncMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "close_tab", "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-    out_switch = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "switch_tab", "params": {"tab_id": "ab12"}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_switch["success"] is False
-    assert "leave pinned page host" in out_switch["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-
-async def test_execute_evaluate_refuses_navigation_while_pinned():
-    """Fleet 0b3b582b: evaluate location/href escapes the handoff pin."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    assert service_actions.evaluate_code_looks_like_navigation(
-        "window.location.href = 'https://www.merchant.com/'"
-    )
-    assert service_actions.evaluate_code_looks_like_navigation("history.back()")
-    assert not service_actions.evaluate_code_looks_like_navigation(
-        "document.querySelector('#card-number')?.value"
-    )
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
     out = await service_actions.execute_action(
         dom_service=dom,
         action_history=ah,
         action={
             "action": "evaluate",
-            "params": {"code": "window.location.href = 'https://www.merchant.com/cart'"},
+            "params": {"code": "window.location.href = 'https://order.online/'"},
         },
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
+        current_url="https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
     )
-    assert out["success"] is False
-    assert "evaluate that would navigate" in out["error"]
-
-
-async def test_execute_press_key_and_click_refuse_leave_while_pinned():
-    """Fleet d2a9805f: Ctrl+Shift+W and Return-to-merchant href escaped the pin."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    assert service_actions.press_key_looks_like_leave_page("Control+Shift+W")
-    assert service_actions.press_key_looks_like_leave_page("Alt+Left")
-    assert not service_actions.press_key_looks_like_leave_page("Enter")
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.ensure_browser_overlays_suppressed = AsyncMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "key chord" in out["error"]
+    assert "pinned" not in str(out.get("error") or "").lower()
+    assert "evaluate that would navigate" not in str(out.get("error") or "")
 
     leave_el = MagicMock()
-    leave_el.attributes = {"href": "https://www.merchant.com/cart"}
-    same_el = MagicMock()
-    same_el.attributes = {"href": "https://pay.example.com/confirm"}
-    assert (
-        service_actions.click_href_leaves_pinned_base(leave_el, "checkout.example.com")
-        == "https://www.merchant.com/cart"
-    )
-    assert (
-        service_actions.click_href_leaves_pinned_base(same_el, "checkout.example.com")
-        is None
-    )
-
-    dom.selector_map = {3: leave_el}
-    out_click = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "click", "index": 3, "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_click["success"] is False
-    assert "click that navigates off pinned host" in out_click["error"]
-    session.event_bus.dispatch.assert_not_called()
+    leave_el.attributes = {
+        "href": "https://order.online/business/BlueBottleCoffee-156787"
+    }
+    # Click path needs more of the click helper; assert guard helpers are gone
+    # and href leave helper no longer exists.
+    assert not hasattr(service_actions, "click_href_leaves_pinned_base")
+    assert not hasattr(service_actions, "effective_navigation_pin_host")
+    assert not hasattr(service_actions, "navigation_leaves_pinned_host")
+    assert not hasattr(service_actions, "press_key_looks_like_leave_page")
 
 
-def test_handoff_pin_is_sticky_in_handler():
-    """Once handoff is observed, pin host is persisted (not cleared on return to origin)."""
+def test_handoff_payment_autofill_without_host_pin():
+    """Payment auto-fill still runs on cross-origin handoff; no sticky host pin."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    assert "navigation_pin_url" in source
-    assert "Auto-returning to pinned handoff host" in source
+    assert "navigation_pin_host" not in source
+    assert "navigation_pin_url" not in source
+    assert "Auto-returning to pinned handoff host" not in source
     assert "navigation_origin_base_domain" in source
-    assert "Auto-filled payment refs on pinned handoff page" in source
-    assert "Handoff payment auto-fill exhausted; pin retained" in source
+    assert "_on_cross_origin_handoff" in source
+    assert "Auto-filled payment refs on handoff page" in source
+    assert "Handoff payment auto-fill exhausted" in source
     assert "handoff_payment_fill_attempts" in source
     assert '"text": "card_number"' in source
     assert "wait_for_payment_ref_fields" in source
@@ -13115,16 +12952,16 @@ def test_handoff_pin_is_sticky_in_handler():
     wait_offset = source.index("wait_for_payment_ref_fields")
     attempt_offset = source.index("handoff_payment_fill_attempts += 1")
     assert wait_offset < attempt_offset
-    # Auto-fill gate must stay host/path agnostic.
+    # Auto-fill gate must stay host/path agnostic and must not reintroduce pinning.
     auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
     auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
     auto_fill_block = source[auto_fill_start:auto_fill_end]
     assert "checkout.stripe" not in auto_fill_block
     assert "test_payment" not in auto_fill_block
     assert "api.stripe" not in auto_fill_block
-    assert "Payment auto-fill exhausted — pin held; fill manually" in auto_fill_block
-    assert "Released handoff pin — no payment fields found" not in auto_fill_block
-    assert "navigation_pin_host = None" not in auto_fill_block
+    assert "pin held" not in auto_fill_block
+    assert "Pinned handoff" not in auto_fill_block
+    assert "leave pinned" not in source
 
 
 def test_recovery_skips_when_live_tab_already_clear():
@@ -13152,7 +12989,7 @@ def test_recovery_skips_when_live_tab_already_clear():
 
 
 def test_navigation_guard_has_no_endpoint_path_allowlists():
-    """Nav guards must not special-case payment/checkout path markers."""
+    """Nav guards must not special-case payment/checkout path markers or host pins."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import service_actions
@@ -13160,7 +12997,8 @@ def test_navigation_guard_has_no_endpoint_path_allowlists():
     source = inspect.getsource(service_actions._navigation_guard_error)
     assert "target_looks_like_payment_document" not in source
     assert "payment page" not in source
-    assert "effective_navigation_pin_host" in source
+    assert "effective_navigation_pin_host" not in source
+    assert "pinned page host" not in source
     assert "url_looks_like_api_surface" in source
 
 
@@ -17762,26 +17600,17 @@ async def run_all_tests():
         test_execute_goto_err_aborted_persists_attachment_download,
     )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
-    r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
+    r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
-    await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
+    await r.record_async("cross_origin_nav_allowed", test_execute_allows_cross_origin_navigation)
     await r.record_async(
-        "navback_refuses_cross_origin_handoff",
-        test_execute_navback_refuses_on_cross_origin_handoff,
+        "click_evaluate_allow_leave_hosts",
+        test_execute_click_and_evaluate_allow_leave_hosts,
     )
-    await r.record_async(
-        "close_tab_refuses_cross_origin_handoff",
-        test_execute_close_tab_refuses_on_cross_origin_handoff,
+    r.record(
+        "handoff_payment_autofill_without_host_pin",
+        test_handoff_payment_autofill_without_host_pin,
     )
-    await r.record_async(
-        "evaluate_refuses_nav_while_pinned",
-        test_execute_evaluate_refuses_navigation_while_pinned,
-    )
-    await r.record_async(
-        "press_key_click_refuse_leave_while_pinned",
-        test_execute_press_key_and_click_refuse_leave_while_pinned,
-    )
-    r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
     r.record(
         "nav_guard_no_endpoint_path_allowlists",
         test_navigation_guard_has_no_endpoint_path_allowlists,

@@ -6,7 +6,12 @@
 import { type Prisma, IntegrationType, IntegrationStatus, mergeJson } from './types';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
-import { getAdminPhone, isAnthropicApiKeyConfigured, isEmailProviderSlug } from './config';
+import {
+  getAdminPhone,
+  isAnthropicApiKeyConfigured,
+  isEmailProviderSlug,
+  isOpenRouterApiKeyConfigured,
+} from './config';
 import {
   fetchClaudeCodeAccessToken,
   fetchPoolToken,
@@ -733,11 +738,14 @@ export async function markComputeTokenRateLimited(
 
 /** Read the running backend's shared ANTHROPIC_API_KEY availability.
  *  Consumers must require both configured=true and onCooldown=false before
- *  selecting the funded-default tier; no secret material leaves the process. */
+ *  selecting the funded-default tier; no secret material leaves the process.
+ *  `openrouterConfigured` lets Claude Code preflight proceed when the shared
+ *  Anthropic org is on cooldown but OpenRouter can back the sandbox. */
 export async function getAnthropicApiKeyCooldown() {
   return {
     configured: isAnthropicApiKeyConfigured(),
     onCooldown: await isAnthropicApiKeyOnCooldown(),
+    openrouterConfigured: isOpenRouterApiKeyConfigured(),
   };
 }
 

@@ -1,69 +1,38 @@
+/**
+ * Blackbox tests for the Admin Health page and its metrics fetch layer.
+ *
+ * Covers:
+ *   - full-page render of primary/secondary/general metrics, cost chart,
+ *     connector adoption, conversion funnels, retention, and velocity
+ *   - time-slice selection re-requests the endpoint with the admin bearer token
+ *   - funnel end-to-end guard rejects anomalous current/prior growth
+ *   - fetchAdminHealthData: no local/session caching, no cross-user reuse,
+ *     unauthenticated rejection, backend-failure surfacing, timeout during parse
+ *
+ * The UsersSection directory that the page embeds is covered by
+ * admin-health-users-list.blackbox.tsx and admin-health-users-invite.blackbox.tsx.
+ */
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { server } from './msw/server';
-import { capturedRequests, clearCaptures } from './msw/capture';
-import { renderWithProviders } from './test-wrapper';
-import { Toaster } from '@/components/ui/toaster';
+
 import AdminHealth from '@/pages/AdminHealth';
 import { fetchAdminHealthData } from '@/features/admin-health/api';
 import { funnelEndToEnd } from '@/features/admin-health/components/metricComparison';
-import UsersSection from '@/features/admin-health/components/UsersSection';
-import type { AdminDirectoryPerson } from '@/lib/adminUsers';
-import { adminHealthPayload, makeFunnelSteps, makeSeries } from './admin-health.fixtures';
 
-const API_BASE = 'http://localhost:3001/api';
-const defaultResizeObserver = window.ResizeObserver;
-
-class ChartResizeObserver {
-  private readonly callback: ResizeObserverCallback;
-
-  constructor(callback: ResizeObserverCallback) {
-    this.callback = callback;
-  }
-
-  observe(target: Element) {
-    this.callback(
-      [
-        {
-          target,
-          contentRect: { width: 1200, height: 420 } as DOMRectReadOnly,
-        } as ResizeObserverEntry,
-      ],
-      this as unknown as ResizeObserver,
-    );
-  }
-
-  unobserve() {}
-  disconnect() {}
-}
-
-function mockSession() {
-  localStorage.setItem(
-    'rose-session',
-    JSON.stringify({
-      access_token: 'admin-token',
-      refresh_token: 'test-refresh',
-      expires_in: 3600,
-      expires_at: Math.floor(Date.now() / 1000) + 3600,
-      token_type: 'bearer',
-      user: { id: '1f85ff25-6e29-4c1b-8739-f917bd101a30' },
-    }),
-  );
-}
-
-function installAdminHealthHandler() {
-  server.use(
-    http.get(`${API_BASE}/admin-health`, ({ request }) => {
-      const url = new URL(request.url);
-      return HttpResponse.json(adminHealthPayload(url.searchParams.get('timeSlice') ?? 'weekly'));
-    }),
-    // The Waitlist People section fetches this on mount; default to empty so the
-    // full-page tests don't trip the onUnhandledRequest guard.
-    http.get(`${API_BASE}/admin-health/users`, () => HttpResponse.json(directoryResponse([]))),
-  );
-}
+import { server } from './msw/server';
+import { capturedRequests, clearCaptures } from './msw/capture';
+import { renderWithProviders } from './test-wrapper';
+import {
+  API_BASE,
+  ChartResizeObserver,
+  defaultResizeObserver,
+  installAdminHealthHandler,
+  makeFunnelSteps,
+  mockSession,
+} from './admin-health.fixtures';
 
 describe('AdminHealth page', () => {
   beforeEach(() => {
@@ -325,186 +294,5 @@ describe('AdminHealth page', () => {
       fetchMock.mockRestore();
       vi.useRealTimers();
     }
-  });
-});
-
-function directoryPerson(overrides: Partial<AdminDirectoryPerson> = {}): AdminDirectoryPerson {
-  return {
-    key: 'user:acct-1',
-    userId: 'acct-1',
-    waitlistId: 'wl-1',
-    name: 'Ada Lovelace',
-    email: 'ada@example.com',
-    phone: '+13234498210',
-    joinedAt: '2026-07-01T00:00:00.000Z',
-    invitedAt: null,
-    hasAccount: true,
-    hasSubscription: false,
-    isGated: true,
-    isAdmin: false,
-    ...overrides,
-  };
-}
-
-function directoryResponse(
-  people: AdminDirectoryPerson[],
-  options: { total?: number; page?: number; pageSize?: number; search?: string } = {},
-) {
-  const total = options.total ?? people.length;
-  const page = options.page ?? 1;
-  const pageSize = options.pageSize ?? 50;
-  return {
-    people,
-    total,
-    page,
-    pageSize,
-    totalPages: Math.max(1, Math.ceil(total / pageSize)),
-    search: options.search ?? '',
-  };
-}
-
-describe('UsersSection', () => {
-  beforeEach(() => {
-    sessionStorage.clear();
-    mockSession();
-  });
-
-  afterEach(() => {
-    localStorage.clear();
-    sessionStorage.clear();
-  });
-
-  it('texts and emails an invite, then pulls the person off the waitlist', async () => {
-    clearCaptures();
-    server.use(
-      http.get(`${API_BASE}/admin-health/users`, () =>
-        HttpResponse.json(directoryResponse([directoryPerson()])),
-      ),
-      http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) =>
-        HttpResponse.json({
-          id: params.id,
-          invitedAt: '2026-07-17T00:00:00.000Z',
-          smsSent: true,
-          emailSent: true,
-          flagged: true,
-          alreadyOffWaitlist: false,
-          hasAccount: true,
-        }),
-      ),
-    );
-
-    const user = userEvent.setup();
-    renderWithProviders(<UsersSection />);
-
-    const inviteButton = await screen.findByRole('button', { name: /Invite, text & email/ });
-    await user.click(inviteButton);
-
-    await waitFor(() => {
-      expect(
-        capturedRequests.some(
-          (request) =>
-            request.method === 'POST' &&
-            request.url.includes('/admin-health/waitlist/wl-1/invite') &&
-            request.headers.authorization === 'Bearer admin-token',
-        ),
-      ).toBe(true);
-    });
-
-    // Row flips to the invited state and is no longer marked as gated.
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Re-send/ })).toBeInTheDocument();
-    });
-    expect(screen.getByText('Invited')).toBeInTheDocument();
-    expect(screen.queryByText('On waitlist')).not.toBeInTheDocument();
-  });
-
-  it('reuses one idempotency key for a failed attempt and changes it after success', async () => {
-    clearCaptures();
-    let attempts = 0;
-    server.use(
-      http.get(`${API_BASE}/admin-health/users`, () =>
-        HttpResponse.json(directoryResponse([directoryPerson()])),
-      ),
-      http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) => {
-        attempts += 1;
-        if (attempts === 1) {
-          return HttpResponse.json({ error: 'temporary delivery failure' }, { status: 502 });
-        }
-        return HttpResponse.json({
-          id: params.id,
-          invitedAt: '2026-07-17T00:00:00.000Z',
-          smsSent: true,
-          emailSent: true,
-          flagged: true,
-          alreadyOffWaitlist: false,
-          hasAccount: true,
-        });
-      }),
-    );
-
-    const user = userEvent.setup();
-    renderWithProviders(<UsersSection />);
-    const inviteButton = await screen.findByRole('button', { name: /Invite, text & email/ });
-    await user.click(inviteButton);
-    await waitFor(() => expect(attempts).toBe(1));
-    await waitFor(() => expect(inviteButton).toBeEnabled());
-    await user.click(inviteButton);
-    await waitFor(() => expect(attempts).toBe(2));
-
-    const firstTwo = capturedRequests.filter(
-      (request) => request.method === 'POST' && request.url.includes('/waitlist/wl-1/invite'),
-    );
-    expect(firstTwo).toHaveLength(2);
-    expect(firstTwo[0].headers['idempotency-key']).toMatch(/^[A-Za-z0-9_-]{1,200}$/);
-    expect(firstTwo[1].headers['idempotency-key']).toBe(firstTwo[0].headers['idempotency-key']);
-
-    await user.click(await screen.findByRole('button', { name: /Re-send/ }));
-    await waitFor(() => expect(attempts).toBe(3));
-    const allInvites = capturedRequests.filter(
-      (request) => request.method === 'POST' && request.url.includes('/waitlist/wl-1/invite'),
-    );
-    expect(allInvites[2].headers['idempotency-key']).not.toBe(
-      allInvites[1].headers['idempotency-key'],
-    );
-  });
-
-  it('describes a no-account invite outcome without claiming the account was flagged', async () => {
-    server.use(
-      http.get(`${API_BASE}/admin-health/users`, () =>
-        HttpResponse.json(
-          directoryResponse([
-            directoryPerson({
-              userId: null,
-              key: 'waitlist:wl-1',
-              hasAccount: false,
-              isGated: false,
-            }),
-          ]),
-        ),
-      ),
-      http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) =>
-        HttpResponse.json({
-          id: params.id,
-          invitedAt: '2026-07-17T00:00:00.000Z',
-          smsSent: true,
-          emailSent: false,
-          flagged: false,
-          alreadyOffWaitlist: false,
-          hasAccount: false,
-        }),
-      ),
-    );
-
-    const user = userEvent.setup();
-    renderWithProviders(
-      <>
-        <UsersSection />
-        <Toaster />
-      </>,
-    );
-    await user.click(await screen.findByRole('button', { name: /Invite, text & email/ }));
-
-    expect(await screen.findByText(/no account available to flag/i)).toBeInTheDocument();
-    expect(screen.queryByText(/flagged to subscribe/i)).not.toBeInTheDocument();
   });
 });

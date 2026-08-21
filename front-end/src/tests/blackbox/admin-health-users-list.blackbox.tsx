@@ -1,64 +1,27 @@
+/**
+ * Blackbox tests for the Admin Health user-directory listing in UsersSection.
+ *
+ * Covers:
+ *   - rows render in-app / waitlist / invited status
+ *   - the switch action is offered only for rows with a real account
+ *   - debounced search by name, email, or phone
+ *   - bounded page loads and directory navigation
+ *   - directory load failures surface an error
+ *
+ * The invite flows of the same component live in
+ * admin-health-users-invite.blackbox.tsx.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import UsersSection from '@/features/admin-health/components/UsersSection';
-import type { AdminDirectoryPerson } from '@/lib/adminUsers';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
-
-const API_BASE = 'http://localhost:3001/api';
-
-function mockSession() {
-  localStorage.setItem(
-    'rose-session',
-    JSON.stringify({
-      access_token: 'admin-token',
-      refresh_token: 'test-refresh',
-      expires_in: 3600,
-      expires_at: Math.floor(Date.now() / 1000) + 3600,
-      token_type: 'bearer',
-      user: { id: '1f85ff25-6e29-4c1b-8739-f917bd101a30' },
-    }),
-  );
-}
-
-function directoryPerson(overrides: Partial<AdminDirectoryPerson> = {}): AdminDirectoryPerson {
-  return {
-    key: 'user:acct-1',
-    userId: 'acct-1',
-    waitlistId: 'wl-1',
-    name: 'Ada Lovelace',
-    email: 'ada@example.com',
-    phone: '+13234498210',
-    joinedAt: '2026-07-01T00:00:00.000Z',
-    invitedAt: null,
-    hasAccount: true,
-    hasSubscription: false,
-    isGated: true,
-    isAdmin: false,
-    ...overrides,
-  };
-}
-
-function directoryResponse(
-  people: AdminDirectoryPerson[],
-  options: { total?: number; page?: number; pageSize?: number; search?: string } = {},
-) {
-  const total = options.total ?? people.length;
-  const page = options.page ?? 1;
-  const pageSize = options.pageSize ?? 50;
-  return {
-    people,
-    total,
-    page,
-    pageSize,
-    totalPages: Math.max(1, Math.ceil(total / pageSize)),
-    search: options.search ?? '',
-  };
-}
+import { API_BASE, directoryPerson, directoryResponse, mockSession } from './admin-health.fixtures';
 
 describe('UsersSection list', () => {
   beforeEach(() => {
