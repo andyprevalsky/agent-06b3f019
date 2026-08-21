@@ -1614,4 +1614,39 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'return "$sync_rc"' \
   "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
 
+# --single-box must reject at arg-parse time BEFORE cd/catalog work. The
+# production-only classifier was inserted above this guard and, in the
+# cloudbench-multi sandbox (no tasks.json), exited 2 before the parallel-safe
+# message — failing scenario 14. Cement the order + catalog-free rejection.
+single_box_guard="$(awk '/^if \[\[ "\$\{1:-\}" == "--single-box" \]\]/,/^fi$/' \
+  "$ROOT_DIR/scripts/run-bench" | head -20)"
+printf '%s\n' "$single_box_guard" | grep -qiF 'parallel-safe' ||
+  fail "run-bench --single-box guard must explain the parallel-safety hazard"
+# Guard must appear before the production-only classifier invocation.
+python3 - "$ROOT_DIR/scripts/run-bench" <<'PY' || fail "run-bench --single-box must precede production-only classifier"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+sb = text.find('[[ "${1:-}" == "--single-box" ]]')
+prod = text.find("cloudbench-production-only-tasks.py")
+if sb < 0 or prod < 0 or not (sb < prod):
+    raise SystemExit(f"single-box at {sb}, production-only at {prod}")
+PY
+sandbox_rb="$(mktemp -d)"
+mkdir -p "$sandbox_rb/scripts" "$sandbox_rb/agents/benchmarks"
+cp "$ROOT_DIR/scripts/run-bench" "$sandbox_rb/scripts/run-bench"
+# No tasks.json — mirrors cloudbench-multi's synthetic worktree.
+sb_out="$(mktemp)"
+set +e
+bash "$sandbox_rb/scripts/run-bench" --single-box some-bench >"$sb_out" 2>&1
+sb_ec=$?
+set -e
+grep -qiF 'parallel-safe' "$sb_out" || {
+  echo "--- run-bench --single-box output ---" >&2
+  cat "$sb_out" >&2
+  fail "catalog-free --single-box rejection must still explain parallel-safety"
+}
+[ "$sb_ec" -ne 0 ] || fail "catalog-free --single-box must exit nonzero"
+rm -rf "$sandbox_rb" "$sb_out"
+
 echo "All cloud benchmark environment checks passed."
