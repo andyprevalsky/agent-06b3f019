@@ -27,35 +27,42 @@ tags:
 sources:
   - agent 01dce6e9-1f2c-4039-90dc-901ed48ce2bf
   - agent f666bc05-27bb-4c77-81bf-8048a232741a
-repro: agents/tests/e2e/alchemy_evaluate_stall_repro.py + blackbox tests; live rerun 20260821_215746 reproduced with classification
+  - agent 958687b8-a755-4ae6-bdbf-39e28c3b9eb5
+  - agent 4161ece1-7b66-4d67-9faf-c03e4f097923
+repro: agents/tests/e2e/alchemy_evaluate_stall_repro.py + blackbox tests; live k=1 reruns 20260821_215746 / 221618 / 223059 all hit the stall
 status: open
 ---
 
 ## Problem
 
-`scripts/run-bench --local browser-alchemy-springs-sauna` times out ~900s with no
-attention terminal after an evaluate hang on the Momence waiver surface.
+`scripts/run-bench --local browser-alchemy-springs-sauna` hangs on Momence waiver
+`evaluate` (`renderer_main_thread_blocked`). Pre-fix: burns ~900s with no
+attention. Post hard-recover: unblocks, then fails a different static tool-count
+check (`spawn_agent` expected 1, got 0) after `request_payment_card`.
 
 ## Reproduction (not transient)
 
-Two independent local Kernel runs, different evaluate payloads, same class:
+Four independent local Kernel runs — stall is **reliable**, not flaky:
 
-| Run | Agent | Hung payload | Classification |
+| Run | Agent | Hung payload | Outcome |
 | --- | --- | --- | --- |
-| 1 | `01dce6e9` | canvas MouseEvent stroke (sha `ded456fc3328`) | inferred from recovery shape |
-| 2 | `f666bc05` | `[role=presentation]` PointerEvent fanout (sha `dcee4bdbb5d2`) | **live** `renderer=frozen browser=ok verdict=renderer_main_thread_blocked` |
+| 1 | `01dce6e9` | canvas MouseEvent (sha `ded456fc3328`) | timeout 903s (pre hard-recover) |
+| 2 | `f666bc05` | `[role=presentation]` PointerEvent (sha `dcee4bdbb5d2`) | live classify `renderer_main_thread_blocked`; timeout 903s |
+| 3 | `958687b8` | evaluate hang + hard recover | FAIL `spawn_agent` count (got past hang) |
+| 4 | `4161ece1` | sha `4ec95bc7122d` + hard recover | **same stall again**; FAIL `spawn_agent` count |
 
-Rerun 2 timeline:
+Rerun 4 timeline (fresh 2026-08-21 ~22:18 local bench):
 
-- 21:46:21.125 — `Browser evaluate starting` (code_len=475, sha `dcee4bdbb5d2`)
-- 21:51:53.778 — timeout + classification (`renderer_ms=2030`, `browser_ms=60`)
-- 21:52:16.487 — soft recovery `actions=["bring_to_front"]` only
-- Harness FAIL: Timeout 903s, no payment/auth_assistance attention
+- 22:22:46 — `Browser evaluate starting` (code_len=440, sha `4ec95bc7122d`) on Momence skipPreview URL
+- 22:28:19 — timeout + classification (`renderer_ms=2034`, `browser_ms=57`, `verdict=renderer_main_thread_blocked`)
+- 22:28:51 — soft recovery `actions=["bring_to_front"]`
+- 22:28:55 — hard recovery `new_context_page`, `goto_resume_url`, `close_target`, `close_playwright_page` (`recycled=true`)
+- Loop resumed (typing / checkout); harness FAIL: `spawn_agent` expected 1 got 0; counts include `request_payment_card: 1`
 
-FE (rerun): `http://localhost:3202/?agent-id=f666bc05-27bb-4c77-81bf-8048a232741a`
-Run JSON: `agents/benchmarks/runs/20260821_215746_browser-alchemy-springs-sauna.json`
+FE (rerun 4): `http://localhost:3202/?agent-id=4161ece1-7b66-4d67-9faf-c03e4f097923`
+Run JSON: `agents/benchmarks/runs/20260821_223059_browser-alchemy-springs-sauna.json`
 
-Different JS both times ⇒ not a single bad evaluate program. Momence waiver
+Different JS across runs ⇒ not a single bad evaluate program. Momence waiver
 signature surface (react-konva) leaves the **renderer main thread** unresponsive
 to page-target CDP while the browser process stays healthy.
 
@@ -81,10 +88,10 @@ Implemented:
 3. Blackbox: healthy evaluate JS, recovery signature, hard-recover restores
    evaluate.
 
-Still required for close: re-run exact
-`scripts/run-bench --local browser-alchemy-springs-sauna` and show the run gets
-past evaluate (attention terminal or non-timeout progress) with hard recovery
-logs present. Case stays `open` until that outcome proof.
+Hard-recovery outcome proof: runs 3–4 both log hard recovery and continue past
+the evaluate hang (`request_payment_card: 1`). Case stays `open` because the
+task still fails the static `spawn_agent` expectation (separate from the stall);
+need a clean pass or ignore-mode attention terminal under hard recovery.
 
 Do not raise task/action timeouts to "pass" this.
 
