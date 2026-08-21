@@ -3074,6 +3074,75 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment():
+    """Stale DOM index ERRORs recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    fdd449b5-2288-4890-b001-dfae973097a6 reached grounded payment_approval after
+    spawn_browser_agent ERROR "Element with index 0 not found" (title Scrolled down
+    600px), then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_Zp8HUD74TFWqfl2xUnbDeHXg",
+                    "title": "Scrolled down 600px",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
+    """A terminal unrecovered DOM index miss remains a grounded tool failure."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_index_miss",
+                    "title": "Scrolled down 600px",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    failures = _tool_runtime_failures(data)
+    assert failures == ["spawn_browser_agent call_terminal_index_miss status=ERROR"]
+    passed, reason = _run_declared_static_check(evaluator, data)
+    assert passed is False
+    assert "tool failure" in reason.lower()
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -14045,6 +14114,14 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_challenge_recovery",
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_element_index_miss",
+        test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_rejects_unrecovered_element_index_miss",
+        test_no_tool_failures_still_rejects_unrecovered_element_index_miss,
     )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
