@@ -68,10 +68,9 @@ BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
-    # Must include admin-bypass: it opens a public Kernel tunnel to /test_payment.
-    # Omitting it left BENCHMARK_BUNDLED_FRONTEND unset so run.sh served Vite DEV;
-    # five concurrent remote browsers then fetched the unbundled module graph over
-    # ngrok and sat on blank #root until the task budget burned.
+    # Must include admin-bypass so needs_frontend_tunnel still publishes
+    # BENCHMARK_FRONTEND_URL for /test_payment. Bundling itself now follows
+    # needs_public_tunnel (any Kernel-reachable FE), not this allowlist alone.
     "gate-subscription-card-mint-admin-bypass",
 }
 # Sandbox lifecycle benches run as the default admin account so credit checks
@@ -831,7 +830,14 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         os.environ["BENCHMARK_ISOLATED_RUN"] = "true"
     else:
         os.environ.pop("BENCHMARK_ISOLATED_RUN", None)
-    if needs_frontend_tunnel(tasks):
+    # Any publicly tunneled frontend must be a production bundle. Vite DEV's
+    # unbundled module graph cannot mount reliably through Kernel+ngrok; tying
+    # bundling to a hand-maintained allowlist caused blank-SPA budget burns when
+    # a new tunnel task was omitted (admin-bypass). needs_public_tunnel already
+    # decides who pays for a tunnel — the bundle follows that same gate. Skip
+    # when the run points at an external BENCHMARK_FRONTEND_URL (nothing local
+    # to build).
+    if needs_public_tunnel(tasks) and not os.environ.get("BENCHMARK_FRONTEND_URL"):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
     if needs_non_purchase_gates(tasks):

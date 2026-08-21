@@ -849,6 +849,30 @@ def test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start():
         assert local.needs_frontend_tunnel(["gate-subscription-card-mint-admin-bypass"])
 
 
+def test_public_tunnel_benchmarks_enable_bundled_frontend_by_default():
+    """Bundling follows needs_public_tunnel — not a hand-maintained allowlist."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    # browser-agent needs a public tunnel but is not a /test_payment task.
+    assert local.needs_public_tunnel(["browser-agent"]) is True
+    assert local.needs_frontend_tunnel(["browser-agent"]) is False
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        local.configure_task_environment(["browser-agent"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ["BENCHMARK_FRONTEND_URL"] = "https://example.test"
+        local.configure_task_environment(["browser-agent"])
+        assert "BENCHMARK_BUNDLED_FRONTEND" not in os.environ
+
+
 def test_benchmark_bundled_frontend_build_has_cloud_heap_budget():
     """Cloud build hosts default near 2GB old-space, below the frontend bundle need."""
     script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
@@ -13965,6 +13989,10 @@ async def run_all_tests():
     r.record(
         "purchase_gate_benchmark_bundled_frontend",
         test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start,
+    )
+    r.record(
+        "public_tunnel_benchmark_bundled_frontend_default",
+        test_public_tunnel_benchmarks_enable_bundled_frontend_by_default,
     )
     r.record(
         "benchmark_bundled_frontend_cloud_heap_budget",
