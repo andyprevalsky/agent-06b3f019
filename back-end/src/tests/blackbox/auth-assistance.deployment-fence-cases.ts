@@ -10,6 +10,7 @@ import {
   finalizeInterruptedWorkflowTools,
 } from '../../providers/staleWorkflowTools';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
+import { authAssistanceGateCleanupTests } from './auth-assistance.gate-cleanup-cases';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
@@ -152,6 +153,25 @@ async function runDeployFenceCase(userId: string): Promise<void> {
       metadata: { attentionKind: 'approval' },
     },
   });
+
+  // Replacement generations preserve the agent id. Their waiter is still a live
+  // foreign owner and must protect the shared gate from old-generation cleanup.
+  const replacementWorkflowId = `${agent.id}:replacement:${randomUUID()}`;
+  const replacementGateRequestId = randomUUID();
+  await prisma.agentAttentionRequest.create({
+    data: {
+      id: replacementGateRequestId,
+      userId,
+      agentId: agent.id,
+      workflowId: agent.id,
+      question: 'Connect Drive',
+      gateKey: `source_connect:drive:${randomUUID()}`,
+      metadata: {
+        attentionKind: 'gate',
+        gateWaiters: [{ agentId: agent.id, workflowId: replacementWorkflowId }],
+      },
+    },
+  });
   const approvalToolCallId = `toolu_${randomUUID().slice(0, 12)}`;
   await prisma.message.create({
     data: {
@@ -226,7 +246,7 @@ async function runDeployFenceCase(userId: string): Promise<void> {
   // The deploy cutover claims a new generation, then seals the old one.
   await prisma.agent.update({
     where: { id: agent.id },
-    data: { temporalWorkflowId: `${agent.id}:replacement:${randomUUID()}` },
+    data: { temporalWorkflowId: replacementWorkflowId },
   });
   const fenceResult = await finalizeInterruptedWorkflowTools(agent.id, agent.id, []);
   assert(fenceResult.candidates >= 2, 'Deploy fence should see both in-flight tool calls');
@@ -264,6 +284,14 @@ async function runDeployFenceCase(userId: string): Promise<void> {
   assert(
     sharedGate !== null && sharedGate.userResponse === null,
     `Deploy fence must not answer a deduped gate on behalf of live waiters (userResponse=${String(sharedGate?.userResponse)})`
+  );
+
+  const replacementGate = await prisma.agentAttentionRequest.findUnique({
+    where: { id: replacementGateRequestId },
+  });
+  assert(
+    replacementGate !== null && replacementGate.userResponse === null,
+    `Deploy fence must keep a same-agent replacement-generation gate pending (userResponse=${String(replacementGate?.userResponse)})`
   );
 
   const soleGate = await prisma.agentAttentionRequest.findUnique({
@@ -434,38 +462,6 @@ async function testCompetingCompletionIsNotMisclassifiedAsDeployInterruption(): 
   } finally {
     await cleanupFixture(userId);
   }
-}
-
-async function testGateWaiterAppendWinsMetadataCas(): Promise<void> {
-  const agentId = randomUUID();
-  const originalMetadata = { attentionKind: 'gate' };
-  let currentMetadata: unknown = originalMetadata;
-  const client = {
-    agentAttentionRequest: {
-      findMany: async () => [
-        {
-          id: 'racing-gate',
-          gateKey: 'source_connect:racing',
-          metadata: originalMetadata,
-        },
-      ],
-      updateMany: async (args: { where: { metadata?: { equals?: unknown } } }) => {
-        // Model appendGateWaiter committing after cleanup's read but before its
-        // update reaches the row lock.
-        currentMetadata = {
-          ...originalMetadata,
-          gateWaiters: [{ agentId: randomUUID(), workflowId: randomUUID() }],
-        };
-        return {
-          count:
-            JSON.stringify(args.where.metadata?.equals) === JSON.stringify(currentMetadata) ? 1 : 0,
-        };
-      },
-    },
-  } as unknown as Parameters<typeof closeInterruptedAttentionRequests>[0];
-
-  const closed = await closeInterruptedAttentionRequests(client, agentId, agentId);
-  assert(closed === 0, 'cleanup metadata CAS must not erase a concurrently appended waiter');
 }
 
 async function testCompletionWaitsForDeploymentCleanupLock(): Promise<void> {
@@ -663,7 +659,7 @@ export const authAssistanceDeploymentFenceTests: TestCase[] = [
     'concurrent completions run external side effects exactly once',
     testConcurrentCompletionsRunExternalSideEffectsOnce,
   ],
-  ['gate cleanup preserves a concurrently appended waiter', testGateWaiterAppendWinsMetadataCas],
+  ...authAssistanceGateCleanupTests,
   [
     'auth completion waits for deployment cleanup generation lock',
     testCompletionWaitsForDeploymentCleanupLock,

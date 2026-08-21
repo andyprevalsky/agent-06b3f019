@@ -331,9 +331,20 @@ force_loop="$({
   sed -n '/while \[ \$((SECONDS - force_started)) -lt 2 \]; do/,/^[[:space:]]*done$/p' \
     "$SETUP_DB"
 } 2>/dev/null)"
-printf '%s\n' "$force_loop" | grep -q 'setup_db_child_pids' || fail \
+printf '%s\n' "$force_loop" | grep -q 'setup_db_child_records' || fail \
   "case 7: force-cleanup loop does not rescan descendants before releasing the DB lock"
 printf '%s\n' "$force_loop" | grep -q 'kill -KILL' || fail \
   "case 7: force-cleanup loop discovers descendants but does not stop late arrivals"
+
+# ── Case 8: retained PIDs must be identity-checked before force cleanup ───────
+# A short-lived child can exit during the grace phase and its numeric PID can be
+# reused before a later force-loop iteration. Start time plus parent/group identity
+# distinguish the owned child from the unrelated replacement process.
+printf '%s\n' "$force_loop" | grep -q 'setup_db_pid_matches_record' || fail \
+  "case 8: force cleanup can SIGKILL a recycled PID without revalidating identity"
+grep -q 'lstart=' "$SETUP_DB" || fail \
+  "case 8: descendant identity does not include process start time"
+grep -q 'current_started.*expected_started' "$SETUP_DB" || fail \
+  "case 8: process start time is captured but never revalidated"
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"
