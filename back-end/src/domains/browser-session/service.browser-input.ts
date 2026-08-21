@@ -1,8 +1,16 @@
+export function isValidBrowserKeySymbols(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 16 &&
+    value.every((key: unknown) => typeof key === 'string' && key.length > 0 && key.length <= 64)
+  );
+}
+
 export function validateBrowserKeySymbols(keys: string[]): void {
-  if (!Array.isArray(keys) || keys.length === 0 || keys.length > 16) {
-    throw new Error('keys must contain between 1 and 16 key symbols');
-  }
-  if (keys.some((key) => typeof key !== 'string' || key.length === 0 || key.length > 64)) {
-    throw new Error('each key symbol must be a non-empty string of at most 64 characters');
+  if (!isValidBrowserKeySymbols(keys)) {
+    throw new Error(
+      'keys must contain between 1 and 16 non-empty key symbols of at most 64 characters'
+    );
   }
 }

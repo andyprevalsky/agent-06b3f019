@@ -231,6 +231,19 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
   );
 });
 
+test('every seed mode hydrates the selected user before dependent writes', async () => {
+  const source = readSeedLocalSource();
+  const connectivity = source.indexOf('await remote.$queryRaw`SELECT 1`');
+  const identity = source.indexOf('await ensureSeedUserExists()', connectivity);
+  const computeMode = source.indexOf('if (COMPUTE_TOKENS_ONLY)', connectivity);
+  const emailMode = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)', connectivity);
+
+  assert(connectivity > 0, 'expected remote connectivity check');
+  assert(identity > connectivity, 'expected selected-user hydration after connectivity');
+  assert(identity < computeMode, 'expected selected-user hydration before compute-token writes');
+  assert(identity < emailMode, 'expected selected-user hydration before email-credential writes');
+});
+
 test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
   const source = readSeedLocalSource();
   const validation = source.indexOf('if (requestedSeedModes.length > 1)');

@@ -9486,6 +9486,16 @@ async def test_execute_action_press_key_prefers_provider_computer_input():
         repo.press_browser_computer_key = original
 
 
+def test_kernel_computer_key_maps_playwright_names_to_x11_keysyms():
+    from domains.spawn_browser_agent_v3.service_actions import _kernel_computer_key
+
+    assert _kernel_computer_key("Backspace") == "BackSpace"
+    assert _kernel_computer_key("Del") == "Delete"
+    assert _kernel_computer_key("PageUp") == "Prior"
+    assert _kernel_computer_key("PageDown") == "Next"
+    assert _kernel_computer_key("Control+Shift+PageUp") == "Ctrl+Shift+Prior"
+
+
 async def test_execute_action_press_key_ambiguous_provider_failure_does_not_replay():
     """A lost provider response cannot safely fall back and send Enter twice."""
     from domains.spawn_browser_agent_v3 import repo
@@ -17374,6 +17384,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_press_key_provider_computer",
         test_execute_action_press_key_prefers_provider_computer_input,
+    )
+    r.record(
+        "kernel_computer_key_maps_playwright_names_to_x11_keysyms",
+        test_kernel_computer_key_maps_playwright_names_to_x11_keysyms,
     )
     await r.record_async(
         "execute_action_press_key_ambiguous_provider_failure",

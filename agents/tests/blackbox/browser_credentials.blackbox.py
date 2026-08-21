@@ -472,6 +472,51 @@ async def test_passkey_injection_reenables_virtual_environment_at_use_boundary()
     assert methods.index("WebAuthn.enable") < methods.index("WebAuthn.addVirtualAuthenticator")
 
 
+async def test_passkey_payload_validation_is_atomic() -> None:
+    """One malformed credential must not retain earlier entries from the payload."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send)
+    malformed = {
+        "credentialId": "credential-incomplete",
+        "rpId": "example.com",
+    }
+
+    try:
+        await dom.inject_passkeys([AMAZON_PASSKEY, malformed])
+        raise AssertionError("expected malformed passkey payload to fail")
+    except RuntimeError as error:
+        assert "Incomplete passkey payload" in str(error)
+
+    assert dom._held_passkeys_by_credential_id == {}
+    assert state.calls == [], "browser state changed before the full payload was validated"
+
+
+async def test_passkey_readback_transport_failure_keeps_seeded_authenticator() -> None:
+    """A transient verification read must not discard credentials that were added successfully."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    failed_readback = False
+
+    async def flaky_send(method: str, params: dict, target_id: str):
+        nonlocal failed_readback
+        if method == "WebAuthn.getCredentials" and not failed_readback:
+            failed_readback = True
+            raise RuntimeError("transient CDP transport failure")
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(flaky_send)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert failed_readback
+    assert dom._passkey_seeded_by_target["target-a"] == {"credential-amazon"}
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
 async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> None:
     from browser_tools.dom_service import DOMService
 
@@ -657,6 +702,14 @@ async def run_all_tests():
     await runner.record_async(
         "passkey_injection_reenables_virtual_environment_at_use_boundary",
         test_passkey_injection_reenables_virtual_environment_at_use_boundary,
+    )
+    await runner.record_async(
+        "passkey_payload_validation_is_atomic",
+        test_passkey_payload_validation_is_atomic,
+    )
+    await runner.record_async(
+        "passkey_readback_transport_failure_keeps_seeded_authenticator",
+        test_passkey_readback_transport_failure_keeps_seeded_authenticator,
     )
     await runner.record_async(
         "passkeys_from_multiple_realms_share_one_live_authenticator",

@@ -1044,6 +1044,7 @@ async function sync() {
 
   // Verify remote connectivity
   await remote.$queryRaw`SELECT 1`;
+  await ensureSeedUserExists();
 
   if (COMPUTE_TOKENS_ONLY) {
     await syncComputeTokensWithRetries();
@@ -1055,14 +1056,12 @@ async function sync() {
     console.log(
       '  ℹ️  Syncing authoritative passkeys only; browser state and passwords are excluded'
     );
-    await ensureSeedUserExists();
     await syncPasskeysOnly(undefined, { authoritative: true });
     console.log('\n🔄 Passkey sync complete.');
     return;
   }
 
   if (CREDENTIALS_ONLY) {
-    await ensureSeedUserExists();
     console.log(
       SEED_COOKIE_DOMAINS.length > 0
         ? `  ℹ️  Refreshing production browser auth for ${SEED_COOKIE_DOMAINS.join(', ')} while preserving local-only rows`

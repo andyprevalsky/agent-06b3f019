@@ -37,6 +37,7 @@ export async function resizeKernelViewport(
 }
 
 const FILE_DIRECTORIES = ['/tmp/downloads', '/tmp/rose-uploads', '/home/oai/share'];
+const KERNEL_COMPUTER_INPUT_TIMEOUT_MS = 10_000;
 
 /** Ensure Kernel download/upload roots exist before CDP writes or listFiles. */
 export async function ensureKernelSessionFileDirectories(sessionId: string): Promise<void> {
@@ -101,5 +102,9 @@ export async function captureKernelScreenshot(sessionId: string): Promise<Buffer
 }
 
 export async function pressKernelKeys(sessionId: string, keys: string[]): Promise<void> {
-  await kernelClient().browsers.computer.pressKey(sessionId, { keys });
+  await kernelClient().browsers.computer.pressKey(
+    sessionId,
+    { keys },
+    { timeout: KERNEL_COMPUTER_INPUT_TIMEOUT_MS, maxRetries: 0 }
+  );
 }

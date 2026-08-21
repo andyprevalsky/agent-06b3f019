@@ -175,6 +175,10 @@ def _kernel_computer_key(key: str) -> str:
         "arrowdown": "Down",
         "arrowleft": "Left",
         "arrowright": "Right",
+        "backspace": "BackSpace",
+        "del": "Delete",
+        "pageup": "Prior",
+        "pagedown": "Next",
         "escape": "Escape",
         "esc": "Escape",
     }

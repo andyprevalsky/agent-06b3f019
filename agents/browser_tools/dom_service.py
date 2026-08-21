@@ -1013,12 +1013,15 @@ class DOMService:
         live target, which is what keeps a site whose passkey we do not hold from
         raising an unreachable native chooser over the agent.
         """
+        validated_passkeys: List[tuple[str, Dict[str, Any]]] = []
         for pk in passkeys:
             credential_id = pk.get("credentialId")
             private_key = pk.get("privateKey")
             rp_id = pk.get("rpId")
             if not credential_id or not private_key or not rp_id:
                 raise RuntimeError(f"Incomplete passkey payload for relying party {rp_id or 'unknown'}")
+            validated_passkeys.append((credential_id, pk))
+        for credential_id, pk in validated_passkeys:
             self._held_passkeys_by_credential_id[credential_id] = pk
 
         target_id, cdp_session = await self._live_cdp_session()
@@ -1134,20 +1137,28 @@ class DOMService:
         )
         if seeded:
             counts = await self._read_signcounts_for_target(target_id, cdp_session)
-            observed_ids = set(counts)
-            missing = seeded_ids - observed_ids
-            logger.info(
-                "🔑 [passkey] virtual authenticator readback: "
-                f"expected_count={len(seeded_ids)} observed_count={len(observed_ids)} "
-                f"missing_count={len(missing)} target={target_id[:12]}"
-            )
-            if missing:
-                raise RuntimeError(
-                    f"Browser passkey readback is missing {len(missing)} injected credential(s)"
+            if counts is None:
+                logger.warning(
+                    "⚠️ [passkey] readback unavailable; keeping seeded authenticator "
+                    f"target={target_id[:12]}"
                 )
+            else:
+                observed_ids = set(counts)
+                missing = seeded_ids - observed_ids
+                logger.info(
+                    "🔑 [passkey] virtual authenticator readback: "
+                    f"expected_count={len(seeded_ids)} observed_count={len(observed_ids)} "
+                    f"missing_count={len(missing)} target={target_id[:12]}"
+                )
+                if missing:
+                    raise RuntimeError(
+                        f"Browser passkey readback is missing {len(missing)} injected credential(s)"
+                    )
         return seeded
 
-    async def _read_signcounts_for_target(self, target_id: str, cdp_session: Any) -> Dict[str, int]:
+    async def _read_signcounts_for_target(
+        self, target_id: str, cdp_session: Any
+    ) -> Optional[Dict[str, int]]:
         authenticator_id = self._passkey_authenticator_by_target.get(target_id)
         if authenticator_id is None:
             return {}
@@ -1159,7 +1170,7 @@ class DOMService:
             )
         except Exception as e:
             logger.warning(f"⚠️ [passkey] getCredentials failed: {e}")
-            return {}
+            return None
         counts: Dict[str, int] = {}
         for cred in result.get("credentials", []) or []:
             cid = cred.get("credentialId")
@@ -1185,7 +1196,10 @@ class DOMService:
                 cdp_session = await session.get_or_create_cdp_session(target_id, focus=False)
             except Exception:
                 continue
-            for cid, value in (await self._read_signcounts_for_target(target_id, cdp_session)).items():
+            target_counts = await self._read_signcounts_for_target(target_id, cdp_session)
+            if target_counts is None:
+                continue
+            for cid, value in target_counts.items():
                 if value > counts.get(cid, -1):
                     counts[cid] = value
         return counts

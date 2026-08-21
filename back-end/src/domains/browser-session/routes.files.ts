@@ -1,6 +1,7 @@
 import { type Response, type Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { isValidBrowserKeySymbols } from './service.browser-input';
 import {
   downloadFile,
   InvalidSessionFilePathError,
@@ -18,15 +19,6 @@ function userIdForOwnedSessionAccess(req: AuthRequest): string | undefined {
   return typeof rawUserId === 'string' && rawUserId.trim() !== '' ? rawUserId.trim() : undefined;
 }
 
-function validKeySymbols(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
-    value.length > 0 &&
-    value.length <= 16 &&
-    value.every((key: unknown) => typeof key === 'string' && key.length > 0 && key.length <= 64)
-  );
-}
-
 async function handlePressKey(req: AuthRequest, res: Response): Promise<void> {
   try {
     const userId = userIdForOwnedSessionAccess(req);
@@ -35,7 +27,7 @@ async function handlePressKey(req: AuthRequest, res: Response): Promise<void> {
       return;
     }
     const body = req.body as { keys?: unknown } | undefined;
-    if (!validKeySymbols(body?.keys)) {
+    if (!isValidBrowserKeySymbols(body?.keys)) {
       res.status(400).json({
         error: 'keys must contain between 1 and 16 non-empty key symbols of at most 64 characters',
       });
