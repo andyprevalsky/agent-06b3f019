@@ -3227,19 +3227,26 @@ async def test_declared_evaluator_hydrates_completion_sms_receipt():
     assert data["_benchmark"]["completion_sms_events"][0]["path"] == path
 
 
-def test_doordash_catalog_requires_single_clean_completed_browser_run():
-    """DoorDash combines deterministic runtime invariants with product semantics."""
+def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
+    """DoorDash stages checkout then stops at an unresolved place-order write lock."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-doordash-usb-c-cable")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
     assert task.prompt.endswith("Complete checkout.")
-    assert task.approval_handling == "auto_approve"
+    assert task.approval_handling == "ignore"
     assert task.expected_approval_count == 1
+    assert task.expected_attention_kind == "write_lock"
     assert task.expected_attention_kinds == []
-    assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
+    assert task.expected_attention_kind_any_of == []
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
+    assert task.environment["context_notes"] == (
+        "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and "
+        "delivery timing. The runner treats the final place-order write lock as completion, leaves "
+        "that request unresolved, and does not place the order. The task may exercise guest "
+        "checkout and does not require an injected cookie bundle."
+    )
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -3248,12 +3255,23 @@ def test_doordash_catalog_requires_single_clean_completed_browser_run():
     assert static_types == {
         "no_tool_failures",
         "browser_agent_session_count",
-        "agent_status",
         "approval_request_count",
+        "approval_request_details",
     }
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["USB-C"]
+    assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "write lock" in runtime_criteria
+    assert "unresolved" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("usb-c to usb-c", "6 feet", "60w", "$30", "earliest"):
+    for requirement in ("usb-c to usb-c", "6 feet", "60w", "$30", "earliest", "unresolved", "not placed"):
         assert requirement in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("payment-card approval", "approval of the write lock", "order confirmation"):
+        assert failure in judge_prompt
 
 
 def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
@@ -3824,8 +3842,8 @@ async def test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_a
     assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
 
 
-async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
-    """DoorDash accepts either supported checkout gate without requiring a second request."""
+async def test_doordash_poll_stops_at_write_lock_without_resolving_it():
+    """DoorDash completion is one unresolved place-order write lock; never auto-approve."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     write_lock = {
@@ -3834,6 +3852,11 @@ async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
         "question": "Approve the $17.42 DoorDash order?",
         "metadata": {"requestUserApproval": {"writePermission": True}},
     }
+    payment = {
+        "id": "doordash-payment",
+        "agentId": "agent-doordash",
+        "metadata": {"requestPaymentCard": {}},
+    }
 
     (data, triggered, resolved, failure), responses = await _run_attention_poll(
         get_task_by_name("browser-doordash-usb-c-cable"),
@@ -3841,13 +3864,19 @@ async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
     )
 
     assert failure is None
-    assert (triggered, resolved) == (1, 1)
-    assert responses == [("doordash-write-lock", "approved")]
+    assert (triggered, resolved) == (1, 0)
+    assert responses == []
     assert data["_benchmark"]["attention_request_kind_seen"] == "write_lock"
-    assert data["_benchmark"]["expected_attention_kind_any_of"] == [
-        "payment_approval",
-        "write_lock",
-    ]
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "write_lock"
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        get_task_by_name("browser-doordash-usb-c-cable"),
+        [payment],
+    )
+    assert failure == "Expected attention kind write_lock, observed payment_approval"
+    assert data["_benchmark"]["unexpected_attention_kind"] == "payment_approval"
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
 
 
 async def test_instacart_proposed_checkout_boundary_accepts_exactly_one_supported_kind():
@@ -13868,8 +13897,8 @@ async def run_all_tests():
         test_declared_evaluator_hydrates_completion_sms_receipt,
     )
     r.record(
-        "doordash_single_clean_completed_browser_run",
-        test_doordash_catalog_requires_single_clean_completed_browser_run,
+        "doordash_unresolved_place_order_write_lock_catalog",
+        test_doordash_catalog_stops_at_unresolved_place_order_write_lock,
     )
     r.record(
         "uber_normal_single_browser_task",
@@ -13908,8 +13937,8 @@ async def run_all_tests():
         test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it,
     )
     await r.record_async(
-        "doordash_single_write_lock_checkout_approval",
-        test_doordash_poll_accepts_single_write_lock_as_checkout_approval,
+        "doordash_write_lock_stops_without_resolving",
+        test_doordash_poll_stops_at_write_lock_without_resolving_it,
     )
     await r.record_async(
         "instacart_exactly_one_supported_checkout_boundary",
