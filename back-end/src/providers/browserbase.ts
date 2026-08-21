@@ -339,9 +339,10 @@ export async function injectUserCookies(
   // Fetch user's chrome_cookies integration
   const integration = await prisma.integration.findUnique({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId,
         name: 'chrome_cookies',
+        accountId: '',
       },
     },
   });

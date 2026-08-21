@@ -62,7 +62,10 @@ cleanup() {
     if $USE_SYSTEM_PG; then
         PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$TARGET_DB" >/dev/null 2>&1 || true
     else
-        docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+        # postgres declares /var/lib/postgresql/data as a VOLUME, so every
+        # throwaway container gets an anonymous volume. Remove it with the
+        # container or repeated cold runs leak gigabytes onto the deploy host.
+        docker rm -fv "$CONTAINER" >/dev/null 2>&1 || true
     fi
 }
 cleanup_all() {
@@ -70,7 +73,7 @@ cleanup_all() {
     if $USE_SYSTEM_PG; then
         PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$SRC_DB" >/dev/null 2>&1 || true
     else
-        docker rm -f "$SRC_CONTAINER" >/dev/null 2>&1 || true
+        docker rm -fv "$SRC_CONTAINER" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup_all EXIT INT TERM
@@ -122,7 +125,7 @@ if $USE_SYSTEM_PG; then
     [ "${SRC_ROWS:-0}" -gt 0 ] || { echo "❌ source restore produced no Cookie rows for seed user — measurement would be meaningless" | tee -a "$SUMMARY"; exit 1; }
     export SEED_REMOTE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/$SRC_DB"
 else
-    docker rm -f "$SRC_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -fv "$SRC_CONTAINER" >/dev/null 2>&1 || true
     if [ "$SRC_PORT_REQUESTED" = 0 ]; then
         SRC_PORT_MAPPING="127.0.0.1::5432"
     else

@@ -20,8 +20,6 @@
  */
 
 import 'dotenv/config';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import {
   createTestPaymentCheckoutSession,
   settleTestPaymentCheckoutSession,
@@ -33,6 +31,12 @@ import {
   stripe,
   type Stripe,
 } from '../../providers/stripe';
+import { assertMerchantClientIsolation } from './test-payment.merchant-key-structural';
+import {
+  FAKE_MERCHANT_KEY,
+  withBothCheckoutClientsStubbed,
+  withMerchantKey,
+} from './test-payment.merchant-key-support';
 
 interface TestResult {
   name: string;
@@ -60,100 +64,11 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
   }
 }
 
-/**
- * A merchant key that is syntactically a Stripe key but belongs to no account: the SDK is never
- * actually called over the wire in this suite (every method under test is stubbed), so this can
- * never authorize anything.
- */
-const FAKE_MERCHANT_KEY = 'sk_test_merchant_blackbox_never_dialed';
-
-function withMerchantKey<T>(key: string | undefined, fn: () => T): T {
-  const previous = process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
-  const restore = () => {
-    if (previous === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
-    else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = previous;
-  };
-  if (key === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
-  else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = key;
-  try {
-    const result = fn();
-    if (result instanceof Promise) return result.finally(restore) as T;
-    restore();
-    return result;
-  } catch (error) {
-    restore();
-    throw error;
-  }
-}
-
-interface CheckoutSessionsResource {
-  create: (params: unknown) => Promise<{ id: string; url: string | null }>;
-  retrieve: (id: string, params?: unknown) => Promise<unknown>;
-}
-
-function checkoutSessions(client: Stripe): CheckoutSessionsResource {
-  return client.checkout.sessions as unknown as CheckoutSessionsResource;
-}
-
-interface StubbedCall {
-  client: 'merchant' | 'billing';
-  op: 'create' | 'retrieve';
-  params?: unknown;
-}
-
-/**
- * Stub `checkout.sessions.{create,retrieve}` on BOTH the merchant and billing clients and record
- * which one the code under test reached for. The billing stubs are the inversion detector: if the
- * checkout path ever regresses back to the `stripe` singleton, it lands in `calls` tagged
- * `billing` and every assertion below fails.
- */
-async function withBothCheckoutClientsStubbed<T>(
-  merchant: Stripe,
-  session: { id: string; url: string | null; retrieved: unknown },
-  fn: (calls: StubbedCall[]) => Promise<T>
-): Promise<T> {
-  const calls: StubbedCall[] = [];
-  const targets: Array<{ label: 'merchant' | 'billing'; resource: CheckoutSessionsResource }> = [
-    { label: 'merchant', resource: checkoutSessions(merchant) },
-    { label: 'billing', resource: checkoutSessions(stripe) },
-  ];
-  const originals = targets.map(({ resource }) => ({
-    create: resource.create,
-    retrieve: resource.retrieve,
-  }));
-
-  for (const { label, resource } of targets) {
-    resource.create = async (params) => {
-      calls.push({ client: label, op: 'create', params });
-      return { id: session.id, url: session.url };
-    };
-    resource.retrieve = async () => {
-      calls.push({ client: label, op: 'retrieve' });
-      return session.retrieved;
-    };
-  }
-
-  try {
-    return await fn(calls);
-  } finally {
-    targets.forEach(({ resource }, index) => {
-      resource.create = originals[index].create;
-      resource.retrieve = originals[index].retrieve;
-    });
-  }
-}
-
 const CHECKOUT_ITEMS = [
   { id: 'aurora-notebook', quantity: 1 },
   { id: 'ceramic-mug', quantity: 1 },
   { id: 'canvas-tote', quantity: 1 },
 ];
-
-const SOURCE_ROOT = join(dirname(new URL(import.meta.url).pathname), '../..');
-
-function readSource(relativePath: string): string {
-  return readFileSync(join(SOURCE_ROOT, relativePath), 'utf-8');
-}
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
@@ -657,52 +572,7 @@ const tests: Array<[string, () => Promise<void>]> = [
   [
     'only the /test_payment checkout path may reach for the merchant client',
     async () => {
-      // Structural half of the guarantee: the behavioural tests above prove checkout uses the
-      // merchant key; this proves nothing ELSE can start using it. Billing, purchase holds, and
-      // settlement must stay on the billing singleton.
-      const checkoutSource = readSource('domains/test-payment/checkout.ts');
-      assert(
-        checkoutSource.includes('getTestPaymentMerchantStripeClient'),
-        'checkout.ts must acquire through the merchant client'
-      );
-      const stripeImport = /import \{([^}]*)\} from '\.\.\/\.\.\/providers\/stripe';/.exec(
-        checkoutSource
-      );
-      assert(stripeImport !== null, 'checkout.ts should import from providers/stripe');
-      const bindings = (stripeImport?.[1] ?? '')
-        .split(',')
-        .map((binding) => binding.replace(/^type\s+/, '').trim());
-      assert(
-        !bindings.includes('stripe'),
-        'checkout.ts must not bind the billing `stripe` singleton; every Stripe call in the ' +
-          'checkout path is an acquirer call and belongs on the merchant client'
-      );
-      for (const billingPath of [
-        'domains/billing/service.ts',
-        'domains/purchases/charge.ts',
-        'domains/test-payment/lifecycle.ts',
-        'domains/test-payment/service.ts',
-        'providers/agentcard/checkout-settlement.ts',
-        'domains/webhooks/service.ts',
-      ]) {
-        const source = readSource(billingPath);
-        assert(
-          !source.includes('getTestPaymentMerchantStripeClient('),
-          `${billingPath} is a BILLING-side call site and must never use the merchant client: ` +
-            'subscriptions, customers, and personal purchase holds live on STRIPE_SECRET_KEY'
-        );
-      }
-      const billingService = readSource('domains/billing/service.ts');
-      assert(
-        billingService.includes('checkout.sessions.create'),
-        'billing subscription checkout must still mint Stripe Checkout sessions'
-      );
-      assert(
-        billingService.includes('getStripeClientForSecretKey') ||
-          billingService.includes('stripe.checkout.sessions.create'),
-        'billing subscription checkout must mint via the billing/live Stripe client, ' +
-          'never the merchant acquirer client'
-      );
+      assertMerchantClientIsolation();
     },
   ],
 ];
