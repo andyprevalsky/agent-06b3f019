@@ -71,6 +71,7 @@ describe('test-payment Confirmation receipt', () => {
   afterEach(() => {
     window.history.replaceState({}, '', '/');
     window.localStorage.removeItem('rose.test_payment.last_confirmation');
+    window.sessionStorage.removeItem('rose.test_payment.benchmark_mode_latch');
     startTestPaymentCheckout.mockClear();
     startTestPaymentCheckout.mockResolvedValue({
       url: 'https://checkout.stripe.com/c/pay/cs_test',
@@ -86,6 +87,20 @@ describe('test-payment Confirmation receipt', () => {
     render(<TestPaymentPage />);
     expect(screen.getByTestId('payment-confirmation')).toBeInTheDocument();
     expect(screen.getByText(/Order tp_abc12345 was paid successfully/)).toBeInTheDocument();
+  });
+
+  it('keeps the normal shop armed when an agent later navigates into the abandonment query', async () => {
+    window.history.replaceState({}, '', '/test_payment');
+    const first = render(<TestPaymentPage />);
+    expect(window.sessionStorage.getItem('rose.test_payment.benchmark_mode_latch')).toBe('');
+    first.unmount();
+
+    window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-abandonment');
+    render(<TestPaymentPage />);
+    expect(window.location.search).not.toContain('agentcard-abandonment');
+    const payButton = await screen.findByRole('button', { name: /Pay \$/ });
+    fireEvent.click(payButton);
+    expect(screen.queryByText('This checkout is unavailable')).not.toBeInTheDocument();
   });
 
   it('shows a stable pre-submit checkout reference', () => {

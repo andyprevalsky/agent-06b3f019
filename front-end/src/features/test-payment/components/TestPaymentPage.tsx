@@ -16,7 +16,8 @@
  * [CONFIRMING] -- API/Stripe error --> [CHECKOUT_ERROR]
  * [ACCESS_GATE/LOADING] -- localStorage last confirmation present --> [CONFIRMED]
  *
- * This page is a local benchmark merchant. It intentionally exposes real card
+ * Benchmark mode (`?benchmark=`) is latched on the tab's first paint so a browser
+ * agent cannot mid-task `goto` into `agentcard-abandonment` and disable Pay.
  * fields so browser agents can use request_payment_card before Stripe hosted
  * Checkout. Live authorization happens on Stripe's page — merchant Place order
  * only creates the Checkout session. Optional card last4 is sent when the
@@ -95,6 +96,14 @@ function DisabledPage() {
 
 /** Survives new tabs in the same origin (sessionStorage is per-tab). */
 const LAST_CONFIRMATION_STORAGE_KEY = 'rose.test_payment.last_confirmation';
+/**
+ * Latch the `benchmark=` mode from the tab's first `/test_payment` paint.
+ * Browser agents that scrape this module often `goto` `?benchmark=agentcard-abandonment`
+ * mid-task, which disables Pay ("This checkout is unavailable") and stalls purchase gates
+ * (gate-subscription-card-mint-admin-bypass 2026-08-21). Harness start_urls that already
+ * include the query still arm on first paint.
+ */
+const BENCHMARK_MODE_LATCH_KEY = 'rose.test_payment.benchmark_mode_latch';
 
 function isTestPaymentConfirmation(value: unknown): value is TestPaymentConfirmation {
   if (value === null || typeof value !== 'object') return false;
@@ -132,6 +141,29 @@ function persistConfirmation(confirmation: TestPaymentConfirmation): void {
   params.set('order', confirmation.orderId);
   const next = `${window.location.pathname}?${params.toString()}`;
   window.history.replaceState({}, '', next);
+}
+
+function resolveLatchedBenchmarkMode(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  const queryMode = params.get('benchmark');
+  let latched: string | null = null;
+  try {
+    if (window.sessionStorage.getItem(BENCHMARK_MODE_LATCH_KEY) === null) {
+      window.sessionStorage.setItem(BENCHMARK_MODE_LATCH_KEY, queryMode ?? '');
+    }
+    latched = window.sessionStorage.getItem(BENCHMARK_MODE_LATCH_KEY);
+  } catch {
+    // sessionStorage unavailable — fall back to the live query (manual/dev only).
+    return queryMode;
+  }
+  const normalizedLatch = latched === null || latched === '' ? null : latched;
+  if ((queryMode ?? null) !== normalizedLatch) {
+    if (normalizedLatch === null) params.delete('benchmark');
+    else params.set('benchmark', normalizedLatch);
+    const qs = params.toString();
+    window.history.replaceState({}, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+  }
+  return normalizedLatch;
 }
 
 function ProductGrid({
@@ -462,7 +494,7 @@ export function Confirmation({ confirmation }: { confirmation: TestPaymentConfir
 
 export default function TestPaymentPage() {
   const isDev = import.meta.env.DEV === true;
-  const benchmarkMode = new URLSearchParams(window.location.search).get('benchmark');
+  const benchmarkMode = resolveLatchedBenchmarkMode();
   const isLiveLifecycleFixture = benchmarkMode === LIVE_LIFECYCLE_BENCHMARK_QUERY;
   const isAbandonmentFixture = isDev && benchmarkMode === ABANDONMENT_BENCHMARK_QUERY;
   const isEnabled = isDev || isLiveLifecycleFixture;
