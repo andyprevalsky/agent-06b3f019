@@ -6971,6 +6971,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 auth_guard_classifier_usages: list = []
                 auth_guard_page_challenged = False
                 if input_page is not None:
+                    auth_guard_dom_tree = None
+                    with contextlib.suppress(Exception):
+                        auth_guard_state = await dom_service.get_browser_state(
+                            include_screenshot=False
+                        )
+                        auth_guard_dom_tree = str(auth_guard_state.get("dom_tree") or "") or None
                     auth_guard_page_challenged = await live_tab_looks_challenged(
                         input_page,
                         agent_id=agent_id,
@@ -6983,6 +6989,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         gpt_token_source=gpt_token_source,
                         gpt_token_pool_id=gpt_token_pool_id,
                         usage_collector=auth_guard_classifier_usages,
+                        agent_dom_tree=auth_guard_dom_tree,
+                        network_recorder=browser_network_recorder,
                     )
                 for classifier_usage in auth_guard_classifier_usages:
                     if not isinstance(classifier_usage, dict):
@@ -7443,11 +7451,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             gpt_token_source=gpt_token_source,
                             gpt_token_pool_id=gpt_token_pool_id,
                             usage_collector=challenge_classifier_usages,
+                            recovery_reason=str(recovery_reason or "") or None,
                         ),
                         commit_cookie_removals=lambda keys: commit_cookie_removals(
                             input_page,
                             keys,
                             current_url,
+                            recovery_reason=str(recovery_reason or "") or None,
+                            network_recorder=browser_network_recorder,
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
@@ -7555,6 +7566,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             "live_verify",
                             "Verifying the promoted browser cleared the challenge on the live tab.",
                         )
+                        live_verify_dom_tree = None
+                        with contextlib.suppress(Exception):
+                            live_verify_state = await dom_service.get_browser_state(
+                                include_screenshot=False
+                            )
+                            live_verify_dom_tree = (
+                                str(live_verify_state.get("dom_tree") or "") or None
+                            )
                         if not await verify_live_page_cleared_challenge(
                             input_page,
                             current_url,
@@ -7568,6 +7587,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             gpt_token_source=gpt_token_source,
                             gpt_token_pool_id=gpt_token_pool_id,
                             usage_collector=challenge_classifier_usages,
+                            agent_dom_tree=live_verify_dom_tree,
+                            network_recorder=browser_network_recorder,
+                            recovery_reason=str(recovery_reason or "") or None,
                         ):
                             provider = config_result.get("provider")
                             proxy_tier = config_result.get("proxy_tier")

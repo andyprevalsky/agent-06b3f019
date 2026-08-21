@@ -14,6 +14,7 @@ search unless the guest commit path applies.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -300,6 +301,23 @@ def _has_substantive_content(title: str, body_text: str, visible_markup: str) ->
     return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and is_usable_document_title(title)
 
 
+def _response_network_entry(response: Any) -> Dict[str, Any] | None:
+    """Best-effort Playwright Response → classifier network row (status, no body)."""
+    try:
+        url = str(getattr(response, "url", "") or "")
+        status = getattr(response, "status", None)
+        status_text = str(getattr(response, "status_text", "") or "")
+        if not url and status is None:
+            return None
+        return {
+            "url": url,
+            "status": status,
+            "status_text": status_text,
+        }
+    except Exception:
+        return None
+
+
 async def _wait_for_clean_page(
     page: Any,
     response: Any,
@@ -315,6 +333,10 @@ async def _wait_for_clean_page(
     gpt_token_source: str | None = None,
     gpt_token_pool_id: str | None = None,
     usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    network_entries: list | None = None,
+    recovery_reason: str | None = None,
 ) -> bool:
     """After DOM settle, ask rose-1-mini whether the page is still challenged."""
     from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
@@ -333,6 +355,10 @@ async def _wait_for_clean_page(
         gpt_token_source=gpt_token_source,
         gpt_token_pool_id=gpt_token_pool_id,
         usage_collector=usage_collector,
+        agent_dom_tree=agent_dom_tree,
+        network_recorder=network_recorder,
+        network_entries=network_entries,
+        recovery_reason=recovery_reason,
     )
     return bool(result.get("clean"))
 
@@ -353,30 +379,56 @@ async def _probe_page(
     gpt_token_source: str | None = None,
     gpt_token_pool_id: str | None = None,
     usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    recovery_reason: str | None = None,
 ) -> bool:
-    for _ in range(attempts):
-        response = None
+    collected: list[Dict[str, Any]] = []
+
+    def _on_response(resp: Any) -> None:
+        entry = _response_network_entry(resp)
+        if entry is not None:
+            collected.append(entry)
+
+    on_fn = getattr(page, "on", None)
+    off_fn = getattr(page, "remove_listener", None) or getattr(page, "off", None)
+    if callable(on_fn):
         try:
-            response = await page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
+            on_fn("response", _on_response)
         except Exception:
-            pass
-        if not await _wait_for_clean_page(
-            page,
-            response,
-            solver_timeout_seconds,
-            agent_id=agent_id,
-            user_id=user_id,
-            claude_token=claude_token,
-            claude_token_source=claude_token_source,
-            claude_token_pool_id=claude_token_pool_id,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            usage_collector=usage_collector,
-        ):
-            return False
-    return True
+            on_fn = None
+    try:
+        for _ in range(attempts):
+            response = None
+            try:
+                response = await page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
+            except Exception:
+                pass
+            if not await _wait_for_clean_page(
+                page,
+                response,
+                solver_timeout_seconds,
+                agent_id=agent_id,
+                user_id=user_id,
+                claude_token=claude_token,
+                claude_token_source=claude_token_source,
+                claude_token_pool_id=claude_token_pool_id,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                usage_collector=usage_collector,
+                agent_dom_tree=agent_dom_tree,
+                network_recorder=network_recorder,
+                network_entries=list(collected),
+                recovery_reason=recovery_reason,
+            ):
+                return False
+        return True
+    finally:
+        if callable(on_fn) and callable(off_fn):
+            with contextlib.suppress(Exception):
+                off_fn("response", _on_response)
 
 
 async def probe_storage_state(
@@ -396,6 +448,7 @@ async def probe_storage_state(
     gpt_token_source: str | None = None,
     gpt_token_pool_id: str | None = None,
     usage_collector: list | None = None,
+    recovery_reason: str | None = None,
 ) -> bool:
     """Probe a storage variant in an isolated remote-browser context."""
     context = await playwright_browser.new_context(storage_state=storage_state)
@@ -416,6 +469,7 @@ async def probe_storage_state(
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             usage_collector=usage_collector,
+            recovery_reason=recovery_reason,
         )
     finally:
         await context.close()
@@ -438,6 +492,9 @@ async def verify_live_page_cleared_challenge(
     gpt_token_source: str | None = None,
     gpt_token_pool_id: str | None = None,
     usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    recovery_reason: str | None = None,
 ) -> bool:
     """Require the canonical live tab to clear challenges after promote/restore.
 
@@ -461,6 +518,9 @@ async def verify_live_page_cleared_challenge(
         gpt_token_source=gpt_token_source,
         gpt_token_pool_id=gpt_token_pool_id,
         usage_collector=usage_collector,
+        agent_dom_tree=agent_dom_tree,
+        network_recorder=network_recorder,
+        recovery_reason=recovery_reason,
     )
 
 
@@ -477,6 +537,9 @@ async def live_tab_looks_challenged(
     gpt_token_source: str | None = None,
     gpt_token_pool_id: str | None = None,
     usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    recovery_reason: str | None = None,
 ) -> bool:
     """True when the live tab's current document still looks challenged (LLM).
 
@@ -502,6 +565,9 @@ async def live_tab_looks_challenged(
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
             usage_collector=usage_collector,
+            agent_dom_tree=agent_dom_tree,
+            network_recorder=network_recorder,
+            recovery_reason=recovery_reason,
         )
     except Exception:
         # Unknown page state — do not claim "clean".
@@ -629,6 +695,9 @@ async def commit_cookie_removals(
     *,
     attempts: int = 2,
     solver_timeout_seconds: float = 45.0,
+    recovery_reason: str | None = None,
+    network_recorder: Any = None,
+    agent_dom_tree: str | None = None,
 ) -> bool:
     """Delete proven-safe keys and require the canonical tab to pass twice."""
     context = page.context
@@ -639,6 +708,9 @@ async def commit_cookie_removals(
         target_url,
         attempts=attempts,
         solver_timeout_seconds=solver_timeout_seconds,
+        recovery_reason=recovery_reason,
+        network_recorder=network_recorder,
+        agent_dom_tree=agent_dom_tree,
     )
 
 

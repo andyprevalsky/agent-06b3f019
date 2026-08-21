@@ -22,6 +22,8 @@ from _test_utils import BlackboxResult
 from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
     build_challenge_classifier_messages,
     capture_network_summary,
+    format_network_summary_lines,
+    recovery_soft_block_still_present,
 )
 
 
@@ -49,6 +51,10 @@ class _StatusAwarePage:
                 "transferSize": 108,
                 "status": 429,
                 "statusText": "Too Many Requests",
+                "response_body": (
+                    '{"errors":[{"message":"Provisioned request rate has been exceeded"}]}'
+                ),
+                "response_body_truncated": False,
             }
         ]
 
@@ -65,6 +71,9 @@ async def test_network_summary_surfaces_graphql_http_429():
         "challenge classifier network summary must surface GraphQL HTTP 429 "
         f"soft-blocks; got: {summary!r}"
     )
+    assert "status=429" in summary
+    assert "response_body" in summary
+    assert "Provisioned request rate" in summary
 
 
 async def test_perf_only_entries_still_format_without_status():
@@ -74,21 +83,78 @@ async def test_perf_only_entries_still_format_without_status():
     assert "286ms" in summary
 
 
-def test_classifier_messages_include_network_block():
+async def test_truncated_response_body_is_labeled():
+    long_body = "X" * 500
+    summary = format_network_summary_lines(
+        [
+            {
+                "url": "https://www.hotels.com/graphql",
+                "status": 429,
+                "status_text": "Too Many Requests",
+                "duration_ms": 100,
+                "size_bytes": 50,
+                "response_body": long_body,
+                "response_body_truncated": True,
+            }
+        ]
+    )
+    assert "response_body (truncated):" in summary
+    assert long_body not in summary
+    assert "X" * 200 in summary
+
+
+def test_classifier_messages_include_network_block_and_recovery_reason():
     msgs = build_challenge_classifier_messages(
         {
             "url": "https://www.hotels.com/ho129640/",
             "title": "Hotel Kabuki",
             "status": 200,
             "cleaned_dom": "<div id=Offers>Loading</div>",
-            "network_summary": "286ms 108B status=429 https://www.hotels.com/graphql",
+            "network_summary": (
+                "status=429 Too Many Requests 286ms 108B https://www.hotels.com/graphql\n"
+                "  response_body (truncated): Provisioned request rate has been exceeded"
+            ),
             "screenshot_base64_png": None,
+            "recovery_reason": "GraphQL 429 / Offers Loading on hotels.com property page",
         }
     )
     user = next(m for m in msgs if m.get("role") == "user")
     text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
     assert "status=429" in text or "429" in text
     assert "Network metadata" in text
+    assert "Agent recover_from_challenge reason:" in text
+    assert "Offers Loading" in text
+    assert "truncated" in text.lower()
+    assert "DOM tree" in text
+
+
+def test_soft_block_gate_forces_challenged_when_429_remains():
+    assert recovery_soft_block_still_present(
+        "status=429 Too Many Requests https://www.hotels.com/graphql",
+        "repeated GraphQL 429 / Offers still Loading",
+    )
+    assert not recovery_soft_block_still_present(
+        "status=200 120ms https://www.hotels.com/graphql",
+        "repeated GraphQL 429 / Offers still Loading",
+    )
+
+
+async def test_network_entries_override_prefers_explicit_status_rows():
+    summary = await capture_network_summary(
+        _PerfOnlyPage(),
+        network_entries=[
+            {
+                "url": "https://www.hotels.com/graphql",
+                "status": 429,
+                "status_text": "Too Many Requests",
+                "duration_ms": 50,
+                "size_bytes": 108,
+                "response_body": '{"message":"Provisioned request rate has been exceeded"}',
+            }
+        ],
+    )
+    assert "status=429" in summary
+    assert "Provisioned request rate" in summary
 
 
 async def run_all_tests() -> bool:
@@ -102,9 +168,21 @@ async def run_all_tests() -> bool:
         "perf_only_entries_still_format_without_status",
         test_perf_only_entries_still_format_without_status,
     )
+    await result.record_async(
+        "truncated_response_body_is_labeled",
+        test_truncated_response_body_is_labeled,
+    )
     result.record(
-        "classifier_messages_include_network_block",
-        test_classifier_messages_include_network_block,
+        "classifier_messages_include_network_block_and_recovery_reason",
+        test_classifier_messages_include_network_block_and_recovery_reason,
+    )
+    result.record(
+        "soft_block_gate_forces_challenged_when_429_remains",
+        test_soft_block_gate_forces_challenged_when_429_remains,
+    )
+    await result.record_async(
+        "network_entries_override_prefers_explicit_status_rows",
+        test_network_entries_override_prefers_explicit_status_rows,
     )
     return result.all_passed
 

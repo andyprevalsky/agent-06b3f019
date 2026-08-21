@@ -5,7 +5,7 @@ post-promote verify decisions. The legacy ``page_looks_challenged`` heuristic
 in challenge_recovery.py is deprecated but retained.
 
 Mirrors back-end ``challengeLlmClassifier.ts``:
-  settle DOM → screenshot + cleaned DOM + network metadata → rose-1-mini
+  settle DOM → screenshot + agent DOM tree + network metadata → rose-1-mini
   structured {challenged, reason}.
 
 Cost routing reuses ``helpers.llm.call_llm`` (same path as web_fetch's
@@ -17,7 +17,7 @@ and persists ToolUsage rows.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import structlog
 from pydantic import BaseModel, Field
@@ -27,8 +27,10 @@ logger = structlog.get_logger()
 CHALLENGE_LLM_MODEL = "rose-labs/rose-1-mini"
 CHALLENGE_LLM_SETTLE_MS = 60_000
 CHALLENGE_LLM_CALL_SITE = "challenge_llm_classifier"
-_CLEANED_DOM_CHAR_CAP = 12_000
+_DOM_CHAR_CAP = 12_000
 _NETWORK_ENTRY_CAP = 40
+_NETWORK_BODY_CHAR_CAP = 200
+_NETWORK_SUMMARY_CHAR_CAP = 4_000
 
 CHALLENGE_LLM_SYSTEM_PROMPT = """You are a binary page-state classifier for a browser agent.
 
@@ -38,11 +40,14 @@ Return challenged=true when:
 - A challenge / CAPTCHA / human-verification interstitial is visible or dominating the page
 - The document is an empty/blank soft-wall, error gateway, or host-only shell without the real product UI
 - Navigation failed into a block page even if some marketing text leaked into the DOM
+- Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
+- The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
 
 Return challenged=false ONLY when:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
+- AND if an agent recovery reason is provided, that specific failure mode is cleared (network + DOM evidence)
 
-Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use cleaned DOM + network metadata as supporting evidence. Prefer challenged=true when uncertain."""
+Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use the agent DOM tree + network metadata (including HTTP status and truncated response bodies) as supporting evidence. Prefer challenged=true when uncertain."""
 
 
 class ChallengePageClassification(BaseModel):
@@ -80,7 +85,14 @@ async def wait_for_dom_settled(page: Any, timeout_ms: float = CHALLENGE_LLM_SETT
         await asyncio.sleep(1.5)
 
 
-async def capture_cleaned_dom(page: Any) -> str:
+async def capture_agent_stripped_dom(page: Any) -> str:
+    """Capture stripped page text closest to the main browser agent's DOM view.
+
+    Prefer full visible body text after removing script/style (so soft-block
+    markers like Offers/Loading survive). Cap length for the classifier prompt.
+    Callers that already have DOMService ``dom_tree`` should pass that instead
+    via ``agent_dom_tree`` so the classifier sees the exact agent snapshot.
+    """
     try:
         cleaned = await page.evaluate(
             """(charCap) => {
@@ -89,61 +101,231 @@ async def capture_cleaned_dom(page: Any) -> str:
               const clone = body.cloneNode(true);
               clone.querySelectorAll('script, style, noscript, svg, iframe')
                 .forEach((node) => node.remove());
-              const lines = [];
-              const interesting = clone.querySelectorAll(
-                'a, button, input, select, textarea, h1, h2, h3, h4, label, [role="button"], [role="link"]'
-              );
-              interesting.forEach((el) => {
-                const tag = el.tagName.toLowerCase();
-                const text = (el.textContent || el.value || el.placeholder || '')
-                  .replace(/\\s+/g, ' ')
-                  .trim()
-                  .slice(0, 200);
-                if (text) lines.push(`${tag}: ${text}`);
-              });
-              const interactive = lines.join('\\n').trim();
-              if (interactive.length >= 40) return interactive.slice(0, charCap);
-              return (clone.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, charCap);
+              return (clone.innerText || clone.textContent || '')
+                .replace(/\\s+/g, ' ')
+                .trim()
+                .slice(0, charCap);
             }""",
-            _CLEANED_DOM_CHAR_CAP,
+            _DOM_CHAR_CAP,
         )
         return cleaned if isinstance(cleaned, str) else ""
     except Exception:
         return ""
 
 
-async def capture_network_summary(page: Any) -> str:
+# Back-compat alias used by older imports/tests.
+capture_cleaned_dom = capture_agent_stripped_dom
+
+
+def _truncate_body(text: str, cap: int = _NETWORK_BODY_CHAR_CAP) -> tuple[str, bool]:
+    raw = text if isinstance(text, str) else str(text or "")
+    if len(raw) <= cap:
+        return raw, False
+    return raw[:cap], True
+
+
+def format_network_summary_lines(entries: Sequence[Dict[str, Any]]) -> str:
+    """Format network rows with HTTP status and clearly-marked truncated bodies."""
+    lines: List[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or entry.get("name") or "")[:180]
+        duration = entry.get("duration_ms")
+        if duration is None:
+            duration = entry.get("durationMs")
+        size = entry.get("size_bytes")
+        if size is None:
+            size = entry.get("transferSize")
+        status = entry.get("status")
+        status_text = str(entry.get("status_text") or entry.get("statusText") or "").strip()
+        parts: List[str] = []
+        if status is not None and str(status).strip() != "":
+            parts.append(f"status={status}")
+            if status_text:
+                parts.append(status_text)
+        if duration is not None:
+            try:
+                parts.append(f"{int(duration)}ms")
+            except Exception:
+                parts.append(f"{duration}ms")
+        if size is not None:
+            try:
+                parts.append(f"{int(size)}B")
+            except Exception:
+                parts.append(f"{size}B")
+        if url:
+            parts.append(url)
+        if not parts:
+            continue
+        line = " ".join(parts)
+        body = entry.get("response_body")
+        if body is None:
+            body = entry.get("body")
+        if isinstance(body, str) and body:
+            snippet, capped_here = _truncate_body(body)
+            truncated = bool(entry.get("response_body_truncated")) or capped_here
+            if truncated:
+                line += f"\n  response_body (truncated): {snippet}"
+            else:
+                line += f"\n  response_body: {snippet}"
+        lines.append(line)
+        if len("\n".join(lines)) >= _NETWORK_SUMMARY_CHAR_CAP:
+            break
+    if not lines:
+        return "(no resource timings)"
+    return "\n".join(lines)[:_NETWORK_SUMMARY_CHAR_CAP]
+
+
+def network_entries_from_recorder(
+    network_recorder: Any,
+    *,
+    limit: int = _NETWORK_ENTRY_CAP,
+    max_body_chars: int = _NETWORK_BODY_CHAR_CAP,
+) -> List[Dict[str, Any]]:
+    """Pull recent CDP recorder rows (status + truncated bodies) when available."""
+    if network_recorder is None:
+        return []
+    query = getattr(network_recorder, "query_requests", None)
+    if not callable(query):
+        return []
+    try:
+        rows = query(
+            limit=limit,
+            include_bodies=True,
+            max_body_chars=max_body_chars,
+        )
+    except Exception as exc:
+        logger.warning("Challenge classifier network recorder query failed", error=str(exc))
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+async def capture_network_summary(
+    page: Any,
+    *,
+    network_recorder: Any = None,
+    network_entries: Sequence[Dict[str, Any]] | None = None,
+) -> str:
+    """Build classifier network summary with HTTP status when available.
+
+    Preference order:
+    1. Explicit ``network_entries`` (e.g. Playwright responses collected during goto)
+    2. Live ``BrowserNetworkRecorder.query_requests`` (status + truncated bodies)
+    3. Performance Resource Timing fallback (may omit status — probes without CDP)
+    """
+    if network_entries:
+        return format_network_summary_lines(list(network_entries)[-_NETWORK_ENTRY_CAP:])
+
+    recorder_rows = network_entries_from_recorder(network_recorder)
+    if recorder_rows:
+        return format_network_summary_lines(recorder_rows)
+
     try:
         entries = await page.evaluate(
             """(cap) => {
               const resources = performance.getEntriesByType('resource');
-              return resources.slice(-cap).map((entry) => ({
-                name: String(entry.name || '').slice(0, 180),
-                durationMs: Math.round(entry.duration || 0),
-                transferSize: Number(entry.transferSize || 0),
-              }));
+              return resources.slice(-cap).map((entry) => {
+                const row = {
+                  name: String(entry.name || '').slice(0, 180),
+                  durationMs: Math.round(entry.duration || 0),
+                  transferSize: Number(entry.transferSize || 0),
+                };
+                // Some runtimes expose responseStatus on resource timing.
+                if (typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
+                  row.status = entry.responseStatus;
+                }
+                return row;
+              });
             }""",
             _NETWORK_ENTRY_CAP,
         )
         if not isinstance(entries, list) or not entries:
             return "(no resource timings)"
-        lines = [
-            f"{int(e.get('durationMs') or 0)}ms {int(e.get('transferSize') or 0)}B {e.get('name') or ''}"
-            for e in entries
-            if isinstance(e, dict)
-        ]
-        return "\n".join(lines)[:4_000]
+        normalized: List[Dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            row = {
+                "url": entry.get("name") or entry.get("url"),
+                "duration_ms": entry.get("durationMs"),
+                "size_bytes": entry.get("transferSize"),
+            }
+            if entry.get("status") is not None:
+                row["status"] = entry.get("status")
+            if entry.get("statusText") is not None:
+                row["status_text"] = entry.get("statusText")
+            # Tests / CDP-backed evaluate may pass status on the raw entry.
+            if "status" in entry and row.get("status") is None:
+                row["status"] = entry.get("status")
+            if entry.get("response_body") is not None:
+                row["response_body"] = entry.get("response_body")
+                row["response_body_truncated"] = bool(entry.get("response_body_truncated"))
+            normalized.append(row)
+        return format_network_summary_lines(normalized)
     except Exception:
         return "(network metadata unavailable)"
+
+
+def recovery_soft_block_still_present(
+    network_summary: str,
+    recovery_reason: str | None,
+) -> bool:
+    """Deterministic gate: cited soft-block still visible in network summary."""
+    reason = (recovery_reason or "").lower()
+    summary = (network_summary or "").lower()
+    if not reason or not summary:
+        return False
+    reason_mentions_soft_block = any(
+        token in reason
+        for token in (
+            "429",
+            "rate limit",
+            "rate-limit",
+            "ratelimit",
+            "provisioned",
+            "graphql",
+            "too many requests",
+            "offers loading",
+            "soft-block",
+            "soft block",
+        )
+    )
+    if not reason_mentions_soft_block:
+        return False
+    return (
+        "status=429" in summary
+        or "too many requests" in summary
+        or "provisioned request rate" in summary
+    )
 
 
 async def capture_challenge_classifier_context(
     page: Any,
     response: Any = None,
+    *,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    network_entries: Sequence[Dict[str, Any]] | None = None,
+    recovery_reason: str | None = None,
 ) -> Dict[str, Any]:
     title_task = page.title()
-    cleaned_task = capture_cleaned_dom(page)
-    network_task = capture_network_summary(page)
+    if isinstance(agent_dom_tree, str) and agent_dom_tree.strip():
+        fixed_dom = agent_dom_tree.strip()[:_DOM_CHAR_CAP]
+
+        async def _fixed_dom() -> str:
+            return fixed_dom
+
+        cleaned_task = _fixed_dom()
+    else:
+        cleaned_task = capture_agent_stripped_dom(page)
+    network_task = capture_network_summary(
+        page,
+        network_recorder=network_recorder,
+        network_entries=network_entries,
+    )
     title, cleaned_dom, network_summary = await asyncio.gather(
         title_task, cleaned_task, network_task, return_exceptions=True
     )
@@ -179,20 +361,34 @@ async def capture_challenge_classifier_context(
         "cleaned_dom": cleaned_s,
         "network_summary": network_s,
         "screenshot_base64_png": screenshot_b64,
+        "recovery_reason": (recovery_reason or "").strip() or None,
     }
 
 
 def build_challenge_classifier_messages(context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    recovery_reason = context.get("recovery_reason")
+    recovery_lines: List[str] = []
+    if recovery_reason:
+        recovery_lines = [
+            f"Agent recover_from_challenge reason: {recovery_reason}",
+            (
+                "Return challenged=false only if this specific failure mode is cleared "
+                "in DOM + network evidence (not merely because the HTML shell looks fine)."
+            ),
+            "",
+        ]
     text_block = "\n".join(
         [
             f"Target URL: {context.get('url') or ''}",
             f"Document title: {context.get('title') or '(empty)'}",
             f"Last main-document HTTP status: {context.get('status') if context.get('status') is not None else '(unknown)'}",
             "",
-            "Network metadata (recent resource timings):",
+            *recovery_lines,
+            "Network metadata (recent requests; includes HTTP status when known; "
+            "response bodies are truncated and labeled when truncated):",
             context.get("network_summary") or "(none)",
             "",
-            "Cleaned DOM (scripts/styles removed; interactive summary preferred):",
+            "DOM tree (same stripped page text the browser agent uses; scripts/styles removed):",
             context.get("cleaned_dom") or "(empty)",
             "",
             "Classify challenged true/false for this page state.",
@@ -243,6 +439,25 @@ async def classify_challenge_with_llm(
 ) -> Dict[str, Any]:
     """Fail closed: errors ⇒ challenged=True so probes cannot promote on outage."""
     from helpers.llm import call_llm
+
+    if recovery_soft_block_still_present(
+        str(context.get("network_summary") or ""),
+        context.get("recovery_reason") if isinstance(context.get("recovery_reason"), str) else None,
+    ):
+        logger.info(
+            "Challenge LLM classifier forced challenged — recovery soft-block still in network",
+            url=str(context.get("url") or "")[:200],
+            recovery_reason=str(context.get("recovery_reason") or "")[:200],
+            agent_id=agent_id,
+        )
+        return {
+            "challenged": True,
+            "reason": (
+                "recovery_reason soft-block still present in network summary "
+                "(HTTP 429 / rate-limit evidence uncleared)"
+            ),
+            "usage": empty_classifier_usage(),
+        }
 
     try:
         result = await call_llm(
@@ -322,6 +537,10 @@ async def classify_page_after_settle(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     usage_collector: Optional[List[Dict[str, Any]]] = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    network_entries: Sequence[Dict[str, Any]] | None = None,
+    recovery_reason: str | None = None,
 ) -> Dict[str, Any]:
     """Settle DOM, capture context, run binary LLM classifier.
 
@@ -329,7 +548,14 @@ async def classify_page_after_settle(
     provided, appends the usage dict for the caller to fold into cost tracking.
     """
     await wait_for_dom_settled(page, settle_timeout_ms)
-    context = await capture_challenge_classifier_context(page, response)
+    context = await capture_challenge_classifier_context(
+        page,
+        response,
+        agent_dom_tree=agent_dom_tree,
+        network_recorder=network_recorder,
+        network_entries=network_entries,
+        recovery_reason=recovery_reason,
+    )
     result = await classify_challenge_with_llm(
         context,
         agent_id=agent_id,

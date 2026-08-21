@@ -29,6 +29,8 @@ export const CHALLENGE_LLM_MODEL = 'rose-labs/rose-1-mini';
 export const CHALLENGE_LLM_SETTLE_MS = 60_000;
 const CLEANED_DOM_CHAR_CAP = 12_000;
 const NETWORK_ENTRY_CAP = 40;
+const NETWORK_BODY_CHAR_CAP = 200;
+const NETWORK_SUMMARY_CHAR_CAP = 4_000;
 
 const ChallengeClassificationSchema = z.object({
   challenged: z
@@ -62,11 +64,14 @@ Return challenged=true when:
 - A challenge / CAPTCHA / human-verification interstitial is visible or dominating the page
 - The document is an empty/blank soft-wall, error gateway, or host-only shell without the real product UI
 - Navigation failed into a block page even if some marketing text leaked into the DOM
+- Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
+- The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
 
 Return challenged=false ONLY when:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
+- AND if an agent recovery reason is provided, that specific failure mode is cleared (network + DOM evidence)
 
-Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use cleaned DOM + network metadata as supporting evidence. Prefer challenged=true when uncertain.`;
+Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use the agent DOM tree + network metadata (including HTTP status and truncated response bodies) as supporting evidence. Prefer challenged=true when uncertain.`;
 
 export interface ChallengeClassifierContext {
   url: string;
@@ -75,6 +80,7 @@ export interface ChallengeClassifierContext {
   cleanedDom: string;
   networkSummary: string;
   screenshotBase64Png: string | null;
+  recoveryReason?: string | null;
 }
 
 export interface ChallengeClassifierBilling {
@@ -147,22 +153,10 @@ export async function captureCleanedDom(page: Page): Promise<string> {
       clone
         .querySelectorAll('script, style, noscript, svg, iframe')
         .forEach((node) => node.remove());
-      const lines: string[] = [];
-      const interesting = clone.querySelectorAll(
-        'a, button, input, select, textarea, h1, h2, h3, h4, label, [role="button"], [role="link"]'
-      );
-      interesting.forEach((el) => {
-        const tag = el.tagName.toLowerCase();
-        const input = el as HTMLInputElement;
-        const text = (el.textContent || input.value || input.placeholder || '')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 200);
-        if (text) lines.push(`${tag}: ${text}`);
-      });
-      const interactive = lines.join('\n').trim();
-      if (interactive.length >= 40) return interactive.slice(0, charCap);
-      return (clone.innerText || '').replace(/\s+/g, ' ').trim().slice(0, charCap);
+      return (clone.innerText || clone.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, charCap);
     }, CLEANED_DOM_CHAR_CAP);
     return cleaned;
   } catch {
@@ -170,24 +164,126 @@ export async function captureCleanedDom(page: Page): Promise<string> {
   }
 }
 
-export async function captureNetworkSummary(page: Page): Promise<string> {
+type NetworkSummaryEntry = {
+  url?: string;
+  name?: string;
+  status?: number | null;
+  statusText?: string | null;
+  status_text?: string | null;
+  durationMs?: number | null;
+  duration_ms?: number | null;
+  transferSize?: number | null;
+  size_bytes?: number | null;
+  response_body?: string | null;
+  response_body_truncated?: boolean;
+};
+
+function truncateBody(text: string, cap: number = NETWORK_BODY_CHAR_CAP): {
+  snippet: string;
+  truncated: boolean;
+} {
+  if (text.length <= cap) return { snippet: text, truncated: false };
+  return { snippet: text.slice(0, cap), truncated: true };
+}
+
+export function formatNetworkSummaryLines(entries: NetworkSummaryEntry[]): string {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    const url = String(entry.url || entry.name || '').slice(0, 180);
+    const duration = entry.duration_ms ?? entry.durationMs ?? null;
+    const size = entry.size_bytes ?? entry.transferSize ?? null;
+    const status = entry.status;
+    const statusText = String(entry.status_text || entry.statusText || '').trim();
+    const parts: string[] = [];
+    if (status !== null && status !== undefined && String(status).trim() !== '') {
+      parts.push(`status=${status}`);
+      if (statusText) parts.push(statusText);
+    }
+    if (duration !== null && duration !== undefined) parts.push(`${Math.round(Number(duration))}ms`);
+    if (size !== null && size !== undefined) parts.push(`${Math.round(Number(size))}B`);
+    if (url) parts.push(url);
+    if (parts.length === 0) continue;
+    let line = parts.join(' ');
+    const body = entry.response_body;
+    if (typeof body === 'string' && body) {
+      const { snippet, truncated: cappedHere } = truncateBody(body);
+      const truncated = Boolean(entry.response_body_truncated) || cappedHere;
+      line += truncated
+        ? `\n  response_body (truncated): ${snippet}`
+        : `\n  response_body: ${snippet}`;
+    }
+    lines.push(line);
+    if (lines.join('\n').length >= NETWORK_SUMMARY_CHAR_CAP) break;
+  }
+  if (lines.length === 0) return '(no resource timings)';
+  return lines.join('\n').slice(0, NETWORK_SUMMARY_CHAR_CAP);
+}
+
+export function recoverySoftBlockStillPresent(
+  networkSummary: string,
+  recoveryReason?: string | null
+): boolean {
+  const reason = (recoveryReason || '').toLowerCase();
+  const summary = (networkSummary || '').toLowerCase();
+  if (!reason || !summary) return false;
+  const reasonMentionsSoftBlock = [
+    '429',
+    'rate limit',
+    'rate-limit',
+    'ratelimit',
+    'provisioned',
+    'graphql',
+    'too many requests',
+    'offers loading',
+    'soft-block',
+    'soft block',
+  ].some((token) => reason.includes(token));
+  if (!reasonMentionsSoftBlock) return false;
+  return (
+    summary.includes('status=429') ||
+    summary.includes('too many requests') ||
+    summary.includes('provisioned request rate')
+  );
+}
+
+export async function captureNetworkSummary(
+  page: Page,
+  options?: {
+    networkEntries?: NetworkSummaryEntry[];
+  }
+): Promise<string> {
+  if (options?.networkEntries && options.networkEntries.length > 0) {
+    return formatNetworkSummaryLines(options.networkEntries.slice(-NETWORK_ENTRY_CAP));
+  }
   try {
     const entries = await page.evaluate((cap: number) => {
       const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
-      return resources.slice(-cap).map((entry) => ({
-        name: String(entry.name || '').slice(0, 180),
-        durationMs: Math.round(entry.duration || 0),
-        transferSize: Number(entry.transferSize || 0),
-      }));
+      return resources.slice(-cap).map((entry) => {
+        const row: Record<string, unknown> = {
+          name: String(entry.name || '').slice(0, 180),
+          durationMs: Math.round(entry.duration || 0),
+          transferSize: Number(entry.transferSize || 0),
+        };
+        const maybeStatus = (entry as PerformanceResourceTiming & { responseStatus?: number })
+          .responseStatus;
+        if (typeof maybeStatus === 'number' && maybeStatus > 0) {
+          row.status = maybeStatus;
+        }
+        return row;
+      });
     }, NETWORK_ENTRY_CAP);
     if (!Array.isArray(entries) || entries.length === 0) return '(no resource timings)';
-    return entries
-      .map(
-        (entry) =>
-          `${entry.durationMs}ms ${entry.transferSize}B ${entry.name}`
-      )
-      .join('\n')
-      .slice(0, 4_000);
+    return formatNetworkSummaryLines(
+      entries.map((entry) => ({
+        url: String((entry as { name?: string }).name || ''),
+        durationMs: Number((entry as { durationMs?: number }).durationMs || 0),
+        transferSize: Number((entry as { transferSize?: number }).transferSize || 0),
+        status:
+          (entry as { status?: number }).status === undefined
+            ? null
+            : Number((entry as { status?: number }).status),
+      }))
+    );
   } catch {
     return '(network metadata unavailable)';
   }
@@ -195,12 +291,21 @@ export async function captureNetworkSummary(page: Page): Promise<string> {
 
 export async function captureChallengeClassifierContext(
   page: Page,
-  response: Response | null
+  response: Response | null,
+  options?: {
+    agentDomTree?: string | null;
+    networkEntries?: NetworkSummaryEntry[];
+    recoveryReason?: string | null;
+  }
 ): Promise<ChallengeClassifierContext> {
+  const agentDom =
+    typeof options?.agentDomTree === 'string' && options.agentDomTree.trim()
+      ? options.agentDomTree.trim().slice(0, CLEANED_DOM_CHAR_CAP)
+      : null;
   const [title, cleanedDom, networkSummary] = await Promise.all([
     page.title().catch(() => ''),
-    captureCleanedDom(page),
-    captureNetworkSummary(page),
+    agentDom ? Promise.resolve(agentDom) : captureCleanedDom(page),
+    captureNetworkSummary(page, { networkEntries: options?.networkEntries }),
   ]);
   let screenshotBase64Png: string | null = null;
   try {
@@ -218,21 +323,31 @@ export async function captureChallengeClassifierContext(
     cleanedDom,
     networkSummary,
     screenshotBase64Png,
+    recoveryReason: options?.recoveryReason?.trim() || null,
   };
 }
 
 export function buildChallengeClassifierMessages(
   context: ChallengeClassifierContext
 ): CompletionMessage[] {
+  const recoveryLines =
+    context.recoveryReason && context.recoveryReason.trim()
+      ? [
+          `Agent recover_from_challenge reason: ${context.recoveryReason}`,
+          'Return challenged=false only if this specific failure mode is cleared in DOM + network evidence (not merely because the HTML shell looks fine).',
+          '',
+        ]
+      : [];
   const textBlock = [
     `Target URL: ${context.url}`,
     `Document title: ${context.title || '(empty)'}`,
     `Last main-document HTTP status: ${context.status ?? '(unknown)'}`,
     '',
-    'Network metadata (recent resource timings):',
+    ...recoveryLines,
+    'Network metadata (recent requests; includes HTTP status when known; response bodies are truncated and labeled when truncated):',
     context.networkSummary || '(none)',
     '',
-    'Cleaned DOM (scripts/styles removed; interactive summary preferred):',
+    'DOM tree (same stripped page text the browser agent uses; scripts/styles removed):',
     context.cleanedDom || '(empty)',
     '',
     'Classify challenged true/false for this page state.',
@@ -352,6 +467,19 @@ export async function classifyChallengeWithLlm(
   context: ChallengeClassifierContext,
   billing: ChallengeClassifierBilling = {}
 ): Promise<ChallengeClassificationWithUsage> {
+  if (recoverySoftBlockStillPresent(context.networkSummary, context.recoveryReason)) {
+    log.info('Challenge LLM classifier forced challenged — recovery soft-block still in network', {
+      url: context.url.slice(0, 200),
+      recovery_reason: (context.recoveryReason || '').slice(0, 200),
+      agent_id: billing.agentId ?? null,
+    });
+    return {
+      challenged: true,
+      reason:
+        'recovery_reason soft-block still present in network summary (HTTP 429 / rate-limit evidence uncleared)',
+      usage: null,
+    };
+  }
   try {
     const stream = await createStreamingCompletion({
       model: CHALLENGE_LLM_MODEL,
@@ -404,7 +532,12 @@ export async function classifyPageAfterSettle(
   page: Page,
   response: Response | null,
   settleTimeoutMs: number = CHALLENGE_LLM_SETTLE_MS,
-  billing: ChallengeClassifierBilling = {}
+  billing: ChallengeClassifierBilling = {},
+  options?: {
+    agentDomTree?: string | null;
+    networkEntries?: NetworkSummaryEntry[];
+    recoveryReason?: string | null;
+  }
 ): Promise<{
   clean: boolean;
   reason: string;
@@ -412,7 +545,7 @@ export async function classifyPageAfterSettle(
   usage: ChallengeClassifierLlmUsage | null;
 }> {
   await waitForDomSettled(page, settleTimeoutMs);
-  const context = await captureChallengeClassifierContext(page, response);
+  const context = await captureChallengeClassifierContext(page, response, options);
   const result = await classifyChallengeWithLlm(context, billing);
   return {
     clean: !result.challenged,

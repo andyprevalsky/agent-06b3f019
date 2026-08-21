@@ -24,7 +24,7 @@ tags:
 sources:
   - agent 2da69edc-2852-4a90-9d0f-dbc257e1302b
 repro: agents/tests/blackbox/challenge_llm_classifier_network.blackbox.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -100,7 +100,7 @@ capture formats `'286ms 108B https://www.hotels.com/graphql'` with no `429`
 
 ## Solution
 
-Proposed (not yet implemented — awaiting approval):
+Implemented:
 
 1. Extend `capture_network_summary` (and TS mirror if any) to include failed-fetch
    HTTP statuses from CDP/network recorder when present; keep Performance Timing
