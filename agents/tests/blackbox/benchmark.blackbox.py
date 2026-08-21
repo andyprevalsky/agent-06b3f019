@@ -10801,6 +10801,26 @@ def test_admin_bypass_card_mint_variant_wiring():
     assert "expected_gate" not in admin_checks
     assert "expected_payment_receipt" in admin_checks
 
+    # `true` must validate without AttributeError (harness used to crash on `.get`).
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    admin_req = {
+        "metadata": {
+            "requestPaymentCard": {
+                "merchant": "Rose Labs Test Payment",
+                "currency": "USD",
+                "subtotalCents": 3600,
+                "totalCents": 4396,
+                "lineItems": [],
+                "fees": [],
+            }
+        }
+    }
+    assert _validate_payment_receipt(admin, admin_req, messages=[]) is None
+    assert "missing requestPaymentCard metadata" in (
+        _validate_payment_receipt(admin, {"metadata": {}}, messages=[]) or ""
+    )
+
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     """The parallel search smoke should exercise execute-phase explore fanout."""
