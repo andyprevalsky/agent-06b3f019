@@ -25,9 +25,7 @@ sources:
   - agent 1336b4b4-22e2-4212-923e-8cdfa002742b
   - agent 19a568fb-406c-45ff-bf22-fb0346a00b4b
   - agent b393b72c-e7d2-4055-b1d5-2ec245945596
-  - run 713f68b9-7af0-402d-b930-1c969c47bf02
-  - relative case 2026-08-10-eventim-challenge-recovery-error-fails-no-tool-failures
-  - relative case 2026-08-21-evaluate-timeout-poisons-js-thread-blocks-recovery
+  - fleet run 713f68b9-7af0-402d-b930-1c969c47bf02
 repro: agents/tests/blackbox/benchmark.blackbox.py — test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors (proposed)
 status: open
 ---
