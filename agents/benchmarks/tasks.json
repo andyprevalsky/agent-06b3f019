@@ -1829,9 +1829,9 @@
   },
   {
     "name": "browser-hotel-booking",
-    "title": "Refundable Hotel Booking",
-    "description": "Reserve a one-night hotel stay while comparing room price and cancellation terms.",
-    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room with free cancellation, keep the room rate under $400 before taxes and fees, and do not select a nonrefundable rate, package, room upgrade, or add-on. Complete the reservation.",
+    "title": "Hotel Kabuki One-Night Booking",
+    "description": "Reserve a one-night hotel stay while comparing room price and completing checkout.",
+    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room, keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Complete the reservation.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1876,7 +1876,7 @@
       "live_targets": [
         "https://www.booking.com"
       ],
-      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation.",
+      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, smoking preference, and price cap while allowing room inventory and cancellation terms to vary, and auto-approves one write boundary to require a confirmed reservation.",
       "live_cookie_domains": [
         "booking.com"
       ]
@@ -1889,7 +1889,7 @@
           "No tool call fails",
           "Exactly one browser-agent session is used",
           "The root agent completes after exactly one auto-approved write-lock",
-          "The approval identifies Hotel Kabuki, both stay dates, free cancellation, and the total amount"
+          "The approval identifies Hotel Kabuki, both stay dates, and the total amount"
         ],
         "checks": [
           {
@@ -1915,11 +1915,11 @@
         "method": "single_turn_llm_judge",
         "criteria": [
           "The completed reservation is for Hotel Kabuki, one adult, Saturday to Sunday, in a non-smoking room",
-          "Grounded comparison evidence shows the selected rate is the lowest-priced available option with free cancellation and is under $400 before taxes and fees",
-          "No nonrefundable rate, package, upgrade, or add-on is selected, and the single approval describes the selected room or rate, cancellation terms, both dates, and total amount",
+          "Grounded comparison evidence shows the selected rate is the lowest-priced available non-smoking option under $400 before taxes and fees",
+          "No package, upgrade, or add-on is selected, and the single approval describes the selected room or rate, cancellation terms as shown, both dates, and total amount",
           "The trajectory reaches a grounded final reservation confirmation after approval; checkout, an approval request, or a write-lock alone is not completion"
         ],
-        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and attention request. Pass only if grounded evidence proves the exact hotel, dates, occupancy, refundability, room constraints, lowest-price selection, price cap, well-formed approval, and completed reservation confirmation."
+        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and attention request. Pass only if grounded evidence proves the exact hotel, dates, occupancy, room constraints, lowest-price selection, price cap, well-formed approval, and completed reservation confirmation. Do not require free cancellation or reject a nonrefundable rate."
       }
     ],
     "enforce_declared_evaluators": true,
