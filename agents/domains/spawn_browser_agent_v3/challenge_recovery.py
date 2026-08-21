@@ -2,11 +2,13 @@
 
 The canonical browser context is never used for experiments. Cookie variants are
 probed in one parallel wave (≤5 isolated Playwright contexts) after the provider
-solver; only a known anti-bot cookie strip may be committed to the live context.
-Cookie-name heuristics are useful for diagnosis but can never prove that an
-opaque cookie is not authentication state. Unknown-cookie findings therefore keep
+solver; only a known anti-bot cookie strip may be committed to the live context
+by default. Guest / anonymous checkout goals may additionally commit a proven
+clean ``all_target`` strip (logged-out recovery). Cookie-name heuristics are
+useful for diagnosis but can never prove that an opaque cookie is not
+authentication state on signed-in paths. Unknown-cookie findings therefore keep
 the source state byte-for-byte intact and move to a provider/proxy configuration
-search.
+search unless the guest commit path applies.
 """
 
 from __future__ import annotations
