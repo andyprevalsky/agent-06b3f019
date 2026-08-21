@@ -2079,7 +2079,9 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     task = get_task_by_name("agent-payment-test-shop")
 
     assert "visible Rose Labs Test Payment checkout" in task.prompt
-    assert "do not navigate to source files or API endpoints" in task.prompt
+    assert "do not navigate to source files or API endpoints" not in task.prompt
+    assert "request_payment_card" not in task.prompt
+    assert "card number" not in task.prompt.lower()
     assert "preserve the merchant" not in task.prompt.lower()
     assert task.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
     assert task.expected_payment_lifecycle["walletFunding"]["status"] == "CONSUMED"
