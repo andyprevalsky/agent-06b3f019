@@ -927,6 +927,9 @@ const TEST_PHONE = '+19729777432';
 const TEST_OTP = '181818';
 const REVIEW_TEST_PHONE = '+15555550123';
 const REVIEW_TEST_OTP = '191919';
+/** Synthetic phone for Twilio boundary assertions — never the admin/test phones. */
+const BOUNDARY_TWILIO_PHONE = '+15551239999';
+const BOUNDARY_TWILIO_OTP = '424242';
 
 /**
  * POST /api/auth/anonymous makes NO outbound HTTP calls.
@@ -953,47 +956,93 @@ async function testBoundary_anonymousNoOutboundCalls() {
 }
 
 /**
- * POST /api/auth/send-otp calls Twilio Verify Verifications API with exact params:
- *   URL:     https://verify.twilio.com/v2/Services/{SERVICE_SID}/Verifications
- *   Method:  POST
- *   Headers: Authorization: Basic ..., Content-Type: application/x-www-form-urlencoded
- *   Body:    To={phone}&Channel=sms
+ * Admin/test phone must NEVER call live Twilio Verify — even under capture —
+ * because it shares the production Verify service and rate-limits prod login.
+ */
+async function testBoundary_adminPhoneNeverHitsTwilio() {
+  const sendToken = captureToken('admin-phone-no-twilio-send');
+  const sendRes = await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    headers: { 'X-Capture-Token': sendToken },
+    body: JSON.stringify({ phone: TEST_PHONE }),
+  });
+  assertStatus(sendRes.status, 200, sendRes.data);
+  const sendTwilio = (await readCapturesForToken(sendToken)).filter((c) =>
+    c.url.includes('verify.twilio.com')
+  );
+  assert(
+    sendTwilio.length === 0,
+    `Expected 0 Twilio calls for admin send-otp, got ${sendTwilio.length}`
+  );
+
+  const wrongToken = captureToken('admin-phone-no-twilio-wrong');
+  const wrongRes = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'X-Capture-Token': wrongToken },
+    body: JSON.stringify({ phone: TEST_PHONE, token: '000000' }),
+  });
+  if (wrongRes.status === 200) {
+    throw new Error('Expected wrong OTP on admin phone to fail without Twilio');
+  }
+  const wrongTwilio = (await readCapturesForToken(wrongToken)).filter((c) =>
+    c.url.includes('verify.twilio.com')
+  );
+  assert(
+    wrongTwilio.length === 0,
+    `Expected 0 Twilio calls for admin wrong-OTP, got ${wrongTwilio.length}`
+  );
+
+  const okToken = captureToken('admin-phone-no-twilio-ok');
+  const okRes = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'X-Capture-Token': okToken },
+    body: JSON.stringify({ phone: TEST_PHONE, token: TEST_OTP }),
+  });
+  assertStatus(okRes.status, 200, okRes.data);
+  const okTwilio = (await readCapturesForToken(okToken)).filter((c) =>
+    c.url.includes('verify.twilio.com')
+  );
+  assert(
+    okTwilio.length === 0,
+    `Expected 0 Twilio calls for admin verify-otp, got ${okTwilio.length}`
+  );
+}
+
+/**
+ * POST /api/auth/send-otp calls Twilio Verify Verifications API with exact params.
+ * Uses a synthetic phone + seeded Twilio response so we never burn the admin
+ * phone's live Verify quota.
  */
 async function testBoundary_sendOtpTwilioCall() {
+  if (TWILIO_VERIFY_SERVICE_SID === '') {
+    console.log('    [skipped] Twilio not configured — cannot test boundary');
+    return;
+  }
+  if (!seedTwilioVerifySend(BOUNDARY_TWILIO_PHONE, { httpStatus: 201 })) {
+    console.log('    [skipped] Could not seed Twilio send response');
+    return;
+  }
+
   const token = captureToken('send-otp-twilio');
 
   const res = await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
     headers: { 'X-Capture-Token': token },
-    body: JSON.stringify({ phone: TEST_PHONE }),
+    body: JSON.stringify({ phone: BOUNDARY_TWILIO_PHONE }),
   });
 
-  // If Twilio credentials aren't configured, send-otp returns 400 with "configuration" error
   if (res.status === 400) {
     const data = res.data as { error?: string };
     if (data.error?.includes('configuration')) {
       console.log('    [skipped] Twilio not configured — cannot test boundary');
       return;
     }
-    // Twilio was called but returned an error (e.g. rate limit) — captures are still available
   }
 
-  // Assert the outbound call was captured regardless of Twilio's response status.
-  // Even if Twilio rate-limits us (400 "Max send attempts"), the call params are still recorded.
-  // Filter to Twilio Verify calls only — other domain tests running concurrently may produce captures.
+  assertStatus(res.status, 200, res.data);
+
   const allCalls = await readCapturesForToken(token);
   const calls = allCalls.filter((c) => c.url.includes('verify.twilio.com'));
-
-  // The test phone bypasses Twilio server-side when dev/blackbox/benchmark OTP
-  // login is enabled (shouldBypassOtpSend in service.twilio.ts) — same valid
-  // behavior the verify-otp boundary test tolerates. Only assert the boundary
-  // when the server actually took the Twilio path.
-  if (calls.length === 0 && res.status === 200) {
-    console.log(
-      '    [info] 0 Twilio calls captured — test credentials bypass Twilio (valid behavior)'
-    );
-    return;
-  }
   assert(
     calls.length === 1,
     `Expected exactly 1 Twilio Verify call, got ${calls.length} (${allCalls.length} total captures)`
@@ -1001,17 +1050,14 @@ async function testBoundary_sendOtpTwilioCall() {
 
   const call = calls[0];
 
-  // Assert URL pattern: Twilio Verify Verifications endpoint
   assert(
     call.url.startsWith('https://verify.twilio.com/v2/Services/') &&
       call.url.endsWith('/Verifications'),
     `Unexpected Twilio URL: ${call.url}`
   );
 
-  // Assert method
   assert(call.method === 'POST', `Expected POST, got ${call.method}`);
 
-  // Assert headers
   assert(
     call.requestHeaders['Content-Type'] === 'application/x-www-form-urlencoded',
     `Expected Content-Type: application/x-www-form-urlencoded, got: ${call.requestHeaders['Content-Type']}`
@@ -1021,64 +1067,58 @@ async function testBoundary_sendOtpTwilioCall() {
     `Expected Basic auth, got: ${call.requestHeaders['Authorization']?.slice(0, 20)}`
   );
 
-  // Assert body params
   assert(call.requestBody !== null, 'Expected non-null request body');
   const params = parseUrlEncodedBody(call.requestBody!);
-  assert(params['To'] === TEST_PHONE, `Expected To=${TEST_PHONE}, got To=${params['To']}`);
+  assert(
+    params['To'] === BOUNDARY_TWILIO_PHONE,
+    `Expected To=${BOUNDARY_TWILIO_PHONE}, got To=${params['To']}`
+  );
   assert(params['Channel'] === 'sms', `Expected Channel=sms, got Channel=${params['Channel']}`);
 
-  // Assert Twilio responded (any status — 201 success or 429/400 rate limit)
   assert(call.responseStatus !== null, 'Expected a response from Twilio');
 }
 
 /**
- * POST /api/auth/verify-otp calls Twilio Verify VerificationCheck API with exact params:
- *   URL:     https://verify.twilio.com/v2/Services/{SERVICE_SID}/VerificationCheck
- *   Method:  POST
- *   Headers: Authorization: Basic ..., Content-Type: application/x-www-form-urlencoded
- *   Body:    To={phone}&Code={otp}
- *
- * The test OTP may or may not be approved by Twilio (depends on verification service config).
- * We assert on the outbound call params regardless of the OTP outcome.
+ * POST /api/auth/verify-otp calls Twilio Verify VerificationCheck with exact params.
+ * Uses a synthetic phone + seeded VerificationCheck so we never hit live Twilio
+ * for the admin/test phone.
  */
 async function testBoundary_verifyOtpTwilioCall() {
+  if (TWILIO_VERIFY_SERVICE_SID === '') {
+    console.log('    [skipped] Twilio not configured — cannot test boundary');
+    return;
+  }
+  if (!seedTwilioVerifyCheck(BOUNDARY_TWILIO_PHONE, BOUNDARY_TWILIO_OTP, true)) {
+    console.log('    [skipped] Could not seed Twilio check response');
+    return;
+  }
+
   const token = captureToken('verify-otp-twilio');
 
-  // Make the verify-otp request (may return 400 if OTP not approved, but Twilio is still called)
   await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     headers: { 'X-Capture-Token': token },
-    body: JSON.stringify({ phone: TEST_PHONE, token: TEST_OTP }),
+    body: JSON.stringify({ phone: BOUNDARY_TWILIO_PHONE, token: BOUNDARY_TWILIO_OTP }),
   });
 
   const calls = await readCapturesForToken(token);
-
-  // Filter to Twilio calls only (verify-otp might also call Supabase Admin if OTP approved)
   const twilioCalls = calls.filter((c) => c.url.includes('verify.twilio.com'));
-
-  // The test credentials (+19729777432 / 181818) bypass Twilio entirely on the server side.
-  // When using test credentials, 0 Twilio calls is valid behavior — skip the assertion.
-  if (twilioCalls.length === 0) {
-    console.log(
-      '    [info] 0 Twilio calls captured — test credentials bypass Twilio (valid behavior)'
-    );
-    return;
-  }
+  assert(
+    twilioCalls.length >= 1,
+    `Expected at least 1 Twilio call for synthetic boundary phone, got ${twilioCalls.length}`
+  );
 
   const checkCall = twilioCalls.find((c) => c.url.includes('/VerificationCheck'));
   assert(checkCall !== undefined, 'Expected a VerificationCheck call to Twilio');
 
-  // Assert URL pattern
   assert(
     checkCall!.url.startsWith('https://verify.twilio.com/v2/Services/') &&
       checkCall!.url.endsWith('/VerificationCheck'),
     `Unexpected VerificationCheck URL: ${checkCall!.url}`
   );
 
-  // Assert method
   assert(checkCall!.method === 'POST', `Expected POST, got ${checkCall!.method}`);
 
-  // Assert headers
   assert(
     checkCall!.requestHeaders['Content-Type'] === 'application/x-www-form-urlencoded',
     `Expected Content-Type: application/x-www-form-urlencoded`
@@ -1088,19 +1128,18 @@ async function testBoundary_verifyOtpTwilioCall() {
     'Expected Basic auth header'
   );
 
-  // Assert body params
   assert(checkCall!.requestBody !== null, 'Expected non-null request body');
   const params = parseUrlEncodedBody(checkCall!.requestBody!);
-  assert(params['To'] === TEST_PHONE, `Expected To=${TEST_PHONE}, got To=${params['To']}`);
-  assert(params['Code'] === TEST_OTP, `Expected Code=${TEST_OTP}, got Code=${params['Code']}`);
+  assert(
+    params['To'] === BOUNDARY_TWILIO_PHONE,
+    `Expected To=${BOUNDARY_TWILIO_PHONE}, got To=${params['To']}`
+  );
+  assert(
+    params['Code'] === BOUNDARY_TWILIO_OTP,
+    `Expected Code=${BOUNDARY_TWILIO_OTP}, got Code=${params['Code']}`
+  );
 }
 
-/**
- * POST /api/auth/verify-otp with valid OTP: if Twilio approves, asserts that
- * Supabase Admin API or local DB lookup follows the Twilio call (correct ordering).
- *
- * If Twilio rejects the OTP, asserts that NO Supabase call is made (short-circuit).
- */
 async function testBoundary_verifyOtpCallOrdering() {
   const token = captureToken('verify-otp-ordering');
 
@@ -1291,6 +1330,11 @@ async function testSendOtp_reviewBypassHappyPath() {
 }
 
 async function testSendOtp_invalidPhoneFormat() {
+  seedTwilioVerifySend('not-a-phone', {
+    httpStatus: 400,
+    twilioCode: 60200,
+    twilioMessage: 'Invalid parameter `To`',
+  });
   const res = await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
     body: JSON.stringify({ phone: 'not-a-phone' }),
@@ -1635,12 +1679,14 @@ async function testCompleteOnboarding_viaApiKey() {
 
 // 9. send-otp with valid E.164 international format
 async function testSendOtp_validE164() {
+  const phone = '+447911123456';
+  seedTwilioVerifySend(phone, { httpStatus: 201 });
   const res = await request(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
-    body: JSON.stringify({ phone: '+447911123456' }),
+    body: JSON.stringify({ phone }),
   });
 
-  // 200 if Twilio configured, 400/500 otherwise (invalid number or Twilio not set up)
+  // 200 when seeded/configured, 400/500 otherwise
   if (res.status !== 200 && res.status !== 400 && res.status !== 500) {
     throw new Error(`Expected 200/400/500 for E.164 phone, got ${res.status}`);
   }
@@ -2646,6 +2692,10 @@ async function runAll() {
       {
         name: 'boundary -- verify-otp validation makes no outbound calls',
         fn: testBoundary_verifyOtpValidationNoOutbound,
+      },
+      {
+        name: 'boundary -- admin phone never hits Twilio Verify',
+        fn: testBoundary_adminPhoneNeverHitsTwilio,
       },
       {
         name: 'boundary -- send-otp calls Twilio Verify with exact params',
