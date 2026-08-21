@@ -287,16 +287,12 @@ def known_task_names() -> list[str]:
 
 
 def validate_task_names(names: Sequence[str]) -> list[str]:
+    """Validate task names and preserve intentional repeats (k=N parallel trials)."""
     known = set(known_task_names())
     unknown = sorted(set(names) - known)
     if unknown:
         raise ValueError(f"Unknown benchmark task(s): {', '.join(unknown)}")
-    deduped: list[str] = []
-    for name in names:
-        if name not in deduped:
-            deduped.append(name)
-    return deduped
-
+    return list(names)
 
 def plan_invocations(tasks: Sequence[str]) -> list[BenchmarkInvocation]:
     return [BenchmarkInvocation("benchmarks", list(tasks), is_load=False)] if tasks else []
