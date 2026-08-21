@@ -122,6 +122,42 @@ test('reconciler leaves an agent alone when Temporal reports RUNNING', async () 
   assert((await statusOf(agentId)) === 'ACTIVE', 'a running workflow must never be sealed');
 });
 
+test('reconciler does not seal a replacement generation from a stale candidate', async () => {
+  const session = await createAnonymousSession('liveness-replacement-race');
+  const { agentId, workflowId } = await seedLivenessAgent(
+    session.user.id,
+    'replacement-race',
+    'ACTIVE'
+  );
+  const replacementWorkflowId = `${workflowId}:replacement:${randomUUID()}`;
+
+  await makeEligible([agentId]);
+  const summary = await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async (id: string) => {
+      if (id !== workflowId) return 'RUNNING';
+      // Race the candidate snapshot: a deploy claims a replacement generation
+      // after discovery but before the old workflow's closed result is applied.
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { temporalWorkflowId: replacementWorkflowId },
+      });
+      return 'WORKFLOW_EXECUTION_STATUS_TERMINATED';
+    },
+  });
+
+  const row = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { status: true, temporalWorkflowId: true },
+  });
+  assert(row?.status === 'ACTIVE', 'a stale liveness candidate must not fail its replacement');
+  assert(
+    row?.temporalWorkflowId === replacementWorkflowId,
+    'the replacement workflow identity must remain current'
+  );
+  assert(summary.sealed === 0, 'a stale liveness candidate must not count as sealed');
+});
+
 test('reconciler leaves an agent alone when the Temporal read is inconclusive', async () => {
   const session = await createAnonymousSession('liveness-error');
   const { agentId, workflowId } = await seedLivenessAgent(session.user.id, 'error', 'ACTIVE');

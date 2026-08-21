@@ -3,6 +3,7 @@ import { resumeAgentWorkflow } from './agentResume';
 import { createMessage } from './messages';
 import { createLogger } from './logger';
 import { getTemporalClient } from './temporal';
+import { DEPLOY_INTERRUPTED_TOOL_MESSAGE } from './workflowGeneration';
 
 export const AUTH_ASSISTANCE_COMPLETED_RESPONSE = '__AUTH_ASSISTANCE_COMPLETED__';
 
@@ -49,8 +50,15 @@ export type AuthAssistanceCompletionResult =
   | { status: 'not_found' }
   | { status: 'forbidden' }
   | {
-      status: 'missing_steel_context' | 'already_completed';
+      status: 'missing_steel_context';
       request: AuthAssistanceRequestRecord;
+      workflowId: string;
+    }
+  | {
+      status: 'already_completed';
+      request: AuthAssistanceRequestRecord;
+      /** True when the completed request belongs to a deploy-fenced generation. */
+      interrupted: boolean;
       workflowId: string;
     }
   | {
@@ -77,7 +85,7 @@ export async function completeAuthAssistanceForUser(
       where: { id },
       include: {
         attentionRequest: {
-          select: { workflowId: true },
+          select: { workflowId: true, userResponse: true },
         },
       },
     });
@@ -92,6 +100,7 @@ export async function completeAuthAssistanceForUser(
       return {
         status: 'already_completed' as const,
         request,
+        interrupted: request.attentionRequest.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
         workflowId: request.attentionRequest.workflowId,
       };
     }
@@ -264,11 +273,19 @@ export async function completeAuthAssistanceForUser(
   }
 
   if (result.status === 'already_completed') {
-    await signalAuthAssistanceCompleted(
-      result.workflowId,
-      result.request.agentId,
-      result.request.id
-    );
+    if (result.interrupted) {
+      log.warn('Skipped retry signal for deploy-fenced auth assistance request', {
+        request_id: result.request.id,
+        agent_id: result.request.agentId,
+        workflow_id: result.workflowId,
+      });
+    } else {
+      await signalAuthAssistanceCompleted(
+        result.workflowId,
+        result.request.agentId,
+        result.request.id
+      );
+    }
     try {
       await resumeAgentWorkflow(result.request.agentId);
     } catch (error) {

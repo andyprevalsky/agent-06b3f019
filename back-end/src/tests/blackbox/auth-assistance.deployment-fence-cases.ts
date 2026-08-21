@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
 import { prisma } from '../../providers/database';
 import {
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
@@ -327,6 +328,15 @@ async function runCompletionAfterFenceCase(userId: string): Promise<void> {
   assert(
     attention !== null && attention.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     `Completion overwrote the deploy-fence marker (userResponse=${String(attention?.userResponse)})`
+  );
+
+  // A client retry must preserve the same fence classification. Otherwise the
+  // already-completed branch signals the dead generation even though the first
+  // completion correctly skipped it.
+  const retry = await completeAuthAssistanceForUser(requestId, userId);
+  assert(
+    retry.status === 'already_completed' && retry.interrupted,
+    `Retry lost the deploy-fenced completion state (status=${retry.status})`
   );
 }
 

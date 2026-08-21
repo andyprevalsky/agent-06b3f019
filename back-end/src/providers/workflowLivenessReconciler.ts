@@ -140,6 +140,7 @@ async function sealAgent(candidate: LivenessCandidate, temporalStatus: string): 
   const { count } = await prisma.agent.updateMany({
     where: {
       id: candidate.agentId,
+      temporalWorkflowId: candidate.workflowId,
       deletedAt: null,
       status: { notIn: [...TERMINAL_AGENT_STATUSES] },
     },
