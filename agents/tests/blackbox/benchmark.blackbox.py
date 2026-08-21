@@ -5723,17 +5723,22 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
         environment = {"live_fixtures": ["live"]}
 
     setup_timeline = []
+    setup_started = threading.Event()
+    setup_release = threading.Event()
 
     def blocking_applier(_ctx):
         setup_timeline.append("setup-start")
-        time.sleep(0.1)
+        setup_started.set()
+        assert setup_release.wait(timeout=2), "event loop did not run while fixture setup blocked"
         setup_timeline.append("setup-end")
         return {"fixture": "live"}
 
     async def setup_probe():
         async def heartbeat():
-            await asyncio.sleep(0.02)
+            while not setup_started.is_set():
+                await asyncio.sleep(0)
             setup_timeline.append("parallel-tick")
+            setup_release.set()
 
         with (
             patch.dict(bench.LIVE_FIXTURE_APPLIERS, {"live": blocking_applier}),
@@ -5749,6 +5754,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     assert setup_timeline.index("parallel-tick") < setup_timeline.index("setup-end")
 
     restore_timeline = []
+    restore_started = threading.Event()
+    restore_release = threading.Event()
     manifest = {
         "scenario": "fresh_browser_state",
         "fixture": "live",
@@ -5757,7 +5764,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     def blocking_restore(_manifest, *, label):
         assert label == "fresh browser state"
         restore_timeline.append("restore-start")
-        time.sleep(0.1)
+        restore_started.set()
+        assert restore_release.wait(timeout=2), "event loop did not run while fixture restore blocked"
         restore_timeline.append("restore-end")
 
     async def restore_probe():
@@ -5765,8 +5773,10 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
             await bench._restore_live_fixture_scenarios_async([manifest])
 
         async def heartbeat():
-            await asyncio.sleep(0.02)
+            while not restore_started.is_set():
+                await asyncio.sleep(0)
             restore_timeline.append("parallel-tick")
+            restore_release.set()
 
         with patch.object(bench, "_restore_isolated_browser_state_scenario", blocking_restore):
             await asyncio.gather(restore(), heartbeat())
