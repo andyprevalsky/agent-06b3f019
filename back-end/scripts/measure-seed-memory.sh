@@ -209,6 +209,10 @@ else
         fi
         echo "   pg_restore reported only role/extension noise (exit $SRC_RESTORE_STATUS)" | tee -a "$SUMMARY"
     fi
+    # The script intentionally started without errexit so each measured seed's
+    # status can be captured and reported below. The restore probe enables it
+    # only around its classifier; restore that original mode before measuring.
+    set +e
     # Cookie is the fidelity-critical table the gate fingerprints below. Canonical
     # base dumps can have empty MessageRecord (messages still live in Message), so
     # Cookie (for the seeded DEV user) is the durable "dump is non-empty" probe.

@@ -9,6 +9,7 @@
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
+import { authAssistanceDeploymentFenceTests } from './auth-assistance.deployment-fence-cases';
 import { authAssistanceProviderCompletionTests } from './auth-assistance.provider-cases';
 
 config();
@@ -615,6 +616,7 @@ async function main(): Promise<void> {
       testAttentionRespondCompletesAuthAssistance,
     ],
     ['manual_step completion does not require Steel auth', testManualModeCompletesWithoutSteelAuth],
+    ...authAssistanceDeploymentFenceTests,
   ];
 
   const results = [];
