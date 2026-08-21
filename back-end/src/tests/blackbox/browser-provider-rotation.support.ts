@@ -26,6 +26,18 @@ interface CrossProviderLadderOptions {
   readDifferentExitIp: (wsUrl: string, previousIp: string) => Promise<string>;
   retrieveKernelBrowser: (sessionId: string) => Promise<{ deleted_at?: string | Date | null }>;
   retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string }>;
+  /**
+   * Every provider session this ladder allocates, appended as it is created.
+   *
+   * The caller's `finally` can only close a session id it already holds, and it
+   * learns the ladder's final id from the RETURN value — so when the ladder throws
+   * partway (a Steel 429 on call 4 is the observed case) the session allocated by
+   * the provider switch is orphaned: still live, still billing, with its DB row
+   * already deleted by the caller's cleanup. Two such orphans were found live on
+   * the Steel account while diagnosing this, sharing the concurrency cap with 8
+   * legitimate production sessions.
+   */
+  allocatedSessionIds?: string[];
 }
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -61,6 +73,26 @@ const STEEL_OUTAGE_CONNECTIVITY_HINTS = [
   'network',
 ];
 
+const STEEL_CAPACITY_RETRY_DELAYS_MS = [15_000, 30_000, 60_000];
+
+/**
+ * Steel's HTTP 429 here means its account-wide concurrent-session pool is full,
+ * not that this rotation request is invalid. Production and the live parity gate
+ * share that pool, so a deploy must wait for a slot instead of failing whenever
+ * live agents happen to occupy all ten sessions. Keep the classifier exact:
+ * after the bounded wait only this structured capacity response can use the
+ * provider-unavailable path; auth, billing, generic provider 429s, and every
+ * non-Steel failure still fail closed.
+ */
+export function isSteelCapacityRateLimit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('/rotate-proxy 429') &&
+    message.includes('"error":"browser_provider_rate_limit"') &&
+    message.includes('"provider":"steel"')
+  );
+}
+
 /**
  * True only when a `/rotate-proxy` failure is a genuine Steel live-infra OUTAGE:
  * a 5xx whose body is production's post-retry "Failed to create Steel
@@ -92,13 +124,7 @@ export function isSteelProvisioningOutage(error: unknown): boolean {
  * for skip purposes — not an AUTH/QUOTA credential failure (401/402/403).
  */
 export function isSteelSessionRateLimited(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return (
-    message.includes('/rotate-proxy') &&
-    message.includes('429') &&
-    message.includes('browser_provider_rate_limit') &&
-    message.includes('"provider":"steel"')
-  );
+  return isSteelCapacityRateLimit(error);
 }
 
 function shouldSkipSteelLegs(error: unknown): boolean {
@@ -151,32 +177,38 @@ export async function runCrossProviderRotationLadder(
     readDifferentExitIp,
     retrieveKernelBrowser,
     retrieveSteelBrowser,
+    allocatedSessionIds,
   } = options;
+  const recordAllocation = (sessionId: unknown): void => {
+    if (typeof sessionId === 'string' && sessionId !== '') allocatedSessionIds?.push(sessionId);
+  };
 
-  // Steel create is flaky under parallel blackbox load; retry the Kernel→Steel
-  // switch on transient connection failures and session rate limits (server
-  // already retries create; 429 is shared-account contention across domains).
-  const postWithSteelConnectionRetry = async (
-    path: string,
-    body?: unknown
-  ): Promise<RotationResponse> =>
+  // Steel create is flaky under parallel blackbox load; retry transient
+  // connection failures quickly. An account-wide capacity 429 gets a separate,
+  // longer bounded schedule because production sessions normally expire within
+  // this window. Only exhaustion of the exact structured capacity response uses
+  // the provider-unavailable path; auth and billing failures still fail closed.
+  const postWithSteelRetry = async (path: string, body?: unknown): Promise<RotationResponse> =>
     retryWithBackoff(() => post(path, body), {
       maxRetries: 4,
-      fixedDelays: [2_000, 5_000, 10_000],
+      getBackoffDelayMs: (error, attempt) =>
+        isSteelCapacityRateLimit(error)
+          ? (STEEL_CAPACITY_RETRY_DELAYS_MS[attempt - 1] ?? 60_000)
+          : 1_000 * 2 ** (attempt - 1),
       isRetryable: (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         return (
+          isSteelCapacityRateLimit(error) ||
           message.includes('Failed to create Steel replacement') ||
-          message.includes('Connection error') ||
-          isSteelSessionRateLimited(error)
+          message.includes('Connection error')
         );
       },
-      component: 'browser-provider:steel-switch',
+      component: 'browser-provider:steel-create',
     });
 
   let switched: RotationResponse;
   try {
-    switched = await postWithSteelConnectionRetry('/rotate-proxy', {
+    switched = await postWithSteelRetry('/rotate-proxy', {
       task_id: taskId,
       current_url: 'https://example.com/provider-switch-check',
     });
@@ -216,6 +248,7 @@ export async function runCrossProviderRotationLadder(
       Boolean(switched.browser_session_metadata.steel_profile_id),
     'provider switch omitted Steel session metadata'
   );
+  recordAllocation(switched.session_id);
   assert(
     switched.session_id !== undefined && switched.session_id !== currentKernelSessionId,
     'provider switch did not allocate a new Steel session'
@@ -227,7 +260,7 @@ export async function runCrossProviderRotationLadder(
 
   let steelRotated: RotationResponse;
   try {
-    steelRotated = await post('/rotate-proxy', {
+    steelRotated = await postWithSteelRetry('/rotate-proxy', {
       task_id: taskId,
       current_url: 'https://example.com/steel-rotation-check',
     });
@@ -255,6 +288,7 @@ export async function runCrossProviderRotationLadder(
       steelRotated.next_recovery === 'rotation_budget_exhausted',
     'call 4 returned the wrong final rotation state'
   );
+  recordAllocation(steelRotated.session_id);
   assert(
     steelRotated.session_id !== undefined && steelRotated.session_id !== switched.session_id,
     'call 4 did not allocate another Steel session'

@@ -41,7 +41,9 @@ function readWaiters(metadata: unknown): GateWaiter[] {
       x !== null &&
       typeof x === 'object' &&
       typeof (x as GateWaiter).workflowId === 'string' &&
-      typeof (x as GateWaiter).agentId === 'string'
+      (x as GateWaiter).workflowId.length > 0 &&
+      typeof (x as GateWaiter).agentId === 'string' &&
+      (x as GateWaiter).agentId.length > 0
   );
 }
 
