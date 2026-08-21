@@ -157,7 +157,11 @@ if (requestedSeedModes.length > 1) {
 }
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
-const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
+// Pin the local URL the same way as remote. Relying on process.env.DATABASE_URL
+// at query time fails under --compute-tokens-only when Prisma re-validates
+// schema env("DATABASE_URL") and the engine no longer sees the parent-injected
+// value (AgentCard lifecycle: "Environment variable not found: DATABASE_URL").
+const local = new PrismaClient({ datasources: { db: { url: LOCAL_URL } } });
 /**
  * Deterministic ordering is what makes `skip`/`take` paging safe — without it
  * Postgres may return overlapping or missing rows across pages.
