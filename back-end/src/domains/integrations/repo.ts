@@ -20,7 +20,15 @@ export async function findIntegrationsByUser(userId: string) {
     orderBy: { updatedAt: 'desc' },
     include: {
       emailCredentials: {
-        select: { email: true },
+        // state/lastErrorReason drive the per-account health chip in the FE.
+        // Token columns stay unselected -- they must never cross the API edge.
+        select: {
+          id: true,
+          email: true,
+          state: true,
+          lastErrorReason: true,
+          lastFailedSyncAt: true,
+        },
       },
     },
   });
@@ -92,9 +100,10 @@ export async function upsertIntegration(params: {
 }) {
   return prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: params.userId,
         name: params.name,
+        accountId: '',
       },
     },
     create: {
@@ -141,9 +150,10 @@ export async function upsertIntegrationRaw(params: {
 }) {
   return prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: params.userId,
         name: params.name,
+        accountId: '',
       },
     },
     create: {
@@ -181,9 +191,10 @@ export async function upsertIntegrationForUpload(params: {
 }) {
   return prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: params.userId,
         name: params.name,
+        accountId: '',
       },
     },
     create: {
@@ -224,9 +235,10 @@ export async function updateIntegrationStatus(
 export async function findIntegrationByUserAndName(userId: string, name: string) {
   return prisma.integration.findUnique({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId,
         name,
+        accountId: '',
       },
     },
   });

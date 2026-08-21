@@ -480,6 +480,7 @@ class DOMService:
         # the seeded (block-reserved) base, so we can detect at session end
         # whether the relying party actually exercised the passkey.
         self._webauthn_cdp = None
+        self._passkey_target_id: Optional[str] = None
         self._passkey_authenticator_id: Optional[str] = None
         self._passkey_seed_counts: Dict[str, int] = {}
 
@@ -586,6 +587,10 @@ class DOMService:
             finally:
                 self._session = None
                 self._selector_map = {}
+                self._webauthn_cdp = None
+                self._passkey_target_id = None
+                self._passkey_authenticator_id = None
+                self._passkey_seed_counts.clear()
                 logger.info("🔌 Disconnected from browser")
 
     async def _send_cdp_command(
@@ -643,6 +648,7 @@ class DOMService:
                 # it. enableUI=false is exactly right for cloud custody — the
                 # virtual authenticator auto-signs with no blocking native modal.
                 self._webauthn_cdp = cdp_session
+                self._passkey_target_id = target_id
                 logger.info("🛡️ [overlay-suppress] WebAuthn native UI disabled (passkey popups suppressed)")
             except Exception as e:
                 logger.warning(f"⚠️ [overlay-suppress] Failed to disable WebAuthn UI: {e}")
@@ -919,6 +925,40 @@ class DOMService:
         except Exception as e:
             logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
+    async def _follow_focused_passkey_target(self) -> None:
+        """Move WebAuthn state to the page/window the agent currently controls.
+
+        Virtual authenticators are CDP-target scoped.  An IdP popup therefore
+        cannot see the authenticator created for the relying-party tab.  The
+        handler retains the complete decrypted key union and calls
+        ``inject_passkeys`` on every realm transition; resetting the per-target
+        memo here makes that call restore the union onto the new target.
+        """
+        if self._session is None:
+            # Older/direct callers can already provide the correctly-scoped CDP
+            # session (including the established credential-injection path and
+            # its tests). There is no focus target to follow in that shape, but
+            # the live WebAuthn handle remains fully usable.
+            if self._webauthn_cdp is not None:
+                return
+            raise RuntimeError("No browser session is available for passkey injection")
+        target_id = self._session.agent_focus_target_id
+        if not target_id:
+            raise RuntimeError("No focused browser target is available for passkey injection")
+        if self._webauthn_cdp is not None and self._passkey_target_id == target_id:
+            return
+
+        previous_target_id = self._passkey_target_id
+        self._webauthn_cdp = await self._session.get_or_create_cdp_session(target_id, focus=False)
+        self._passkey_target_id = target_id
+        self._passkey_authenticator_id = None
+        self._passkey_seed_counts.clear()
+        logger.info(
+            "🔑 [passkey] following focused browser target",
+            previous_target_id=previous_target_id,
+            target_id=target_id,
+        )
+
     async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> int:
         """Seed a CDP virtual authenticator with cloud-custody passkeys.
 
@@ -931,8 +971,7 @@ class DOMService:
         """
         if not passkeys:
             return 0
-        if self._webauthn_cdp is None:
-            raise RuntimeError("No WebAuthn CDP session is available for passkey injection")
+        await self._follow_focused_passkey_target()
 
         if self._passkey_authenticator_id is not None:
             try:

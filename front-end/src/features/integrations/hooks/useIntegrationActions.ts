@@ -17,6 +17,7 @@ interface SyncHandlers {
   handleLinkedInSync: () => Promise<void>;
   handleEmailConnect: (provider: 'gmail') => Promise<void>;
   handleEmailDisconnect: (email: string) => Promise<void>;
+  handleEmailResync: (email: string) => Promise<void>;
   handleFileUpload: (type: 'vcf' | 'email-zip', file: File) => Promise<string | undefined>;
 }
 
@@ -87,6 +88,14 @@ export function useIntegrationActions(handlers: SyncHandlers) {
           await h.handleEmailDisconnect(email);
         } catch (e) {
           setError(formatError(e, 'Failed to disconnect Gmail account'));
+        }
+      },
+      onGmailResync: async (email: string) => {
+        setError(null);
+        try {
+          await h.handleEmailResync(email);
+        } catch (e) {
+          setError(formatError(e, 'Failed to reconnect Gmail account'));
         }
       },
       onFileChange: async (type: 'vcf' | 'email-zip', file: File) => {

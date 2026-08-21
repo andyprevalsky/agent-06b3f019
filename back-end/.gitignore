@@ -6,3 +6,10 @@ dist
 .DS_Store
 
 scripts/.prod-health-history.jsonl
+
+# Compute-token conformance ledgers (contain live refresh tokens - never commit)
+.compute-token-conformance.json
+scripts/.codex-lineage-canary.jsonl
+scripts/.claude-grant-independence.jsonl
+scripts/.parked-grants.json
+scripts/.keychain-restore.json

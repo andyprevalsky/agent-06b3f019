@@ -298,7 +298,11 @@ async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
     close: async () => undefined,
   } as unknown as Browser;
   const session = {
-    ...fakeSession({ key: 'kernel_residential_city', provider: 'kernel', proxyMode: 'residential' }),
+    ...fakeSession({
+      key: 'kernel_residential_city',
+      provider: 'kernel',
+      proxyMode: 'residential',
+    }),
     validationBrowser: browser,
   };
   const result = await probeCandidateBrowser(

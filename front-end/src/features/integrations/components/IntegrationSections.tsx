@@ -137,8 +137,10 @@ export default function IntegrationSections({
         connectedIntegrations={data.connectedIntegrations}
         connectingProvider={gmail.connectingProvider}
         disconnectingEmail={gmail.disconnectingEmail}
+        resyncingEmail={gmail.resyncingEmail}
         onGmailConnect={() => void actions.onGmailConnect()}
         onGmailDisconnect={(email) => void actions.onGmailDisconnect(email)}
+        onGmailResync={(email) => void actions.onGmailResync(email)}
       />
 
       {isFullySignedIn && (

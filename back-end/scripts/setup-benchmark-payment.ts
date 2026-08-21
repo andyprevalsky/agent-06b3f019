@@ -74,7 +74,7 @@ async function seedAgentCardConnection(
   }
   const config = { orgManaged: true, cardholderId };
   await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'agentcard' } },
+    where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     create: {
       userId,
       name: 'agentcard',

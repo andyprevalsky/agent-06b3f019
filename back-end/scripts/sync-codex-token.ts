@@ -107,7 +107,7 @@ async function main() {
   await ensureUserExists();
 
   const integration = await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'gpt_code' } },
+    where: { userId_name_accountId: { userId, name: 'gpt_code', accountId: '' } },
     create: {
       userId,
       name: 'gpt_code',

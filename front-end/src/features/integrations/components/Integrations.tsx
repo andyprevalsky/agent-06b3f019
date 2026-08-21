@@ -66,6 +66,7 @@ export default function Integrations() {
     handleLinkedInSync: messages.handleLinkedInSync,
     handleEmailConnect: gmail.handleEmailConnect,
     handleEmailDisconnect: gmail.handleEmailDisconnect,
+    handleEmailResync: gmail.handleEmailResync,
     handleFileUpload: fileUpload.handleFileUpload,
   });
 
