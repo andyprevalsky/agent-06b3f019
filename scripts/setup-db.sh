@@ -302,7 +302,16 @@ setup_db_term_records() {
 SETUP_DB_TEARDOWN_SIGNAL=""
 
 setup_db_signal_teardown() {
-    SETUP_DB_TEARDOWN_SIGNAL="$1"
+    # Ignore nested INT immediately so it cannot flip the exit code mid-handler.
+    # Keep TERM live long enough that a TERM racing an INT can still upgrade the
+    # recorded signal — otherwise TERM+INT bursts report 130 instead of 143.
+    trap '' INT
+    if [ -z "$SETUP_DB_TEARDOWN_SIGNAL" ]; then
+        SETUP_DB_TEARDOWN_SIGNAL="$1"
+    elif [ "$1" -eq 15 ]; then
+        SETUP_DB_TEARDOWN_SIGNAL=15
+    fi
+    trap '' INT TERM
     setup_db_teardown
 }
 
