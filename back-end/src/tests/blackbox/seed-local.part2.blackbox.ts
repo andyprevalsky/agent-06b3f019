@@ -231,6 +231,70 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
   );
 });
 
+test('email credential seed reads remain compatible before production migration', async () => {
+  const source = readSeedLocalSource();
+  const projectionStart = source.indexOf('const PROD_EMAIL_CREDENTIAL_COLUMNS = {');
+  const projectionEnd = source.indexOf('} as const;', projectionStart);
+  const projection = source.slice(projectionStart, projectionEnd);
+  const projectionUses = source.match(/select: PROD_EMAIL_CREDENTIAL_COLUMNS/g) ?? [];
+
+  assert(projectionStart > 0, 'expected a stable production email-credential projection');
+  assert(projectionEnd > projectionStart, 'expected the projection to be complete');
+  for (const stableColumn of [
+    'id: true',
+    'userId: true',
+    'integrationId: true',
+    'provider: true',
+    'refreshToken: true',
+    'email: true',
+  ]) {
+    assert(
+      projection.includes(stableColumn),
+      `expected the email-credential projection to include ${stableColumn}`
+    );
+  }
+  assert(
+    !projection.includes('state: true') &&
+      !projection.includes('lastErrorReason: true') &&
+      !projection.includes('lastFailedSyncAt: true'),
+    'production seed reads must not request health columns before their migration deploys'
+  );
+  assert(
+    projectionUses.length === 2,
+    `both full and email-only seed paths must use the stable projection (found ${projectionUses.length})`
+  );
+});
+
+test('integration seed discovers account columns before selecting them', async () => {
+  const source = readSeedLocalSource();
+  const stableStart = source.indexOf('const PROD_INTEGRATION_COLUMNS = {');
+  const stableEnd = source.indexOf('} as const;', stableStart);
+  const stableProjection = source.slice(stableStart, stableEnd);
+  const helperStart = source.indexOf('async function findProdIntegrations(');
+  const helperEnd = source.indexOf('// Keep production reads', helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert(stableStart > 0 && stableEnd > stableStart, 'expected the stable Integration projection');
+  assert(
+    !stableProjection.includes('accountId: true') &&
+      !stableProjection.includes('accountEmail: true'),
+    'the pre-migration Integration projection must not request account columns'
+  );
+  assert(
+    source.includes("column_name IN ('accountId', 'accountEmail')"),
+    'expected a schema capability probe for the new account columns'
+  );
+  assert(
+    helper.includes('select: PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT') &&
+      helper.includes('select: PROD_INTEGRATION_COLUMNS'),
+    'expected post-migration and pre-migration Integration read paths'
+  );
+  assert(
+    helper.includes("accountId: '', accountEmail: null"),
+    'expected legacy Integration rows to receive the local migration defaults'
+  );
+});
+
 test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
   const source = readSeedLocalSource();
   const validation = source.indexOf('if (requestedSeedModes.length > 1)');
