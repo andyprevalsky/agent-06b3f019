@@ -174,12 +174,31 @@ export async function handleChatMessage(config: {
 
     // Start Temporal workflow immediately - NO more LLM calls
     // Pass mode to determine whether to skip PLAN phase
-    await startTemporalWorkflowForChat(
+    const started = await startTemporalWorkflowForChat(
       config.agentId,
       config.userId,
       decision.goal,
       decision.mode // 'plan' or 'execute'
     );
+    if (!started) {
+      // Agent became ineligible between router decision and start (already has a
+      // workflow, or left ACTIVE). Do not report escalation that did not occur.
+      await createMessage({
+        agentId: config.agentId,
+        role: 'TOOL',
+        text: 'Could not start Cloud Agent — agent is no longer eligible to escalate',
+        skipDuplicateToolCheck: true,
+        metadata: {
+          toolCallId: cloudAgentToolCallId,
+          toolName: CLOUD_AGENT_TOOL_NAME,
+          toolStatus: 'FINISHED',
+          title: CREATING_CLOUD_AGENT_TITLE,
+          startPhase: decision.mode,
+          error: true,
+        },
+      });
+      return { status: 'complete', decision };
+    }
 
     return { status: 'escalated', decision };
   }
@@ -409,7 +428,18 @@ async function startTemporalWorkflowForChat(
       },
     })
   );
-  const accepted = await acceptChatWorkflowExecution(agentId, execution);
+  let accepted: boolean;
+  try {
+    accepted = await acceptChatWorkflowExecution(agentId, execution);
+  } catch (error) {
+    await terminateStaleTemporalWorkflow(execution, agentId).catch((cleanupError: unknown) =>
+      log.error('[ChatHandler] Failed to terminate unaccepted workflow', {
+        agentId,
+        cleanupError,
+      })
+    );
+    throw error;
+  }
   if (!accepted) {
     await terminateStaleTemporalWorkflow(execution, agentId);
     return false;
