@@ -307,7 +307,12 @@ if [ -f "$CHILD_MARKER" ]; then
   sleep 0.1
   [ -f "$TMP/locks/victoria-db-term-ws.lock" ] || fail \
     "case 6: teardown released the workspace DB lock while a TERM-resistant seed child was still alive"
-  wait "$term_pid" 2>/dev/null || true
+  set +e
+  wait "$term_pid" 2>/dev/null
+  term_status=$?
+  set -e
+  [ "$term_status" -eq 143 ] || fail \
+    "case 6: TERM'd setup-db.sh exited rc=$term_status instead of 143"
   rm -f "$CHILD_MARKER"
   sleep 0.3
   [ ! -f "$CHILD_MARKER" ] || fail \
@@ -323,7 +328,20 @@ else
   echo "case 6: skipped (could not observe a live seed child on this host)" >&2
 fi
 
-# ── Case 7: force cleanup must keep discovering late descendants ─────────────
+# ── Case 7: grace cleanup must TERM descendants discovered after teardown starts ─
+# In a shared caller process group, cleanup signals PIDs individually. A wrapper
+# can react to its first TERM by forking one final child; that child must receive
+# TERM during the grace rescan, not its first signal as KILL after grace expires.
+grace_loop="$({
+  sed -n '/while \[ \$((SECONDS - grace_started)) -lt "\$grace" \]; do/,/^[[:space:]]*done$/p' \
+    "$SETUP_DB"
+} 2>/dev/null)"
+printf '%s\n' "$grace_loop" | grep -q 'setup_db_child_records' || fail \
+  "case 7: graceful cleanup does not rescan for late descendants"
+printf '%s\n' "$grace_loop" | grep -q 'setup_db_term_records' || fail \
+  "case 7: descendants discovered during grace are remembered but never sent TERM"
+
+# ── Case 8: force cleanup must keep discovering late descendants ─────────────
 # A TERM-resistant wrapper can fork after the first KILL target snapshot. The
 # force window must rescan inside every iteration; a one-time pre-loop scan can
 # release the DB lock while that late child is still writing.
@@ -332,23 +350,23 @@ force_loop="$({
     "$SETUP_DB"
 } 2>/dev/null)"
 printf '%s\n' "$force_loop" | grep -q 'setup_db_child_records' || fail \
-  "case 7: force-cleanup loop does not rescan descendants before releasing the DB lock"
+  "case 8: force-cleanup loop does not rescan descendants before releasing the DB lock"
 printf '%s\n' "$force_loop" | grep -q 'kill -KILL' || fail \
-  "case 7: force-cleanup loop discovers descendants but does not stop late arrivals"
+  "case 8: force-cleanup loop discovers descendants but does not stop late arrivals"
 
-# ── Case 8: retained PIDs must be identity-checked before force cleanup ───────
+# ── Case 9: retained PIDs must be identity-checked before force cleanup ───────
 # A short-lived child can exit during the grace phase and its numeric PID can be
 # reused before a later force-loop iteration. PID plus start time distinguish the
 # owned process incarnation from the unrelated replacement process; parent/group
 # values are capture-time provenance because descendants may detach or reparent.
 printf '%s\n' "$force_loop" | grep -q 'setup_db_pid_matches_record' || fail \
-  "case 8: force cleanup can SIGKILL a recycled PID without revalidating identity"
+  "case 9: force cleanup can SIGKILL a recycled PID without revalidating identity"
 grep -q 'lstart=' "$SETUP_DB" || fail \
-  "case 8: descendant identity does not include process start time"
+  "case 9: descendant identity does not include process start time"
 grep -q 'current_started.*expected_started' "$SETUP_DB" || fail \
-  "case 8: process start time is captured but never revalidated"
+  "case 9: process start time is captured but never revalidated"
 
-# ── Case 9: retained identity must survive setsid plus reparenting ────────────
+# ── Case 10: retained identity must survive setsid plus reparenting ───────────
 # A seed can detach from its original process group while its wrapper exits.
 # PPID and PGID then both differ from the capture-time descendant record, but it
 # is still the same live process and must remain eligible for force cleanup.
@@ -379,28 +397,28 @@ STUB
 python3 "$TMP/detaching-child.py" &
 detach_parent_pid=$!
 detached_pid=""
-case9_cleanup() {
+case10_cleanup() {
   [ -z "$detached_pid" ] || kill -KILL "$detached_pid" 2>/dev/null || true
   kill -KILL "$detach_parent_pid" 2>/dev/null || true
   wait "$detach_parent_pid" 2>/dev/null || true
 }
-case9_fail() {
+case10_fail() {
   local message="$1"
-  case9_cleanup
+  case10_cleanup
   fail "$message"
 }
 for _ in $(seq 1 200); do
   [ -f "$DETACHED_PID_FILE" ] && break
   sleep 0.05
 done
-[ -f "$DETACHED_PID_FILE" ] || case9_fail \
-  "case 9: could not observe the forked seed child"
+[ -f "$DETACHED_PID_FILE" ] || case10_fail \
+  "case 10: could not observe the forked seed child"
 detached_pid="$(cat "$DETACHED_PID_FILE")"
 detached_record="$(ps -o pid=,ppid=,pgid=,lstart= -p "$detached_pid" 2>/dev/null | awk '
   NR == 1 { print $1 "|" $2 "|" $3 "|" $4 " " $5 " " $6 " " $7 " " $8 }
 ')"
-[ -n "$detached_record" ] || case9_fail \
-  "case 9: could not capture the seed child's original identity"
+[ -n "$detached_record" ] || case10_fail \
+  "case 10: could not capture the seed child's original identity"
 IFS='|' read -r _ expected_parent expected_group _ <<< "$detached_record"
 
 : > "$DETACHED_TRIGGER"
@@ -408,8 +426,8 @@ for _ in $(seq 1 100); do
   [ -f "$DETACHED_READY" ] && break
   sleep 0.05
 done
-[ -f "$DETACHED_READY" ] || case9_fail \
-  "case 9: seed child did not call setsid"
+[ -f "$DETACHED_READY" ] || case10_fail \
+  "case 10: seed child did not call setsid"
 # Reparent only after setsid so the regression covers both identity changes in
 # the same order as a detaching child whose wrapper subsequently exits.
 kill -TERM "$detach_parent_pid" 2>/dev/null || true
@@ -427,15 +445,15 @@ for _ in $(seq 1 100); do
 done
 [ -n "${current_parent:-}" ] \
   && [ "$current_parent" != "$expected_parent" ] \
-  && [ "$current_group" != "$expected_group" ] || case9_fail \
-    "case 9: child did not change both PPID and PGID after setsid/reparenting"
+  && [ "$current_group" != "$expected_group" ] || case10_fail \
+    "case 10: child did not change both PPID and PGID after setsid/reparenting"
 
 matcher_impl="$(sed -n '/^setup_db_pid_matches_record() {$/,/^}$/p' "$SETUP_DB")"
-[ -n "$matcher_impl" ] || case9_fail \
-  "case 9: could not load setup_db_pid_matches_record"
+[ -n "$matcher_impl" ] || case10_fail \
+  "case 10: could not load setup_db_pid_matches_record"
 eval "$matcher_impl"
-setup_db_pid_matches_record "$detached_record" || case9_fail \
-  "case 9: retained child identity was lost after setsid plus reparenting"
-case9_cleanup
+setup_db_pid_matches_record "$detached_record" || case10_fail \
+  "case 10: retained child identity was lost after setsid plus reparenting"
+case10_cleanup
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"
