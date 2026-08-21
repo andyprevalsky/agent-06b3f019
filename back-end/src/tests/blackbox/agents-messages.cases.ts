@@ -149,6 +149,88 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
   await deleteTestAgent(agentId, session.user.id);
 });
 
+test('POST /:id/messages — a header-less descendant TOOL write is never fenced as a stale deployment', async () => {
+  // Prod agent 219dd80e-c2ed-4dc1-a40e-b2b9ea7e0a87 accumulated 105 red
+  // "Tool interrupted by deployment" chips while its browser sub-agent was
+  // running fine and ultimately succeeded. Descendant writers
+  // (spawn_browser_agent_v3 / spawn_agent / spawn_claude_code_agent /
+  // call_phone_number repo.py) POST TOOL rows WITHOUT the
+  // X-Agent-Workflow-Generation header. The route defaults a missing header to
+  // the agent id — i.e. generation 1 — so after any workflow replacement every
+  // one of those live writes is rewritten into the terminal deployment error.
+  //
+  // The invariant: "no generation supplied" means UNKNOWN. It must never be
+  // silently promoted to generation 1 and converted into a fabricated terminal
+  // error for a tool call that is alive in the current generation.
+  const session = await createAnonymousSession('msg-headerless-descendant');
+  const agentId = await createTestAgent(session.user.id, 'Header-less descendant write test');
+  const replacementGeneration = `${agentId}:replacement:${randomUUID()}`;
+  // The agent has already been replaced once, exactly as in the prod trace.
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { temporalWorkflowId: replacementGeneration },
+  });
+
+  // The root workflow registers the browser tool call in the CURRENT generation,
+  // keyed by the provider tool-call id the browser loop streams back.
+  const toolCallId = `call_${randomUUID().replace(/-/g, '').slice(0, 24)}`;
+  const rootRegistration = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-Agent-Workflow-Generation': replacementGeneration },
+    body: JSON.stringify({
+      message: '',
+      role: 'TOOL',
+      metadata: { toolCallId, toolName: 'spawn_browser_agent', toolStatus: 'IN_PROGRESS' },
+    }),
+  });
+  assertStatus(rootRegistration.status, 201, rootRegistration.data);
+
+  // The live browser descendant reports progress for that same call — with NO
+  // generation header, which is exactly what save_browser_action_message sends.
+  const descendantProgress = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      message: 'Clicked "Place order"',
+      role: 'TOOL',
+      metadata: {
+        toolCallId,
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        subAgentId: randomUUID(),
+      },
+    }),
+  });
+
+  // Either the backend rejects an unattributed internal write outright, or it
+  // stores it verbatim. Fabricating a terminal deployment error for a live tool
+  // call is the one outcome that is always wrong.
+  if (descendantProgress.status === 201) {
+    const body = assertSchema(
+      PostMessageResponse,
+      descendantProgress.data,
+      'header-less descendant TOOL write'
+    );
+    const row = await prisma.message.findUniqueOrThrow({ where: { id: body.message_id } });
+    const metadata = row.metadata as { errorCode?: unknown; error?: unknown } | null;
+    assert(
+      row.text !== 'new code version deployed, retry this tool',
+      `a live descendant write with no generation header must not be converted into the deployment error (got text ${JSON.stringify(row.text)})`
+    );
+    assert(
+      metadata?.errorCode !== 'DEPLOY_INTERRUPTED',
+      'a live descendant write with no generation header must not be marked DEPLOY_INTERRUPTED'
+    );
+  } else {
+    assert(
+      descendantProgress.status >= 400,
+      `an unattributed internal TOOL write must be either stored or rejected, got ${descendantProgress.status}`
+    );
+  }
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
 test('POST /:id/messages — changed TOOL metadata is a new event, exact retry is idempotent', async () => {
   const session = await createAnonymousSession('msg-spawn-tree-upgrade');
   const agentId = await createTestAgent(session.user.id, 'Spawn-tree upgrade test');
