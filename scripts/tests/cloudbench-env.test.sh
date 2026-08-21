@@ -1574,7 +1574,8 @@ awk '
   capture { print }
   capture && /^resolve_render_env_value\(\)/ { exit }
 ' "$ROOT_DIR/scripts/run-bench-cloud" | sed '$d' > "$resolve_snippet"
-sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
+sed -i.bak '/^resolve_render_env_value()/,$d' "$resolve_snippet"
+rm -f "${resolve_snippet}.bak"
 (
   set -euo pipefail
   # shellcheck disable=SC1090

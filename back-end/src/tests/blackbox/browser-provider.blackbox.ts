@@ -24,6 +24,7 @@ import {
 import {
   assertFixedRotationLadder,
   deleteKernelResource,
+  isSteelCapacityRateLimit,
   runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
 
@@ -88,6 +89,31 @@ const tests: Array<[string, () => void]> = [
   [
     'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',
     assertFixedRotationLadder,
+  ],
+  [
+    'live ladder retries only Steel concurrent-capacity 429 responses',
+    () => {
+      assert(
+        isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+          )
+        ),
+        'expected the explicit Steel capacity response to be retryable'
+      );
+      assert(
+        !isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"kernel"}'
+          )
+        ),
+        'another provider rate limit must fail closed'
+      );
+      assert(
+        !isSteelCapacityRateLimit(new Error('/rotate-proxy 403: Steel authentication rejected')),
+        'Steel authentication failures must fail closed'
+      );
+    },
   ],
   [
     'Kernel residential proxies fall back from city to state to country',

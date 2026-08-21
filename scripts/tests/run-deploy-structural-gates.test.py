@@ -63,6 +63,14 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         stale = sorted(documented - registry)
         self.assertEqual(stale, [], f"deploy.md names gate(s) absent from the registry: {stale}")
 
+    def test_cloudbench_blackbox_is_not_duplicated_with_agents_coverage(self) -> None:
+        deploy_md = DEPLOY_MD.read_text()
+        step = deploy_md.split("## Step 4cb:", 1)[1].split("## Step 4c:", 1)[0]
+        self.assertIn('if [ -z "$CHANGED_AGENTS" ]; then', step)
+        self.assertIn("python scripts/run_blackbox_tests.py benchmark", step)
+        self.assertIn("Step 4g's agents coverage already runs it", step)
+        self.assertIn("wait for Step 4g to finish before starting", step)
+
 
 class StructuralGatePortIsolationTests(unittest.TestCase):
     """Concurrent gates must not be able to hand out the same port.
