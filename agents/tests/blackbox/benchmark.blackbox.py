@@ -4352,30 +4352,54 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
         assert approval_detail in semantic_criteria
 
 
-def test_amazon_return_catalog_requires_single_clean_completed_return():
-    """Amazon returns complete after one approval instead of stopping at it."""
+def test_amazon_return_catalog_stops_at_unresolved_return_write_lock():
+    """Amazon return stops at an unresolved write lock with grounded approval copy."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-amazon-return")
-    assert "stop at the final write-lock" not in task.prompt.lower()
     assert task.prompt.endswith("Otherwise, complete the return.")
-    assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.approval_handling == "ignore"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_attention_kinds == []
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.min_steps == {"browser": 5}
     assert task.tool_count_scope == "root"
+    assert task.environment["context_notes"] == (
+        "Live Amazon order history with synced account authentication. Success is exactly one "
+        "unresolved return write-lock approval that identifies the item, refund amount, original "
+        "payment method, and drop-off. The runner leaves that request unresolved and does not "
+        "submit the return."
+    )
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
     ]
     static_types = {check["type"] for check in task.evaluators[0]["checks"]}
-    # Approval contents are judged semantically, not substring-matched.
-    assert "approval_request_details" not in static_types
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    assert "agent_status" not in static_types
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["return"]
+    assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "unresolved" in runtime_criteria
+    assert "write lock" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("most recent", "completed", "confirmation"):
+    for requirement in ("unresolved", "does not approve", "not submitted"):
         assert requirement in semantic_criteria
     for approval_detail in ("refund amount", "original payment method", "drop-off"):
         assert approval_detail in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("approval of the write lock", "submitted/confirmed return", "order-history dom"):
+        assert failure in judge_prompt
+    assert task.evaluators[1]["id"] == "amazon-return-write-lock-semantics"
 
 
 def test_live_fixture_fails_when_live_auth_refresh_fails():
@@ -13960,8 +13984,8 @@ async def run_all_tests():
         test_event_ticket_catalog_stops_at_grounded_payment_approval,
     )
     r.record(
-        "amazon_return_clean_completed_return",
-        test_amazon_return_catalog_requires_single_clean_completed_return,
+        "amazon_return_stops_at_unresolved_return_write_lock",
+        test_amazon_return_catalog_stops_at_unresolved_return_write_lock,
     )
     r.record(
         "live_fixture_auth_failure_is_fatal",

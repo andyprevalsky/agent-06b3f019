@@ -22,7 +22,7 @@ sources:
   - agent d943db4b-43c4-4e72-8ab4-8f93ba7ebe4e
   - commit 9ac3e35ca
 repro: pending — cement after fix; red proof via _declared_evaluator_evidence on saved run vs browser_use_step_4 dump
-status: open
+status: superseded
 ---
 
 ## Problem
@@ -69,8 +69,10 @@ Do not weaken `amazon-return-completion-semantics` criteria.
 
 ## Human feedback
 
-None recorded on this specific packaging fix. Prior descend guidance: no
-reward hacks; keep return/`generic_write` notification path.
+Andy: intended pass bar is hitting the write lock with a semantically correct
+approval request; harness must not approve the write lock. Rejected the
+a11y-packaging fix direction. Catalog should mirror amazon-beanie unresolved
+write-lock contract.
 
 ## Reusable lesson
 
