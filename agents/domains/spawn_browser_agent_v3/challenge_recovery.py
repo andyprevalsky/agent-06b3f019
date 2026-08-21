@@ -1,11 +1,12 @@
-"""Auth-preserving, staged recovery for persistent anti-bot challenges.
+"""Auth-preserving recovery for persistent anti-bot challenges.
 
 The canonical browser context is never used for experiments. Cookie variants are
-passed to an injected probe (normally an isolated Playwright context), and only a
-known anti-bot cookie reduction may be committed to the live context. Cookie-name
-heuristics are useful for diagnosis but can never prove that an opaque cookie is
-not authentication state. Unknown-cookie findings therefore keep the source state
-byte-for-byte intact and move to a provider/proxy configuration search.
+probed in one parallel wave (≤5 isolated Playwright contexts) after the provider
+solver; only a known anti-bot cookie strip may be committed to the live context.
+Cookie-name heuristics are useful for diagnosis but can never prove that an
+opaque cookie is not authentication state. Unknown-cookie findings therefore keep
+the source state byte-for-byte intact and move to a provider/proxy configuration
+search.
 """
 
 from __future__ import annotations
@@ -662,7 +663,12 @@ async def minimize_passing_cookie_removal(
     probe: Probe,
     progress: Progress,
 ) -> Tuple[CookieKey, ...]:
-    """Parallel delta-debug a passing removal down to a 1-minimal subset."""
+    """Deprecated: multi-round cookie ddmin.
+
+    Recovery now uses a single parallel wave of ≤5 cookie variants (see
+    ``recover_from_challenge``). Kept for call-site compatibility / offline
+    experiments; do not wire into the hot recover path.
+    """
     current = tuple(dict.fromkeys(passing_removal))
     granularity = 2
     round_number = 0
@@ -696,6 +702,10 @@ async def minimize_passing_cookie_removal(
     return current
 
 
+# Max concurrent cookie-variant probes in one recover wave (settle + LLM overlap).
+_COOKIE_PROBE_WAVE_CAP = 5
+
+
 async def recover_from_challenge(
     *,
     source_state: StorageState,
@@ -707,11 +717,13 @@ async def recover_from_challenge(
     progress: Progress,
     provider_exit_rejected: bool = False,
 ) -> ChallengeRecoveryResult:
-    """Run solver -> cookie isolation -> parallel provider/config recovery.
+    """Run solver -> one parallel cookie-probe wave -> provider/config recovery.
 
-    The config search always receives the full auth-bearing state unless the only
-    removals are from the explicit anti-bot-cookie allowlist. Auth-like and opaque
-    cookies are never removed from the canonical context or named in progress.
+    Cookie stage is a single wave of ≤5 storage variants probed concurrently
+    (shared settle window + parallel LLM classifier calls). Known anti-bot
+    cookie strips may be committed; unclassified strips are diagnostic only and
+    never mutate the live context. Auth-like and opaque cookies are never
+    removed from the canonical context or named in progress.
     """
     original_digest = _state_digest(source_state)
 
@@ -777,56 +789,68 @@ async def recover_from_challenge(
     known_safe = tuple(
         key for key in target_keys if is_known_challenge_cookie(cookies[key]) and not is_auth_cookie(cookies[key])
     )
-
-    if known_safe:
-        await progress(
-            "known_challenge_cookies",
-            "Testing an isolated copy without known challenge cookies; the signed-in context is unchanged.",
-        )
-        if await probe(storage_without_cookies(source_state, known_safe)):
-            minimal = await minimize_passing_cookie_removal(source_state, known_safe, probe, progress)
-            if _state_digest(source_state) != original_digest:
-                raise RuntimeError("Challenge recovery mutated its source browser state")
-            await progress(
-                "apply_cookie_fix",
-                "Applying the proven non-auth cookie fix and requiring two clean live-page probes.",
-            )
-            if await commit_cookie_removals(minimal):
-                return ChallengeRecoveryResult("cookies_sanitized", minimal)
-            return await search_with_preserved_auth_state(minimal)
-
-    await progress(
-        "all_target_cookies",
-        "Testing an isolated copy without target-site cookies to distinguish state from network reputation.",
-    )
-    all_cookie_probe_clean = await probe(storage_without_cookies(source_state, target_keys))
-
     diagnostic_keys = tuple(key for key in target_keys if not is_auth_cookie(cookies[key]))
-    if all_cookie_probe_clean and diagnostic_keys:
-        await progress(
-            "unclassified_cookies",
-            "Testing unclassified target cookies in isolation; unknown cookies remain protected auth state.",
+
+    # One parallel wave: ≤5 distinct cookie variants. No sequential stages / ddmin.
+    wave: List[Tuple[str, Tuple[CookieKey, ...], StorageState]] = []
+    if known_safe:
+        wave.append(("known_challenge", known_safe, storage_without_cookies(source_state, known_safe)))
+    if target_keys and tuple(target_keys) != known_safe:
+        wave.append(("all_target", tuple(target_keys), storage_without_cookies(source_state, target_keys)))
+    if diagnostic_keys and diagnostic_keys != known_safe and diagnostic_keys != tuple(target_keys):
+        wave.append(
+            ("diagnostic", diagnostic_keys, storage_without_cookies(source_state, diagnostic_keys))
         )
-        if await probe(storage_without_cookies(source_state, diagnostic_keys)):
-            # This narrows the likely poison for diagnosis, but a clean logged-out
-            # page is indistinguishable from a clean authenticated page here. Do
-            # not commit or carry the removal into config search: an arbitrary
-            # name such as ``opaque_state`` may be the site's auth credential.
-            await minimize_passing_cookie_removal(
-                source_state,
-                diagnostic_keys,
-                probe,
-                progress,
-            )
-            if _state_digest(source_state) != original_digest:
-                raise RuntimeError("Challenge recovery mutated its source browser state")
-            await progress(
-                "preserve_auth_state",
-                "A cookie-specific cause was isolated, but unknown cookies are preserved; continuing with browser/IP search.",
-            )
-            return await search_with_preserved_auth_state()
+    # Fill remaining slots with coarse halves of the largest removable set so the
+    # wave stays useful under the ≤5 parallel LLM budget without ddmin rounds.
+    base_for_halves = diagnostic_keys or tuple(target_keys)
+    if len(wave) < _COOKIE_PROBE_WAVE_CAP and len(base_for_halves) >= 4:
+        mid = len(base_for_halves) // 2
+        for label, keys in (
+            ("diagnostic_half_a", base_for_halves[:mid]),
+            ("diagnostic_half_b", base_for_halves[mid:]),
+        ):
+            if len(wave) >= _COOKIE_PROBE_WAVE_CAP or not keys:
+                break
+            if any(existing == keys for _label, existing, _state in wave):
+                continue
+            wave.append((label, keys, storage_without_cookies(source_state, keys)))
+    wave = wave[:_COOKIE_PROBE_WAVE_CAP]
+
+    clean_by_label: Dict[str, bool] = {}
+    if wave:
+        await progress(
+            "cookie_probe_wave",
+            f"Probing {len(wave)} cookie variant(s) in parallel on isolated contexts "
+            "(single settle window; known challenge strips may commit, others are diagnostic).",
+        )
+        results = await asyncio.gather(*(probe(state) for _label, _keys, state in wave))
+        clean_by_label = {label: bool(clean) for (label, _keys, _state), clean in zip(wave, results)}
 
     if _state_digest(source_state) != original_digest:
         raise RuntimeError("Challenge recovery mutated its source browser state")
+
+    if known_safe and clean_by_label.get("known_challenge"):
+        await progress(
+            "apply_cookie_fix",
+            "Applying the proven known-challenge cookie strip and requiring two clean live-page probes.",
+        )
+        if await commit_cookie_removals(known_safe):
+            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
+        return await search_with_preserved_auth_state(known_safe)
+
+    diagnostic_clean = any(
+        clean_by_label.get(label)
+        for label in ("all_target", "diagnostic", "diagnostic_half_a", "diagnostic_half_b")
+    )
+    if diagnostic_clean:
+        # Clean logged-out / stripped probes are diagnostic only — opaque cookies
+        # may be auth credentials, so never commit unclassified removals.
+        await progress(
+            "preserve_auth_state",
+            "A cookie variant looked clean in isolation, but unknown cookies are preserved; "
+            "continuing with browser/IP search.",
+        )
+        return await search_with_preserved_auth_state()
 
     return await search_with_preserved_auth_state()

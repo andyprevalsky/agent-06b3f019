@@ -93,7 +93,7 @@ async def test_known_challenge_cookie_is_removed_without_touching_auth():
     assert config_inputs == []
     assert source == before, "experimental probes must not mutate canonical state"
     assert {event[0] for event in events} == {"call-recovery-1"}
-    assert [event[1] for event in events][:2] == ["captcha_solver", "known_challenge_cookies"]
+    assert [event[1] for event in events][:2] == ["captcha_solver", "cookie_probe_wave"]
     assert all("authState" not in event[2] for event in events)
 
 
@@ -142,17 +142,20 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
     assert result.removed_cookie_keys == ()
 
 
-async def test_unknown_cookie_isolated_with_parallel_delta_debugging():
+async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
+    """One settle-window wave: parallel variants, no multi-round cookie ddmin."""
     source = _state(*(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"]))
     before = copy.deepcopy(source)
     active = 0
     max_active = 0
+    probe_calls = 0
 
     async def probe(candidate):
-        nonlocal active, max_active
+        nonlocal active, max_active, probe_calls
+        probe_calls += 1
         active += 1
         max_active = max(max_active, active)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
         clean = "poison" not in {cookie["name"] for cookie in candidate["cookies"]}
         active -= 1
         return clean
@@ -162,10 +165,10 @@ async def test_unknown_cookie_isolated_with_parallel_delta_debugging():
     assert committed == [], "unclassified cookies are diagnostic-only and never deleted"
     assert config_inputs == [before], "config search must retain every opaque cookie"
     assert source == before
-    assert max_active >= 2, "delta-debug rounds must probe cookie groups concurrently"
-    assert "all_target_cookies" in [event[1] for event in events]
-    assert "unclassified_cookies" in [event[1] for event in events]
-    assert "cookie_isolation" in [event[1] for event in events]
+    assert max_active >= 2, "cookie variants must probe concurrently in one wave"
+    assert probe_calls <= 5, "cookie wave must stay within the parallel LLM budget"
+    assert "cookie_isolation" not in [event[1] for event in events], "ddmin rounds are retired"
+    assert "cookie_probe_wave" in [event[1] for event in events]
     assert "preserve_auth_state" in [event[1] for event in events]
 
 
@@ -217,7 +220,7 @@ async def test_cookie_independent_challenge_goes_directly_to_config_search():
     assert committed == []
     assert config_inputs == [source]
     stages = [event[1] for event in events]
-    assert stages == ["captcha_solver", "all_target_cookies", "browser_config_search"]
+    assert stages == ["captcha_solver", "cookie_probe_wave", "browser_config_search"]
 
 
 async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail():
@@ -390,6 +393,8 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
 
 
 async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
+    from unittest.mock import AsyncMock, patch
+
     class FakeBody:
         def __init__(self, page):
             self.page = page
@@ -427,33 +432,44 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
         async def wait_for_timeout(self, _milliseconds):
             return None
 
-    clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
-    assert await verify_live_page_cleared_challenge(
-        clean, "https://wl.eventim.us/event/lyny/1", attempts=2, solver_timeout_seconds=0
-    )
-    # Must navigation-probe — static preloaded content is not enough.
-    assert clean.goto_count == 2
+    async def classify_from_page(page, response=None, **_kwargs):
+        title = await page.title()
+        body = page.body_text
+        html = await page.content()
+        challenged = page_looks_challenged(status=None, title=title, body_text=body, html=html)
+        return {"clean": not challenged, "reason": "test-mock", "title": title, "usage": {}}
 
-    denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
-    assert not await verify_live_page_cleared_challenge(
-        denied, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
-    )
-    assert denied.goto_count == 1
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(side_effect=classify_from_page),
+    ):
+        clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
+        assert await verify_live_page_cleared_challenge(
+            clean, "https://wl.eventim.us/event/lyny/1", attempts=2, solver_timeout_seconds=0
+        )
+        # Must navigation-probe — static preloaded content is not enough.
+        assert clean.goto_count == 2
 
-    # Eventim false-stable: already-loaded probe page looks clean, fresh goto denies.
-    false_stable = FakePage(
-        "LYNY",
-        "General Admission Tier 2",
-        "<main>tickets</main>",
-        flip_to_denied_on_goto=True,
-    )
-    assert not await verify_live_page_cleared_challenge(
-        false_stable,
-        "https://wl.eventim.us/event/lyny/1",
-        attempts=1,
-        solver_timeout_seconds=0,
-    )
-    assert false_stable.goto_count == 1
+        denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
+        assert not await verify_live_page_cleared_challenge(
+            denied, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
+        )
+        assert denied.goto_count == 1
+
+        # Eventim false-stable: already-loaded probe page looks clean, fresh goto denies.
+        false_stable = FakePage(
+            "LYNY",
+            "General Admission Tier 2",
+            "<main>tickets</main>",
+            flip_to_denied_on_goto=True,
+        )
+        assert not await verify_live_page_cleared_challenge(
+            false_stable,
+            "https://wl.eventim.us/event/lyny/1",
+            attempts=1,
+            solver_timeout_seconds=0,
+        )
+        assert false_stable.goto_count == 1
 
 
 def test_payment_document_url_detection():
@@ -718,6 +734,8 @@ def test_challenge_page_classifier_ignores_incidental_captcha_prose():
 
 
 async def test_live_cookie_commit_requires_two_clean_loads():
+    from unittest.mock import AsyncMock, patch
+
     class FakeContext:
         def __init__(self):
             self.cleared = []
@@ -759,27 +777,39 @@ async def test_live_cookie_commit_requires_two_clean_loads():
         async def content(self):
             return f"<main>{self.body_text}</main>"
 
-    key = cookie_key(_cookie("cf_clearance"))
-    clean_page = FakePage("Order drinks and pastries")
-    assert await commit_cookie_removals(
-        clean_page,
-        [key],
-        "https://order.online/store/blue-bottle",
-        solver_timeout_seconds=0,
-    )
-    assert clean_page.goto_count == 2
-    assert clean_page.context.cleared == [
-        {"name": "cf_clearance", "domain": ".order.online", "path": "/"}
-    ]
+    async def classify_from_page(page, response=None, **_kwargs):
+        title = await page.title()
+        body = page.body_text
+        html = await page.content()
+        status = getattr(response, "status", None) if response is not None else None
+        challenged = page_looks_challenged(status=status, title=title, body_text=body, html=html)
+        return {"clean": not challenged, "reason": "test-mock", "title": title, "usage": {}}
 
-    challenged_page = FakePage("Verify you are human")
-    assert not await commit_cookie_removals(
-        challenged_page,
-        [key],
-        "https://order.online/store/blue-bottle",
-        solver_timeout_seconds=0,
-    )
-    assert challenged_page.goto_count == 1
+    key = cookie_key(_cookie("cf_clearance"))
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(side_effect=classify_from_page),
+    ):
+        clean_page = FakePage("Order drinks and pastries")
+        assert await commit_cookie_removals(
+            clean_page,
+            [key],
+            "https://order.online/store/blue-bottle",
+            solver_timeout_seconds=0,
+        )
+        assert clean_page.goto_count == 2
+        assert clean_page.context.cleared == [
+            {"name": "cf_clearance", "domain": ".order.online", "path": "/"}
+        ]
+
+        challenged_page = FakePage("Verify you are human")
+        assert not await commit_cookie_removals(
+            challenged_page,
+            [key],
+            "https://order.online/store/blue-bottle",
+            solver_timeout_seconds=0,
+        )
+        assert challenged_page.goto_count == 1
 
 
 async def run_all_tests():
@@ -791,7 +821,7 @@ async def run_all_tests():
         test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solver,
     )
     await result.record_async(
-        "unknown_cookie_parallel_ddmin", test_unknown_cookie_isolated_with_parallel_delta_debugging
+        "unknown_cookie_parallel_wave", test_unknown_cookie_wave_probes_in_parallel_without_ddmin
     )
     await result.record_async(
         "opaque_auth_cookie_preserved",

@@ -7342,11 +7342,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
+                    "cookie_probe_wave": "Probing cookie variants",
                     "known_challenge_cookies": "Testing challenge cookies",
                     "all_target_cookies": "Testing target-site cookies",
                     "non_auth_cookies": "Testing non-auth cookies",
                     "cookie_isolation": "Isolating poisoned cookie state",
                     "apply_cookie_fix": "Applying safe cookie recovery",
+                    "preserve_auth_state": "Preserving auth; searching configs",
                     "browser_config_search": "Searching browser configurations",
                     "live_verify": "Verifying live tab cleared challenge",
                 }
