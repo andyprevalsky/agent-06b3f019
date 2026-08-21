@@ -102,20 +102,22 @@ capture formats `'286ms 108B https://www.hotels.com/graphql'` with no `429`
 
 Implemented:
 
-1. Extend `capture_network_summary` (and TS mirror if any) to include failed-fetch
-   HTTP statuses from CDP/network recorder when present; keep Performance Timing
-   as fallback.
-2. Treat persistent invocation-reason soft-block (e.g. repeated `/graphql` 429 /
-   Offers Loading) as not-clean for live verify / cookie probe success.
-3. Do not report `cookies_sanitized` / `config_selected` success when the
-   recovery reason is uncleared; revisit `escalate_after_cookie_false_stable` for
-   soft-blocks so a false cookie "success" cannot skip the only useful levers.
+1. `capture_network_summary` prefers Playwright/recorder rows with HTTP status +
+   truncated response bodies labeled `response_body (truncated): …`; Performance
+   Timing remains fallback. TS mirror updated in
+   `back-end/src/providers/browser/challengeLlmClassifier.ts`.
+2. Classifier DOM uses stripped full page text (or the live agent `dom_tree`
+   when supplied) so Offers/Loading soft-block markers are visible.
+3. Agent `recover_from_challenge` `reason` is injected into classifier messages;
+   deterministic gate forces `challenged=true` while cited 429/rate-limit
+   evidence remains in the network summary. Probe/commit/live-verify thread the
+   reason + recorder.
 
-Cement via the new blackbox in `scripts/test.sh` / agents blackbox suite, then
-outcome-gate with unchanged `scripts/run-bench --local browser-hotel-booking`.
+Cemented by `agents/tests/blackbox/challenge_llm_classifier_network.blackbox.py`
+(green). Outcome-gate: unchanged `scripts/run-bench --local browser-hotel-booking`.
 
 10k-agent behavior: per-probe summary stays bounded (`_NETWORK_ENTRY_CAP`);
-status is O(entries) text only — no fan-in.
+status/body text is O(entries) only — no fan-in.
 
 ## Human feedback
 
