@@ -73,6 +73,24 @@ const STEEL_OUTAGE_CONNECTIVITY_HINTS = [
   'network',
 ];
 
+const STEEL_CAPACITY_RETRY_DELAYS_MS = [15_000, 30_000, 60_000];
+
+/**
+ * Steel's HTTP 429 here means its account-wide concurrent-session pool is full,
+ * not that this rotation request is invalid. Production and the live parity gate
+ * share that pool, so a deploy must wait for a slot instead of failing whenever
+ * live agents happen to occupy all ten sessions. Keep the classifier exact: auth,
+ * billing, generic provider 429s, and every non-Steel failure still fail closed.
+ */
+export function isSteelCapacityRateLimit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('/rotate-proxy 429') &&
+    message.includes('"error":"browser_provider_rate_limit"') &&
+    message.includes('"provider":"steel"')
+  );
+}
+
 /**
  * True only when a `/rotate-proxy` failure is a genuine Steel live-infra OUTAGE:
  * a 5xx whose body is production's post-retry "Failed to create Steel
@@ -147,28 +165,32 @@ export async function runCrossProviderRotationLadder(
     if (typeof sessionId === 'string' && sessionId !== '') allocatedSessionIds?.push(sessionId);
   };
 
-  // Steel create is flaky under parallel blackbox load; retry the Kernel→Steel
-  // switch on transient connection failures (server already retries create).
-  const postWithSteelConnectionRetry = async (
-    path: string,
-    body?: unknown
-  ): Promise<RotationResponse> =>
+  // Steel create is flaky under parallel blackbox load; retry transient
+  // connection failures quickly. An account-wide capacity 429 gets a separate,
+  // longer bounded schedule because production sessions normally expire within
+  // this window. Exhaustion still propagates and fails the gate; it is never a
+  // skip or a weakened assertion.
+  const postWithSteelRetry = async (path: string, body?: unknown): Promise<RotationResponse> =>
     retryWithBackoff(() => post(path, body), {
-      maxRetries: 3,
-      fixedDelays: [1_000, 2_000],
+      maxRetries: 4,
+      getBackoffDelayMs: (error, attempt) =>
+        isSteelCapacityRateLimit(error)
+          ? (STEEL_CAPACITY_RETRY_DELAYS_MS[attempt - 1] ?? 60_000)
+          : 1_000 * 2 ** (attempt - 1),
       isRetryable: (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         return (
+          isSteelCapacityRateLimit(error) ||
           message.includes('Failed to create Steel replacement') ||
           message.includes('Connection error')
         );
       },
-      component: 'browser-provider:steel-switch',
+      component: 'browser-provider:steel-create',
     });
 
   let switched: RotationResponse;
   try {
-    switched = await postWithSteelConnectionRetry('/rotate-proxy', {
+    switched = await postWithSteelRetry('/rotate-proxy', {
       task_id: taskId,
       current_url: 'https://example.com/provider-switch-check',
     });
@@ -220,7 +242,7 @@ export async function runCrossProviderRotationLadder(
 
   let steelRotated: RotationResponse;
   try {
-    steelRotated = await post('/rotate-proxy', {
+    steelRotated = await postWithSteelRetry('/rotate-proxy', {
       task_id: taskId,
       current_url: 'https://example.com/steel-rotation-check',
     });

@@ -32,6 +32,7 @@ TMP_ROOT="$(mktemp -d)"
 PIDS=()
 HUB_PIDS=()
 TEST_FAILED=0
+PORT_CLAIM_DIR=""
 
 cleanup() {
     local pid
@@ -41,6 +42,10 @@ cleanup() {
     for pid in "${PIDS[@]:-}"; do
         wait "$pid" 2>/dev/null || true
     done
+    if [ -n "$PORT_CLAIM_DIR" ]; then
+        rm -f "$PORT_CLAIM_DIR/owner" 2>/dev/null || true
+        rmdir "$PORT_CLAIM_DIR" 2>/dev/null || true
+    fi
     if [ "$TEST_FAILED" = "1" ] \
         && [ "${CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE:-0}" = "1" ]; then
         echo "ℹ️  retained failed cloudbench fixture: $TMP_ROOT" >&2
@@ -1005,26 +1010,56 @@ PY
 # Derive a process-specific search window from this run's random tmp root so
 # concurrent copies of this regression (for example, two Conductor workspaces)
 # do not both probe 42000 free and then race to own the same listener.
-find_free_port() {  # find_free_port <start>
-    local start="$1" port
-    for port in $(seq "$start" $((start + 500))); do
-        if ! lsof -ti :"$port" >/dev/null 2>&1; then
-            printf '%s' "$port"
-            return 0
-        fi
-    done
-    return 1
-}
-PORT_WINDOW_START="$(TMP_ROOT="$TMP_ROOT" python3 - <<'PY'
+PORT_WINDOW_SLOT="$(TMP_ROOT="$TMP_ROOT" python3 - <<'PY'
 import hashlib
 import os
 
 digest = hashlib.sha256(os.environ["TMP_ROOT"].encode()).digest()
-print(40000 + int.from_bytes(digest[:4], "big") % 15000)
+print(int.from_bytes(digest[:4], "big") % 200)
 PY
 )"
-HUB_PORT_A="$(find_free_port "$PORT_WINDOW_START")" || fail "could not find a free test port for workstream A"
-HUB_PORT_B="$(find_free_port $((HUB_PORT_A + 1)))" || fail "could not find a free test port for workstream B"
+PORT_CLAIM_ROOT="${TMPDIR:-/tmp}/cloudbench-multi-workstream-port-claims"
+mkdir -p "$PORT_CLAIM_ROOT" || fail "could not initialize the cross-workspace port claim directory"
+for port_attempt in $(seq 0 199); do
+    port_slot=$(((PORT_WINDOW_SLOT + port_attempt) % 200))
+    port_base=$((40000 + port_slot * 64))
+    candidate_claim="$PORT_CLAIM_ROOT/$port_base"
+    if ! mkdir "$candidate_claim" 2>/dev/null; then
+        [ -f "$candidate_claim/owner" ] || continue
+        owner_pid="$(sed -n '1p' "$candidate_claim/owner" 2>/dev/null || true)"
+        owner_tmp="$(sed -n '2p' "$candidate_claim/owner" 2>/dev/null || true)"
+        if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null \
+            && [ -n "$owner_tmp" ] && [ -d "$owner_tmp" ]; then
+            continue
+        fi
+        rm -f "$candidate_claim/owner" 2>/dev/null || continue
+        rmdir "$candidate_claim" 2>/dev/null || continue
+        mkdir "$candidate_claim" 2>/dev/null || continue
+    fi
+    printf '%s\n%s\n' "$$" "$TMP_ROOT" > "$candidate_claim/owner" || {
+        rm -f "$candidate_claim/owner" 2>/dev/null || true
+        rmdir "$candidate_claim" 2>/dev/null || true
+        continue
+    }
+    port_window_busy=0
+    for candidate_port in "$port_base" "$((port_base + 1))" \
+        "$((port_base + 20))" "$((port_base + 21))"; do
+        if lsof -tiTCP:"$candidate_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            port_window_busy=1
+            break
+        fi
+    done
+    if [ "$port_window_busy" = "1" ]; then
+        rm -f "$candidate_claim/owner" 2>/dev/null || true
+        rmdir "$candidate_claim" 2>/dev/null || true
+        continue
+    fi
+    PORT_CLAIM_DIR="$candidate_claim"
+    HUB_PORT_A="$port_base"
+    HUB_PORT_B=$((port_base + 1))
+    break
+done
+[ -n "$PORT_CLAIM_DIR" ] || fail "could not atomically reserve a free cloudbench test port window"
 CONDUCTOR_PORT_A=$((HUB_PORT_A - 5764))
 CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 
