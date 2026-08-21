@@ -78,12 +78,12 @@ wait-looped on an empty shell until the 360s cap.
 
 ## Solution
 
-Add `gate-subscription-card-mint-admin-bypass` to
-`TEST_PAYMENT_FRONTEND_TASK_NAMES` so `configure_task_environment` sets
-`BENCHMARK_BUNDLED_FRONTEND=true` (same contract as the other /test_payment
-gates). Cement in
-`test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start`.
-Also keep blank-SPA mount diagnostics in `wait_for_navigation_ready` for future
+Set `BENCHMARK_BUNDLED_FRONTEND=true` whenever `needs_public_tunnel(tasks)`
+(and no external `BENCHMARK_FRONTEND_URL`) — not via a hand-maintained task
+allowlist. Also keep admin-bypass in `TEST_PAYMENT_FRONTEND_TASK_NAMES` so
+`needs_frontend_tunnel` still publishes the /test_payment public URL. Cemented
+in `test_public_tunnel_benchmarks_enable_bundled_frontend_by_default` and the
+purchase-gate bundled tests. Blank-SPA mount diagnostics remain on reload for
 capture. Do not raise the 360s task timeout.
 
 ## Human feedback
@@ -94,6 +94,5 @@ post-pay PAUSE race RCA.
 
 ## Reusable lesson
 
-Every task that opens a public tunnel to `/test_payment` must be in
-`TEST_PAYMENT_FRONTEND_TASK_NAMES` so the stack serves a bundled frontend —
-never Vite DEV — to Kernel browsers.
+Whenever `needs_public_tunnel` is true, serve a bundled frontend by default —
+never Vite DEV through Kernel+ngrok, and never rely on a per-task allowlist.
