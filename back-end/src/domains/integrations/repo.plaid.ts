@@ -15,7 +15,7 @@ import {
   type PlaidAccount,
   type PlaidItem,
 } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { PLAID_DEFAULT_PRODUCTS } from '../../providers/plaid';
 
 export type PlaidItemWithAccounts = PlaidItem & { accounts: PlaidAccount[] };
@@ -168,21 +168,26 @@ export async function persistPlaidItem(
   input: PersistPlaidItemInput,
   accounts: AccountUpsertInput[]
 ): Promise<PlaidItemWithAccounts> {
-  return prisma.$transaction(async (tx) => {
-    const integration = await upsertIntegrationRow(tx, userId);
-    const plaidItem = await upsertPlaidItemRow(tx, {
-      userId,
-      integrationId: integration.id,
-      ...input,
-    });
-    await upsertPlaidAccounts(tx, userId, plaidItem.id, accounts);
-    const updated = await tx.plaidItem.findUnique({
-      where: { id: plaidItem.id },
-      include: { accounts: true },
-    });
-    if (!updated) throw new Error('PlaidItem disappeared mid-transaction');
-    return updated;
-  });
+  return runTransactionWithRetry(
+    async (tx) => {
+      const integration = await upsertIntegrationRow(tx, userId);
+      const plaidItem = await upsertPlaidItemRow(tx, {
+        userId,
+        integrationId: integration.id,
+        ...input,
+      });
+      await upsertPlaidAccounts(tx, userId, plaidItem.id, accounts);
+      const updated = await tx.plaidItem.findUnique({
+        where: { id: plaidItem.id },
+        include: { accounts: true },
+      });
+      if (!updated) throw new Error('PlaidItem disappeared mid-transaction');
+      return updated;
+    },
+    // Coverage + multi-worker blackbox load routinely exceeds the 10s default;
+    // an expired commit surfaces as 500 on /exchange-public-token.
+    { maxWait: 10_000, timeout: 30_000 }
+  );
 }
 
 export async function findActivePlaidItemsWithTokens(): Promise<PlaidItem[]> {
