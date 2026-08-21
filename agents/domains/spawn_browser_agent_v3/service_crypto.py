@@ -886,29 +886,14 @@ def has_payment_card_secret_refs(secret_refs: Optional[Dict[str, Any]]) -> bool:
     return all(bool(refs.get(ref)) for ref in PAYMENT_CARD_SECRET_REFS)
 
 
-def normalize_payment_card_id(value: Any) -> Optional[str]:
-    """Return a prompt-safe, non-secret payment card identifier."""
-    if not isinstance(value, str):
-        return None
-    card_id = value.strip()
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", card_id):
-        return None
-    return card_id
-
-
-def build_payment_card_resume_prompt_section(
-    payment_card_refs: Dict[str, Any], payment_card_id: Any = None
-) -> str:
+def build_payment_card_resume_prompt_section(payment_card_refs: Dict[str, Any]) -> str:
     """Build resume instructions for an already approved one-time payment card."""
     if not has_payment_card_secret_refs(payment_card_refs):
         return ""
 
-    safe_card_id = normalize_payment_card_id(payment_card_id)
-    card_id_line = f"\nApproved card ID: {safe_card_id}" if safe_card_id else ""
-    return f"""
+    return """
 ## One-Time Payment Card
 Payment approval is complete and the one-time card is ready. Do not call request_payment_card again for this checkout.
-{card_id_line}
 
 Type only these secret refs into the payment fields:
 - Card number field: card_number

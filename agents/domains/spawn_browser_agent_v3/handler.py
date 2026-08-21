@@ -162,7 +162,6 @@ from .service_crypto import (
     format_otp_user_message,
     has_payment_card_secret_refs,
     is_usable_email_otp,
-    normalize_payment_card_id,
 )
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
@@ -226,28 +225,18 @@ def _normalize_funding_retry_seconds(value: Any) -> float:
     return min(max(retry_seconds, 1.0), 60.0)
 
 
-def _build_payment_card_verifier_evidence(
-    last4: Any, payment_card_id: Any = None
-) -> Optional[Dict[str, Any]]:
+def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
     safe_last4 = _normalize_payment_card_last4(last4)
-    safe_card_id = normalize_payment_card_id(payment_card_id)
-    if safe_last4 is None and safe_card_id is None:
+    if safe_last4 is None:
         return None
-    evidence_parts = []
-    metadata: Dict[str, Any] = {
-        "toolName": "payment_card_ready",
-        "toolStatus": "FINISHED",
-    }
-    if safe_card_id is not None:
-        evidence_parts.append(f"card ID: {safe_card_id}")
-        metadata["paymentCardId"] = safe_card_id
-    if safe_last4 is not None:
-        evidence_parts.append(f"last four: {safe_last4}")
-        metadata["paymentCardLast4"] = safe_last4
     return {
         "role": "TOOL",
-        "text": "Approved one-time payment card " + ", ".join(evidence_parts),
-        "metadata": metadata,
+        "text": f"Approved one-time payment card last four: {safe_last4}",
+        "metadata": {
+            "toolName": "payment_card_ready",
+            "toolStatus": "FINISHED",
+            "paymentCardLast4": safe_last4,
+        },
     }
 
 
@@ -4106,7 +4095,6 @@ def _simulated_browser_verifier_context(
     action_entries: List[Dict[str, Any]],
     frame: Optional[Dict[str, Any]],
     payment_card_last4: Optional[str],
-    payment_card_id: Optional[str],
 ) -> List[Dict[str, Any]]:
     state_text = json.dumps(
         {k: v for k, v in browser_state.items() if k not in {"screenshot", "frame", "website_frame"}},
@@ -4143,9 +4131,7 @@ def _simulated_browser_verifier_context(
             },
         },
     ]
-    payment_evidence = _build_payment_card_verifier_evidence(
-        payment_card_last4, payment_card_id
-    )
+    payment_evidence = _build_payment_card_verifier_evidence(payment_card_last4)
     if payment_evidence:
         context.append(payment_evidence)
     return context
@@ -4159,7 +4145,6 @@ async def _verify_simulated_browser_completion(
     action_entries: List[Dict[str, Any]],
     frame: Optional[Dict[str, Any]],
     payment_card_last4: Optional[str],
-    payment_card_id: Optional[str],
     token_state: ClaudeTokenState,
     agent_id: str,
     user_id: str,
@@ -4180,7 +4165,6 @@ async def _verify_simulated_browser_completion(
                 action_entries=action_entries,
                 frame=frame,
                 payment_card_last4=payment_card_last4,
-                payment_card_id=payment_card_id,
             ),
             build_verifier_prompt(response_schema=remote_schema),
             VERIFIER_ULTRA_MODEL,
@@ -4275,7 +4259,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
     }
     iteration = int(resume.get("step_count") or 0)
     payment_card_last4 = _normalize_payment_card_last4(resume.get("payment_card_last4"))
-    payment_card_id = normalize_payment_card_id(resume.get("payment_card_id"))
     write_lock_approvals = dict(resume.get("write_lock_approvals") or {})
     latest_frame: Optional[Dict[str, Any]] = None
     restored_session = resume.get("world_model_session_id")
@@ -4598,7 +4581,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                     action_entries=action_entries,
                     frame=latest_frame,
                     payment_card_last4=payment_card_last4,
-                    payment_card_id=payment_card_id,
                     token_state=token_state,
                     agent_id=agent_id,
                     user_id=user_id,
@@ -4974,7 +4956,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     auth_assistance_resume_mode: Optional[str] = None
     resume_user_messages: List[Dict[str, str]] = []
     payment_card_last4: Optional[str] = None
-    payment_card_id: Optional[str] = None
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
@@ -4984,7 +4965,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
-        payment_card_id = normalize_payment_card_id(write_lock_resume_state.get("payment_card_id"))
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
@@ -5595,9 +5575,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 value = payment_card_refs.get(ref)
                 if value:
                     _secret_refs[ref] = value
-            _payment_card_resume_section = build_payment_card_resume_prompt_section(
-                payment_card_refs, payment_card_id
-            )
+            _payment_card_resume_section = build_payment_card_resume_prompt_section(payment_card_refs)
             if _payment_card_resume_section:
                 _user_context_sections.append(_payment_card_resume_section.strip())
             _secret_refs.update(_realm_credential_state.password_secret_refs)
@@ -7653,9 +7631,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         action_history=action_history,
                         config=config,
                         session_id=session_id,
-                        payment_card_evidence=_build_payment_card_verifier_evidence(
-                            payment_card_last4, payment_card_id
-                        ),
+                        payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
                         browser_checkpoints=verifier_checkpoints,
                     )
 
@@ -9013,7 +8989,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         prior_resume = write_lock_resume_state or {}
                         prior_payment_refs = prior_resume.get("payment_card_refs")
                         prior_payment_last4 = prior_resume.get("payment_card_last4")
-                        prior_payment_card_id = prior_resume.get("payment_card_id")
                         if prior_payment_refs or current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY):
                             current_approvals = grant_site_write_lock_approvals(
                                 current_approvals,
@@ -9039,8 +9014,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             write_lock_resume_state["payment_card_refs"] = prior_payment_refs
                         if prior_payment_last4:
                             write_lock_resume_state["payment_card_last4"] = prior_payment_last4
-                        if prior_payment_card_id:
-                            write_lock_resume_state["payment_card_id"] = prior_payment_card_id
                         _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                         _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
@@ -9504,7 +9477,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "card_expiry": card_expiry,
                         "card_cvv": card_cvv,
                     }
-                    payment_card_id = normalize_payment_card_id(card.get("cardId") or card.get("id"))
 
                     # Payment-card approval unlocks write locks on the merchant
                     # checkout domain for THIS browser activity only (resume state).
@@ -9545,7 +9517,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "auth_realm": result.get("auth_realm"),
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
-                        "payment_card_id": payment_card_id,
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)

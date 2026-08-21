@@ -4235,8 +4235,7 @@ def test_build_payment_card_resume_prompt_section():
             "card_name": "Rose Labs",
             "card_expiry": "12/30",
             "card_cvv": "123",
-        },
-        "card-1",
+        }
     )
 
     assert "Payment approval is complete" in out
@@ -4245,19 +4244,9 @@ def test_build_payment_card_resume_prompt_section():
     assert "card_name" in out
     assert "card_expiry" in out
     assert "card_cvv" in out
-    assert "Approved card ID: card-1" in out
     assert "4111111111111111" not in out
     assert "12/30" not in out
     assert "123" not in out
-    assert "injected" not in build_payment_card_resume_prompt_section(
-        {
-            "card_number": "4111111111111111",
-            "card_name": "Rose Labs",
-            "card_expiry": "12/30",
-            "card_cvv": "123",
-        },
-        "card-1\ninjected",
-    )
 
 def test_build_payment_card_resume_prompt_section_requires_all_refs():
     from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
@@ -15920,7 +15909,6 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
         "card_cvv": "123",
     }
     assert resume_state["payment_card_last4"] == "4242"
-    assert resume_state["payment_card_id"] == "card-1"
 
     payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
     assert payment_ready.status == MessageStatus.FINISHED
@@ -15931,18 +15919,16 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
 def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
     from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
 
-    evidence = _build_payment_card_verifier_evidence("4242", "card-1")
+    evidence = _build_payment_card_verifier_evidence("4242")
     assert evidence == {
         "role": "TOOL",
-        "text": "Approved one-time payment card card ID: card-1, last four: 4242",
+        "text": "Approved one-time payment card last four: 4242",
         "metadata": {
             "toolName": "payment_card_ready",
             "toolStatus": "FINISHED",
-            "paymentCardId": "card-1",
             "paymentCardLast4": "4242",
         },
     }
-    assert _build_payment_card_verifier_evidence(None, "card-1") is not None
     assert _build_payment_card_verifier_evidence("4242424242424242") is None
     assert _build_payment_card_verifier_evidence("42x2") is None
     assert _build_payment_card_verifier_evidence(None) is None
