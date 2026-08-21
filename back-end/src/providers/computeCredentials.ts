@@ -94,7 +94,18 @@ function hasUsableClaudePoolEnvelope(credentialsJson: string): boolean {
     const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
     const accessToken = typeof oauth?.accessToken === 'string' ? oauth.accessToken : '';
     const refreshToken = typeof oauth?.refreshToken === 'string' ? oauth.refreshToken : '';
-    return accessToken.startsWith('sk-ant-oat') && refreshToken.length > 0;
+    const expiresAt = typeof oauth?.expiresAt === 'number' ? oauth.expiresAt : 0;
+    const scopes = Array.isArray(oauth?.scopes) ? oauth.scopes : [];
+    // Legacy browser OAuth envelopes can refresh. New cloud-minted Claude
+    // setup-tokens deliberately cannot: they are year-long inference grants and
+    // carry an empty refreshToken. Rejecting every empty refresh token silently
+    // made those healthy, explicitly-pooled accounts invisible to the pool.
+    const refreshable = refreshToken.length > 0;
+    const liveSetupToken =
+      refreshToken === '' &&
+      expiresAt > Date.now() &&
+      scopes.some((scope) => scope === 'user:inference');
+    return accessToken.startsWith('sk-ant-oat') && (refreshable || liveSetupToken);
   } catch {
     return false;
   }
@@ -106,8 +117,13 @@ function parseGptEnvelope(credentialsJson: string) {
     if (parsed.auth_mode !== 'chatgpt') return null;
     const tokens = parsed.tokens as Record<string, unknown> | undefined;
     const accessToken = typeof tokens?.access_token === 'string' ? tokens.access_token : '';
-    const refreshToken = typeof tokens?.refresh_token === 'string' ? tokens.refresh_token : '';
-    if (accessToken.length === 0 || refreshToken.length === 0) return null;
+    // This selector only hands an access token to Rose/SMS workers. Cloud-minted
+    // grants intentionally omit the refresh lineage, while legacy synced
+    // auth.json envelopes still include it. Requiring refresh_token here made a
+    // healthy access-only grant invisible even though this path never uses it.
+    // The Codex CLI sandbox reader remains strict in gptCredentials.ts because
+    // that surface receives and persists the complete auth.json envelope.
+    if (accessToken.length === 0) return null;
     const accountId = typeof tokens?.account_id === 'string' ? tokens.account_id : undefined;
     return { accessToken, accountId };
   } catch {
@@ -599,9 +615,10 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
   lastCooldownDbCheckMs = now;
   const row = await prisma.integration.findUnique({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
         name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     select: { rateLimitedUntil: true },
@@ -616,9 +633,10 @@ export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<voi
   cachedCooldownUntilMs = until.getTime();
   await prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
         name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     create: {

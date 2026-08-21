@@ -96,7 +96,7 @@ async function resolvePoolingEnabled(): Promise<boolean> {
   const [user, existing] = await Promise.all([
     prisma.user.findUnique({ where: { userId }, select: { poolTokensByDefault: true } }),
     prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'claude_code' } },
+      where: { userId_name_accountId: { userId, name: 'claude_code', accountId: '' } },
       select: { poolingEnabled: true, poolingEnabledOverride: true },
     }),
   ]);
@@ -113,7 +113,7 @@ async function main(): Promise<void> {
   const poolingEnabled = await resolvePoolingEnabled();
 
   const integration = await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'claude_code' } },
+    where: { userId_name_accountId: { userId, name: 'claude_code', accountId: '' } },
     create: {
       userId,
       name: 'claude_code',

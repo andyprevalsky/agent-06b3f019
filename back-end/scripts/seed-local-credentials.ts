@@ -280,9 +280,13 @@ export async function syncIntegrationCredentials(
     void remoteId;
     const synced = await localIntegration.upsert({
       where: {
-        userId_name: {
+        userId_name_accountId: {
           userId: integration.userId,
           name: integration.name,
+          // Carry the source row's accountId so multi-account providers seed as
+          // distinct rows; legacy single-account rows use "" and keep their old
+          // (userId, name) identity.
+          accountId: integration.accountId ?? '',
         },
       },
       create: integration,

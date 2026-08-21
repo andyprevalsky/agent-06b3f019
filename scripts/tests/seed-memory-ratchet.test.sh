@@ -58,6 +58,12 @@ require_text "$MEASUREMENT" \
 require_text "$MEASUREMENT" \
     'TIME_BIN' \
     "measurement must resolve an external time binary (not the shell builtin)"
+require_text "$MEASUREMENT" \
+    'docker rm -fv "$CONTAINER"' \
+    "cold target cleanup must remove postgres anonymous volumes"
+require_text "$MEASUREMENT" \
+    'docker rm -fv "$SRC_CONTAINER"' \
+    "cold source cleanup must remove its postgres anonymous volume"
 require_text "$BUDGET" \
     'SEED_PEAK_RSS_BUDGET_MB = 230' \
     "budget must remain cemented to ceil(191MB * 1.20)"

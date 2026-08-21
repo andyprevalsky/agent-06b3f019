@@ -61,7 +61,6 @@ export function mockSession() {
     }),
   );
 }
-
 export function makeSeries() {
   return Array.from({ length: 12 }, (_, index) => ({
     key: `2026-0${(index % 9) + 1}-01`,
@@ -212,7 +211,6 @@ export function adminHealthPayload(timeSlice = 'monthly') {
     },
   };
 }
-
 export function directoryPerson(
   overrides: Partial<AdminDirectoryPerson> = {},
 ): AdminDirectoryPerson {
