@@ -11042,6 +11042,144 @@ def test_write_lock_purchase_button_excludes_terms_consent_prose():
     assert is_purchase_button("Buy Now\nPrivacy Policy")
 
 
+def test_write_lock_purchase_button_excludes_buynow_dom_identifiers():
+    """Machine ids containing buynow must not trip the purchase write lock.
+
+    Fandango IMAX checkout (2026-08-20 agent 1c3003ef): clicking the email
+    sign-in input ``#buynow-email-si`` joined that id into the write-lock
+    signal. Whitespace-stripped matching turned phrase ``buy now`` into a
+    substring of ``buynow-email-si``, forced a purchase write_lock, and the
+    browser-imax-group-tickets harness observed write_lock instead of
+    payment_approval. Real Buy Now labels stay locked; a co-located id must
+    not veto them.
+    """
+    from browser_tools.write_lock import (
+        is_dom_identifier_write_lock_signal,
+        is_purchase_button,
+    )
+
+    assert is_dom_identifier_write_lock_signal("buynow-email-si")
+    assert is_dom_identifier_write_lock_signal("place_order_btn")
+    assert not is_dom_identifier_write_lock_signal("Buy Now")
+    assert not is_dom_identifier_write_lock_signal("buynow")
+
+    assert not is_purchase_button("buynow-email-si")
+    assert not is_purchase_button("buynow-email-si\nEmail")
+    assert not is_purchase_button("input\nbuynow-email-si")
+    assert is_purchase_button("Buy Now")
+    assert is_purchase_button("buynow-email-si\nBuy Now")
+
+
+def test_click_write_lock_eligible_only_buttons_and_form_submits():
+    """Plain inputs never raise click write locks — only buttons / form submits.
+
+    Andy (2026-08-21) on H-01: an email/text input must never trigger write
+    lock even if its label or id looks like Buy Now / Send. ``input
+    type=submit|button|image`` remains eligible as a form submit.
+    """
+    from types import SimpleNamespace
+
+    from browser_tools.write_lock import is_click_write_lock_eligible_control
+
+    assert is_click_write_lock_eligible_control(None) is True
+    assert is_click_write_lock_eligible_control(SimpleNamespace(tag_name="button", attributes={}))
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(node_name="INPUT", attributes={"type": "submit"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "button"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="a", attributes={"role": "button"})
+    )
+
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "email", "id": "buynow-email-si"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="INPUT", attributes={"type": "text"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="textarea", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="select", attributes={})
+    )
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_skips_plain_email_input():
+    """Email/text inputs never return needs_write_approval even if labels match."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "email", "id": "buynow-email-si"},
+        parent_node=None,
+        get_all_children_text=lambda: "Buy Now",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="buynow-email-si\nBuy Now"),
+        ),
+        patch("browser_tools.write_lock.is_purchase_button", return_value=True),
+        patch("browser_tools.write_lock.is_email_send_button", return_value=True),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://tickets.fandango.com/checkout",
+            system_name="Rose",
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_still_locks_submit_input():
+    """Form-submit inputs remain eligible for purchase write lock."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "submit"},
+        parent_node=None,
+        get_all_children_text=lambda: "Place Order",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="Place Order"),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+            return_value="Place Order",
+        ),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://shop.example.com/checkout",
+            system_name="Rose",
+        )
+    assert out is not None
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "purchase"
+
+
 def test_write_lock_email_send_excludes_marketing_opt_in_controls():
     """Marketing opt-in checkboxes never trigger the outbound-send write lock.
 
@@ -13012,6 +13150,102 @@ async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
     assert out["ready"] is True
     assert page.reloads == 1
     assert page.evaluations >= 2
+
+
+async def test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload():
+    """Persistent blank SPA shells must emit script/preload mount diagnostics."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.reloads = 0
+            self.codes = []
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, code):
+            self.codes.append(code)
+            if "performance.getEntriesByType" in code:
+                return {
+                    "href": "https://x.com/test_payment",
+                    "readyState": "interactive",
+                    "rootChildren": 0,
+                    "scriptCount": 1,
+                    "scripts": [{"type": "module", "src": "https://x.com/src/main.tsx"}],
+                    "preloadCount": 2,
+                    "preloads": [
+                        {"as": "video", "href": "https://x.com/navi-features.webm"},
+                        {"as": "video", "href": "https://x.com/navi-features-hevc.mov"},
+                    ],
+                    "resourceCount": 1,
+                    "scriptResourceCount": 0,
+                    "scriptResources": [],
+                    "preloadResources": [
+                        {
+                            "name": "https://x.com/navi-features.webm",
+                            "initiatorType": "link",
+                            "transferSize": 66000000,
+                            "encodedBodySize": 66000000,
+                            "durationMs": 12000,
+                            "responseEndMs": 13000,
+                        }
+                    ],
+                    "mainScript": {"type": "module", "src": "https://x.com/src/main.tsx"},
+                    "mainResource": None,
+                    "largestPreloadBytes": 66000000,
+                }
+            return {
+                "hasAppRoot": True,
+                "appRootReady": False,
+                "plainPageReady": False,
+                "bodyTextLength": 0,
+                "rootChildren": 0,
+                "blankSpaShell": True,
+                "readyState": "interactive",
+            }
+
+        async def reload(self):
+            self.reloads += 1
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+    monotonic_time = 0.0
+    logged = []
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    def capture_warning(event, **kwargs):
+        logged.append((event, kwargs))
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+        patch.object(service_actions.logger, "warning", side_effect=capture_warning),
+    ):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/test_payment",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is False
+    assert page.reloads == 1
+    diag_events = [item for item in logged if item[0] == "Blank SPA mount diagnostics"]
+    assert len(diag_events) >= 2
+    assert any(item[1].get("phase") == "before_reload" for item in diag_events)
+    assert any(item[1].get("phase") == "after_reload" for item in diag_events)
+    after = next(item[1] for item in diag_events if item[1].get("phase") == "after_reload")
+    assert after["diagnostics"]["mainResource"] is None
+    assert after["diagnostics"]["largestPreloadBytes"] == 66000000
+    assert any("performance.getEntriesByType" in code for code in page.codes)
+
 
 async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -17342,6 +17576,22 @@ async def run_all_tests():
         test_write_lock_purchase_button_excludes_terms_consent_prose,
     )
     r.record(
+        "write_lock_purchase_button_excludes_buynow_dom_identifiers",
+        test_write_lock_purchase_button_excludes_buynow_dom_identifiers,
+    )
+    r.record(
+        "click_write_lock_eligible_only_buttons_and_form_submits",
+        test_click_write_lock_eligible_only_buttons_and_form_submits,
+    )
+    await r.record_async(
+        "click_write_lock_result_skips_plain_email_input",
+        test_click_write_lock_result_skips_plain_email_input,
+    )
+    await r.record_async(
+        "click_write_lock_result_still_locks_submit_input",
+        test_click_write_lock_result_still_locks_submit_input,
+    )
+    r.record(
         "write_lock_email_send_excludes_marketing_opt_in_controls",
         test_write_lock_email_send_excludes_marketing_opt_in_controls,
     )
@@ -17511,6 +17761,10 @@ async def run_all_tests():
     await r.record_async(
         "navigation_ready_reloads_blank_spa",
         test_wait_for_navigation_ready_reloads_blank_spa_shell_once,
+    )
+    await r.record_async(
+        "navigation_ready_logs_blank_spa_mount_diagnostics",
+        test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload,
     )
     await r.record_async(
         "navigation_ready_regotos_loading_doc",

@@ -230,6 +230,14 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
     ),
     'email-credentials-only must not call full syncIntegrations (compute-token churn)'
   );
+  // Multi-account upserts need accountId, but the stable pre-migration projection
+  // must not select it (prod may lack the columns). findProdIntegrations probes
+  // and defaults accountId/accountEmail when absent.
+  assert(
+    source.includes('PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT') &&
+      source.includes("accountId: '', accountEmail: null"),
+    'email-credentials path must resolve accountId via findProdIntegrations defaults'
+  );
 });
 
 test('email credential seed reads remain compatible before production migration', async () => {
@@ -457,6 +465,27 @@ test('compute-token sync can require GPT without requiring Claude OAuth', async 
   );
 });
 
+test('compute-token sync any-mode accepts Claude Code OR Codex', async () => {
+  const source = readSeedLocalSource();
+  const anyHelper = source.indexOf('function requireAnyComputeTokenType');
+  const anyParser = source.indexOf("value.toLowerCase() === 'any'");
+  const anyBranch = source.indexOf('if (requireAnyComputeTokenType())');
+  const eitherOk = source.indexOf('usableClaudeCodeCount > 0 || usableGptCodeCount > 0', anyBranch);
+  const eitherFailure = source.indexOf(
+    "throw new Error('No usable claude_code or gpt_code integrations after sync')",
+    anyBranch
+  );
+
+  assert(anyHelper > 0, 'expected an explicit any-mode helper');
+  assert(anyParser > 0, 'expected parseComputeTokenRequiredTypes to accept any');
+  assert(anyBranch > anyHelper, 'expected sync to branch on any-mode');
+  assert(eitherOk > anyBranch, 'expected any-mode to accept either provider');
+  assert(
+    eitherFailure > eitherOk,
+    'expected any-mode to fail only when both providers are missing'
+  );
+});
+
 test('synthetic benchmark compute access uses the isolated pool without changing ownership', async () => {
   const source = readSeedLocalSource();
   const optIn = source.indexOf('SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS');
@@ -503,11 +532,18 @@ test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks',
     "process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1'"
   );
   const warning = source.indexOf('launcher-scoped non-Claude task', bypass);
-  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
+  // Both providers are inspected up-front; gpt_code must still fail closed
+  // after the Claude-only opt-out (do not short-circuit the GPT branch).
+  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()');
+  const gptFailClosed = source.indexOf(
+    "throw new Error('No usable gpt_code integrations after sync')",
+    warning
+  );
 
   assert(bypass > 0, 'expected a distinct non-Claude task opt-out');
   assert(warning > bypass, 'expected the opt-out to explain its narrow contract');
-  assert(gptInspection > warning, 'expected gpt_code validation to remain active');
+  assert(gptInspection > 0, 'expected gpt_code availability to be inspected');
+  assert(gptFailClosed > warning, 'expected gpt_code validation to remain active');
   assert(
     launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1'),
     'expected the AgentCard launcher to opt into the non-Claude task path'

@@ -1363,8 +1363,21 @@ async def run_agent(
             exclude_anthropic_family_on_llm_retry = False
             bypass_fast_mode_cache_on_llm_retry = False
             if await _account_llm_usage(usage, label="accepted attempt"):
-                logger.info("Agent paused after cost check")
-                return _paused_after_cost_result()
+                # External PAUSE between LLM acceptance and tool dispatch must
+                # not discard already-returned tool_calls. Dropping a forced
+                # attempt_completion here leaves the agent ACTIVE after a
+                # successful child handoff (see
+                # test_pause_after_forced_completion_llm_still_dispatches_attempt_completion).
+                pending_tool_calls = result.tool_calls if hasattr(result, "tool_calls") else []
+                if pending_tool_calls:
+                    logger.info(
+                        "Agent paused after cost check with pending tool_calls; "
+                        "dispatching before pause",
+                        tool_count=len(pending_tool_calls),
+                    )
+                else:
+                    logger.info("Agent paused after cost check")
+                    return _paused_after_cost_result()
 
             fast_cache_llm_position = fast_cache_step
 
