@@ -6,7 +6,12 @@
 import { type Prisma, IntegrationType, IntegrationStatus, mergeJson } from './types';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
-import { getAdminPhone, isAnthropicApiKeyConfigured, isEmailProviderSlug } from './config';
+import {
+  getAdminPhone,
+  isAnthropicApiKeyConfigured,
+  isEmailProviderSlug,
+  isOpenRouterApiKeyConfigured,
+} from './config';
 import {
   fetchClaudeCodeAccessToken,
   fetchPoolToken,
@@ -740,7 +745,7 @@ export async function getAnthropicApiKeyCooldown() {
   return {
     configured: isAnthropicApiKeyConfigured(),
     onCooldown: await isAnthropicApiKeyOnCooldown(),
-    openrouterConfigured: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
+    openrouterConfigured: isOpenRouterApiKeyConfigured(),
   };
 }
 

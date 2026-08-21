@@ -146,8 +146,7 @@ function responseFromSerialized(serialized: SerializedResponse): globalThis.Resp
   delete headers[FETCH_CAPTURE_BODY_ENCODING_HEADER];
   delete headers[FETCH_CAPTURE_BODY_ENCODING_HEADER.toLowerCase()];
 
-  const body =
-    encoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
+  const body = encoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
 
   return new globalThis.Response(body, {
     status: serialized.status,
@@ -192,7 +191,9 @@ class FetchReplayClient {
     });
 
     const contentType =
-      responseHeaders['content-type'] ?? responseHeaders['Content-Type'] ?? response.headers.get('content-type');
+      responseHeaders['content-type'] ??
+      responseHeaders['Content-Type'] ??
+      response.headers.get('content-type');
 
     // Binary / unknown content-types must round-trip as raw bytes. `response.text()`
     // UTF-8-decodes with replacement characters (U+FFFD), expanding a 207KB JPEG
