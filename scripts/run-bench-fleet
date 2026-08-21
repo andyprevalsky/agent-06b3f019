@@ -3324,6 +3324,26 @@ _SEED_GUEST_TOKEN="$(
         "$ROOT_DIR/back-end/prisma/schema.prisma"
 )"
 _SEED_GUEST_PROBE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-seed-probe.XXXXXX")"
+# Detached fleet controllers can inherit a stripped PATH (Cursor cloud / minimal
+# launchers). Ensure npx from nvm or common prefixes is visible before probing.
+if ! command -v npx >/dev/null 2>&1; then
+    for _npx_dir in \
+        "$HOME/.nvm/versions/node"/*/bin \
+        /usr/local/bin \
+        "$ROOT_DIR/node_modules/.bin"
+    do
+        if [ -x "$_npx_dir/npx" ]; then
+            export PATH="$_npx_dir:$PATH"
+            break
+        fi
+    done
+fi
+command -v npx >/dev/null 2>&1 || {
+    rm -f "$_SEED_GUEST_PROBE"
+    echo "❌ npx not found on PATH; cannot verify the cloud-guest seed dump." >&2
+    echo "   Install Node.js or ensure nvm's bin dir is on PATH before run-bench-fleet." >&2
+    exit 1
+}
 # Retry transient npx/tsx install races (ENOENT spawn sh under concurrent
 # controllers / npm cache contention) before failing closed on a missing dump.
 _SEED_GUEST_OK=0
@@ -4163,8 +4183,14 @@ CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
 controller_github_token_b64() {
     local token=""
     if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
-        printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
-        return 0
+        # Cached value may be stale empty b64 from a prior empty gh auth token —
+        # only reuse when decode is non-empty.
+        token="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" | base64 -d 2>/dev/null || true)"
+        if [ -n "$token" ]; then
+            printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
+            return 0
+        fi
+        CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
     fi
     # Prefer live controller credentials (git insteadOf / gh hosts) over a
     # stale injected GITHUB_TOKEN — see cloudbench_controller_github_token.
