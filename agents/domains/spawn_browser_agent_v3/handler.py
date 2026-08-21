@@ -60,6 +60,7 @@ from utils.prompts import build_verifier_prompt
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
+    goal_allows_logged_out_cookie_commit,
     live_tab_looks_challenged,
     page_looks_challenged,
     probe_storage_state,
@@ -7452,6 +7453,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         progress=emit_recovery_progress,
                         provider_exit_rejected=provider_exit_rejected
                         or escalate_after_cookie_false_stable,
+                        allow_logged_out_cookie_commit=goal_allows_logged_out_cookie_commit(
+                            goal
+                        ),
                     )
                     if recovery.recovery == "cookies_sanitized":
                         cookie_recovery_successes += 1

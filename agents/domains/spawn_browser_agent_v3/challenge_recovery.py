@@ -17,7 +17,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 StorageState = Dict[str, Any]
@@ -706,6 +706,30 @@ async def minimize_passing_cookie_removal(
 _COOKIE_PROBE_WAVE_CAP = 5
 
 
+def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
+    """True when the browser task explicitly prefers guest / anonymous checkout.
+
+    Guest payment-boundary tasks inject site cookies that often trip challenges;
+    a clean ``all_target`` strip is the intended recovery (logged-out page), not
+    an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
+    """
+    text = (goal or "").lower()
+    needles = (
+        "guest checkout",
+        "as guest",
+        "continue as guest",
+        "do not sign in",
+        "don't sign in",
+        "without signing in",
+        "without an account",
+        "do not create an account",
+        "don't create an account",
+        "do not log in",
+        "don't log in",
+    )
+    return any(needle in text for needle in needles)
+
+
 async def recover_from_challenge(
     *,
     source_state: StorageState,
@@ -716,14 +740,16 @@ async def recover_from_challenge(
     search_configs: ConfigSearch,
     progress: Progress,
     provider_exit_rejected: bool = False,
+    allow_logged_out_cookie_commit: bool = False,
 ) -> ChallengeRecoveryResult:
     """Run solver -> one parallel cookie-probe wave -> provider/config recovery.
 
     Cookie stage is a single wave of ≤5 storage variants probed concurrently
     (shared settle window + parallel LLM classifier calls). Known anti-bot
     cookie strips may be committed; unclassified strips are diagnostic only and
-    never mutate the live context. Auth-like and opaque cookies are never
-    removed from the canonical context or named in progress.
+    never mutate the live context — except on explicit guest/anonymous tasks
+    where a clean ``all_target`` strip may be committed (logged-out recovery).
+    Auth-like and opaque cookies are never removed on signed-in paths.
     """
     original_digest = _state_digest(source_state)
 
@@ -839,13 +865,32 @@ async def recover_from_challenge(
             return ChallengeRecoveryResult("cookies_sanitized", known_safe)
         return await search_with_preserved_auth_state(known_safe)
 
+    all_target_keys = tuple(target_keys)
+    if (
+        allow_logged_out_cookie_commit
+        and all_target_keys
+        and clean_by_label.get("all_target")
+    ):
+        # Guest / anonymous checkout: isolation already proved the page clears
+        # without every target cookie (including opaque/auth-smelling ones).
+        # Commit that strip and dual live-verify — same contract as known_challenge.
+        await progress(
+            "apply_cookie_fix",
+            "Guest path: applying the proven all-target cookie strip and requiring "
+            "two clean live-page probes.",
+        )
+        if await commit_cookie_removals(all_target_keys):
+            return ChallengeRecoveryResult("cookies_sanitized", all_target_keys)
+        return await search_with_preserved_auth_state()
+
     diagnostic_clean = any(
         clean_by_label.get(label)
         for label in ("all_target", "diagnostic", "diagnostic_half_a", "diagnostic_half_b")
     )
     if diagnostic_clean:
         # Clean logged-out / stripped probes are diagnostic only — opaque cookies
-        # may be auth credentials, so never commit unclassified removals.
+        # may be auth credentials, so never commit unclassified removals on
+        # signed-in / default paths.
         await progress(
             "preserve_auth_state",
             "A cookie variant looked clean in isolation, but unknown cookies are preserved; "

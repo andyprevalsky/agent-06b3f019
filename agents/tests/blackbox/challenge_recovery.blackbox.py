@@ -14,6 +14,7 @@ from domains.spawn_browser_agent_v3.challenge_recovery import (
     blocked_resource_urls_for_verify,
     commit_cookie_removals,
     cookie_key,
+    goal_allows_logged_out_cookie_commit,
     is_auth_cookie,
     is_usable_document_title,
     page_looks_challenged,
@@ -41,7 +42,7 @@ def _state(*cookies):
     }
 
 
-async def _run(source, probe, *, live_commit_clean=True):
+async def _run(source, probe, *, live_commit_clean=True, allow_logged_out_cookie_commit=False):
     events = []
     committed = []
     config_inputs = []
@@ -76,6 +77,7 @@ async def _run(source, probe, *, live_commit_clean=True):
         commit_cookie_removals=commit,
         search_configs=search_configs,
         progress=progress,
+        allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
     )
     return result, events, committed, config_inputs
 
@@ -170,6 +172,38 @@ async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
     assert "cookie_isolation" not in [event[1] for event in events], "ddmin rounds are retired"
     assert "cookie_probe_wave" in [event[1] for event in events]
     assert "preserve_auth_state" in [event[1] for event in events]
+
+
+async def test_guest_path_commits_clean_all_target_strip():
+    """Guest checkout: a clean all_target probe is committed, not discarded for auth."""
+    source = _state(
+        *(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"])
+    )
+    before = copy.deepcopy(source)
+
+    async def probe(candidate):
+        return "poison" not in {cookie["name"] for cookie in candidate["cookies"]}
+
+    result, events, committed, config_inputs = await _run(
+        source, probe, allow_logged_out_cookie_commit=True
+    )
+    assert result.recovery == "cookies_sanitized"
+    assert set(committed) == {cookie_key(cookie) for cookie in before["cookies"]}
+    assert config_inputs == [], "successful guest commit must not escalate to config search"
+    assert source == before
+    assert "apply_cookie_fix" in [event[1] for event in events]
+    assert "preserve_auth_state" not in [event[1] for event in events]
+    assert any("Guest path" in event[2] for event in events)
+
+
+def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
+    assert goal_allows_logged_out_cookie_commit(
+        "Book Hotel Kabuki on hotels.com. Use guest checkout — do not sign in."
+    )
+    assert goal_allows_logged_out_cookie_commit("Continue as guest without an account.")
+    assert not goal_allows_logged_out_cookie_commit("Sign in with my Expedia account and book.")
+    assert not goal_allows_logged_out_cookie_commit("")
+    assert not goal_allows_logged_out_cookie_commit(None)
 
 
 async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
@@ -822,6 +856,14 @@ async def run_all_tests():
     )
     await result.record_async(
         "unknown_cookie_parallel_wave", test_unknown_cookie_wave_probes_in_parallel_without_ddmin
+    )
+    await result.record_async(
+        "guest_path_commits_clean_all_target",
+        test_guest_path_commits_clean_all_target_strip,
+    )
+    result.record(
+        "goal_allows_logged_out_cookie_commit",
+        test_goal_allows_logged_out_cookie_commit_for_guest_prompts,
     )
     await result.record_async(
         "opaque_auth_cookie_preserved",
