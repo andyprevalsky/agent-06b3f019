@@ -9,17 +9,14 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: browser-use loop on booking.com/hotel miyako.html — never clicked submit [8848] I'll\xa0reserve while task requires free cancellation and all visible rates said Total cost to cancel; later goto homepage then Sign in
 symptoms:
   - Expected attention kind write_lock, observed auth_assistance
-  - request_user_assistance_for_authentication
   - I'll reserve
   - Total cost to cancel
-  - Refusing to leave pinned page host 'www.booking.com'
-  - guest_unavailable
-  - browser-hotel-booking
+  - Refusing to leave pinned page host
 tags:
   - browser
   - auth-assistance
   - guest-checkout
-  - booking.com
+  - booking-com
   - navigation-pin
   - free-cancellation
 sources:
