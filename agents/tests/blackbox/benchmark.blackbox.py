@@ -13959,6 +13959,10 @@ async def run_all_tests():
         "declared_static_no_tool_failures_ignores_challenge_recovery",
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
     )
+    r.record(
+        "declared_static_no_tool_failures_ignores_navigation_pin_guard",
+        test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors,
+    )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
         test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_approval,
