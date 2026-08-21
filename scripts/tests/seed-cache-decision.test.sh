@@ -191,7 +191,12 @@ else
 fi
 
 # The setup boundary must actually call the materializer after synchronization.
-if grep -q 'benchmark-seed-cache" materialize' "$ROOT_DIR/scripts/setup-db.sh"; then
+# setup_db_run_interruptible runs it as `bash "$1" materialize ...` with the
+# CLI path passed as $1 so TERM is not deferred behind a foreground wait.
+if grep -Eq 'benchmark-seed-cache"[[:space:]]+materialize|bash "\$1" materialize' \
+    "$ROOT_DIR/scripts/setup-db.sh" \
+  && grep -q 'benchmark-seed-cache' "$ROOT_DIR/scripts/setup-db.sh" \
+  && grep -q 'materialize' "$ROOT_DIR/scripts/setup-db.sh"; then
     PASS=$((PASS+1)); echo "  ✅ setup-db invokes the tested materialization boundary"
 else
     FAIL=$((FAIL+1)); echo "  ❌ setup-db never invokes the tested materialization boundary"
