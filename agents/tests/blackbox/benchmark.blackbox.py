@@ -7017,6 +7017,63 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     assert "ratchet" in reason.lower()
 
 
+def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
+    """Regex pattern order must not let a prompt example replace the grounded result.
+
+    Browser task instructions contain examples such as ``0.85 / 1.0`` followed by
+    ``risk score``. The evaluator used to append all forward-regex matches and then all
+    reverse-regex matches, so that example became the last score even though the
+    terminal browser row carried a grounded structured response.
+    """
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Task instructions: record the score exactly as shown, for example "
+                    '"0.12", "12", "0.85 / 1.0", "risk score: 42".'
+                ),
+                "created_at": "2026-08-21T01:49:49.633Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_started",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Extracted Output: Risk Score: 0.09."
+                ),
+                "created_at": "2026-08-21T01:51:52.088Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "structured_response": {
+                        "risk_score": "0.09",
+                        "checkbox_passed": True,
+                        "invisible_form_submitted": True,
+                        "verdict_text": "Verified!; Form submission allowed!",
+                    },
+                },
+            },
+        ]
+    }
+
+    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+
+    data["messages"][1]["metadata"]["structured_response"]["risk_score"] = "0.91"
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "structured output risk score 0.910 exceeds ratchet" in reason
+
+
 def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded():
     """The ratchet should compare exact FCaptcha JSON, not the page's rounded display text."""
     import json
@@ -13523,6 +13580,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_biometrics_evaluator",
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
+    )
+    r.record(
+        "webdecoy_biometrics_grounded_result_precedence",
+        test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples,
     )
     r.record(
         "webdecoy_biometrics_exact_network_score",
