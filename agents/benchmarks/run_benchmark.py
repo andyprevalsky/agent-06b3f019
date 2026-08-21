@@ -1403,10 +1403,12 @@ async def _update_world_model_before_simulation(args) -> None:
 
 
 def _extract_agent_payment_output_blob(data: dict) -> str:
-    """Collect the browser sub-agent's populated structured output(s) — key-agnostic — as a JSON blob
-    for the reusable semantic output judge. The browser agent's output_schema is LLM-synthesized per
-    run, so the confirmation id may land under order_id, order_confirmation_id, payment_confirmation_id,
-    receipt_id, etc.; the judge maps it by meaning, so we keep every populated structured response."""
+    """Collect terminal browser output — key-agnostic — as a JSON blob for semantic judging.
+
+    Prefer populated structured responses. When a completed browser task used its user-message
+    terminal path, the manager has no structured metadata even though the same grounded result is
+    preserved in the terminal tool message; retain that text as the fallback evidence channel.
+    """
     blobs: List[dict] = []
     for message in data.get("messages", []) or []:
         if not isinstance(message, dict) or message.get("role") != "TOOL":
@@ -1419,6 +1421,14 @@ def _extract_agent_payment_output_blob(data: dict) -> str:
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
         if isinstance(structured, dict):
             blobs.append(structured)
+            continue
+        message_text = message.get("message")
+        if (
+            metadata.get("action_type") == "task_complete"
+            and isinstance(message_text, str)
+            and message_text.strip()
+        ):
+            blobs.append({"browser_result_text": message_text})
     return json.dumps(blobs, default=str) if blobs else ""
 
 
