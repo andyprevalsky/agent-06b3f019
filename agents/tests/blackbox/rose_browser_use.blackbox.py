@@ -242,8 +242,9 @@ def test_build_browser_use_system_prompt_requires_ordered_option_set_capture():
     assert "choosing among ordered options" in prompt
     assert "earliest/latest showtime" in prompt
     assert "capture the full filtered option set" in prompt
-    assert "without trusting your thinking text alone" in prompt
-    assert "`evaluate`" in prompt
+    assert "Enumerate every option in display order" in prompt
+    assert "scrollable or virtualized lists" in prompt
+    assert "Do not select until the complete set and the selected option are recorded" in prompt
     assert "`extract`" not in prompt
 
 
