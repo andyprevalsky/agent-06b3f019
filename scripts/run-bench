@@ -52,6 +52,21 @@ if [[ "${1:-}" == "--local" ]]; then
     exec "$PY" -u benchmarks/local.py "$@"
 fi
 
+# --single-box is DISABLED: it ran every task directly on the ONE shared warm
+# box, which is NOT parallel-safe — two worktrees collide on the same machine and
+# whichever stops it kills the other's in-flight run. The default fleet path
+# already isolates each bench on its own cloned machine, so a single bench is
+# just `run-bench <task>`. (run-bench-cloud enforces the same guard directly.)
+# This guard MUST run before the production-only classifier: `--single-box some-bench`
+# is not a valid task-name argv for that helper, and a classifier fail-closed exit
+# would hide the parallel-safety rejection (multi-workstream scenario 14).
+if [[ "${1:-}" == "--single-box" ]]; then
+    echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
+    echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
+    echo "       bash scripts/run-bench <task...>" >&2
+    exit 2
+fi
+
 # Production-only tasks hit live Temporal/API (roselabs / Render). They must not
 # provision Fly guests or contend for the shared warm donor — that path is both
 # unnecessary and races every concurrent workspace. Route them through the same
