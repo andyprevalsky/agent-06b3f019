@@ -168,21 +168,26 @@ export async function persistPlaidItem(
   input: PersistPlaidItemInput,
   accounts: AccountUpsertInput[]
 ): Promise<PlaidItemWithAccounts> {
-  return prisma.$transaction(async (tx) => {
-    const integration = await upsertIntegrationRow(tx, userId);
-    const plaidItem = await upsertPlaidItemRow(tx, {
-      userId,
-      integrationId: integration.id,
-      ...input,
-    });
-    await upsertPlaidAccounts(tx, userId, plaidItem.id, accounts);
-    const updated = await tx.plaidItem.findUnique({
-      where: { id: plaidItem.id },
-      include: { accounts: true },
-    });
-    if (!updated) throw new Error('PlaidItem disappeared mid-transaction');
-    return updated;
-  });
+  return prisma.$transaction(
+    async (tx) => {
+      const integration = await upsertIntegrationRow(tx, userId);
+      const plaidItem = await upsertPlaidItemRow(tx, {
+        userId,
+        integrationId: integration.id,
+        ...input,
+      });
+      await upsertPlaidAccounts(tx, userId, plaidItem.id, accounts);
+      const updated = await tx.plaidItem.findUnique({
+        where: { id: plaidItem.id },
+        include: { accounts: true },
+      });
+      if (!updated) throw new Error('PlaidItem disappeared mid-transaction');
+      return updated;
+    },
+    // Coverage + multi-worker blackbox load routinely exceeds Prisma's 5s default;
+    // an expired commit surfaces as 500 on /exchange-public-token.
+    { maxWait: 10_000, timeout: 30_000 }
+  );
 }
 
 export async function findActivePlaidItemsWithTokens(): Promise<PlaidItem[]> {

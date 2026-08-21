@@ -356,11 +356,6 @@ const PROD_INTEGRATION_COLUMNS = {
   poolingEnabled: true,
   rateLimitedUntil: true,
   lastUsedAt: true,
-  // Required for @@unique([userId, name, accountId]) upserts. Omitting this
-  // made --email-credentials-only fail with "Argument accountId is missing"
-  // after the multi-account Integration key landed on main.
-  accountId: true,
-  accountEmail: true,
   createdAt: true,
   updatedAt: true,
 } as const;
