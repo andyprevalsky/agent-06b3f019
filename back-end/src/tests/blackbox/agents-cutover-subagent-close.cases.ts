@@ -136,15 +136,27 @@ test('deploy cutover seals a live browser tool call exactly once', async () => {
   );
 });
 
-test('deploy cutover closes a live explore sub-agent', async () => {
-  const session = await createAnonymousSession('cutover-explore-close');
-  const rootAgentId = await createTestAgent(session.user.id, 'Cutover explore close test');
+/**
+ * NOTE ON SCOPE: browser and explore "sub-agents" are NOT descendants. Both are
+ * activities of the ROOT workflow that share the parent's agent_id
+ * (`spawn_browser_agent_v3/handler.py` `agent_id = workflow_instance.agent_id`;
+ * `spawn_agent/handler.py` starts `spawn_explore_agent_activity` the same way).
+ * They own no Agent row, so `cleanupNonterminalDescendantWorkflows` cannot see
+ * them and neither is closed or restarted by a cutover. Proving that requires a
+ * live worker — it is covered by the e2e cutover test, not here.
+ *
+ * The two cases below cover the only sub-agent construct that DOES own an Agent
+ * row: a `spawn_sub_agents` child.
+ */
+test('deploy cutover closes a live spawn_sub_agents descendant', async () => {
+  const session = await createAnonymousSession('cutover-descendant-close');
+  const rootAgentId = await createTestAgent(session.user.id, 'Cutover descendant close test');
   await prisma.agent.update({
     where: { id: rootAgentId },
     data: { temporalWorkflowId: rootAgentId, status: 'ACTIVE' },
   });
 
-  const childAgentId = await createTestAgent(session.user.id, 'Explore child');
+  const childAgentId = await createTestAgent(session.user.id, 'Descendant child');
   await prisma.agent.update({
     where: { id: childAgentId },
     data: {
@@ -159,7 +171,45 @@ test('deploy cutover closes a live explore sub-agent', async () => {
   const child = await prisma.agent.findUniqueOrThrow({ where: { id: childAgentId } });
   assert(
     child.status === 'COMPLETED' || child.status === 'FAILED',
-    `a deploy cutover must close the root's live explore sub-agent, but the child is still ` +
+    `a deploy cutover must close the root's live descendant, but the child is still ` +
       `status=${child.status} — it keeps running on a replaced generation`
+  );
+});
+
+test("deploy cutover releases a closed descendant's browser session", async () => {
+  // `completeDescendantCleanup` marks the child FAILED with a raw
+  // `tx.agent.updateMany`, which bypasses `updateAgentStatus` and therefore its
+  // terminal hook `releaseTerminalBrowserSessions`. So a descendant that held a
+  // rented browser is marked dead while its browser keeps running and billing.
+  // `workflowLivenessReconciler` carries an explicit compensation comment for
+  // this same bypass hazard; `completeDescendantCleanup` has no equivalent.
+  const session = await createAnonymousSession('cutover-descendant-browser');
+  const rootAgentId = await createTestAgent(session.user.id, 'Cutover descendant browser test');
+  await prisma.agent.update({
+    where: { id: rootAgentId },
+    data: { temporalWorkflowId: rootAgentId, status: 'ACTIVE' },
+  });
+
+  const childAgentId = await createTestAgent(session.user.id, 'Descendant holding a browser');
+  await prisma.agent.update({
+    where: { id: childAgentId },
+    data: {
+      parent: { connect: { id: rootAgentId } },
+      temporalWorkflowId: childAgentId,
+      status: 'ACTIVE',
+    },
+  });
+  const childSessionId = await seedLiveBrowserSession(session.user.id, childAgentId);
+
+  await prepareAgentWorkflowReplacement(rootAgentId, session.user.id);
+
+  const childSession = await prisma.browserSession.findUniqueOrThrow({
+    where: { id: childSessionId },
+  });
+  assert(
+    childSession.status !== 'ACTIVE' || childSession.closedAt !== null,
+    `closing a descendant must release its rented browser, but it is still ` +
+      `status=${childSession.status} closedAt=${String(childSession.closedAt)} — ` +
+      `completeDescendantCleanup's raw updateMany skips the terminal release hook`
   );
 });
