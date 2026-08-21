@@ -75,27 +75,3 @@ export async function getInboundSeq(userId: string): Promise<number | null> {
   });
   return session?.lastInboundSeq ?? null;
 }
-
-/**
- * Soft-delete an agent and all descendants (children, grandchildren, etc.),
- * and delete their attention requests in the same statement so /clear cannot
- * leave inbox orphans the way a bare `deletedAt` update used to.
- */
-export async function softDeleteAgentAndChildren(agentId: string) {
-  await prisma.$executeRaw`
-    WITH RECURSIVE descendants AS (
-      SELECT id FROM "Agent" WHERE id = ${agentId} AND "deletedAt" IS NULL
-      UNION ALL
-      SELECT a.id FROM "Agent" a
-      JOIN descendants d ON a."parentAgentId" = d.id
-      WHERE a."deletedAt" IS NULL
-    ),
-    deleted_agents AS (
-      UPDATE "Agent" SET "deletedAt" = NOW()
-      WHERE id IN (SELECT id FROM descendants)
-      RETURNING id
-    )
-    DELETE FROM "AgentAttentionRequest"
-    WHERE "agentId" IN (SELECT id FROM deleted_agents)
-  `;
-}
