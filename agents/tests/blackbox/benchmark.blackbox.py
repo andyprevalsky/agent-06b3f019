@@ -4066,14 +4066,58 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     semantic = next(e for e in task.evaluators if e["method"] != "static_check")
     criteria = " ".join(semantic["criteria"]).lower()
     # Approval contents stay judge-owned, never substring-matched.
-    static_types = {c["type"] for e in task.evaluators if e["method"] == "static_check" for c in e["checks"]}
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    static_types = {c["type"] for c in static["checks"]}
     assert "approval_request_details" not in static_types
+    # Payment-terminal stop leaves the root ACTIVE awaiting ignored approval —
+    # requiring COMPLETED fails closed after a grounded payment_approval (agent
+    # 5bcb4a80-9c0e-4521-ab9a-a7ae0e471181). Align with browser-event-ticket.
+    assert "agent_status" not in static_types
+    assert any(
+        "unresolved payment-card approval" in line.lower() for line in static.get("criteria", [])
+    )
     for required in ("venue", "date", "showtime", "seat", "total amount"):
         assert required in criteria
     assert "unresolved payment approval" in criteria
 
     prompt = semantic["judge_prompt"].lower()
     assert "do not require or accept an approved charge or completed purchase" in prompt
+
+
+def test_imax_runtime_contract_allows_active_after_payment_approval():
+    """Declared static checks must not require COMPLETED on payment-terminal stop.
+
+    Local repro: browser-imax-group-tickets agent
+    5bcb4a80-9c0e-4521-ab9a-a7ae0e471181 reached payment_approval (~$95.94) with
+    no tool failures, then failed only on agent_status ACTIVE vs COMPLETED.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("browser-imax-group-tickets")
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    data = {
+        "agent": {"status": "ACTIVE", "progress": 0.01},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment",
+                    "title": "Payment card requested ($95.94)",
+                },
+            }
+        ],
+        "_benchmark": {"approvals_triggered": 1},
+    }
+    assert "agent_status" not in {c["type"] for c in static["checks"]}
+    assert _run_declared_static_check(task, static, data) == (
+        True,
+        "All declared static checks passed",
+    )
 
 async def test_invalid_payment_receipt_still_records_typed_attention_observation():
     """Receipt validation failures must retain the payment attention that carried them."""
@@ -14237,6 +14281,10 @@ async def run_all_tests():
     await r.record_async(
         "imax_payment_then_purchase_write_lock",
         test_imax_poll_requires_payment_then_purchase_write_lock,
+    )
+    r.record(
+        "imax_runtime_contract_allows_active_after_payment",
+        test_imax_runtime_contract_allows_active_after_payment_approval,
     )
     await r.record_async(
         "invalid_payment_receipt_records_attention",

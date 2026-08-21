@@ -2096,13 +2096,13 @@
       ],
       "services": [
         "amctheatres.com",
-        "write_lock"
+        "request_payment_card"
       ],
       "secrets": [],
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase.",
+      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
       "live_cookie_domains": [
         "amctheatres.com"
       ]
@@ -2114,7 +2114,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
+          "The run stops after exactly one unresolved payment-card approval on the grounded AMC Theatres checkout",
           "The approval identifies AMC Metreon 16, the date, showtime, all three seat assignments, and total amount"
         ],
         "checks": [
@@ -2125,10 +2125,6 @@
             "type": "browser_agent_session_count",
             "min": 1,
             "max": 1
-          },
-          {
-            "type": "agent_status",
-            "value": "COMPLETED"
           },
           {
             "type": "approval_request_count",

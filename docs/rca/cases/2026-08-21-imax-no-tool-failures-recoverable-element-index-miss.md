@@ -50,3 +50,12 @@ Outcome-proof agent `00479d10-d10a-46d9-8103-631bf8586ffa` still failed
 artifact-shaped `message`. Post-hoc on saved `logs.messages` (keyed
 `message`) already passed. Fix: `_tool_message_body` reads `text` or
 `message`.
+
+## Follow-up (H-04)
+
+Outcome agent `5bcb4a80-9c0e-4521-ab9a-a7ae0e471181` cleared tool failures after H-03,
+observed payment_approval (~$95.94), then failed
+`agent_status ACTIVE vs COMPLETED`. Payment-terminal contract
+(`success_on_payment_card_request`, `approval_handling=ignore`) leaves the root
+ACTIVE; sibling `browser-event-ticket` omits `agent_status`. Remove COMPLETED
+check and align criteria/context_notes with unresolved payment-card stop.
