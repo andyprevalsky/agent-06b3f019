@@ -9,14 +9,13 @@ export const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET;
 /** Whether we're running in local development (explicit opt-in, not just "not production") */
 export const IS_DEV = process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test';
 
-/** Whether running inside the blackbox test harness (tests need real Twilio calls) */
+/** Whether running inside the blackbox test harness (outbound capture enabled) */
 export const IS_BLACKBOX_TEST = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1';
 
 /**
- * Benchmark-only override: re-enable the dev-phone OTP login bypass even when
- * capture-outbound (IS_BLACKBOX_TEST) is on, so the message-person iMessage relay
- * can auto-login the benchmark user. Still IS_DEV-gated downstream, so it can
- * never bypass auth in production.
+ * Legacy env flag kept for call-site / run.sh compatibility. Dev test phones
+ * always bypass Twilio in IS_DEV now (including blackbox capture), so this no
+ * longer gates the bypass — see `devTestPhoneBypassApplies`.
  */
 export const BENCHMARK_ALLOW_DEV_OTP_LOGIN = process.env.BENCHMARK_ALLOW_DEV_OTP_LOGIN === '1';
 

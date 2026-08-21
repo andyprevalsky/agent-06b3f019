@@ -200,7 +200,8 @@ export async function runCrossProviderRotationLadder(
         return (
           isSteelCapacityRateLimit(error) ||
           message.includes('Failed to create Steel replacement') ||
-          message.includes('Connection error')
+          message.includes('Connection error') ||
+          isSteelSessionRateLimited(error)
         );
       },
       component: 'browser-provider:steel-create',
