@@ -80,35 +80,20 @@ export const SSO_COOKIE_DOMAINS = [
   'github.com',
 ];
 
-export async function seedLocalCookies(
+/**
+ * Transform and inject an already-loaded cookie set.
+ *
+ * Kept separate from the database read so the profile-coherence and malformed
+ * cookie fallback rules can be verified without coupling protocol tests to
+ * Prisma.
+ */
+export async function seedCookieRows(
   sink: CdpCookieSink,
   userId: string,
   provider: string,
-  cookieUrls: string[],
-  /**
-   * Skip the provider's OWN cookies and seed only the identity providers.
-   *
-   * Used when adding a SECOND account: replaying the provider session would
-   * silently sign you back in as the account you already have, but dropping SSO
-   * too leaves you unable to pick a different one without a password. This keeps
-   * the account chooser working while forcing a real choice.
-   */
-  ssoOnly = false
+  domains: string[],
+  rows: LocalCookieRow[]
 ): Promise<number> {
-  const domains = ssoOnly
-    ? SSO_COOKIE_DOMAINS
-    : [...cookieDomainsFor(cookieUrls), ...SSO_COOKIE_DOMAINS];
-  let rows: LocalCookieRow[];
-  try {
-    rows = await findLocalCookiesForDomains(userId, domains);
-  } catch (error) {
-    log.warn('connect.cookie_seed_query_failed', {
-      provider,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return 0;
-  }
-
   // Never mix profiles: a session is only valid as a complete set.
   const chosen = pickSingleProfile(rows);
   log.info('connect.cookie_profile', {
@@ -153,6 +138,38 @@ export async function seedLocalCookies(
     applied,
   });
   return applied;
+}
+
+export async function seedLocalCookies(
+  sink: CdpCookieSink,
+  userId: string,
+  provider: string,
+  cookieUrls: string[],
+  /**
+   * Skip the provider's OWN cookies and seed only the identity providers.
+   *
+   * Used when adding a SECOND account: replaying the provider session would
+   * silently sign you back in as the account you already have, but dropping SSO
+   * too leaves you unable to pick a different one without a password. This keeps
+   * the account chooser working while forcing a real choice.
+   */
+  ssoOnly = false
+): Promise<number> {
+  const domains = ssoOnly
+    ? SSO_COOKIE_DOMAINS
+    : [...cookieDomainsFor(cookieUrls), ...SSO_COOKIE_DOMAINS];
+  let rows: LocalCookieRow[];
+  try {
+    rows = await findLocalCookiesForDomains(userId, domains);
+  } catch (error) {
+    log.warn('connect.cookie_seed_query_failed', {
+      provider,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
+  }
+
+  return seedCookieRows(sink, userId, provider, domains, rows);
 }
 
 /**
