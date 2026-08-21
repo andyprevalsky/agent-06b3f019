@@ -2492,3 +2492,4 @@
 {"task": "chat-mode", "duration_seconds": 43.1, "cost_cents": 0.0, "timestamp": "2026-08-19T20:40:45.535481+00:00", "agent_id": "4ff6d195-0ce5-49a2-92c5-eab04f77da57"}
 {"task": "browser-smoke", "duration_seconds": 76.7, "cost_cents": 0.0, "timestamp": "2026-08-19T20:40:45.535481+00:00", "agent_id": "141a6068-aaf0-42de-93f6-71d028a59361"}
 {"task": "minted-agent-accounts-x", "duration_seconds": 307.2, "cost_cents": 5.0, "timestamp": "2026-08-21T23:15:35.399769+00:00", "agent_id": "660b4312-bebf-401f-9c1a-7af10ed0dd48,f60e976d-03c8-403a-af16-d13c7e09d71c"}
+{"task": "minted-agent-accounts-x", "duration_seconds": 294.2, "cost_cents": 5.0, "timestamp": "2026-08-21T23:25:02.290515+00:00", "agent_id": "76f6f4fe-b3cc-498e-abcb-1484612275f2,d2bfd00a-1912-4122-9bbe-4c6018bf9648"}
