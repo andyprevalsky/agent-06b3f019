@@ -92,5 +92,18 @@ never substitute that serialization for the request — pass unserializable bodi
 through untouched and mark them uncacheable. The same rule applies to **response**
 bodies: never force binary through `text()` / UTF-8; preserve bytes (e.g. base64)
 or pass the original `Response` through. Prefer an allowlist for text decoding.
+### Recurrence (2026-08-21 fleet2) — guest env lacks OpenRouter base
+
+Fleet `20260821-005824-741456` still showed `fast_mode: true` and Anthropic
+billing-fatal / 0-interaction Fast Mode cache hits despite the host-side
+OpenRouter preference. Guests decode `BACKEND_ENV_B64` (have `OPENROUTER_API_KEY`)
+but do not inherit controller `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_ANTHROPIC_API_KEY`,
+and the shared Anthropic key is often **not** on cooldown — so the cooldown-only
+OpenRouter fallback never fired and Fast Mode still claimed the session.
+
+**Fix:** when Fast Mode would be active, pass `preferOpenRouterGateway` into
+`resolveClaudeCodeSandboxApiKey` so OpenRouter wins without requiring host base
+or cooldown. Dedicated `sk-or-*` keys also infer the OpenRouter base URL.
+
 Funded gateway transports must not be overwritten by a Fast Mode proxy that
 forwards to a different host.

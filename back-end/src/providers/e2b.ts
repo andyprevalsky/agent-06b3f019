@@ -244,6 +244,9 @@ export function shouldPreferSandboxAnthropicBaseUrlOverFastMode(
   }
 }
 
+/** Anthropic-compatible OpenRouter base used for Claude Code funded fallback. */
+export const OPENROUTER_ANTHROPIC_COMPAT_BASE_URL = 'https://openrouter.ai/api';
+
 /**
  * API key injected into the Claude Code sandbox.
  *
@@ -254,6 +257,11 @@ export function shouldPreferSandboxAnthropicBaseUrlOverFastMode(
  *
  * When the host `ANTHROPIC_BASE_URL` points at OpenRouter, use `OPENROUTER_API_KEY`
  * if no dedicated Claude Code key is set (fleet guests already carry OpenRouter).
+ *
+ * `preferOpenRouterGateway` covers the fleet Fast Mode path: guests have
+ * `OPENROUTER_API_KEY` in BACKEND_ENV but often lack `ANTHROPIC_BASE_URL` and may
+ * not have the shared Anthropic key on cooldown, so the cooldown-only fallback
+ * never fires — Fast Mode then tees to api.anthropic.com and 403s (2026-08-21).
  */
 export function resolveClaudeCodeSandboxApiKey(
   claudeCodeAnthropicApiKey: string | undefined,
@@ -262,16 +270,22 @@ export function resolveClaudeCodeSandboxApiKey(
     anthropicBaseUrl?: string;
     openrouterApiKey?: string;
     sharedKeyOnCooldown?: boolean;
+    /** Prefer OpenRouter over bare shared Anthropic (e.g. when Fast Mode would win). */
+    preferOpenRouterGateway?: boolean;
   }
 ): { apiKey: string | undefined; baseUrl: string | undefined } {
   const dedicated = claudeCodeAnthropicApiKey?.trim();
   const hostBase = resolveHostAnthropicBaseUrl(options?.anthropicBaseUrl);
   const openrouter = options?.openrouterApiKey?.trim();
   const shared = anthropicApiKey?.trim();
-  const openrouterBase = 'https://openrouter.ai/api';
+  const openrouterBase = OPENROUTER_ANTHROPIC_COMPAT_BASE_URL;
 
   if (dedicated) {
-    return { apiKey: dedicated, baseUrl: hostBase };
+    // Dedicated OpenRouter keys still need the OpenRouter base — controller
+    // exports of ANTHROPIC_BASE_URL do not reach fleet guests.
+    const base =
+      hostBase ?? (/^sk-or-/i.test(dedicated) ? openrouterBase : undefined);
+    return { apiKey: dedicated, baseUrl: base };
   }
   if (hostBase && openrouter && /openrouter\.ai/i.test(hostBase)) {
     return { apiKey: openrouter, baseUrl: hostBase };
@@ -279,10 +293,11 @@ export function resolveClaudeCodeSandboxApiKey(
   if (hostBase) {
     return { apiKey: shared, baseUrl: hostBase };
   }
-  // Shared Anthropic org is on its out-of-credits cooldown: fall through to the
-  // funded OpenRouter Anthropic-compatible gateway so Claude Code stays runnable
-  // on fleet guests that already have OPENROUTER_API_KEY (no secret rotation).
-  if (options?.sharedKeyOnCooldown && openrouter) {
+  // Shared Anthropic org is on its out-of-credits cooldown, OR Fast Mode would
+  // otherwise claim the session: fall through to the funded OpenRouter
+  // Anthropic-compatible gateway so Claude Code stays runnable on fleet guests
+  // that already have OPENROUTER_API_KEY (no secret rotation).
+  if (openrouter && (options?.sharedKeyOnCooldown || options?.preferOpenRouterGateway)) {
     return { apiKey: openrouter, baseUrl: openrouterBase };
   }
   return { apiKey: shared, baseUrl: undefined };
@@ -423,6 +438,9 @@ export async function createClaudeCodeSession(
   const sharedKeyOnCooldown = sharedAnthropicApiKey
     ? await isAnthropicApiKeyOnCooldown()
     : false;
+  // When Fast Mode is active, prefer OpenRouter over the tee-proxy even if the
+  // shared Anthropic key is not on cooldown — fleet guests rarely set
+  // ANTHROPIC_BASE_URL, and Fast Mode + Anthropic upstream 403s Claude Code.
   const sandboxTransport = resolveClaudeCodeSandboxApiKey(
     process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
     sharedAnthropicApiKey,
@@ -430,6 +448,7 @@ export async function createClaudeCodeSession(
       anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL,
       openrouterApiKey: process.env.OPENROUTER_API_KEY,
       sharedKeyOnCooldown,
+      preferOpenRouterGateway: codeAgentFastModeActive,
     }
   );
   const sandboxApiKey = sandboxTransport.apiKey;
