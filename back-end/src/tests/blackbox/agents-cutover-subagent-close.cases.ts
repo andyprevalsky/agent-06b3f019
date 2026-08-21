@@ -213,3 +213,59 @@ test("deploy cutover releases a closed descendant's browser session", async () =
       `completeDescendantCleanup's raw updateMany skips the terminal release hook`
   );
 });
+
+test('deploy seal is call-scoped so the top-level chip can terminate', async () => {
+  // The front-end only terminates the top-level Browser Agent chip from a row
+  // with no subAgentId and no task_id/action_type (useMessageRouting
+  // `isBrowserAgentChipMessage`). The seal used to inherit the call's LAST
+  // in-progress row -- a sub-step carrying all three -- so the chip rendered
+  // "in progress" forever beside the replacement's new one: two live-looking
+  // browser agents for one that was actually dead.
+  const session = await createAnonymousSession('cutover-seal-scope');
+  const agentId = await createTestAgent(session.user.id, 'Cutover seal scope test');
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { temporalWorkflowId: agentId, status: 'ACTIVE' },
+  });
+  const toolCallId = `call_${randomUUID().slice(0, 12)}`;
+  const subAgentId = randomUUID();
+  // Open at parent scope, then advance to a sub-step -- the real browser shape.
+  await seedInFlightBrowserToolCall(agentId, agentId, toolCallId);
+  await prisma.message.create({
+    data: {
+      agentId,
+      workflowGeneration: agentId,
+      role: 'TOOL',
+      text: '',
+      timestamp: new Date(),
+      metadata: {
+        toolCallId,
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        workflowGeneration: agentId,
+        subAgentId,
+        task_id: subAgentId,
+        action_type: 'goto',
+      },
+    },
+  });
+
+  await prepareAgentWorkflowReplacement(agentId, session.user.id);
+
+  const seal = await prisma.message.findFirstOrThrow({
+    where: {
+      agentId,
+      role: 'TOOL',
+      metadata: { path: ['toolCallId'], equals: toolCallId },
+      AND: [{ metadata: { path: ['errorCode'], equals: 'DEPLOY_INTERRUPTED' } }],
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  const meta = (seal.metadata ?? {}) as Record<string, unknown>;
+  assert(
+    meta.subAgentId === undefined && meta.task_id === undefined && meta.action_type === undefined,
+    `the deploy seal must be call-scoped so the top-level chip terminates, got ` +
+      `subAgentId=${String(meta.subAgentId)} task_id=${String(meta.task_id)} ` +
+      `action_type=${String(meta.action_type)}`
+  );
+});

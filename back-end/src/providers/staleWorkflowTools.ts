@@ -201,12 +201,29 @@ export async function finalizeInterruptedWorkflowTools(
 
   let interrupted = 0;
   for (const [toolCallId, candidate] of candidates) {
+    // A deployment seal terminates the WHOLE tool call, so it must be emitted at
+    // workflow scope. `candidate.metadata` is the call's LAST in-progress row,
+    // which for a browser agent is a sub-step (`subAgentId`/`task_id`/
+    // `action_type: 'goto'`). Inheriting those made the seal look like a
+    // sub-step event, and the front-end only terminates the top-level Browser
+    // Agent chip from a row with no `subAgentId` and no `task_id`/`action_type`
+    // (see useMessageRouting `isBrowserAgentChipMessage`). So the browser agent
+    // was genuinely killed and its session closed, while the card rendered
+    // "in progress" forever next to the replacement's new card — two live-looking
+    // browser agents. Strip the sub-step identity; the sub-agent's own rows keep
+    // theirs.
+    const {
+      subAgentId: _subAgentId,
+      task_id: _taskId,
+      action_type: _actionType,
+      ...callScoped
+    } = candidate.metadata;
     const terminal = await createMessage({
       agentId,
       role: 'TOOL',
       text: DEPLOY_INTERRUPTED_TOOL_MESSAGE,
       metadata: {
-        ...candidate.metadata,
+        ...callScoped,
         workflowGeneration,
         toolCallId,
         toolStatus: 'FINISHED',
