@@ -239,6 +239,14 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
     ),
     'email-credentials-only must not call full syncIntegrations (compute-token churn)'
   );
+  // Multi-account upserts need accountId, but the stable pre-migration projection
+  // must not select it (prod may lack the columns). findProdIntegrations probes
+  // and defaults accountId/accountEmail when absent.
+  assert(
+    source.includes('PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT') &&
+      source.includes("accountId: '', accountEmail: null"),
+    'email-credentials path must resolve accountId via findProdIntegrations defaults'
+  );
 });
 
 test('every seed mode hydrates the selected user before dependent writes', async () => {

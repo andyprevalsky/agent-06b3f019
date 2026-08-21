@@ -2308,11 +2308,22 @@ async def _click_write_lock_result(
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
+        is_click_write_lock_eligible_control,
         is_email_send_button,
         is_purchase_button,
         is_social_domain,
         is_submit_button,
     )
+
+    # Andy (2026-08-21): never raise click write locks on plain inputs /
+    # textarea / select — only buttons and form submits.
+    if element is not None and not is_click_write_lock_eligible_control(element):
+        logger.info(
+            "Write lock skipped: click target is not a button or form submit",
+            tag=getattr(element, "tag_name", None) or getattr(element, "node_name", None),
+            url=current_url[:80] if current_url else None,
+        )
+        return None
 
     coordinate_click = element is None
     if coordinate_click:

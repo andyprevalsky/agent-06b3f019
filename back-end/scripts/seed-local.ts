@@ -477,16 +477,17 @@ async function syncEmailIntegrations(): Promise<Map<string, string>> {
   const remoteToLocal = new Map<string, string>();
   for (const integration of emailIntegrations) {
     const { id: remoteId, ...updateData } = integration;
+    const accountId = integration.accountId ?? '';
     const synced = await local.integration.upsert({
       where: {
         userId_name_accountId: {
           userId: integration.userId,
           name: integration.name,
-          accountId: integration.accountId,
+          accountId,
         },
       },
-      create: integration,
-      update: updateData,
+      create: { ...integration, accountId },
+      update: { ...updateData, accountId },
       select: { id: true },
     });
     remoteToLocal.set(remoteId, synced.id);
