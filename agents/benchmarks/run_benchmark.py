@@ -9807,9 +9807,10 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
     """Mirror the backend's funded-fallback selection without probing the key.
 
     Credential health owns the live Anthropic request. The benchmark preflight
-    owns runtime selection: the key must be configured and the backend's shared
-    out-of-credits circuit breaker must be clear. Any unavailable check fails
-    closed and leaves Claude OAuth mandatory.
+    owns runtime selection: either the shared ANTHROPIC_API_KEY is configured
+    and clear of its out-of-credits cooldown, OR OpenRouter is configured so
+    Claude Code can use the Anthropic-compatible gateway (same path as
+    resolveClaudeCodeSandboxApiKey when the shared org is on cooldown).
     """
     try:
         headers = await _api_headers()
@@ -9822,11 +9823,11 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
         if response.status_code != 200:
             return False
         availability = response.json()
-        return (
-            isinstance(availability, dict)
-            and availability.get("configured") is True
-            and availability.get("onCooldown") is False
-        )
+        if not isinstance(availability, dict):
+            return False
+        if availability.get("configured") is True and availability.get("onCooldown") is False:
+            return True
+        return availability.get("openrouterConfigured") is True
     except Exception:
         return False
 
