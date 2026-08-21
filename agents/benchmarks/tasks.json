@@ -2384,7 +2384,7 @@
     "expected_approval_count": 1,
     "expected_attention_kind": "write_lock",
     "min_steps": {
-      "browser": 1
+      "browser": 5
     },
     "start_phase": "execute",
     "bench": "pipeline-e2e",
