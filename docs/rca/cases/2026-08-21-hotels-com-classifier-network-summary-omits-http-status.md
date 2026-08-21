@@ -124,7 +124,31 @@ status/body text is O(entries) only — no fan-in.
 User confirmed search results were real, Offers never loaded, network read +
 entering `recover_from_challenge` were correct, and asked for an `/RCA` of
 whether recover worked — specifically LLM classifier, cookie rotations, and
-config rotations.
+config rotations. Approved the fix with constraints: truncated response bodies
+explicitly labeled, DOM matching the main agent stripped tree, keep screenshot,
+and reason-aware verify. Asked to rerun the exact benchmark to see whether
+recovery reaches a config with stable GraphQL product responses.
+
+## Follow-up (2026-08-21, agent fa23bb52)
+
+Post-fix exact bench `scripts/run-bench --local browser-hotel-booking` still
+**FAIL** (timeout 903s, no `payment_approval`) on agent
+`fa23bb52-f77f-4ce4-a62a-8333132ccf9b` (run
+`20260821_205032_browser-hotel-booking`).
+
+Classifier/recovery behavior changed as intended:
+
+- Agent reason: `Hotels.com GraphQL requests repeatedly return HTTP 429…`
+- Config probes now reject on GraphQL 429 (steel_managed, kernel_isp,
+  kernel_mobile, kernel_residential_*, …) instead of false-clean.
+- Live verify rejected a promote:
+  `Promoted kernel_residential_state passed candidate probes but the live tab is still challenged`
+- Network index: graphql `200:3` / `429:59` (3 large 200 bodies) — intermittent
+  product payloads, not a stable cleared soft-block through checkout.
+
+Residual outcome gap: hotels.com rate-limit persists across available browser
+configs within the 900s budget; fixing the false-stable oracle alone does not
+yet produce payment-boundary success.
 
 ## Reusable lesson
 
