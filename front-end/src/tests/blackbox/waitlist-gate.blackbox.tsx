@@ -106,6 +106,18 @@ describe('WaitlistGate', () => {
     });
   });
 
+  it('renders nothing on /test_payment even when the session is waitlisted', async () => {
+    mockSession();
+    gateOn();
+
+    const { container } = renderWithProviders(<WaitlistGate />, { route: '/test_payment' });
+
+    await waitFor(() => {
+      expect(container.textContent).not.toContain("You're On The Waitlist!");
+    });
+    expect(screen.queryByLabelText('Invite code')).not.toBeInTheDocument();
+  });
+
   it('redeems a valid invite code and dismisses the gate', async () => {
     mockSession();
     let redeemed = false;
