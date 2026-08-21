@@ -154,14 +154,12 @@ PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
     "plaid-transactions-doordash-count",
     "plaid-transactions-dead-subscriptions",
 }
+# Live X Hello World grades write-lock + post evidence against the synced CookieBundle.
+# Do not steer the agent into MintedAccount signup or phone-auth recovery.
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
-    "If X asks you to sign in or create an account first, use the minted email in auth options "
-    "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
-    "Do not choose the initial 'Continue with phone' or 'Sign up with Phone' path; if X opens a phone-number "
-    "field before you have tried the email route, go back and find the email route instead. "
-    "Use the minted AgentPhone only if X explicitly requires phone/SMS auth after the email route. "
-    "If X shows 'An unexpected error occurred', treats the phone number as invalid, or fails to send an SMS, "
-    "stop and report that as a terminal phone-auth blocker instead of retrying alternate phone formats."
+    "Use the already signed-in X session in the browser if one is available. "
+    "Do not create a new X account and do not clear or replace existing X cookies. "
+    "Post the text exactly: Hello World."
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
@@ -278,7 +276,7 @@ TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHE
 
 
 def _x_post_prompt() -> str:
-    """Return the X post benchmark prompt with auth guidance for fresh profiles."""
+    """Return the X post benchmark prompt with live-session reuse guidance."""
     return f"{MINTED_AGENT_ACCOUNT_X_POST_GOAL}\n\n{MINTED_AGENT_ACCOUNT_X_AUTH_HINT}"
 
 
@@ -296,9 +294,49 @@ def _benchmark_env_bool(name: str) -> Optional[bool]:
 
 
 def _minted_clear_existing_auth_enabled() -> bool:
-    """Minted-account benches clear saved realm auth unless explicitly disabled."""
+    """Non-X minted benches clear saved realm auth unless explicitly disabled."""
     flag = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
     return True if flag is None else flag
+
+
+def _minted_x_clear_existing_auth_enabled() -> bool:
+    """Live X Hello World reuses synced cookies unless explicitly forced to clear."""
+    flag = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    return False if flag is None else flag
+
+
+def _x_post_has_grounded_submission_evidence(post_text: str) -> bool:
+    """Return true when the transcript grounds a submitted Hello World X post."""
+    normalized = (post_text or "").lower()
+    if "hello world" not in normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "posted",
+            "post submitted",
+            "post was submitted",
+            "successfully posted",
+            "published",
+        )
+    )
+
+
+def _grade_live_x_hello_world_post(
+    *,
+    post_passed: bool,
+    post_failure_reason: Optional[str],
+    post_status: str,
+    post_text: str,
+) -> tuple[bool, list[str]]:
+    """Grade live X Hello World: write-lock path must pass; MintedAccount is not required."""
+    post_evidence = _x_post_has_grounded_submission_evidence(post_text)
+    failure_parts: list[str] = []
+    if not post_passed:
+        failure_parts.append(f"post failed: {post_failure_reason or post_status}")
+    if post_passed and not post_evidence:
+        failure_parts.append("no grounded evidence that the Hello World post was submitted")
+    return post_passed and post_evidence, failure_parts
 
 
 def _resolved_fast_mode_cache(task: BenchmarkTask) -> Optional[bool]:
@@ -4336,10 +4374,6 @@ def evaluate_task(
 
     # Check approval expectations
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
-        if task.name == f"{MINTED_AGENT_ACCOUNT_X_TASK_NAME}-post" and _x_signup_has_terminal_phone_blocker(
-            _agent_data_search_text(data)
-        ):
-            return True, None
         return False, "Expected approval requests but none were triggered"
 
     if task.expected_attention_kind_any_of and approvals_triggered > 0:
@@ -7220,11 +7254,15 @@ async def run_minted_agent_account_task(
         "on",
     )
     prefer_phone_auth = _benchmark_env_bool("BENCHMARK_MINTED_PREFER_PHONE_AUTH") is True
-    # Minted-account benches must exercise a fresh realm login by default. Saved
-    # x.com cookies otherwise let the agent post as an existing profile without
-    # ever creating a MintedAccount row (observed 2026-08-20: posted as
-    # @rose_labs_ with no mint). Opt out with BENCHMARK_MINTED_CLEAR_EXISTING_AUTH=false.
-    clear_existing_auth = _minted_clear_existing_auth_enabled()
+    # Live X Hello World reuses the synced CookieBundle and grades write-lock
+    # notification semantics — clearing auth forces mint/signup noise. Other
+    # minted realms still clear by default. Override either path with
+    # BENCHMARK_MINTED_CLEAR_EXISTING_AUTH.
+    clear_existing_auth = (
+        _minted_x_clear_existing_auth_enabled()
+        if target_realm == "x.com"
+        else _minted_clear_existing_auth_enabled()
+    )
     phone_evidence_since = datetime.now(timezone.utc)
     identity_was_present = _local_agent_identity_present_for_user(USER_ID)
     deleted = _delete_local_minted_accounts_for_user(USER_ID, reset_agent_identity=reset_agent_identity)
@@ -7318,10 +7356,13 @@ async def run_minted_agent_account_task(
         post_task = replace(
             task,
             name=f"{task.name}-post",
-            title="Minted Agent Account X Post",
+            title="Live X Hello World Post",
             prompt=_x_post_prompt(),
-            approval_handling="auto_approve",
-            expected_attention_kind="write_lock",
+            approval_handling=task.approval_handling or "auto_approve",
+            expected_attention_kind=task.expected_attention_kind or "write_lock",
+            expected_approval_count=(
+                task.expected_approval_count if task.expected_approval_count is not None else 1
+            ),
             timeout_seconds=max(task.timeout_seconds, 900),
         )
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
@@ -7336,24 +7377,16 @@ async def run_minted_agent_account_task(
 
         minted = _get_local_minted_account(USER_ID, target_realm)
         if minted:
-            print(f"    ✅ Minted account persisted for {target_realm}: {minted['account_label']}")
+            print(f"    ℹ️ MintedAccount present for {target_realm} (not required): {minted['account_label']}")
         else:
-            print(f"    ❌ No minted account persisted for {target_realm}")
+            print(f"    ℹ️ No MintedAccount for {target_realm} (not required for live-auth X post)")
         post_text = _task_result_search_text(post_result)
-        post_evidence = "hello world" in post_text and any(
-            marker in post_text for marker in ("posted", "post submitted", "post was submitted", "successfully posted")
+        passed, failure_parts = _grade_live_x_hello_world_post(
+            post_passed=post_result.passed,
+            post_failure_reason=post_result.failure_reason,
+            post_status=post_result.status,
+            post_text=post_text,
         )
-        x_terminal_phone_blocker = _x_signup_has_terminal_phone_blocker(post_text)
-        passed = post_result.passed and minted is not None and post_evidence and not x_terminal_phone_blocker
-        failure_parts = []
-        if minted is None:
-            failure_parts.append(f"no MintedAccount row for {target_realm}")
-        if x_terminal_phone_blocker:
-            failure_parts.append("X forced phone auth and returned a terminal phone-auth blocker")
-        if not post_result.passed:
-            failure_parts.append(f"post failed: {post_result.failure_reason or post_result.status}")
-        if post_result.passed and not post_evidence and not x_terminal_phone_blocker:
-            failure_parts.append("no grounded evidence that the Hello World post was submitted")
         return TaskResult(
             name=task.name,
             passed=passed,
