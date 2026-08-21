@@ -8333,19 +8333,21 @@ def _is_intermediate_navigation_pin_guard_failure(
     candidate: dict,
     message: Optional[dict] = None,
 ) -> bool:
-    """Host-pin refusals ERROR then continue; those are coaching, not terminal failures.
+    """Explicit `navigation_pin_guard` action rows are intermediate coaching only.
+
+    Textual `Refusing … pinned host` ERRORs are handled by
+    `_is_recoverable_pinned_host_refusal_failure` (requires a later browser
+    recovery). Do not treat every pinned-host refusal string as retry noise —
+    unrecovered terminal refusals must still fail `no_tool_failures`.
 
     Local repro: browser-doordash-usb-c-cable agent
     b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached an unresolved Place Order write_lock
-    after an evaluate pin-guard ERROR, then failed only on no_tool_failures.
+    after an evaluate pin-guard ERROR; recovery-gated pinned-host classification
+    covers that path.
     """
+    _ = message  # signature matches sibling intermediate classifiers
     action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
-    if action_type == "navigation_pin_guard":
-        return True
-    blob = _message_failure_text(message, candidate).lower()
-    if "refusing" not in blob:
-        return False
-    return "pinned host" in blob or "pinned page host" in blob
+    return action_type == "navigation_pin_guard"
 
 
 def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
