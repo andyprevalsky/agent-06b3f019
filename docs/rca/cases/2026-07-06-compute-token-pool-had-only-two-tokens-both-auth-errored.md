@@ -87,3 +87,20 @@ Runtime evidence from local `scripts/run-bench --local files-in-sub-agents`:
 
 Why the earlier remediation did not hold: the 2026-07-06 record left the case **open** with "re-auth or add fresh pool tokens" as the next step; supply was never replenished, so any `requires_claude_code` benchmark still fails closed at the same credential boundary.
 
+## Recurrence — 2026-08-20T22:54Z (credentials restored; Fast Mode loopback)
+
+After claude_code OAuth was restored (`CONNECTED`, poolingEnabled, encryptedCredentials),
+local `scripts/run-bench --local files-in-sub-agents` progressed past compute-token
+preflight and spawned 4 GP → Claude Code children, then timed out at 900s.
+
+Owning boundary: `run.sh` + `BENCHMARK_SKIP_PUBLIC_TUNNEL=1` set
+`PUBLIC_BASE_URL=http://localhost:<frontend>` and exported
+`FAST_MODE_ANTHROPIC_PROXY_URL=$PUBLIC_BASE_URL/anthropic-proxy`. E2B then logged
+`Fast Mode: routing sandbox Anthropic calls via http://localhost:56201/anthropic-proxy/...`
+and Claude Code failed with `Unable to connect to API (ConnectionRefused)` after
+10 `api_retry` attempts (0 interactions).
+
+Fix: refuse loopback Fast Mode proxy bases in `buildFastModeAnthropicEnv` /
+`buildFastModeCodexEnv`, and clear Fast Mode proxy exports in `run.sh` when the
+public URL is not E2B-reachable. Cemented in `fast-cache-flag.test.ts`.
+
