@@ -57,7 +57,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       const generatorPool = poolForModel(selected.generator);
       assertEqual(generatorPool, 'rose-1-lite', 'generator pool');
       if (!generatorPool) throw new Error('generator model did not resolve to a Rose pool');
-      assertEqual(CEREBRAS_CHAT_MODEL, 'zai-glm-4.7', 'generator primary model');
+      assertEqual(CEREBRAS_CHAT_MODEL, 'gemma-4-31b', 'generator primary model');
     },
   ],
   [
@@ -78,7 +78,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
 
       assertEqual(poolName, 'rose-1-lite', 'router pool');
       if (!poolName) throw new Error('router model did not resolve to a Rose pool');
-      assertEqual(CEREBRAS_CHAT_MODEL, 'zai-glm-4.7', 'router Cerebras model');
+      assertEqual(CEREBRAS_CHAT_MODEL, 'gemma-4-31b', 'router Cerebras model');
     },
   ],
   [
