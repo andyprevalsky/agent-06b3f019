@@ -13,7 +13,6 @@ symptoms:
   - Action evaluate failed
   - Expected one of ['payment_approval', 'auth_assistance'] attention requests (to ignore) but none was triggered
   - Timeout after 903s (dynamic cap=900s)
-  - browser_use_step_N last dump is evaluate on a signature canvas, then no further browser_use_step until PAUSE
 tags:
   - browser
   - evaluate
@@ -25,8 +24,6 @@ tags:
   - timeout
 sources:
   - agent 01dce6e9-1f2c-4039-90dc-901ed48ce2bf
-  - run agents/benchmarks/runs/20260821_192249_browser-alchemy-springs-sauna.json
-  - branch cursor/alchemy-auth-assistance-any-of-2a78
 repro: none-recorded — owning-boundary Playwright repro exists as /opt/cursor/artifacts/alchemy_evaluate_hang_repro.txt (soft recovery TIMEOUT; new page OK); not yet cemented in agents/tests/blackbox/
 status: open
 ---
