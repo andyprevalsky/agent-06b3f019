@@ -85,13 +85,6 @@ bases skip Fast Mode proxy/flags; text-only capture decoding; attachment
 fingerprint in Fast Mode traces. Cemented in fetch-capture + credential unit
 tests.
 
-## Reusable lesson
-
-A capture/replay wrapper may serialize a request to build its cache key, but must
-never substitute that serialization for the request — pass unserializable bodies
-through untouched and mark them uncacheable. The same rule applies to **response**
-bodies: never force binary through `text()` / UTF-8; preserve bytes (e.g. base64)
-or pass the original `Response` through. Prefer an allowlist for text decoding.
 ### Recurrence (2026-08-21 fleet2) — guest env lacks OpenRouter base
 
 Fleet `20260821-005824-741456` still showed `fast_mode: true` and Anthropic
@@ -105,5 +98,12 @@ OpenRouter fallback never fired and Fast Mode still claimed the session.
 `resolveClaudeCodeSandboxApiKey` so OpenRouter wins without requiring host base
 or cooldown. Dedicated `sk-or-*` keys also infer the OpenRouter base URL.
 
+## Reusable lesson
+
+A capture/replay wrapper may serialize a request to build its cache key, but must
+never substitute that serialization for the request — pass unserializable bodies
+through untouched and mark them uncacheable. The same rule applies to **response**
+bodies: never force binary through `text()` / UTF-8; preserve bytes (e.g. base64)
+or pass the original `Response` through. Prefer an allowlist for text decoding.
 Funded gateway transports must not be overwritten by a Fast Mode proxy that
 forwards to a different host.
