@@ -85,6 +85,14 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+# shellcheck source=lib/cloudbench-github-token.sh
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-github-token.sh"
+# Injected $GITHUB_TOKEN is often an invalid github_pat_. Overwrite process env
+# and local .env so children inherit the working hosts.yml / insteadOf token.
+cloudbench_export_controller_github_token \
+  "$ROOT_DIR/agents/.env" \
+  "$ROOT_DIR/back-end/.env" \
+  || echo "WARN: controller GITHUB_TOKEN export failed; fetch-ref still uses cloudbench_controller_github_token" >&2
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
@@ -433,13 +441,239 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
     fi
 }
 
-# Read GITHUB_TOKEN from back-end/.env (fallback agents/.env) for the git clone +
-# per-run fetches (private repo).
-resolve_github_token() {
-    local t
+# Prefer a GitHub token that can actually fetch the private rose repo.
+# Stale GITHUB_TOKEN values in .env / the ambient environment previously made
+# --refresh-deps emit an empty AUTH_HDR and fail with:
+#   fatal: could not read Username for 'https://github.com'
+# Never return an unvalidated token: an invalid PAT is worse than a missing one
+# because callers treat non-empty as "auth is configured".
+github_token_can_fetch_repo() {
+    local token="$1" code cfg
+    [ -n "$token" ] || return 1
+    # Metadata-only fine-grained PATs can pass GET /repos while lacking Contents
+    # and failing git clone/fetch. Probe the contents root (no trailing slash) so
+    # acceptance requires Contents: read — the permission git operations need.
+    # Keep the PAT out of curl argv (ps/audit) via a mode-0600 curl config file.
+    cfg="$(mktemp)"
+    printf 'header = "Authorization: Bearer %s"\n' "$token" >"$cfg"
+    chmod 600 "$cfg"
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+        --config "$cfg" \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'User-Agent: cloudbench' \
+        'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' 2>/dev/null)" || {
+        rm -f "$cfg"
+        return 1
+    }
+    rm -f "$cfg"
+    [ "$code" = "200" ]
+}
+
+# Long-lived token for Fly app secrets. Never use `gh auth token` here — those
+# expire and would leave the warm box unable to git-sync after the next hour.
+# Try candidates in priority order until one passes Contents validation so an
+# invalid DISPATCH value cannot block a later valid GITHUB_TOKEN.
+resolve_durable_github_token() {
+    local candidates=() t
+    t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -n "$t" ] && candidates+=("$t")
+    t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -n "$t" ] && candidates+=("$t")
     t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    [ -z "$t" ] && t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    echo "$t"
+    [ -n "$t" ] && candidates+=("$t")
+    t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -n "$t" ] && candidates+=("$t")
+    for t in "${candidates[@]}"; do
+        if github_token_can_fetch_repo "$t"; then
+            printf '%s' "$t"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Resolve a GitHub token that can fetch this private repo for ephemeral
+# controller→guest git-sync (refresh-deps SSH snippet, boot-launch env).
+# Prefer the controller's live `gh auth token`, then exported GITHUB_TOKEN /
+# GH_TOKEN (same order as run-bench-fleet), then long-lived .env tokens via
+# resolve_durable_github_token (DISPATCH first). Validate Contents access before
+# accepting any candidate. Never print the value.
+resolve_github_token() {
+    local candidates=() t decoded gh_tok
+    if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+        decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+        [ -n "$decoded" ] && candidates+=("$decoded")
+    fi
+    # gh prefers ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST over hosts.yml — unset them
+    # so a stale env override cannot mask a working CLI login for github.com.
+    gh_tok="$(env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com 2>/dev/null || true)"
+    [ -n "$gh_tok" ] && candidates+=("$gh_tok")
+    t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    [ -n "$t" ] && candidates+=("$t")
+    t="$(resolve_durable_github_token)"
+    [ -n "$t" ] && candidates+=("$t")
+
+    for t in "${candidates[@]}"; do
+        if github_token_can_fetch_repo "$t"; then
+            printf '%s' "$t"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Resolve the CONTROLLER GitHub token into an Authorization Basic header value.
+# Fail closed when no token is available — never fall back to an optional empty
+# box-side GITHUB_TOKEN secret (that produced `fatal: could not read Username
+# for 'https://github.com'` on non-TTY ssh and aborted fleet --refresh-deps).
+token_to_git_auth_header() {
+    printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$1" | base64 | tr -d '\n')"
+}
+
+resolve_controller_git_auth_header() {
+    local token
+    token="$(resolve_github_token)"
+    if [ -z "$token" ]; then
+        echo "❌ No controller GitHub token for private-repo git-sync." >&2
+        echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or authenticate gh." >&2
+        return 1
+    fi
+    token_to_git_auth_header "$token"
+}
+
+# Build a remote shell snippet that fetches+checks out $2 inside $1.
+# The returned script NEVER embeds the controller token. Delivery must set
+# AUTH_HDR (and optional AUTH_HDR_DURABLE) via ssh_exec_controller_git_sync
+# stdin, and uses git's GIT_CONFIG_* environment mechanism for http.extraheader
+# so credentials never appear in flyctl/ssh/git argv.
+build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-marker]
+    local remote_repo="$1" ref="$2" verify_marker="${3:-}"
+    # Fail closed early if the controller has no token (same gate as delivery).
+    resolve_controller_git_auth_header >/dev/null || return 1
+    local repo_q ref_q
+    printf -v repo_q '%q' "$remote_repo"
+    printf -v ref_q '%q' "$ref"
+    local cmd
+    cmd="set -e
+[ -n \"\${AUTH_HDR:-}\" ] || { echo 'FATAL: missing controller git auth header' >&2; exit 1; }
+_try_fetch() {
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0=http.extraheader
+  export GIT_CONFIG_VALUE_0=\"\$1\"
+  git -c safe.directory=$repo_q -C $repo_q fetch --quiet origin $ref_q
+}
+if ! _try_fetch \"\$AUTH_HDR\" 2>/tmp/cloudbench-git-fetch.err; then
+  _err=\$(cat /tmp/cloudbench-git-fetch.err 2>/dev/null || true)
+  rm -f /tmp/cloudbench-git-fetch.err
+  case \"\$_err\" in
+    *'could not read Username'*|*'Authentication failed'*|*'Invalid username or password'*|*'403'*|*'401'*)
+      if [ -n \"\${AUTH_HDR_DURABLE:-}\" ]; then
+        echo 'primary GitHub token auth failed; retrying with durable fallback'
+        _try_fetch \"\$AUTH_HDR_DURABLE\"
+      else
+        printf '%s\\n' \"\$_err\" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      printf '%s\\n' \"\$_err\" >&2
+      exit 1
+      ;;
+  esac
+else
+  rm -f /tmp/cloudbench-git-fetch.err
+fi
+FETCHED_REF=\$(git -c safe.directory=$repo_q -C $repo_q rev-parse FETCH_HEAD)
+case $ref_q in
+  [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
+    case \"\$FETCHED_REF\" in
+      $ref_q*) ;;
+      *) echo \"FATAL: FETCH_HEAD \$FETCHED_REF does not match requested SHA $ref_q\" >&2; exit 1 ;;
+    esac
+    ;;
+esac
+git -c safe.directory=$repo_q -C $repo_q checkout -f \"\$FETCHED_REF\"
+git -c safe.directory=$repo_q -C $repo_q reset --hard
+chown -R rose:rose $repo_q 2>/dev/null || true
+REMOTE_REF=\$(git -c safe.directory=$repo_q -C $repo_q rev-parse HEAD)
+echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)"
+    if [ -n "$verify_marker" ]; then
+        # Marker is a controller-owned constant (e.g. ::CLOUDBENCH-REF::).
+        case "$verify_marker" in
+            *[!A-Za-z0-9:_-]*) echo "❌ invalid git-sync verify marker" >&2; return 1 ;;
+        esac
+        cmd="$cmd
+echo \"${verify_marker}\$REMOTE_REF\""
+    fi
+    printf '%s' "$cmd"
+}
+
+# Deliver a controller git-sync script over SSH without putting the token in
+# process arguments. flyctl `ssh console -C` does NOT forward local stdin to the
+# remote command (observed hang on `IFS= read -r AUTH_HDR`), so credentials are
+# SFTP'd to mode-0600 temp files and the -C argv only names those paths.
+# Prefer the primary controller token; on auth failure the remote script retries
+# with the durable DISPATCH/GITHUB_TOKEN header when it differs.
+ssh_exec_controller_git_sync() {  # <machine_id> <remote-shell-command>
+    local mid="$1" sync_cmd="$2" primary durable primary_hdr durable_hdr="" 
+    local auth_local durable_local cmd_local remote_auth remote_durable remote_cmd
+    primary="$(resolve_github_token)"
+    [ -n "$primary" ] || {
+        echo "❌ No controller GitHub token for private-repo git-sync." >&2
+        echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or authenticate gh." >&2
+        return 1
+    }
+    primary_hdr="$(token_to_git_auth_header "$primary")"
+    durable="$(resolve_durable_github_token)"
+    if [ -n "$durable" ] && [ "$durable" != "$primary" ]; then
+        durable_hdr="$(token_to_git_auth_header "$durable")"
+    fi
+    unset primary durable
+    auth_local="$(mktemp)"
+    durable_local="$(mktemp)"
+    cmd_local="$(mktemp)"
+    remote_auth="/tmp/cloudbench-git-sync-auth.$$"
+    remote_durable="/tmp/cloudbench-git-sync-auth-durable.$$"
+    remote_cmd="/tmp/cloudbench-git-sync-cmd.$$"
+    printf '%s\n' "$primary_hdr" >"$auth_local"
+    printf '%s\n' "$durable_hdr" >"$durable_local"
+    printf '%s\n' "$sync_cmd" >"$cmd_local"
+    chmod 600 "$auth_local" "$durable_local" "$cmd_local"
+    _sftp_put_git_sync() {
+        ssh_exec "$mid" "rm -f '$remote_auth' '$remote_durable' '$remote_cmd'" >/dev/null || true
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 "$auth_local" "$remote_auth" &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 "$durable_local" "$remote_durable" &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0700 "$cmd_local" "$remote_cmd"
+    }
+    if ! cloudbench_retry_command \
+        "${CLOUDBENCH_GIT_SYNC_SFTP_ATTEMPTS:-5}" \
+        "${CLOUDBENCH_GIT_SYNC_SFTP_RETRY_SECONDS:-3}" \
+        _sftp_put_git_sync; then
+        rm -f "$auth_local" "$durable_local" "$cmd_local"
+        echo "❌ failed to upload controller git-sync credentials/script to $mid" >&2
+        return 1
+    fi
+    rm -f "$auth_local" "$durable_local" "$cmd_local"
+    # -C argv contains only remote paths — never the Authorization header.
+    # Bound hung sessions (dead tunnel / rate-limit) via CLOUDBENCH_SSH_EXEC_TIMEOUT
+    # so refresh-deps cannot block fleets indefinitely (descend I-02).
+    local -a ssh_cmd=(
+        flyctl ssh console -a "$APP" --machine "$mid"
+        -C "bash -lc \"IFS= read -r AUTH_HDR < '$remote_auth'; IFS= read -r AUTH_HDR_DURABLE < '$remote_durable'; export AUTH_HDR AUTH_HDR_DURABLE; trap 'rm -f \\'$remote_auth\\' \\'$remote_durable\\' \\'$remote_cmd\\'' EXIT; bash '$remote_cmd'\""
+    )
+    local sync_rc=0
+    if [ -n "${CLOUDBENCH_SSH_EXEC_TIMEOUT:-}" ]; then
+        set +e
+        _with_timeout "$CLOUDBENCH_SSH_EXEC_TIMEOUT" "${ssh_cmd[@]}"
+        sync_rc=$?
+        set -e
+        if [ "$sync_rc" -eq 124 ]; then
+            echo "❌ ssh_exec timed out after ${CLOUDBENCH_SSH_EXEC_TIMEOUT}s" >&2
+            return 124
+        fi
+        return "$sync_rc"
+    fi
+    "${ssh_cmd[@]}"
 }
 
 resolve_render_env_value() {
@@ -723,7 +957,9 @@ _inject_secrets_locked() {
     backend_b64="$(base64 < back-end/.env | tr -d '\n')"
     agents_sha="$(cloudbench_env_sha256 agents/.env)"
     backend_sha="$(cloudbench_env_sha256 back-end/.env)"
-    gh_token="$(resolve_github_token)"
+    # Fly secrets need a durable token (gh auth expires). resolve_durable_*
+    # already Contents-validates candidates in priority order.
+    gh_token="$(resolve_durable_github_token)" || gh_token=""
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
@@ -734,11 +970,13 @@ _inject_secrets_locked() {
         "BACKEND_ENV_SHA256=$backend_sha"
         "CLOUDBENCH_BROWSER_PROVIDER=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     )
+    # Always stage GITHUB_TOKEN= so a missing/invalid durable candidate clears any
+    # previously staged stale credential while preserving the required secret name.
+    set_args+=("GITHUB_TOKEN=$gh_token")
     if [ -n "$gh_token" ]; then
-        set_args+=("GITHUB_TOKEN=$gh_token")
-        echo "   GITHUB_TOKEN present (for private-repo git-sync)"
+        echo "   GITHUB_TOKEN present (durable + Contents-validated for private-repo git-sync)"
     else
-        echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
+        echo "   ⚠️  No validated durable GitHub token — staging empty GITHUB_TOKEN to clear stale secret"
     fi
     assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
@@ -795,7 +1033,13 @@ inject_secrets() {
 # secrets exist WITHOUT staging or activating anything, so concurrent
 # workstreams never race each other's environment. Staging/activation lives
 # only in the explicit maintenance ops (--refresh-secrets/--setup/--refresh-wmh).
-REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER"
+#
+# GITHUB_TOKEN must be present as an app secret name (on-box decode / legacy
+# paths). refresh-deps does NOT rely on that secret being non-empty in SSH —
+# it injects a controller-resolved token (gh auth / DISPATCH) into the sync
+# command — because Fly Status=Staged can persist on Machines-only apps even
+# after machine update, and a stale GITHUB_TOKEN secret may be empty or 401.
+REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
     local listing missing
     listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
@@ -848,6 +1092,72 @@ if [ "$MODE" = "refresh-secrets" ]; then
     exit 0
 fi
 
+# Checkout an exact SHA on the shared warm volume using the same controller
+# token + cloudbench-fetch-ref.sh path guest drivers already use. Never fall
+# back to optional box-side $GITHUB_TOKEN: an empty token makes `git fetch`
+# prompt for a username over HTTPS and abort the fleet before any task starts.
+warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
+    local mid="$1" sha="$2" token token_b64 sync_log remote_ref token_local remote_token
+    # Contents-validated resolver (same gate as --setup / refresh-deps) — never
+    # an unvalidated hosts.yml / url.insteadOf token that later 401s on fetch.
+    token="$(resolve_github_token)" || token=""
+    [ -n "$token" ] || {
+        echo "❌ No controller GitHub token for warm-source git-sync." >&2
+        return 1
+    }
+    token_b64="$(printf '%s' "$token" | base64 | tr -d '\n')"
+    token_local="$(mktemp)"
+    remote_token="/tmp/cloudbench-warm-fetch-token.$$"
+    printf '%s' "$token_b64" >"$token_local"
+    chmod 600 "$token_local"
+    _sftp_put_fetch_ref() {
+        # flyctl sftp will not overwrite; each attempt must start from a clean dest.
+        ssh_exec "$mid" "rm -f /data/cloudbench-fetch-ref.sh '$remote_token'" >/dev/null || true
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
+            "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 \
+            "$token_local" "$remote_token"
+    }
+    # Guest driver staging already retries sftp (CLOUDBENCH_STAGE_ATTEMPTS). A
+    # single Fly API "tunnel unavailable / context deadline exceeded" here used
+    # to abort the whole fleet before any task machine started.
+    if ! cloudbench_retry_command \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS:-5}" \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS:-3}" \
+        _sftp_put_fetch_ref; then
+        rm -f "$token_local"
+        echo "❌ failed to upload cloudbench-fetch-ref.sh to $mid" >&2
+        return 1
+    fi
+    rm -f "$token_local"
+    sync_log="$(mktemp)"
+    # -C argv names only remote paths — never the token bytes.
+    local sync_rc=0
+    set +e
+    ssh_exec "$mid" "set -e
+trap 'rm -f $remote_token' EXIT
+export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat '$remote_token')
+export CLOUDBENCH_APP_USER=rose
+bash /data/cloudbench-fetch-ref.sh '$REMOTE_REPO' '$sha'
+REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
+echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
+echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" 2>&1 | grep -av '^Connecting to' | tee "$sync_log" | sed 's/^/   /'
+    sync_rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$sync_rc" -ne 0 ]; then
+        rm -f "$sync_log"
+        echo "❌ exact remote checkout failed" >&2
+        return "$sync_rc"
+    fi
+    remote_ref="$(sed -n 's/^::CLOUDBENCH-REF:://p' "$sync_log" | tail -1)"
+    rm -f "$sync_log"
+    if [ "$remote_ref" != "$sha" ]; then
+        echo "❌ remote checkout mismatch: expected $sha, got ${remote_ref:-<missing>}" >&2
+        return 1
+    fi
+    return 0
+}
+
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     # base64 the command instead of printf %q: a multi-line command quotes to
@@ -857,7 +1167,23 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     # by hand). base64 has no shell-special bytes, so it survives any shell.
     local b64
     b64="$(printf '%s' "$2" | base64 | tr -d '\n')"
-    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\""
+    local -a ssh_cmd=(flyctl ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\"")
+    # Optional bound for hung sessions (dead tunnel / rate-limit). refresh-deps
+    # sets CLOUDBENCH_SSH_EXEC_TIMEOUT so a stalled git-sync cannot block fleets
+    # indefinitely (descend I-02).
+    if [ -n "${CLOUDBENCH_SSH_EXEC_TIMEOUT:-}" ]; then
+        local ssh_rc=0
+        set +e
+        _with_timeout "$CLOUDBENCH_SSH_EXEC_TIMEOUT" "${ssh_cmd[@]}"
+        ssh_rc=$?
+        set -e
+        if [ "$ssh_rc" -eq 124 ]; then
+            echo "❌ ssh_exec timed out after ${CLOUDBENCH_SSH_EXEC_TIMEOUT}s" >&2
+            return 124
+        fi
+        return "$ssh_rc"
+    fi
+    "${ssh_cmd[@]}"
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
@@ -929,6 +1255,15 @@ start_machine() {  # start_machine <id>
         st="$(machine_state "$id")"
         [ "$st" = "started" ] && { echo "✅ Machine started"; return 0; }
         [ "$st" = "gone" ] && { echo "❌ Machine $id disappeared while starting"; return 1; }
+        # A start issued while Fly still reports stopping/replacing fails with
+        # failed_precondition and leaves require_machine_ready racing itself
+        # (observed: start error → false progress → SSH wait on stopped donor).
+        case "$st" in
+            stopping|replacing|starting)
+                sleep "$nap"
+                continue
+                ;;
+        esac
         now="$(date +%s)"
         if machine_storage_ready "$id" \
             && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; }; then
@@ -974,14 +1309,78 @@ stop_machine_strict() {  # stop_machine_strict <id>
 
 resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory> <purpose>
     local id="$1" size="$2" memory="$3" purpose="$4" state
+    local attempt=1 max_attempts retry_delay this_delay cap update_out update_rc
+    local lease_attempts="${CLOUDBENCH_WARM_RESIZE_LEASE_ATTEMPTS:-8}"
+    local lease_delay="${CLOUDBENCH_WARM_RESIZE_LEASE_RETRY_SECONDS:-15}"
     [ -n "$id" ] || return 0
+    max_attempts="${CLOUDBENCH_WARM_RESIZE_ATTEMPTS:-6}"
+    retry_delay="${CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS:-8}"
+    cap="${CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS:-90}"
+    if ! [[ "$lease_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_LEASE_ATTEMPTS must be a positive integer (got: ${lease_attempts})" >&2
+        return 1
+    fi
+    if ! [[ "$lease_delay" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_LEASE_RETRY_SECONDS must be a positive integer (got: ${lease_delay})" >&2
+        return 1
+    fi
+    if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_ATTEMPTS must be a positive integer (got: ${max_attempts})" >&2
+        return 1
+    fi
+    # Retry delay/cap may be 0 in unit tests (instant retry); production defaults are >0.
+    if ! [[ "$retry_delay" =~ ^[0-9]+$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS must be a non-negative integer (got: ${retry_delay})" >&2
+        return 1
+    fi
+    if ! [[ "$cap" =~ ^[0-9]+$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS must be a non-negative integer (got: ${cap})" >&2
+        return 1
+    fi
     state="$(machine_state "$id")"
     if [ "$state" != "stopped" ]; then
         stop_machine_strict "$id" || return 1
     fi
     echo "🧮 sizing warm source for $purpose: $size/${memory}MB"
-    FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
-        --command "sleep infinity" --skip-start --yes >/dev/null
+    # Retry Fly machine-update failures that are either exclusive leases held by
+    # a peer workspace, or org API rate limits after park→prepare. Fail closed
+    # after bounded attempts so a stuck donor cannot strand every later fleet.
+    while true; do
+        update_rc=0
+        update_out="$(FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
+            --command "sleep infinity" --skip-start --yes 2>&1)" || update_rc=$?
+        if [ "$update_rc" -eq 0 ]; then
+            return 0
+        fi
+        if printf '%s' "$update_out" | grep -Eqi 'lease currently held|failed to (obtain|get) lease'; then
+            if [ "$attempt" -ge "$lease_attempts" ]; then
+                printf '%s\n' "$update_out" | sed 's/^/   /' >&2
+                echo "❌ warm source resize lease still held after ${lease_attempts} attempts" >&2
+                return 1
+            fi
+            echo "   ⏳ warm resize lease held — retry $attempt/$lease_attempts in ${lease_delay}s" >&2
+            sleep "$lease_delay"
+            attempt=$((attempt + 1))
+            continue
+        fi
+        if ! printf '%s' "$update_out" | grep -Eqi \
+            'resource_exhausted|rate[[:space:]]*limit|429|concurrent[[:space:]]+update|version[[:space:]]+changed|aborted:'; then
+            printf '%s\n' "$update_out" | sed 's/^/   /' >&2
+            echo "❌ warm-source resize for $purpose failed (non-retryable)" >&2
+            return 1
+        fi
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            printf '%s\n' "$update_out" | sed 's/^/   /' >&2
+            echo "❌ warm-source resize for $purpose exhausted $attempt rate-limit retries" >&2
+            return 1
+        fi
+        this_delay=$(( retry_delay * (1 << (attempt - 1)) ))
+        [ "$this_delay" -gt "$cap" ] && this_delay="$cap"
+        this_delay=$(( this_delay + (RANDOM % 5) ))
+        echo "⏳ warm-source resize rate-limited (attempt $attempt/$max_attempts); retrying in ${this_delay}s ..." >&2
+        sleep "$this_delay"
+        attempt=$((attempt + 1))
+    done
 }
 
 prepare_warm_source() {
@@ -1080,13 +1479,15 @@ else:
 # not a hint: if SSH never answers, say so and let the caller decide.
 #
 # A machine can also drop back out of `started` between start and exec (an
-# auto-stop, or a resize-induced restart), so re-assert the start once when the
-# state regressed rather than failing on a recoverable blip.
+# auto-stop, a resize-induced restart, or a sibling fleet's stop/start). A bare
+# start issued while Fly still reports stopping fails with failed_precondition
+# and leaves SSH waiting on a stopped donor. Wait out transitional states, then
+# re-issue start on the same cadence as start_machine (not a single shot).
 wait_for_ssh() {  # wait_for_ssh <id>
     local id="$1" attempts="${CLOUDBENCH_SSH_WAIT_ATTEMPTS:-30}"
     local nap="${CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS:-3}"
     local probe_timeout="${CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS:-10}"
-    local state restarted=0
+    local state now last_start_ts=0
     for _ in $(seq 1 "$attempts"); do
         # Reuse the run-start readiness contract and its hard process timeout.
         # A raw `flyctl ssh` against a stopped machine has hung for hours.
@@ -1098,10 +1499,19 @@ wait_for_ssh() {  # wait_for_ssh <id>
             echo "❌ Machine $id disappeared while waiting for SSH" >&2
             return 1
         fi
-        if [ "$state" != "started" ] && [ "$restarted" -eq 0 ]; then
-            echo "   ↻ $id fell out of 'started' (state=$state) — re-asserting start once"
-            request_machine_start "$id" || true
-            restarted=1
+        if [ "$state" != "started" ]; then
+            case "$state" in
+                stopping|replacing|starting)
+                    sleep "$nap"
+                    continue
+                    ;;
+            esac
+            now="$(date +%s)"
+            if [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; then
+                echo "   ↻ $id fell out of 'started' (state=$state) — re-asserting start"
+                request_machine_start "$id" || true
+                last_start_ts="$now"
+            fi
         fi
         sleep "$nap"
     done
@@ -1257,37 +1667,62 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
-    if [ -z "$(resolve_github_token)" ]; then
-        echo "❌ GITHUB_TOKEN not found in back-end/.env or agents/.env — cannot clone the repo." >&2
-        echo "   Stopping machine; add GITHUB_TOKEN and re-run --setup." >&2
+    # ── git clone the repo into /data/repo (auth via validated controller token) ─
+    SETUP_GITHUB_TOKEN="$(resolve_github_token)" || SETUP_GITHUB_TOKEN=""
+    if [ -z "$SETUP_GITHUB_TOKEN" ]; then
+        echo "❌ No validated GitHub token available — cannot clone the private repo." >&2
+        echo "   Checked CLOUDBENCH_GITHUB_TOKEN_B64, GITHUB_DISPATCH_TOKEN, gh auth, and .env GITHUB_TOKEN." >&2
+        echo "   Stopping machine; fix credentials and re-run --setup." >&2
         stop_machine "$mid"
         exit 1
     fi
+    SETUP_GITHUB_TOKEN_B64="$(printf '%s' "$SETUP_GITHUB_TOKEN" | base64 | tr -d '\n')"
     echo ""
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
-    # GITHUB_TOKEN is already active as a Fly machine secret. The non-secret
-    # script is base64-transported into one remote Bash process so multiline
-    # quoting cannot split the auth setup from the Git commands. The token is
-    # used via http.extraheader rather than embedded in Git argv/config.
-    # The remote stays clean (https://github.com/...) for all future fetches, which
-    # then reuse the same header only when the run/refresh paths re-supply it.
+    # Request-scoped controller token via GIT_CONFIG_GLOBAL http.extraheader —
+    # never persist into .git/config, never put AUTH_HDR on git argv (ps leak).
+    # Upload token + script via SFTP (mode 0600/0700); -C only names remote paths.
     CLONE_CMD="set -e
 mkdir -p /data
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+TOKEN=\$(printf '%s' \"\$CLOUDBENCH_GITHUB_TOKEN_B64\" | base64 -d 2>/dev/null || true)
+[ -n \"\$TOKEN\" ] || { echo 'FATAL: controller GitHub token unavailable for setup clone' >&2; exit 1; }
+auth_config=\$(mktemp /tmp/cloudbench-setup-gitconfig.XXXXXX)
+trap 'rm -f \"\$auth_config\"' EXIT
+printf '[http]\\n\\textraheader = Authorization: Basic %s\\n' \"\$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\\n')\" >\"\$auth_config\"
+chmod 600 \"\$auth_config\"
+git_auth() { env \"GIT_CONFIG_GLOBAL=\$auth_config\" GIT_CONFIG_NOSYSTEM=1 git \"\$@\"; }
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
-  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+  # Reset origin before authenticated fetch so a retained/altered remote cannot
+  # receive the controller token (same order as cloudbench-fetch-ref.sh).
+  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
+  git_auth -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' fetch --quiet origin
 else
-  git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
+  git_auth clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
 fi
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo 'clone/fetch complete'"
-    CLONE_CMD_B64="$(printf '%s' "$CLONE_CMD" | base64 | tr -d '\n')"
+    setup_token_local="$(mktemp)"
+    setup_cmd_local="$(mktemp)"
+    remote_setup_token="/tmp/cloudbench-setup-token.$$"
+    remote_setup_cmd="/tmp/cloudbench-setup-cmd.$$"
+    printf '%s' "$SETUP_GITHUB_TOKEN_B64" >"$setup_token_local"
+    printf '%s' "$CLONE_CMD" >"$setup_cmd_local"
+    chmod 600 "$setup_token_local" "$setup_cmd_local"
+    # flyctl sftp will not overwrite; start clean, and wipe remotes on any
+    # partial failure so a lone token file cannot linger on the box.
+    ssh_exec "$mid" "rm -f '$remote_setup_token' '$remote_setup_cmd'" >/dev/null 2>&1 || true
+    if ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 "$setup_token_local" "$remote_setup_token" ||
+       ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0700 "$setup_cmd_local" "$remote_setup_cmd"; then
+        ssh_exec "$mid" "rm -f '$remote_setup_token' '$remote_setup_cmd'" >/dev/null 2>&1 || true
+        rm -f "$setup_token_local" "$setup_cmd_local"
+        echo "❌ failed to upload setup clone credentials/script"; stop_machine "$mid"; exit 1
+    fi
+    rm -f "$setup_token_local" "$setup_cmd_local"
     clone_output=""
     if ! clone_output="$(FLY ssh console -a "$APP" --machine "$mid" \
-        -C "bash -lc \"printf '%s' '$CLONE_CMD_B64' | base64 -d | bash\"" 2>&1)"; then
+        -C "bash -lc \"trap 'rm -f $remote_setup_token $remote_setup_cmd' EXIT; export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat $remote_setup_token); bash $remote_setup_cmd\"" 2>&1)"; then
         printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
         echo "❌ git clone failed"; stop_machine "$mid"; exit 1
     fi
@@ -1339,29 +1774,25 @@ if [ "$MODE" = "refresh-deps" ]; then
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # Sync the repo to the ref whose manifests the trees must match (auth via
-    # the box-side GITHUB_TOKEN secret through git http.extraheader).
+    # Sync the repo to the ref whose manifests the trees must match via the same
+    # controller-token + cloudbench-fetch-ref.sh path used by WMH / guest drivers.
+    # Token resolution prefers live controller credentials (insteadOf / gh hosts)
+    # via cloudbench_export_controller_github_token, then Contents-validated
+    # resolve_github_token inside warm_source_fetch_ref. Bound hung sessions so
+    # refresh-deps cannot sit on "git-syncing ..." forever (descend I-02).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
-    SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
-chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
-REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
-echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
-echo \"::CLOUDBENCH-REF::\$REMOTE_REF\""
-    SYNC_LOG="$(mktemp)"
-    if ! ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
-        rm -f "$SYNC_LOG"
-        echo "❌ exact remote checkout failed" >&2
+    SYNC_SSH_TIMEOUT="${CLOUDBENCH_REFRESH_DEPS_SSH_TIMEOUT:-300}"
+    set +e
+    CLOUDBENCH_SSH_EXEC_TIMEOUT="$SYNC_SSH_TIMEOUT" \
+      warm_source_fetch_ref "$mid" "$EXPECTED_REF"
+    sync_rc=$?
+    set -e
+    if [ "$sync_rc" -eq 124 ]; then
+        echo "❌ exact remote checkout failed: ssh_exec timed out after ${SYNC_SSH_TIMEOUT}s" >&2
         exit 1
     fi
-    REMOTE_REF="$(sed -n 's/^::CLOUDBENCH-REF:://p' "$SYNC_LOG" | tail -1)"
-    rm -f "$SYNC_LOG"
-    if [ "$REMOTE_REF" != "$EXPECTED_REF" ]; then
-        echo "❌ remote checkout mismatch: expected $EXPECTED_REF, got ${REMOTE_REF:-<missing>}" >&2
+    if [ "$sync_rc" -ne 0 ]; then
+        echo "❌ exact remote checkout failed" >&2
         exit 1
     fi
 
@@ -1486,18 +1917,13 @@ if [ "$MODE" = "refresh-wmh" ]; then
     require_machine_ready "$mid" || exit 1
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
-    # http.extraheader (kept out of .git/config + git argv).
+    # Prefer the shared warm_source_fetch_ref helper (SHA-pinned, fail-closed).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
-    SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
-chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
-echo checkout \$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse --short HEAD)"
-    ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
+    if ! EXPECTED_WMH_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
+        echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
+        exit 1
+    fi
+    warm_source_fetch_ref "$mid" "$EXPECTED_WMH_REF" || exit 1
 
     echo ""
     echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
@@ -2167,7 +2593,7 @@ CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
-    _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
+    _ghb64="$(printf '%s' "$(cloudbench_controller_github_token)" | base64 | tr -d '\n')"
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
@@ -2381,7 +2807,7 @@ done
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
 # LIVE_BACKEND_PORT/URL + CLOUDBENCH_API_KEY are now set once before the launch
 # branch (shared by boot-launch + the post-launch proxy code).
-CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
+CONTROLLER_GITHUB_TOKEN="$(cloudbench_controller_github_token)"
 [ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
 CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
 

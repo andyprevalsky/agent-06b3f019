@@ -1,3 +1,5 @@
+import type { BROWSER_EMITTED_ACTION_TYPES } from '../backendToolNames';
+
 // =============================================================================
 // Agent Channel Events (agent:{agentId})
 // =============================================================================
@@ -24,20 +26,30 @@ export type ToolStatus = 'IN_PROGRESS' | 'FINISHED' | 'ERROR';
 
 /**
  * Browser agent action types.
+ *
+ * DERIVED, never hand-maintained. `BROWSER_EMITTED_ACTION_TYPES` is the single
+ * source of truth for what the browser agent actually emits, and this union is
+ * projected from it so a producer-side action type cannot exist without the
+ * type system knowing about it.
+ *
+ * This was previously a hand-written literal list, which silently drifted: the
+ * runtime emitted `session_init`, `session_starting`, `payment_card_ready`, and
+ * `write_lock_granted` while the union declared none of them. That drift is the
+ * same class of defect this file's consumers exist to prevent — an untyped
+ * action type read as something it is not (see the approval-resume regression
+ * these types now guard).
+ *
+ * Historical action types kept for transcripts that predate the current
+ * vocabulary are unioned in explicitly below.
  */
 export type BrowserActionType =
-  | 'browser' // Init message (new browser session)
-  | 'system' // Legacy init
+  | (typeof BROWSER_EMITTED_ACTION_TYPES)[number]
+  // Legacy literals retained for already-persisted messages. They are not in the
+  // current emitted vocabulary, so they cannot be derived from it.
   | 'navigate'
-  | 'click'
   | 'type'
-  | 'screenshot'
   | 'scroll'
-  | 'hover'
-  | 'wait'
-  | 'error'
-  | 'task_complete'
-  | 'session_paused';
+  | 'hover';
 
 /**
  * Code agent action types.
