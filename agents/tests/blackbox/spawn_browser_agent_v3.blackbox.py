@@ -8,6 +8,7 @@ and handler (ClaudeTokenState, get_manager, workflow helper static bits).
 import ast
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import sys
@@ -10405,6 +10406,192 @@ async def test_evaluate_awaits_promises():
     assert evaluate.await_args.kwargs["params"]["awaitPromise"] is True
 
 
+# Exact evaluate payloads from alchemy agent 01dce6e9 step 23/24 (Momence Konva waiver).
+_ALCHEMY_STEP23_EVAL = (
+    "(()=>{try{const c=document.querySelector('canvas'); if(c){const r=c.getBoundingClientRect(); "
+    "const ctx=c.getContext('2d'); ctx.beginPath();ctx.moveTo(20,30);ctx.lineTo(90,10);ctx.lineTo(150,35);"
+    "ctx.stroke(); c.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,clientX:r.left+20,"
+    "clientY:r.top+30,pointerId:1}));c.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,"
+    "clientX:r.left+100,clientY:r.top+20,pointerId:1}));c.dispatchEvent(new PointerEvent('pointerup',"
+    "{bubbles:true,clientX:r.left+150,clientY:r.top+35,pointerId:1}));return 'signed canvas';} "
+    "return 'none';}catch(e){return String(e)}})()"
+)
+_ALCHEMY_STEP24_EVAL = (
+    "(()=>{try{const c=document.querySelector('canvas');if(!c)return 'no canvas';"
+    "const r=c.getBoundingClientRect();const pts=[[20,30],[40,20],[60,40],[80,15],[100,35],[130,20]];"
+    "for(let i=0;i<pts.length;i++){const [x,y]=pts[i]; "
+    "const type=i===0?'mousedown':i===pts.length-1?'mouseup':'mousemove';"
+    "c.dispatchEvent(new MouseEvent(type,{bubbles:true,clientX:r.left+x,clientY:r.top+y,"
+    "buttons:type==='mouseup'?0:1}));} return {w:c.width,h:c.height,"
+    "buttons:[...document.querySelectorAll('button')].filter(b=>b.textContent.includes('Accept'))"
+    ".map(b=>({disabled:b.disabled}))};}catch(e){return String(e)}})()"
+)
+
+
+async def test_alchemy_evaluate_js_completes_on_healthy_canvas():
+    """Exact alchemy step23/24 evaluate JS must finish quickly on a healthy page.
+
+    Proves the hung evaluate was not caused by the JS payload itself (CDP
+    Runtime.evaluate + awaitPromise on finite PointerEvent/MouseEvent strokes).
+    """
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(
+                "<canvas width='480' height='150'></canvas><button disabled>Accept</button>"
+            )
+            cdp = await page.context.new_cdp_session(page)
+
+            async def _eval(code: str):
+                return await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {"expression": code, "returnByValue": True, "awaitPromise": True},
+                    ),
+                    timeout=5.0,
+                )
+
+            r23 = await _eval(_ALCHEMY_STEP23_EVAL)
+            assert (r23.get("result") or {}).get("value") == "signed canvas"
+            r24 = await _eval(_ALCHEMY_STEP24_EVAL)
+            value = (r24.get("result") or {}).get("value") or {}
+            assert value.get("w") == 480
+            assert value.get("h") == 150
+        finally:
+            await browser.close()
+
+
+async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
+    """Renderer main-thread freeze reproduces the live evaluate-timeout recovery shape.
+
+    Live agent 01dce6e9: action_timeout_evaluate_330s → soft recovery actions
+    ['bring_to_front'] only (Escape timed out) → subsequent CDP stays dead until
+    harness pause. Cancelling awaitPromise alone does not poison the page.
+    """
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    async def _force_close(browser) -> None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=5.0)
+            return
+        except Exception:
+            pass
+        proc = getattr(browser, "process", None)
+        if proc is not None and getattr(proc, "pid", None):
+            with contextlib.suppress(Exception):
+                proc.kill()
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(
+                "<canvas width='480' height='150'></canvas><button disabled>Accept</button>"
+            )
+            cdp = await page.context.new_cdp_session(page)
+
+            # Control: cancelling a long awaitPromise evaluate must not wedge CDP.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {
+                            "expression": (
+                                "(async () => { await new Promise(r => setTimeout(r, 10000)); "
+                                "return 42; })()"
+                            ),
+                            "returnByValue": True,
+                            "awaitPromise": True,
+                        },
+                    ),
+                    timeout=0.8,
+                )
+            await asyncio.sleep(0.2)
+            retry = await asyncio.wait_for(
+                cdp.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
+                ),
+                timeout=3.0,
+            )
+            assert (retry.get("result") or {}).get("value") == 2
+
+            # Block renderer without awaiting the spinning work.
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.sleep(0.2)
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {
+                            "expression": _ALCHEMY_STEP24_EVAL,
+                            "returnByValue": True,
+                            "awaitPromise": True,
+                        },
+                    ),
+                    timeout=2.0,
+                )
+
+            stall = await classify_evaluate_cdp_stall(
+                input_page=page,
+                playwright_browser=browser,
+                timeout_s=1.5,
+            )
+            assert stall["verdict"] == "renderer_main_thread_blocked"
+            assert stall["renderer"] == "frozen"
+            assert stall["browser"] == "ok"
+
+            soft_actions = []
+            try:
+                await asyncio.wait_for(page.bring_to_front(), timeout=1.5)
+                soft_actions.append("bring_to_front")
+            except asyncio.TimeoutError:
+                soft_actions.append("bring_to_front:TimeoutError")
+            try:
+                await asyncio.wait_for(page.keyboard.press("Escape"), timeout=1.5)
+                soft_actions.append("press_escape")
+            except asyncio.TimeoutError:
+                soft_actions.append("press_escape:TimeoutError")
+            assert "bring_to_front" in soft_actions
+            assert "press_escape:TimeoutError" in soft_actions
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {"expression": "1+1", "returnByValue": True},
+                    ),
+                    timeout=1.5,
+                )
+
+            fresh = await browser.new_page()
+            await fresh.goto("about:blank")
+            fresh_cdp = await fresh.context.new_cdp_session(fresh)
+            ok = await asyncio.wait_for(
+                fresh_cdp.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True},
+                ),
+                timeout=2.0,
+            )
+            assert (ok.get("result") or {}).get("value") == 2
+        finally:
+            await _force_close(browser)
+
+
 async def test_goto_err_aborted_persists_download_to_session():
     """goto net::ERR_ABORTED on attachment URLs must persist bytes under /tmp/downloads."""
     import domains.spawn_browser_agent_v3.download_persist as download_persist
@@ -17251,6 +17438,14 @@ async def run_all_tests():
         test_execute_action_select_dropdown_with_element,
     )
     await r.record_async("execute_action_evaluate", test_execute_action_evaluate)
+    await r.record_async(
+        "alchemy_evaluate_js_completes_on_healthy_canvas",
+        test_alchemy_evaluate_js_completes_on_healthy_canvas,
+    )
+    await r.record_async(
+        "renderer_block_matches_evaluate_timeout_recovery_signature",
+        test_renderer_block_matches_evaluate_timeout_recovery_signature,
+    )
     await r.record_async("execute_action_open_new_tab", test_execute_action_open_new_tab)
     await r.record_async("execute_action_close_tab_focused", test_execute_action_close_tab_via_focused)
     await r.record_async("execute_action_close_tab_no_focused", test_execute_action_close_tab_no_focused)

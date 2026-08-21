@@ -8003,6 +8003,28 @@ Based on this feedback, I need to continue working on the task and address the i
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
+                if action_name == "evaluate":
+                    from domains.spawn_browser_agent_v3.service_actions import (
+                        _evaluate_code_fingerprint,
+                        classify_evaluate_cdp_stall,
+                    )
+
+                    eval_code = str((unified_action.get("params") or {}).get("code") or "")
+                    stall = await classify_evaluate_cdp_stall(
+                        input_page=input_page,
+                        playwright_browser=playwright_browser,
+                        timeout_s=2.0,
+                    )
+                    logger.error(
+                        "Browser evaluate timed out; CDP stall classification",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        session_id=session_id,
+                        iteration=iteration,
+                        current_url=current_url,
+                        stall=stall,
+                        **_evaluate_code_fingerprint(eval_code),
+                    )
                 await _recover_browser_step(
                     f"action_timeout_{action_name}_{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s",
                     reload_page=False,

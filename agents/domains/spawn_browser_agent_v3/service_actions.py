@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import json
 import re
@@ -922,16 +923,117 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
     return {"success": True, "message": "", "new_tab_id": new_tab_id, "url": url}
 
 
+def _evaluate_code_fingerprint(code: str) -> Dict[str, Any]:
+    """Compact evaluate payload identity for stall diagnostics (no full source)."""
+    text = code if isinstance(code, str) else str(code or "")
+    return {
+        "code_len": len(text),
+        "code_sha256_12": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12],
+    }
+
+
+async def classify_evaluate_cdp_stall(
+    *,
+    input_page: Optional[Any] = None,
+    playwright_browser: Optional[Any] = None,
+    timeout_s: float = 2.0,
+) -> Dict[str, Any]:
+    """Distinguish renderer-main-thread freeze from browser-process / CDP transport death.
+
+    Mirrors agents/tests/e2e/steel_cpu_diagnostic.py:
+    - renderer Runtime.evaluate("1+1") blocks when the page JS thread is pinned
+    - Browser.getVersion stays responsive on the browser process even then
+    """
+    classification: Dict[str, Any] = {
+        "renderer": "skipped",
+        "browser": "skipped",
+        "verdict": "unknown",
+    }
+
+    async def _renderer_ping() -> str:
+        if input_page is None:
+            return "skipped"
+        context = getattr(input_page, "context", None)
+        if context is None or not hasattr(context, "new_cdp_session"):
+            return "skipped"
+        t0 = time_module.monotonic()
+        page_cdp = None
+        try:
+            page_cdp = await context.new_cdp_session(input_page)
+            await asyncio.wait_for(
+                page_cdp.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True},
+                ),
+                timeout=timeout_s,
+            )
+            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "ok"
+        except asyncio.TimeoutError:
+            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "frozen"
+        except Exception as exc:
+            classification["renderer_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
+            return "error"
+        finally:
+            if page_cdp is not None:
+                with suppress(Exception):
+                    await asyncio.wait_for(page_cdp.detach(), timeout=0.5)
+
+    async def _browser_ping() -> str:
+        if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
+            return "skipped"
+        t0 = time_module.monotonic()
+        browser_cdp = None
+        try:
+            browser_cdp = await playwright_browser.new_browser_cdp_session()
+            await asyncio.wait_for(browser_cdp.send("Browser.getVersion"), timeout=timeout_s)
+            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "ok"
+        except asyncio.TimeoutError:
+            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "frozen"
+        except Exception as exc:
+            classification["browser_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
+            return "error"
+        finally:
+            if browser_cdp is not None:
+                with suppress(Exception):
+                    await asyncio.wait_for(browser_cdp.detach(), timeout=0.5)
+
+    classification["renderer"] = await _renderer_ping()
+    classification["browser"] = await _browser_ping()
+    rend = classification["renderer"]
+    brow = classification["browser"]
+    if rend == "frozen" and brow == "ok":
+        classification["verdict"] = "renderer_main_thread_blocked"
+    elif rend == "frozen" and brow == "frozen":
+        classification["verdict"] = "cdp_or_browser_process_unresponsive"
+    elif rend == "ok":
+        classification["verdict"] = "renderer_responsive_after_timeout"
+    return classification
+
+
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
     if context.action_name == "read_network_requests":
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
+        fingerprint = _evaluate_code_fingerprint(code)
+        logger.info(
+            "Browser evaluate starting",
+            session_id=context.session_id,
+            **fingerprint,
+        )
+        started = time_module.monotonic()
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
+        session_acquire_ms = round((time_module.monotonic() - started) * 1000)
+        eval_started = time_module.monotonic()
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
             params={"expression": code, "returnByValue": True, "awaitPromise": True},
             session_id=cdp_session.session_id,
         )
+        eval_ms = round((time_module.monotonic() - eval_started) * 1000)
         value = result.get("result", {}).get("value")
         # CDP returns exceptionDetails when the expression throws; surface that
         # instead of a silent null/empty value (async fetch failures used to look
@@ -943,6 +1045,14 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
                 or (exception.get("exception") or {}).get("description")
                 or "evaluate raised"
             )
+            logger.warning(
+                "Browser evaluate raised",
+                session_id=context.session_id,
+                session_acquire_ms=session_acquire_ms,
+                eval_ms=eval_ms,
+                error=error_text[:200],
+                **fingerprint,
+            )
             await context.action_history.record_action(
                 dom_service=context.dom_service,
                 action="evaluate",
@@ -951,6 +1061,14 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
                 result={"success": False, "error": error_text},
             )
             return {"success": False, "error": error_text, "value": value}
+        logger.info(
+            "Browser evaluate completed",
+            session_id=context.session_id,
+            session_acquire_ms=session_acquire_ms,
+            eval_ms=eval_ms,
+            cdp_session_id=getattr(cdp_session, "session_id", None),
+            **fingerprint,
+        )
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="evaluate",
