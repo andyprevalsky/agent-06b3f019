@@ -2383,11 +2383,22 @@ async def _click_write_lock_result(
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
+        is_click_write_lock_eligible_control,
         is_email_send_button,
         is_purchase_button,
         is_social_domain,
         is_submit_button,
     )
+
+    # Andy (2026-08-21): never raise click write locks on plain inputs /
+    # textarea / select — only buttons and form submits.
+    if element is not None and not is_click_write_lock_eligible_control(element):
+        logger.info(
+            "Write lock skipped: click target is not a button or form submit",
+            tag=getattr(element, "tag_name", None) or getattr(element, "node_name", None),
+            url=current_url[:80] if current_url else None,
+        )
+        return None
 
     coordinate_click = element is None
     if coordinate_click:
@@ -2421,33 +2432,10 @@ async def _click_write_lock_result(
             url=current_url[:80] if current_url else None,
         )
 
-    # Text-like inputs are never purchase controls. Fandango's email sign-in
-    # field (#buynow-email-si) previously matched purchase via its machine id.
-    skip_purchase = False
-    if element is not None:
-        attrs = getattr(element, "attributes", None) or {}
-        if not isinstance(attrs, dict):
-            attrs = {}
-        tag_name = str(
-            getattr(element, "tag_name", "") or getattr(element, "node_name", "") or ""
-        ).lower()
-        input_type = str(attrs.get("type") or "").lower()
-        if tag_name == "input" and input_type in {
-            "",
-            "text",
-            "email",
-            "password",
-            "tel",
-            "search",
-            "number",
-            "url",
-        }:
-            skip_purchase = True
-
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
         ("email_send", is_email_send_button(element_text), "email send"),
-        ("purchase", (not skip_purchase) and is_purchase_button(element_text), "purchase button"),
+        ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""
     minted_card_unlocks_purchase = has_payment_card_secret_refs(secret_refs)
