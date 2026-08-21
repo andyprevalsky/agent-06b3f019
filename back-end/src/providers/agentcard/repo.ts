@@ -7,7 +7,7 @@
  */
 
 import { type Prisma, IntegrationStatus, IntegrationType } from '@prisma/client';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import { AGENTCARD_INTEGRATION_NAME } from './config';
 import type { StoredTokenConfig } from './types';
 
@@ -66,6 +66,63 @@ export async function findUserIdsByCardholderId(cardholderId: string): Promise<s
     select: { userId: true },
   });
   return rows.map((row) => row.userId);
+}
+
+/**
+ * Bind a cardholder to a user, serialized against every other writer for that same cardholder.
+ *
+ * The ownership check and the write MUST be one atomic unit. Read-then-write lets two concurrent
+ * calls for different users both observe "unowned" and both bind, which is precisely the
+ * commingled-wallet outcome the invariant exists to prevent — and the read is a JSON path query,
+ * so no unique index can catch it afterwards.
+ *
+ * `pg_advisory_xact_lock` is keyed by the cardholder id and released automatically when the
+ * transaction ends (commit OR rollback), so a crash mid-write cannot strand the lock. Every writer
+ * of this binding must go through here; `hashtext` collisions are harmless (they only serialize
+ * two unrelated cardholders for the duration of one short transaction).
+ */
+export async function bindCardholderExclusively(
+  userId: string,
+  cardholderId: string,
+  buildConfig: (existing: unknown | undefined) => Prisma.InputJsonObject
+): Promise<{ conflictingUserId?: string }> {
+  return runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:cardholder:${cardholderId}`}))`;
+
+    const owners = await tx.integration.findMany({
+      where: {
+        name: AGENTCARD_INTEGRATION_NAME,
+        config: { path: ['cardholderId'], equals: cardholderId },
+      },
+      select: { userId: true },
+    });
+    const conflicting = owners.map((row) => row.userId).find((owner) => owner !== userId);
+    if (conflicting !== undefined) return { conflictingUserId: conflicting };
+
+    const existing = await tx.integration.findUnique({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      select: { config: true },
+    });
+    const config = buildConfig(existing?.config);
+    await tx.integration.upsert({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      create: {
+        userId,
+        name: AGENTCARD_INTEGRATION_NAME,
+        type: IntegrationType.TOOL_SETUP,
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config,
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config,
+        lastUsedAt: new Date(),
+      },
+    });
+    return {};
+  });
 }
 
 export async function saveIntegrationConfig(

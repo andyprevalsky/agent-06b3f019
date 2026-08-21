@@ -109,12 +109,15 @@ export async function mintCaptureAndIssue(
     state.activeWalletFundingProvider,
     preparedFunding.providerTransferId ?? undefined
   );
-  const isStaticCard = await persistMintedCard(
-    state,
-    purchase,
-    minted,
-    minted.providerTransferId ?? providerTransferId
-  );
+  // First NON-BLANK id wins. `??` only falls through on null/undefined, so a provider returning
+  // `providerTransferId: ''` would yield '' and discard the id mintCompanyFlowCard already
+  // confirmed — making persistMintedCard throw agentcard_company_transfer_missing and roll back a
+  // purchase whose transfer id was available all along.
+  const resolvedTransferId =
+    [minted.providerTransferId, providerTransferId].find(
+      (id) => typeof id === 'string' && id.trim() !== ''
+    ) ?? undefined;
+  const isStaticCard = await persistMintedCard(state, purchase, minted, resolvedTransferId);
   // Org mint already fetched get_card_details; reusing those secrets avoids a second MCP read that
   // has hung the HTTP request for 15+ minutes (client ReadTimeout, purchase stuck CHARGING → 409).
   const details = await resolveIssuedCardDetails(minted, state.activeCardProvider);

@@ -126,5 +126,17 @@ async function main(): Promise<void> {
 
 void main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
+  // `possiblySent` distinguishes "definitely not sent" from "may already be moving". Printing only
+  // the message makes an ambiguous failure look clean, the operator re-runs with --confirm, and the
+  // retry carries a NEW idem key — so Coinbase applies no dedup and the send happens twice. A USDC
+  // transfer is irreversible, so an ambiguous failure must never read as a safe retry.
+  if ((error as { possiblySent?: boolean })?.possiblySent === true) {
+    console.error(
+      '\n⚠️  THIS SEND MAY ALREADY BE IN FLIGHT. Do NOT re-run with --confirm.\n' +
+        '   A retry mints a new idempotency key, so Coinbase will NOT de-duplicate it and you\n' +
+        '   would send twice. Confirm the actual state first (Coinbase transactions for the USDC\n' +
+        '   wallet, or the org wallet balance), and only re-send if nothing arrived.'
+    );
+  }
   process.exit(1);
 });

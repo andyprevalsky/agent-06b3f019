@@ -111,10 +111,33 @@ export function isSettledRecovery(status: string): boolean {
  * already tried to reclaim its own capital.
  */
 export function isRecoveryFailure(result: unknown): boolean {
-  const structured = asRecord(asRecord(result)?.structuredContent) ?? asRecord(result);
-  return (
-    optionalString(structured, 'status')?.toLowerCase() === 'error' && !isNothingToRecover(result)
-  );
+  // The benign "nothing to recover" case is never a failure, whatever shape it arrives in.
+  if (isNothingToRecover(result)) return false;
+
+  const outer = asRecord(result);
+  const structured = asRecord(outer?.structuredContent) ?? outer;
+
+  // `mcpCallTool` returns the MCP result verbatim, so a provider outage can surface in several
+  // shapes. Any of them previously parsed as `amount_cents: 0` and were logged as a successful
+  // zero recovery — after which the top-up spends real USDC believing it had already tried to
+  // reclaim its own capital.
+  if (outer?.isError === true) return true;
+  if (outer?.error !== undefined && outer.error !== null) return true;
+  if (structured?.error !== undefined && structured.error !== null) return true;
+  if (optionalString(structured, 'status')?.toLowerCase() === 'error') return true;
+
+  // Text-only error responses carry no structured status at all.
+  const content = outer?.content;
+  if (Array.isArray(content)) {
+    const text = content
+      .map((item) => optionalString(asRecord(item), 'text') ?? '')
+      .join(' ')
+      .toLowerCase();
+    if (/\b(error|failed|failure|unauthorized|forbidden|rate limit|timeout)\b/.test(text)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -198,9 +221,11 @@ export interface ResidualSweepResult {
 export async function pendingRecoveries(
   callOrgTool: AgentCardOrgToolCaller
 ): Promise<Array<{ amountCents: number; createdAtMs: number; cardholderId?: string }>> {
-  const structured =
-    asRecord(asRecord(await callOrgTool('list_recoveries', { limit: 50 }))?.structuredContent) ??
-    asRecord(await callOrgTool('list_recoveries', { limit: 50 }));
+  // ONE call. Putting the `await` in the right operand of `??` fires a SECOND list_recoveries
+  // whenever `structuredContent` is absent — burning the shared rate-limit budget and letting the
+  // two responses describe different snapshots of the same money.
+  const response = await callOrgTool('list_recoveries', { limit: 50 });
+  const structured = asRecord(asRecord(response)?.structuredContent) ?? asRecord(response);
   const list = structured?.recoveries;
   if (!Array.isArray(list)) return [];
   return list
@@ -214,11 +239,14 @@ export async function pendingRecoveries(
       const cardholderId = optionalString(entry, 'cardholder_id');
       return {
         amountCents: typeof raw === 'number' && Number.isFinite(raw) ? Math.trunc(raw) : 0,
+        // NaN when `created_at` is missing or unparseable. Deliberately NOT filtered out: dropping
+        // the entry erases its amount from pendingCents and reports "nothing in flight" while real
+        // money is still moving — exactly the failure this function exists to prevent. Callers
+        // treat NaN as unknown age.
         createdAtMs: Date.parse(optionalString(entry, 'created_at') ?? ''),
         ...(cardholderId === undefined ? {} : { cardholderId }),
       };
-    })
-    .filter((entry) => Number.isFinite(entry.createdAtMs));
+    });
 }
 
 /** Age in ms of the oldest recovery that has not reached a terminal state. */
@@ -226,9 +254,9 @@ export async function oldestPendingRecoveryAgeMs(
   callOrgTool: AgentCardOrgToolCaller,
   now: number
 ): Promise<number | undefined> {
-  const structured =
-    asRecord(asRecord(await callOrgTool('list_recoveries', { limit: 50 }))?.structuredContent) ??
-    asRecord(await callOrgTool('list_recoveries', { limit: 50 }));
+  // Single call, same reasoning as pendingRecoveries.
+  const response = await callOrgTool('list_recoveries', { limit: 50 });
+  const structured = asRecord(asRecord(response)?.structuredContent) ?? asRecord(response);
   const list = structured?.recoveries;
   if (!Array.isArray(list)) return undefined;
   const ages = list
@@ -237,8 +265,11 @@ export async function oldestPendingRecoveryAgeMs(
       (entry) => entry !== undefined && !isSettledRecovery(optionalString(entry, 'status') ?? '')
     )
     .map((entry) => Date.parse(optionalString(entry, 'created_at') ?? ''))
-    .filter((parsed) => Number.isFinite(parsed))
-    .map((parsed) => now - parsed);
+    // An unparseable date contributes age 0 (treated as FRESH) rather than being dropped. Dropping
+    // it would let "pending exists but its date is unreadable" masquerade as `undefined`, which
+    // callers read as "nothing pending" and would spend on top of in-flight money. Age 0 is the
+    // conservative reading: the livelock guard defers instead of spending.
+    .map((parsed) => (Number.isFinite(parsed) ? now - parsed : 0));
   return ages.length === 0 ? undefined : Math.max(...ages);
 }
 
@@ -288,8 +319,18 @@ export async function recoverAllCardholderResiduals(
   const now = Date.now();
   const inFlight = await pendingRecoveries(callOrgTool);
   const totalPendingCents = inFlight.reduce((sum, entry) => sum + entry.amountCents, 0);
+  // An unparseable `created_at` yields NaN, and `Math.max(x, NaN)` is NaN — which would silently
+  // defeat every downstream age comparison in the livelock guard. Treat unknown age as 0 (fresh),
+  // matching oldestPendingRecoveryAgeMs: the guard then defers rather than spending on top of
+  // money that may still be in flight.
   const oldestPendingAgeMs =
-    inFlight.length === 0 ? undefined : Math.max(...inFlight.map((e) => now - e.createdAtMs));
+    inFlight.length === 0
+      ? undefined
+      : Math.max(
+          ...inFlight.map((entry) =>
+            Number.isFinite(entry.createdAtMs) ? now - entry.createdAtMs : 0
+          )
+        );
   return {
     settledCents,
     pendingCents: Math.max(pendingCents, totalPendingCents),

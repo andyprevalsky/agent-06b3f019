@@ -164,34 +164,39 @@ export class AgentCardCardholderConflictError extends Error {
  * prod, so this refuses rather than silently overwriting.
  */
 export interface SaveOrgCardholderDeps {
-  findUserIdsByCardholderId: (cardholderId: string) => Promise<string[]>;
-  findTokenConfig: (userId: string) => Promise<unknown | undefined>;
-  saveIntegrationConfig: (
+  bindCardholderExclusively: (
     userId: string,
-    config: Prisma.InputJsonObject,
-    connected: boolean
-  ) => Promise<void>;
+    cardholderId: string,
+    buildConfig: (existing: unknown | undefined) => Prisma.InputJsonObject
+  ) => Promise<{ conflictingUserId?: string }>;
 }
 
+/**
+ * The ownership check and the write happen inside ONE advisory-locked transaction
+ * (`repo.bindCardholderExclusively`). Doing the check here and the write separately would let two
+ * concurrent calls for different users both see "unowned" and both bind — the exact commingled
+ * wallet this guard exists to prevent, and one no unique index can catch afterwards because the
+ * binding lives in a JSON column.
+ */
 export async function saveOrgCardholderId(
   userId: string,
   cardholderId: string,
   deps: SaveOrgCardholderDeps = repo
 ): Promise<void> {
-  const owners = await deps.findUserIdsByCardholderId(cardholderId);
-  const conflicting = owners.find((owner) => owner !== userId);
-  if (conflicting !== undefined) {
-    throw new AgentCardCardholderConflictError(cardholderId, conflicting, userId);
-  }
-  const existing = configRecord(await deps.findTokenConfig(userId));
-  delete existing.onboardingSessionId;
-  delete existing.onboardingSetupUrl;
-  delete existing.onboardingExpiresAt;
-  await deps.saveIntegrationConfig(
+  const { conflictingUserId } = await deps.bindCardholderExclusively(
     userId,
-    { ...existing, orgManaged: true, cardholderId } as Prisma.InputJsonObject,
-    true
+    cardholderId,
+    (existing) => {
+      const config = configRecord(existing);
+      delete config.onboardingSessionId;
+      delete config.onboardingSetupUrl;
+      delete config.onboardingExpiresAt;
+      return { ...config, orgManaged: true, cardholderId } as Prisma.InputJsonObject;
+    }
   );
+  if (conflictingUserId !== undefined) {
+    throw new AgentCardCardholderConflictError(cardholderId, conflictingUserId, userId);
+  }
 }
 
 export async function clearUserToken(userId: string): Promise<void> {

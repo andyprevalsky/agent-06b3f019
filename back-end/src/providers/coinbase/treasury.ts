@@ -76,6 +76,12 @@ interface V2Account {
   balance?: { amount?: string; currency?: string };
 }
 
+/** One page of `/v2/accounts`. `pagination.next_uri` is null on the final page. */
+interface V2AccountsPage {
+  data?: V2Account[];
+  pagination?: { next_uri?: string | null };
+}
+
 /**
  * Convert a Coinbase decimal amount string ("123.456789") to integer cents, flooring.
  *
@@ -111,13 +117,31 @@ export function createCoinbaseTreasury(
     apiKeySecret: config.apiKeySecret,
   };
 
+  /**
+   * Find an account by currency, following Coinbase's cursor across ALL pages.
+   *
+   * A single `limit=100` read is not safe here: an account on a later page is indistinguishable
+   * from an account that does not exist, and `getUsdcBalanceCents` turns "not found" into `0`.
+   * That zero reaches `planFloatReplenish`, which then wires real fiat to top up a float that is
+   * actually healthy. Same failure mode this repo documents for the Render env API.
+   */
   async function findAccount(currencyCode: string): Promise<V2Account | undefined> {
-    const body = await coinbaseRequest<{ data?: V2Account[] }>(
-      credentials,
-      'GET',
-      '/v2/accounts?limit=100'
-    );
-    return (body.data ?? []).find((account) => account.currency?.code === currencyCode);
+    let path = '/v2/accounts?limit=100';
+    const seen = new Set<string>();
+    for (;;) {
+      const body: V2AccountsPage = await coinbaseRequest<V2AccountsPage>(credentials, 'GET', path);
+      const match = (body.data ?? []).find(
+        (account: V2Account) => account.currency?.code === currencyCode
+      );
+      if (match !== undefined) return match;
+
+      const nextUri = body.pagination?.next_uri;
+      if (nextUri === undefined || nextUri === null || nextUri === '') return undefined;
+      // Defend against a provider echoing the same cursor forever.
+      if (seen.has(nextUri)) return undefined;
+      seen.add(nextUri);
+      path = nextUri;
+    }
   }
 
   async function findUsdcAccount(): Promise<V2Account | undefined> {
