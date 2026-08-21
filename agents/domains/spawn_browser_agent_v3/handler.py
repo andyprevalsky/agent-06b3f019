@@ -2437,6 +2437,184 @@ async def _run_browser_supervisor_recovery(
 # validation/tool error in context before falling back to the deterministic question.
 _WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS = 3
 
+# Worked examples for the notification fork — payloads mirror the fields our
+# renderer (_render_write_lock_notification_question / _append_*_notification)
+# and schema already prescribe. Shown to the model as format targets, not as
+# hardcoded gate→trigger routing.
+_WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] = (
+    (
+        "Purchases (buying / placing an order)",
+        {
+            "trigger_type": "purchase",
+            "action": "buy one black Carhartt beanie",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "url": "https://www.amazon.com/checkout/spc",
+            },
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                    "alt": "Carhartt beanie",
+                    "kind": "product",
+                }
+            ],
+            "purchase": {
+                "items": [
+                    {
+                        "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black",
+                        "price": "$19.99",
+                        "quantity": "1",
+                        "description": "Black, One Size",
+                        "rating": "4.8 stars",
+                        "review_count": "167,432 reviews",
+                        "image_url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                        "product_url": "https://www.amazon.com/dp/B000000001",
+                        "seller": "Amazon.com",
+                        "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
+                    }
+                ],
+                "totals": {
+                    "subtotal": "$19.99",
+                    "shipping": "$0.00",
+                    "tax": "$1.72",
+                    "total": "$21.71",
+                },
+                "payment_method": "Visa ending in 9857",
+                "delivery_address": "Aman Gottumukkala, 88 HOWARD ST APT 1413, SAN FRANCISCO, CA 94105",
+            },
+        },
+        (
+            "Every visible item; one media image (or rendered_summary for multi-item). "
+            "Per item require title, numeric rating, review count, and a canonical "
+            "product-detail URL already in the trajectory — never cart/checkout/order/return URLs. "
+            "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
+        ),
+    ),
+    (
+        "Emails / outbound messages",
+        {
+            "trigger_type": "message",
+            "action": "send email",
+            "service": {
+                "name": "Gmail",
+                "domain": "mail.google.com",
+                "url": "https://mail.google.com/mail/u/0/#inbox?compose=new",
+            },
+            "media": [],
+            "message": {
+                "to": ["alex@example.com"],
+                "cc": [],
+                "bcc": [],
+                "subject": "Dinner Friday",
+                "body": "Want to grab dinner Friday at 7?",
+                "attachments": [],
+            },
+        },
+        "Include visible to/cc/bcc, subject, body, and attachments when shown.",
+    ),
+    (
+        "Social posts",
+        {
+            "trigger_type": "social_post",
+            "action": "post publicly",
+            "service": {"name": "X", "domain": "x.com", "url": "https://x.com/compose/post"},
+            "media": [],
+            "social_post": {
+                "destination": "your profile",
+                "audience": "Public",
+                "body": "Shipped the v1 release today.",
+                "attachments": [],
+            },
+        },
+        "Include visible destination, audience, body, and attachments when shown.",
+    ),
+    (
+        "Returns / refund confirmations",
+        {
+            "trigger_type": "generic_write",
+            "action": "confirm Amazon return for Carhartt beanie",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "url": "https://www.amazon.com/spr/returns/contract/example",
+            },
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                    "kind": "product",
+                }
+            ],
+            "generic_write": {
+                "label": "Confirm return",
+                "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                "payload_summary": (
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                    "Return by Sep 19, 2026."
+                ),
+            },
+        },
+        (
+            "Use generic_write for return/refund confirmations. Put item title in target and "
+            "refund amount, original payment method, drop-off/shipping method, and return-by "
+            "date in payload_summary. Do not invent purchase ratings or product-detail URLs."
+        ),
+    ),
+    (
+        "Payment field entry",
+        {
+            "trigger_type": "payment",
+            "action": "enter payment details",
+            "service": {
+                "name": "Delta",
+                "domain": "delta.com",
+                "url": "https://www.delta.com/checkout",
+            },
+            "media": [
+                {
+                    "url": "https://cdn.delta.com/receipt.png",
+                    "alt": "Booking summary",
+                    "kind": "page_preview",
+                }
+            ],
+            "payment": {
+                "merchant": "Delta Air Lines",
+                "amount": "$412.30",
+                "purpose": "Flight SFO -> JFK",
+                "fields": ["card number", "expiration date", "CVV"],
+            },
+        },
+        "Never include card numbers, CVV, passwords, tokens, or one-time codes.",
+    ),
+)
+
+
+def _write_lock_notification_example_block() -> str:
+    """Render prescribed worked examples for the fork prompt."""
+    sections: List[str] = [
+        "Call generate_write_lock_notification exactly once.",
+        "Choose the trigger_type whose example best matches the real-world irreversible action.",
+        "Copy that example's shape; fill fields only from the browser trajectory — never invent.",
+        "If Runtime evidence includes media_candidates, use only those URLs for media / image_url.",
+        "approval_type in Runtime evidence is a hint from the click gate, not a required trigger_type.",
+        "",
+    ]
+    for title, payload, notes in _WRITE_LOCK_NOTIFICATION_EXAMPLES:
+        rendered = _render_write_lock_notification_question(
+            payload,
+            system_name="Rose",
+            fallback_question="Approve?",
+        )
+        sections.append(f"### {title}")
+        sections.append(f"Notes: {notes}")
+        sections.append("Tool args example:")
+        sections.append(json_dumps_compact({"tool": "generate_write_lock_notification", **payload}))
+        sections.append("Notification format this produces:")
+        sections.append(rendered)
+        sections.append("")
+    return "\n".join(sections).strip()
+
 
 def _write_lock_notification_prompt(
     *,
@@ -2456,104 +2634,6 @@ def _write_lock_notification_prompt(
     if media_candidates:
         evidence["media_candidates"] = media_candidates[:12]
 
-    # Example-driven: the model picks trigger_type from the real-world action.
-    # Do not hardcode gate→trigger mapping here; approval_type is only a hint.
-    examples = """
-Pick the trigger_type whose example best matches the real-world irreversible action.
-Use only fields already visible in the browser trajectory — never invent ratings,
-review counts, product URLs, recipients, or secrets. If Runtime evidence includes
-media_candidates, use only those URLs for media and item image_url.
-
-### Purchases (buying / placing an order) → trigger_type=purchase
-{
-  "trigger_type": "purchase",
-  "action": "buy items",
-  "service": {"name": "Amazon", "domain": "amazon.com", "url": "<current page url>"},
-  "media": [{"url": "<one product or rendered_summary image>", "alt": "<item title>", "kind": "product"}],
-  "purchase": {
-    "items": [{
-      "title": "<visible item title>",
-      "price": "<visible price>",
-      "quantity": "<visible qty>",
-      "description": "<variant details, under 80 chars>",
-      "rating": "<numeric rating already in trajectory, e.g. 4.6 stars>",
-      "review_count": "<numeric count already in trajectory, e.g. 312 reviews>",
-      "image_url": "<product image from media_candidates when available>",
-      "product_url": "<canonical product-detail URL already visited — never cart/checkout/order/return URL>",
-      "seller": "<visible seller>",
-      "shipping": "<visible delivery details>"
-    }],
-    "totals": {"subtotal": "...", "shipping": "...", "tax": "...", "total": "..."},
-    "payment_method": "<visible redacted payment method>",
-    "delivery_address": "<visible address>"
-  }
-}
-Include every visible item being bought. Set media to exactly one image when any
-product/checkout/page image is visible; for multiple items prefer one
-rendered_summary. Required per item: title, real numeric rating, review count,
-and canonical product-detail URL that already exist in the trajectory.
-
-### Emails / outbound messages → trigger_type=message
-{
-  "trigger_type": "message",
-  "action": "send email",
-  "service": {"name": "Gmail", "domain": "mail.google.com", "url": "<current page url>"},
-  "media": [],
-  "message": {
-    "to": ["<visible recipient>"],
-    "cc": [],
-    "bcc": [],
-    "subject": "<visible subject>",
-    "body": "<visible body>",
-    "attachments": [{"name": "<filename>", "url": "<preview url when visible>"}]
-  }
-}
-
-### Social posts → trigger_type=social_post
-{
-  "trigger_type": "social_post",
-  "action": "post publicly",
-  "service": {"name": "X", "domain": "x.com", "url": "<current page url>"},
-  "media": [],
-  "social_post": {
-    "destination": "<profile, subreddit, or channel>",
-    "audience": "<Public / followers / etc.>",
-    "body": "<visible post body>",
-    "attachments": [{"url": "<preview url when visible>", "description": "<alt>"}]
-  }
-}
-
-### Returns / refund confirmations → trigger_type=generic_write
-{
-  "trigger_type": "generic_write",
-  "action": "confirm return",
-  "service": {"name": "Amazon", "domain": "amazon.com", "url": "<current page url>"},
-  "media": [{"url": "<returned item image>", "alt": "<item title>", "kind": "product"}],
-  "generic_write": {
-    "label": "Confirm return",
-    "target": "<visible item title being returned>",
-    "payload_summary": "<refund amount>, <original payment method>, <drop-off or shipping method>, <return-by date when shown>"
-  }
-}
-Do not use trigger_type=purchase for returns — purchase requires PDP rating /
-review_count / product_url that return-only pages usually lack.
-
-### Payment field entry → trigger_type=payment
-{
-  "trigger_type": "payment",
-  "action": "enter payment details",
-  "service": {"name": "<merchant>", "domain": "<domain>", "url": "<current page url>"},
-  "media": [{"url": "<page preview when available>", "alt": "Checkout page preview", "kind": "page_preview"}],
-  "payment": {
-    "merchant": "<visible merchant>",
-    "amount": "<visible amount>",
-    "purpose": "<visible purpose>",
-    "fields": ["card number", "expiration date", "CVV"]
-  }
-}
-Never include card numbers, CVV, passwords, tokens, or one-time codes.
-""".strip()
-
     return (
         "WRITE_LOCK_NOTIFICATION_FORK_REQUEST\n\n"
         "A write lock was triggered. Call generate_write_lock_notification exactly once using the "
@@ -2561,9 +2641,8 @@ Never include card numbers, CVV, passwords, tokens, or one-time codes.
         "Do not perform any browser action. Do not continue the task. Do not ask the user for "
         "approval. Generate structured approval metadata only.\n\n"
         "Describe the real-world action the user is approving, not the clicked button or DOM "
-        "mechanic. Match one of the examples below; approval_type in Runtime evidence is only a "
-        "hint from the deterministic gate.\n\n"
-        f"{examples}\n\n"
+        "mechanic.\n\n"
+        f"{_write_lock_notification_example_block()}\n\n"
         f"Runtime evidence:\n{json_dumps_compact(evidence)}"
     )
 

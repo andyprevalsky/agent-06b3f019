@@ -13504,18 +13504,18 @@ def test_write_lock_notification_prompt_includes_media_candidates():
 
     assert "media_candidates" in prompt
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
-    assert "trigger_type=purchase" in prompt
-    assert "trigger_type=message" in prompt
-    assert "trigger_type=social_post" in prompt
-    assert "trigger_type=generic_write" in prompt
-    assert "trigger_type=payment" in prompt
-    assert "Returns / refund confirmations" in prompt
-    assert "never invent" in prompt.lower() or "Never invent" in prompt or "never invent" in prompt
+    assert "### Purchases" in prompt
+    assert "### Emails / outbound messages" in prompt
+    assert "### Social posts" in prompt
+    assert "### Returns / refund confirmations" in prompt
+    assert "### Payment field entry" in prompt
+    assert "**Approval Needed**" in prompt
+    assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in prompt
     assert "Visit the product page" not in prompt
 
 
 def test_write_lock_notification_prompt_is_example_driven_for_all_gates():
-    """Fork prompt teaches via examples; it does not hardcode gate→trigger routing."""
+    """Fork prompt teaches via prescribed worked examples for every case."""
     from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
 
     return_prompt = _write_lock_notification_prompt(
@@ -13544,17 +13544,23 @@ def test_write_lock_notification_prompt_is_example_driven_for_all_gates():
         write_lock_result={"status": "needs_write_approval", "approval_type": "purchase"},
     )
 
-    # Same example catalog regardless of gate; only runtime evidence differs.
     for needle in (
         "### Purchases",
         "### Emails / outbound messages",
         "### Social posts",
         "### Returns / refund confirmations",
         "### Payment field entry",
-        "approval_type in Runtime evidence is only a hint",
+        "Notification format this produces:",
+        "Tool args example:",
+        "approval_type in Runtime evidence is a hint",
+        "Action: Confirm return",
+        "Payment secrets are not included in this message.",
     ):
-        assert needle in return_prompt
-        assert needle in purchase_prompt
+        assert needle in return_prompt, needle
+        assert needle in purchase_prompt, needle
+    # Same example catalog; only runtime evidence differs.
+    assert return_prompt.split("Runtime evidence:")[0] == purchase_prompt.split("Runtime evidence:")[0]
+    assert "Confirm your return" in return_prompt
     assert '"approval_type": "return"' in return_prompt or '"approval_type":"return"' in return_prompt.replace(
         " ", ""
     )
