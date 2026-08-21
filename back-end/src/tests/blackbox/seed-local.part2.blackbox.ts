@@ -425,11 +425,18 @@ test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks',
     "process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1'"
   );
   const warning = source.indexOf('launcher-scoped non-Claude task', bypass);
-  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
+  // Both providers are inspected up-front; gpt_code must still fail closed
+  // after the Claude-only opt-out (do not short-circuit the GPT branch).
+  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()');
+  const gptFailClosed = source.indexOf(
+    "throw new Error('No usable gpt_code integrations after sync')",
+    warning
+  );
 
   assert(bypass > 0, 'expected a distinct non-Claude task opt-out');
   assert(warning > bypass, 'expected the opt-out to explain its narrow contract');
-  assert(gptInspection > warning, 'expected gpt_code validation to remain active');
+  assert(gptInspection > 0, 'expected gpt_code availability to be inspected');
+  assert(gptFailClosed > warning, 'expected gpt_code validation to remain active');
   assert(
     launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1'),
     'expected the AgentCard launcher to opt into the non-Claude task path'
