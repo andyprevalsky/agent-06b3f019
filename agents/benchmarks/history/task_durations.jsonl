@@ -2493,3 +2493,4 @@
 {"task": "browser-smoke", "duration_seconds": 76.7, "cost_cents": 0.0, "timestamp": "2026-08-19T20:40:45.535481+00:00", "agent_id": "141a6068-aaf0-42de-93f6-71d028a59361"}
 {"task": "browser-doordash-usb-c-cable", "duration_seconds": 681.4, "cost_cents": 2.0, "timestamp": "2026-08-20T20:46:51.609350+00:00", "agent_id": "a85b55c7-1fc6-44b1-b153-134a4fb92579"}
 {"task": "browser-doordash-usb-c-cable", "duration_seconds": 509.4, "cost_cents": 0.0, "timestamp": "2026-08-21T19:08:19.176108+00:00", "agent_id": "77ca4899-afae-47f8-8a16-179d4120ffc5"}
+{"task": "browser-doordash-usb-c-cable", "duration_seconds": 383.3, "cost_cents": 0.0, "timestamp": "2026-08-21T19:36:56.046928+00:00", "agent_id": "81bec6ad-96a3-4b36-9ff2-cd2391dd537c"}
