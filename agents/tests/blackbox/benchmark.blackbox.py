@@ -838,6 +838,40 @@ def test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start():
         local.configure_task_environment(["gate-kyc-card-mint"])
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        # Admin-bypass shares /test_payment + public Kernel tunnel; omitting it
+        # from TEST_PAYMENT_FRONTEND_TASK_NAMES served Vite DEV and left #root
+        # blank for minutes under pass@5 concurrency.
+        local.configure_task_environment(["gate-subscription-card-mint-admin-bypass"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+        assert local.needs_frontend_tunnel(["gate-subscription-card-mint-admin-bypass"])
+
+
+def test_public_tunnel_benchmarks_enable_bundled_frontend_by_default():
+    """Bundling follows needs_public_tunnel — not a hand-maintained allowlist."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    # browser-agent needs a public tunnel but is not a /test_payment task.
+    assert local.needs_public_tunnel(["browser-agent"]) is True
+    assert local.needs_frontend_tunnel(["browser-agent"]) is False
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        local.configure_task_environment(["browser-agent"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ["BENCHMARK_FRONTEND_URL"] = "https://example.test"
+        local.configure_task_environment(["browser-agent"])
+        assert "BENCHMARK_BUNDLED_FRONTEND" not in os.environ
+
 
 def test_benchmark_bundled_frontend_build_has_cloud_heap_budget():
     """Cloud build hosts default near 2GB old-space, below the frontend bundle need."""
@@ -1270,6 +1304,34 @@ def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
         os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
         local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
         assert os.environ.get("ADMIN_USER_IDS_EXTRA", "") == ""
+
+
+def test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard():
+    """Depleted purchase-subscription cleanup deletes integrations; admin company_flow mint needs one.
+
+    Observed 2026-08-20: `gate-subscription-card-mint-admin-bypass` reached
+    `issueAdminCompanyCard` (ADMIN_USER_IDS_EXTRA worked) then AgentCardRoutingProvider threw
+    `cardholder_onboarding_required` because the gate fixture left zero integrations for the
+    synthetic admin. The fixture must re-seed an org-managed agentcard row after cleanup,
+    using a KYC-ready cardholder (prefer andy@roselabs.ai, else agentcard-benchmark@).
+    """
+    from pathlib import Path
+
+    from benchmarks.run_benchmark import ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+
+    root = Path(__file__).resolve().parents[3]
+    fixture = (root / "back-end" / "scripts" / "gate-benchmark-fixture.ts").read_text()
+    float_src = (
+        root / "back-end" / "src" / "providers" / "agentcard" / "benchmark-float.ts"
+    ).read_text()
+    assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID in fixture
+    assert "seedOrgManagedAgentCardForUser" in fixture
+    assert "resolveBenchmarkCardholderId" in fixture
+    assert "ensureBenchmarkOrgCardholder" in fixture
+    assert "orgManaged: true" in fixture
+    assert "agentcard_org_cardholder_id" in fixture
+    assert "andy@roselabs.ai" in float_src
+    assert "agentcard-benchmark@roselabs.ai" in float_src
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -11240,6 +11302,26 @@ def test_admin_bypass_card_mint_variant_wiring():
     assert "expected_gate" not in admin_checks
     assert "expected_payment_receipt" in admin_checks
 
+    # `true` must validate without AttributeError (harness used to crash on `.get`).
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    admin_req = {
+        "metadata": {
+            "requestPaymentCard": {
+                "merchant": "Rose Labs Test Payment",
+                "currency": "USD",
+                "subtotalCents": 3600,
+                "totalCents": 4396,
+                "lineItems": [],
+                "fees": [],
+            }
+        }
+    }
+    assert _validate_payment_receipt(admin, admin_req, messages=[]) is None
+    assert "missing requestPaymentCard metadata" in (
+        _validate_payment_receipt(admin, {"metadata": {}}, messages=[]) or ""
+    )
+
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     """The parallel search smoke should exercise execute-phase explore fanout."""
@@ -14380,6 +14462,10 @@ async def run_all_tests():
         test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start,
     )
     r.record(
+        "public_tunnel_benchmark_bundled_frontend_default",
+        test_public_tunnel_benchmarks_enable_bundled_frontend_by_default,
+    )
+    r.record(
         "benchmark_bundled_frontend_cloud_heap_budget",
         test_benchmark_bundled_frontend_build_has_cloud_heap_budget,
     )
@@ -14422,6 +14508,10 @@ async def run_all_tests():
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",
         test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
+    )
+    r.record(
+        "admin_bypass_gate_fixture_reseeds_org_managed_agentcard",
+        test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard,
     )
     r.record(
         "success_on_payment_card_request",
