@@ -31,6 +31,7 @@
     "src/domains/tools/types.ts",
     "src/domains/auth/types.ts",
     "src/domains/auth-options/types.ts",
+    "src/domains/admin-health/types.ts",
     "src/domains/test-payment/types.ts",
     "src/types/person.ts",
     "src/domains/upload/types.ts",
