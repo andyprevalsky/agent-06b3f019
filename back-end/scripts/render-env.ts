@@ -41,18 +41,25 @@ async function fetchAllEnvVars(apiKey: string, serviceId: string): Promise<Map<s
       (cursor === undefined ? '' : `&cursor=${encodeURIComponent(cursor)}`);
     const response = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
     if (!response.ok) {
-      throw new Error(`Render env-vars ${response.status}: ${(await response.text()).slice(0, 200)}`);
+      throw new Error(
+        `Render env-vars ${response.status}: ${(await response.text()).slice(0, 200)}`
+      );
     }
     const body = (await response.json()) as RenderEnvRow[];
-    const rows = Array.isArray(body) ? body.filter((row) => row.envVar?.key !== undefined) : [];
-    if (rows.length === 0) break;
+    // Page fullness and the cursor are properties of the RAW page, never of the filtered subset.
+    // Deriving them from `rows` means a single row without `envVar.key` makes a full 100-row page
+    // look short, the loop breaks, and every later page is dropped — reproducing the exact
+    // silent-truncation failure this script exists to prevent.
+    const pageRows = Array.isArray(body) ? body : [];
+    const rows = pageRows.filter((row) => row.envVar?.key !== undefined);
+    if (pageRows.length === 0) break;
 
     for (const row of rows) {
       values.set(row.envVar?.key as string, row.envVar?.value ?? '');
     }
-    cursor = rows[rows.length - 1].cursor;
+    cursor = pageRows[pageRows.length - 1].cursor;
     // A short page is the last page. Without this we would keep requesting with a stale cursor.
-    if (rows.length < PAGE_SIZE || cursor === undefined) break;
+    if (pageRows.length < PAGE_SIZE || cursor === undefined) break;
     if (page === MAX_PAGES - 1) {
       throw new Error(
         `Stopped after ${MAX_PAGES} pages with a cursor still present — refusing to report a ` +
@@ -84,7 +91,11 @@ async function main(): Promise<void> {
   const values = await fetchAllEnvVars(apiKey, serviceId);
 
   if (asJson) {
-    console.log(JSON.stringify(Object.fromEntries(values), null, 2));
+    // Masked unless --show, exactly like the human-readable path. `--json` output is routinely
+    // redirected to a file or pasted into a ticket, so an unmasked default would leak every
+    // production credential on a single flag with no warning.
+    const entries = [...values.entries()].map(([key, value]) => [key, show ? value : mask(value)]);
+    console.log(JSON.stringify(Object.fromEntries(entries), null, 2));
     return;
   }
 

@@ -145,7 +145,17 @@ function assertLocalDatabaseUrl(resolved: Record<string, string> | undefined): v
       // .env unreadable; fall through to the generic reason
     }
   }
-  const remoteHost = /@([^/?]+)/.exec(configuredUrl)?.[1] ?? 'the DATABASE_URL in back-end/.env';
+  // Parse rather than regex-match. `/@([^/?]+)/` matches from the FIRST '@', so a password
+  // containing an unencoded '@' (postgresql://user:pa@ss@host/db) captures "ss@host" and writes a
+  // credential fragment into terminal scrollback and CI logs.
+  let remoteHost = 'the DATABASE_URL in back-end/.env';
+  if (configuredUrl !== '') {
+    try {
+      remoteHost = new URL(configuredUrl).host;
+    } catch {
+      // Unparseable: keep the generic description rather than echoing the raw URL.
+    }
+  }
   console.error(
     `Refusing to run backend unit tests: ${reason} (${remoteHost}). These tests create and\n` +
       'delete real rows. Start the workspace DB (scripts/run.sh), run via `npm run test:coverage`\n' +
@@ -157,7 +167,6 @@ function assertLocalDatabaseUrl(resolved: Record<string, string> | undefined): v
 
 const localDatabaseEnv = resolveLocalDatabaseEnv();
 assertLocalDatabaseUrl(localDatabaseEnv);
-
 
 async function findTests(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });

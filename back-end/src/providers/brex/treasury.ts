@@ -176,7 +176,21 @@ export function createBrexTreasury(config: BrexConfig): BrexTreasury {
     }
 
     const text = await response.text();
-    const parsed: unknown = text === '' ? {} : JSON.parse(text);
+    let parsed: unknown;
+    try {
+      parsed = text === '' ? {} : JSON.parse(text);
+    } catch {
+      // A non-JSON body (gateway HTML on 502/504) must STILL carry `possiblySent`. A bare
+      // SyntaxError has no such property, so `runCoinbaseFloatReplenish` would read
+      // possiblySent=false and release the settlement window on a wire Brex may have accepted —
+      // letting the next hourly tick send a second wire on top of it.
+      throw new BrexApiError(
+        `Brex ${method} ${path} -> ${response.status}: unparseable body ${text.slice(0, 200)}`,
+        response.status,
+        'brex_unparseable_response',
+        method === 'POST'
+      );
+    }
     if (!response.ok) {
       const detail = (parsed as { message?: string }).message ?? text.slice(0, 200);
       throw new BrexApiError(
@@ -201,20 +215,40 @@ export function createBrexTreasury(config: BrexConfig): BrexTreasury {
     }));
   }
 
+  /**
+   * Resolve the configured instrument's rail, following Brex's cursor across ALL vendor pages.
+   *
+   * A single `limit=100` read makes an instrument on a later page look like
+   * `brex_counterparty_not_found`. That fails closed (it blocks replenishment rather than
+   * misrouting funds), but it is still a silent, self-inflicted outage of the fiat leg.
+   */
   async function getCounterpartyRail(): Promise<string | undefined> {
     if (config.coinbaseCounterpartyId === undefined) return undefined;
-    const body = await request<{
-      items?: Array<{
-        payment_accounts?: Array<{ details?: { type?: string; payment_instrument_id?: string } }>;
-      }>;
-    }>('GET', '/v1/vendors?limit=100');
-    for (const vendor of body.items ?? []) {
-      for (const account of vendor.payment_accounts ?? []) {
-        if (account.details?.payment_instrument_id === config.coinbaseCounterpartyId) {
-          return account.details.type;
+    let cursor: string | undefined;
+    const seen = new Set<string>();
+    do {
+      const path =
+        cursor === undefined
+          ? '/v1/vendors?limit=100'
+          : `/v1/vendors?limit=100&cursor=${encodeURIComponent(cursor)}`;
+      const body = await request<{
+        items?: Array<{
+          payment_accounts?: Array<{ details?: { type?: string; payment_instrument_id?: string } }>;
+        }>;
+        next_cursor?: string | null;
+      }>('GET', path);
+      for (const vendor of body.items ?? []) {
+        for (const account of vendor.payment_accounts ?? []) {
+          if (account.details?.payment_instrument_id === config.coinbaseCounterpartyId) {
+            return account.details.type;
+          }
         }
       }
-    }
+      cursor = body.next_cursor ?? undefined;
+      // Defend against a provider echoing the same cursor forever.
+      if (cursor !== undefined && seen.has(cursor)) return undefined;
+      if (cursor !== undefined) seen.add(cursor);
+    } while (cursor !== undefined);
     return undefined;
   }
 
@@ -266,19 +300,37 @@ export function createBrexTreasury(config: BrexConfig): BrexTreasury {
       }
 
       // Draw from the explicitly configured account, else the one with the most available funds.
+      // Either way the funds check runs: a configured account that cannot cover the transfer must
+      // fail here rather than at Brex, so an overdraft/NSF is never initiated on our side.
+      const activeAccounts = (await listCashAccounts())
+        .filter((account) => account.status === 'ACTIVE')
+        .sort((a, b) => b.availableCents - a.availableCents);
       let originatingAccountId = config.originatingAccountId;
       if (originatingAccountId === undefined) {
-        const accounts = (await listCashAccounts())
-          .filter((account) => account.status === 'ACTIVE')
-          .sort((a, b) => b.availableCents - a.availableCents);
-        if (accounts.length === 0 || accounts[0].availableCents < cents) {
+        if (activeAccounts.length === 0 || activeAccounts[0].availableCents < cents) {
           throw new BrexApiError(
             `no Brex cash account has ${cents} cents available`,
             0,
             'brex_insufficient_funds'
           );
         }
-        originatingAccountId = accounts[0].id;
+        originatingAccountId = activeAccounts[0].id;
+      } else {
+        const configured = activeAccounts.find((account) => account.id === originatingAccountId);
+        if (configured === undefined) {
+          throw new BrexApiError(
+            `BREX_ORIGINATING_ACCOUNT_ID ${originatingAccountId} is not an ACTIVE Brex cash account`,
+            0,
+            'brex_originating_account_not_found'
+          );
+        }
+        if (configured.availableCents < cents) {
+          throw new BrexApiError(
+            `Brex account ${originatingAccountId} has ${configured.availableCents} cents available, needs ${cents}`,
+            0,
+            'brex_insufficient_funds'
+          );
+        }
       }
 
       log.info('Initiating Brex transfer to Coinbase', {

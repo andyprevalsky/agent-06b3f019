@@ -160,5 +160,17 @@ async function main(): Promise<void> {
 
 void main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
+  // `possiblySent` distinguishes "definitely not sent" from "may already be moving". Printing only
+  // the message makes an ambiguous failure look clean, the operator re-runs with --confirm, and the
+  // retry carries a NEW idempotency key — so Brex applies no dedup and the wire goes out twice.
+  if ((error as { possiblySent?: boolean })?.possiblySent === true) {
+    console.error(
+      '\n⚠️  THIS WIRE MAY ALREADY BE IN FLIGHT. Do NOT re-run with --confirm.\n' +
+        '   A retry mints a new idempotency key, so Brex will NOT de-duplicate it and you would\n' +
+        '   wire twice. Check first:\n' +
+        '     npx tsx scripts/brex-wire.ts --status\n' +
+        '   Only re-send if the transfer is absent from that list.'
+    );
+  }
   process.exit(1);
 });

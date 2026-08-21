@@ -39,8 +39,16 @@ interface Saved {
   connected: boolean;
 }
 
-/** In-memory stand-in for repo.ts — keeps these pure unit tests with no database. */
-function fakeRepo(ownersByCardholder: Record<string, string[]>): {
+/**
+ * In-memory stand-in for repo.ts — keeps these pure unit tests with no database.
+ *
+ * Mirrors the real contract: ownership check and write are ONE atomic operation
+ * (`bindCardholderExclusively`), so the test cannot pass a shape production no longer uses.
+ */
+function fakeRepo(
+  ownersByCardholder: Record<string, string[]>,
+  existingConfig: unknown = {}
+): {
   deps: SaveOrgCardholderDeps;
   saved: Saved[];
 } {
@@ -48,14 +56,13 @@ function fakeRepo(ownersByCardholder: Record<string, string[]>): {
   return {
     saved,
     deps: {
-      async findUserIdsByCardholderId(cardholderId) {
-        return ownersByCardholder[cardholderId] ?? [];
-      },
-      async findTokenConfig() {
+      async bindCardholderExclusively(userId, cardholderId, buildConfig) {
+        const owners = ownersByCardholder[cardholderId] ?? [];
+        const conflicting = owners.find((owner) => owner !== userId);
+        if (conflicting !== undefined) return { conflictingUserId: conflicting };
+        const config = buildConfig(existingConfig);
+        saved.push({ userId, config: config as Record<string, unknown>, connected: true });
         return {};
-      },
-      async saveIntegrationConfig(userId, config, connected) {
-        saved.push({ userId, config: config as Record<string, unknown>, connected });
       },
     },
   };
@@ -127,29 +134,51 @@ async function main(): Promise<void> {
   });
 
   await check('onboarding scratch keys are cleared on promotion to org-managed', async () => {
-    const saved: Saved[] = [];
-    const deps: SaveOrgCardholderDeps = {
-      async findUserIdsByCardholderId() {
-        return [];
-      },
-      async findTokenConfig() {
-        return {
-          onboardingSessionId: 'sess_1',
-          onboardingSetupUrl: 'https://example.test/setup',
-          onboardingExpiresAt: '2026-01-01T00:00:00Z',
-          accessToken: 'keep-me',
-        };
-      },
-      async saveIntegrationConfig(userId, config, connected) {
-        saved.push({ userId, config: config as Record<string, unknown>, connected });
-      },
-    };
+    const { deps, saved } = fakeRepo(
+      { ch_3: [] },
+      {
+        onboardingSessionId: 'sess_1',
+        onboardingSetupUrl: 'https://example.test/setup',
+        onboardingExpiresAt: '2026-01-01T00:00:00Z',
+        accessToken: 'keep-me',
+      }
+    );
     await saveOrgCardholderId('user-c', 'ch_3', deps);
     const written = saved[0].config;
     assert.strictEqual(written.onboardingSessionId, undefined);
     assert.strictEqual(written.onboardingSetupUrl, undefined);
     assert.strictEqual(written.onboardingExpiresAt, undefined);
     assert.strictEqual(written.accessToken, 'keep-me', 'unrelated config must survive');
+  });
+
+  // REGRESSION: the check and the write must be ONE atomic operation. The earlier shape read
+  // owners, then wrote separately, so two concurrent binds for different users could both observe
+  // "unowned" and both succeed — commingling two users onto one wallet. No unique index can catch
+  // that after the fact, because the binding lives in a JSON column.
+  await check('ownership check and write are a single atomic call', async () => {
+    const calls: string[] = [];
+    const owners: Record<string, string[]> = { ch_race: [] };
+    const deps: SaveOrgCardholderDeps = {
+      async bindCardholderExclusively(userId, cardholderId, buildConfig) {
+        calls.push(userId);
+        // Serialized by the advisory lock in production: the second caller observes the first
+        // caller's write. Modelled here by committing before returning.
+        const existing = owners[cardholderId] ?? [];
+        const conflicting = existing.find((owner) => owner !== userId);
+        if (conflicting !== undefined) return { conflictingUserId: conflicting };
+        buildConfig({});
+        owners[cardholderId] = [...existing, userId];
+        return {};
+      },
+    };
+    await saveOrgCardholderId('user-first', 'ch_race', deps);
+    await assert.rejects(
+      () => saveOrgCardholderId('user-second', 'ch_race', deps),
+      AgentCardCardholderConflictError,
+      'the second binder must lose once the first has committed'
+    );
+    assert.deepStrictEqual(calls, ['user-first', 'user-second']);
+    assert.deepStrictEqual(owners.ch_race, ['user-first'], 'only one owner may ever be recorded');
   });
 
   if (failures.length > 0) {

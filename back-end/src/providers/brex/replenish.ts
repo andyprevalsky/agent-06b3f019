@@ -83,6 +83,25 @@ export function floatReplenishPolicyFromEnvironment(): FloatReplenishPolicy {
   if (policy.targetCents <= policy.floorCents) {
     throw new Error('COINBASE_FLOAT_TARGET_CENTS must exceed COINBASE_FLOAT_FLOOR_CENTS');
   }
+  // Reject a config that can NEVER transfer. `planFloatReplenish` caps `wanted` by both
+  // maxTransferCents and the target-floor gap; if minTransferCents exceeds either bound, every
+  // tick returns skip:'below_min_transfer'. The rail then reports "skipped" forever while the
+  // float drains and no alert fires — a permanently disabled rail that looks healthy. Fail at
+  // load time, where the operator can still see which value is wrong.
+  if (policy.minTransferCents > policy.maxTransferCents) {
+    throw new Error(
+      `COINBASE_FLOAT_MIN_TRANSFER_CENTS (${policy.minTransferCents}) must not exceed ` +
+        `COINBASE_FLOAT_MAX_TRANSFER_CENTS (${policy.maxTransferCents}); the rail could never transfer.`
+    );
+  }
+  const maxGapCents = policy.targetCents - policy.floorCents;
+  if (policy.minTransferCents > maxGapCents) {
+    throw new Error(
+      `COINBASE_FLOAT_MIN_TRANSFER_CENTS (${policy.minTransferCents}) exceeds the largest possible ` +
+        `top-up (target ${policy.targetCents} - floor ${policy.floorCents} = ${maxGapCents}); ` +
+        'the rail could never transfer.'
+    );
+  }
   return policy;
 }
 

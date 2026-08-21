@@ -45,10 +45,41 @@ const DEFAULT_MIN_TRANSFER_CENTS = 1_000; // $10 — below this, gas is not wort
 const DEFAULT_MAX_TRANSFER_CENTS = 50_000; // $500 per transfer
 const DEFAULT_DAILY_CAP_CENTS = 200_000; // $2,000 per rolling 24h
 const DAILY_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** How long a recovery may sit un-settled before we stop deferring the top-up on it. */
-const RECOVERY_SETTLE_GRACE_MS = Number(
-  process.env.AGENTCARD_RECOVERY_SETTLE_GRACE_MS ?? 15 * 60 * 1000
-);
+const DEFAULT_RECOVERY_SETTLE_GRACE_MS = 15 * 60 * 1000;
+
+/**
+ * A held claim older than this is treated as orphaned by a dead process, not as live contention.
+ * Generous relative to a real top-up (a wallet read plus one transfer), so normal contention is
+ * never mislabelled.
+ */
+const ORPHANED_CLAIM_ALERT_MS = 30 * 60 * 1000;
+
+/**
+ * How long a recovery may sit un-settled before we stop deferring the top-up on it.
+ *
+ * A bare `Number()` returns NaN for any non-numeric value, and EVERY comparison against NaN is
+ * false — so a typo in `AGENTCARD_RECOVERY_SETTLE_GRACE_MS` would silently disable the livelock
+ * guard instead of erroring. Fall back to the default (and say so) rather than shipping a guard
+ * that is quietly inert. A negative or zero value is equally rejected: it would make every pending
+ * recovery instantly "stuck" and defeat the deferral entirely.
+ */
+function resolveRecoverySettleGraceMs(
+  raw: string | undefined = process.env.AGENTCARD_RECOVERY_SETTLE_GRACE_MS
+): number {
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === '') return DEFAULT_RECOVERY_SETTLE_GRACE_MS;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    log.warn('Invalid AGENTCARD_RECOVERY_SETTLE_GRACE_MS; using default', {
+      provided: trimmed,
+      default_ms: DEFAULT_RECOVERY_SETTLE_GRACE_MS,
+    });
+    return DEFAULT_RECOVERY_SETTLE_GRACE_MS;
+  }
+  return parsed;
+}
+
+const RECOVERY_SETTLE_GRACE_MS = resolveRecoverySettleGraceMs();
 
 export interface OrgWalletTopUpPolicy {
   enabled: boolean;
@@ -341,17 +372,40 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
     availableCents: current.availableCents,
   });
   if (!claim.claimed) {
-    log.info('AgentCard org-wallet top-up already claimed; skipping', {
-      held_since: claim.heldSince?.toISOString(),
-    });
+    // A claim held far longer than any real top-up means the holder died between `claim()` and
+    // `recordSuccess`/`releaseClaim`. `claim()` never stale-clears that row by design, so the rail
+    // stays halted until an operator deletes it — and the transfer catch block never runs, so no
+    // alert would otherwise fire. Escalate to a warning (alertable) instead of an info line that
+    // repeats silently forever.
+    const heldMs =
+      claim.heldSince === undefined ? undefined : Date.now() - claim.heldSince.getTime();
+    if (heldMs !== undefined && heldMs > ORPHANED_CLAIM_ALERT_MS) {
+      log.warn('AgentCard org-wallet top-up claim appears ORPHANED; rail is halted', {
+        held_since: claim.heldSince?.toISOString(),
+        held_ms: heldMs,
+        remediation: `delete the ${TOPUP_OPERATION_TYPE} in-flight ToolSideEffect row to resume`,
+      });
+    } else {
+      log.info('AgentCard org-wallet top-up already claimed; skipping', {
+        held_since: claim.heldSince?.toISOString(),
+      });
+    }
     return { status: 'contended', ...(claim.heldSince ? { heldSince: claim.heldSince } : {}) };
   }
 
   // Re-read UNDER the claim. If we queued behind a concurrent top-up that already landed, the
   // wallet is now healthy and this send must not happen.
+  //
+  // The DAILY SPEND must be re-read here too. The pre-claim value is stale in a way the balance
+  // re-read does not cover: a previous holder can complete inside our wait window (its
+  // recordSuccess re-keys the row and frees the in-flight key), so we would re-plan against
+  // dailySpentCents=0 and exceed the rolling 24h cap. The cap is a spend total, not a balance
+  // check, so a healthier balance does not restore its bound.
   let confirmed: AgentCardOrgWallet;
+  let confirmedDailySpentCents: number;
   try {
     confirmed = extractAgentCardOrgWallet(await deps.callOrgTool('get_company_wallet', {}));
+    confirmedDailySpentCents = await deps.store.dailySpentCents();
   } catch (error) {
     await deps.store.releaseClaim();
     throw error;
@@ -360,7 +414,7 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
     policy: deps.policy,
     wallet: confirmed,
     floatCents,
-    dailySpentCents,
+    dailySpentCents: confirmedDailySpentCents,
   });
   if (replan.action !== 'transfer') {
     await deps.store.releaseClaim();
