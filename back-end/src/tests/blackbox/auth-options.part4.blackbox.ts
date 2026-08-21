@@ -45,8 +45,23 @@ async function cleanup(userId: string) {
   await prisma.browserPassword.deleteMany({ where: { userId } });
   await prisma.steelSessionAuth.deleteMany({ where: { userId } });
   await prisma.mintedAccount.deleteMany({ where: { userId } });
+  await prisma.passkeyCredential.deleteMany({ where: { userId } });
   await prisma.browserContext.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
+}
+
+async function createPasskey(userId: string, authRealm: string) {
+  return prisma.passkeyCredential.create({
+    data: {
+      userId,
+      authRealm,
+      rpId: authRealm,
+      credentialId: `cred-${randomUUID()}`,
+      encryptedPrivateKey: 'enc-stub',
+      userHandle: 'uh-stub',
+      signCount: 0,
+    },
+  });
 }
 
 async function createBundleWithCookie(params: {
@@ -84,6 +99,24 @@ async function createBundleWithCookie(params: {
   });
   return bundle;
 }
+
+test('browser agent loads normal and SSO passkeys lazily by the active realm', async () => {
+  const userId = await createUser();
+  try {
+    const normal = await createPasskey(userId, 'amazon.com');
+    const sso = await createPasskey(userId, 'google.com');
+
+    const initial = await getAuthOptions(userId, 'https://www.amazon.com/ap/signin');
+    assert(initial.passkeys.length === 1, 'initial realm must not eagerly load SSO passkeys');
+    assert(initial.passkeys[0].id === normal.id, 'expected the normal-site passkey at startup');
+
+    const transitioned = await getAuthOptions(userId, 'https://accounts.google.com/v3/signin');
+    assert(transitioned.passkeys.length === 1, 'expected one passkey after the SSO transition');
+    assert(transitioned.passkeys[0].id === sso.id, 'expected the Google passkey in Google realm');
+  } finally {
+    await cleanup(userId);
+  }
+});
 
 test('benchmark anon auth options hide saved auth and expose minted identity', async () => {
   const userId = await createUser('Rose Harbor');

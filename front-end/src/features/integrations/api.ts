@@ -3,6 +3,7 @@ import { getStoredSession } from '@/lib/supabase';
 import { API_BASE_URL, API_BASE_WITH_PATH } from './config';
 import type {
   ConnectedIntegration,
+  GmailResyncResult,
   PlaidItem,
   PlaidLinkSuccessMetadata,
   PlaidLinkTokenResponse,
@@ -76,6 +77,29 @@ export async function startGmailOAuthApi(returnUrl?: string): Promise<{ authUrl:
     throw new Error(payload?.error || 'Failed to start email connection');
   }
   return payload;
+}
+
+/**
+ * Repair one damaged Gmail account.
+ *
+ * The server decides whether the break is transient (a retry it just performed)
+ * or terminal (`needsReauth`, meaning the caller must run the OAuth flow).
+ */
+export async function resyncGmailAccountApi(email: string): Promise<GmailResyncResult> {
+  const headers = getAuthHeaders();
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/integrations/email/gmail/accounts/${encodeURIComponent(email)}/resync`,
+    {
+      method: 'POST',
+      headers,
+    },
+  );
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(payload?.error || 'Failed to reconnect Gmail account');
+  }
+  return payload as GmailResyncResult;
 }
 
 export async function disconnectGmailAccountApi(email: string): Promise<void> {
@@ -239,4 +263,101 @@ export async function completePlaidUpdateModeApi(itemId: string): Promise<{ item
     },
   );
   return plaidJsonOrThrow<{ item: PlaidItem }>(response, 'Complete Plaid update mode');
+}
+
+// --- compute accounts (multi-account Claude / Codex) -------------------------
+//
+// Mirrors the Gmail account model: the user connects N accounts per provider and
+// each renders as a removable chip. Only CONNECTIONS are exposed -- the grants
+// behind them are minted and replaced automatically, so surfacing them would
+// invite users to act on something the system already heals.
+
+export interface ComputeAccount {
+  provider: string;
+  accountId: string;
+  accountEmail: string | null;
+  /** "connected" | "needs_reconnect" -- the only user-actionable state. */
+  state: string;
+  lastErrorReason: string | null;
+  connectedAt: string;
+}
+
+export interface ConnectSessionHandle {
+  connectId: string;
+  provider: string;
+  /** Live view the user signs into. */
+  liveViewUrl: string | null;
+  expiresAt: string;
+}
+
+export interface ConnectPollResult {
+  state: 'pending' | 'connected' | 'expired' | 'unknown';
+  /** Sent once the cloud browser has booted; null while still provisioning. */
+  liveViewUrl?: string | null;
+  /**
+   * Fine-grained progress for the connect modal. Only the server knows which
+   * step it is on (browser boot, cookie restore, page load, minting), so this
+   * comes over the wire rather than being guessed client-side.
+   */
+  stage?:
+    | 'creating_browser'
+    | 'restoring_session'
+    | 'loading_authorize'
+    | 'awaiting_human'
+    | 'capturing'
+    | 'minting'
+    | 'connected';
+  accountEmail?: string;
+  accountId?: string;
+  reason?: string;
+}
+
+export async function fetchComputeAccounts(provider?: string): Promise<ComputeAccount[]> {
+  const qs = provider === undefined ? '' : `?provider=${encodeURIComponent(provider)}`;
+  const res = await fetch(`${API_BASE_URL}/api/compute-accounts${qs}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error(`Failed to load compute accounts (${res.status})`);
+  const body = (await res.json()) as { accounts: ComputeAccount[] };
+  return body.accounts;
+}
+
+export async function startComputeConnect(provider: string): Promise<ConnectSessionHandle> {
+  const res = await fetch(`${API_BASE_URL}/api/compute-accounts/connect`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ provider }),
+  });
+  if (!res.ok) throw new Error(`Failed to start sign-in (${res.status})`);
+  return (await res.json()) as ConnectSessionHandle;
+}
+
+export async function pollComputeConnect(connectId: string): Promise<ConnectPollResult> {
+  const res = await fetch(
+    `${API_BASE_URL}/api/compute-accounts/connect/${encodeURIComponent(connectId)}`,
+    { headers: getAuthHeaders() },
+  );
+  if (!res.ok) throw new Error(`Failed to poll sign-in (${res.status})`);
+  return (await res.json()) as ConnectPollResult;
+}
+
+/**
+ * Abandon a sign-in. Called on cancel AND on unmount: the remote browser bills
+ * until released, and users abandon sign-in far more often than they finish it.
+ */
+export async function cancelComputeConnect(connectId: string): Promise<void> {
+  await fetch(`${API_BASE_URL}/api/compute-accounts/connect/${encodeURIComponent(connectId)}`, {
+    method: 'DELETE',
+    headers: getAuthHeaders(),
+  }).catch(() => undefined);
+}
+
+export async function removeComputeAccount(provider: string, accountId: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE_URL}/api/compute-accounts/${encodeURIComponent(provider)}/${encodeURIComponent(accountId)}`,
+    { method: 'DELETE', headers: getAuthHeaders() },
+  );
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`Failed to remove account (${res.status})`);
+  }
 }

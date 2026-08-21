@@ -155,8 +155,10 @@ def post(path, body, method="POST"):
         method=method)
     opener.open(req, timeout=20).read()
 
+# Poll first, then sleep. Sleeping before the first inspect lost the live
+# snapshot under coverage load: the stub can finish and reap this loop during
+# the initial interval wait, so POST /runs?live=1 never reaches the hub.
 while True:
-    time.sleep(snapshot_interval)
     try:
         # Only inspect this request's output root. Mtime alone is not ownership:
         # another benchmark producer can write a newer canonical artifact while
@@ -165,38 +167,37 @@ while True:
                  glob.glob(os.path.join(local_artifact_root, "report-card.json")) +
                  glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "report-card.json"))
                  if os.path.getmtime(p) > start]
-        if not cards:
-            continue
-        card = json.load(open(max(cards, key=os.path.getmtime)))
-        actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
-        if actual != expected:
-            continue
-        tasks = []
-        for row in card.get("per_task") or []:
-            url = row.get("agent_url") or ""
-            agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
-            dur = row.get("duration_s")
-            cost = row.get("cost_usd")
-            tasks.append({
-                "name": row.get("name"), "status": row.get("status") or "running",
-                "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
-                "agent_id": agent_id, "duration_seconds": dur,
-                "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
-                "world_model_mode": row.get("world_model_mode"),
-                "fast_mode": bool(row.get("fast_mode")),
-            })
-        bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
-                  "source": "hub-poller", "tasks": tasks,
-                  "code": os.environ.get("HUB_CODE_SUMMARY") or None,
-                  "elapsed_s": card.get("elapsed_s"),
-                  "cost": card.get("cost"), "metadata": card.get("metadata")}
-        post("/api/benchmarks/runs?live=1", bundle)
-        # the run-request update route is PATCH-only (urllib defaults data= to POST)
-        post(f"/api/benchmarks/run-requests/{req_id}",
-             {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
+        if cards:
+            card = json.load(open(max(cards, key=os.path.getmtime)))
+            actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
+            if actual == expected:
+                tasks = []
+                for row in card.get("per_task") or []:
+                    url = row.get("agent_url") or ""
+                    agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
+                    dur = row.get("duration_s")
+                    cost = row.get("cost_usd")
+                    tasks.append({
+                        "name": row.get("name"), "status": row.get("status") or "running",
+                        "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
+                        "agent_id": agent_id, "duration_seconds": dur,
+                        "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+                        "world_model_mode": row.get("world_model_mode"),
+                        "fast_mode": bool(row.get("fast_mode")),
+                    })
+                bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
+                          "source": "hub-poller", "tasks": tasks,
+                          "code": os.environ.get("HUB_CODE_SUMMARY") or None,
+                          "elapsed_s": card.get("elapsed_s"),
+                          "cost": card.get("cost"), "metadata": card.get("metadata")}
+                post("/api/benchmarks/runs?live=1", bundle)
+                # the run-request update route is PATCH-only (urllib defaults data= to POST)
+                post(f"/api/benchmarks/run-requests/{req_id}",
+                     {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
     except Exception as error:
         # Snapshot upload is best-effort; the terminal result remains authoritative.
         print(f"snapshot upload failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+    time.sleep(snapshot_interval)
 PY
 }
 

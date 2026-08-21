@@ -40,12 +40,10 @@ interface TerminalHeaderProps {
   onLogout: () => void;
   isSignedIn: boolean;
   clientSource: string;
-  realtimeReady: boolean;
   agents: Agent[];
   isLoadingAgents: boolean;
   selectedAgentId: string | null;
-  onResumeAgent: (agentId: string) => Promise<void>;
-  resumingAgentId: string | null;
+  onRefreshAgents: () => void | Promise<void>;
   dripStyles: DripStyles;
   blur: number;
   backgroundColors: number;
@@ -141,8 +139,7 @@ function HeaderAuthAction({
   isSignedIn,
   onLoginClick,
   onSelectAgent,
-  realtimeReady,
-}: Pick<TerminalHeaderProps, 'isSignedIn' | 'onLoginClick' | 'onSelectAgent' | 'realtimeReady'>) {
+}: Pick<TerminalHeaderProps, 'isSignedIn' | 'onLoginClick' | 'onSelectAgent'>) {
   return (
     <>
       {!isSignedIn && (
@@ -155,7 +152,7 @@ function HeaderAuthAction({
         </button>
       )}
       <div className={cn(!isSignedIn && 'hidden md:block')}>
-        <AttentionInbox onSelectAgent={onSelectAgent} realtimeReady={realtimeReady} />
+        <AttentionInbox onSelectAgent={onSelectAgent} />
       </div>
     </>
   );
@@ -163,7 +160,7 @@ function HeaderAuthAction({
 
 /** Desktop (>= md): the original floating blur pill — brand + AttentionInbox bell. */
 function DesktopHeaderPill(props: TerminalHeaderProps) {
-  const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn, realtimeReady } = props;
+  const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn } = props;
   const { dripStyles, blur, backgroundColors, borderColor, shadowIntensity } = props;
   return (
     <header
@@ -176,7 +173,6 @@ function DesktopHeaderPill(props: TerminalHeaderProps) {
         isSignedIn={isSignedIn}
         onLoginClick={onLoginClick}
         onSelectAgent={onSelectAgent}
-        realtimeReady={realtimeReady}
       />
     </header>
   );
@@ -195,12 +191,10 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
     onLogout,
     isSignedIn,
     clientSource,
-    realtimeReady,
     agents,
     isLoadingAgents,
     selectedAgentId,
-    onResumeAgent,
-    resumingAgentId,
+    onRefreshAgents,
   } = props;
   return (
     <header className="fixed inset-x-0 top-0 z-50 grid h-[var(--mobile-terminal-header-height)] grid-cols-3 items-center border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md">
@@ -217,9 +211,7 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
           selectedAgentId={selectedAgentId}
           onSelectAgent={onSelectAgent}
           onCreateAgent={onCreateNewAgent}
-          onResumeAgent={onResumeAgent}
-          resumingAgentId={resumingAgentId}
-          realtimeReady={realtimeReady}
+          onRefreshAgents={onRefreshAgents}
           isSignedIn={isSignedIn}
           onLoginClick={onLoginClick}
           onLogout={onLogout}
