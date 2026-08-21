@@ -11,9 +11,13 @@ import {
 } from './codeAgentFastModeEnv';
 import { FilePointer, downloadFromStorage } from './storage';
 import { v4 as uuidv4 } from 'uuid';
-import { fetchClaudeCodeCredentialsWithMeta } from './claudeCredentials';
+import { fetchClaudeCodeCredentialsWithMeta, type ClaudeCodeCredentialResult } from './claudeCredentials';
 import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
-import { fetchGptCodeCredentialsWithMeta, isGptApiKeyOnCooldown } from './gptCredentials';
+import {
+  fetchGptCodeCredentialsWithMeta,
+  isGptApiKeyOnCooldown,
+  type GptCodeCredentialEnvelopeResult,
+} from './gptCredentials';
 import {
   buildCodeAgentSystemPrompt,
   CODE_AGENT_ATTACHMENTS_DIR,
