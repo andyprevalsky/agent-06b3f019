@@ -3074,6 +3074,92 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
+    """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
+
+    Local repro: browser-agent-amazon-cookie-payment agent
+    b87b27c5-a055-41bf-ab63-8d2e90547f04 reached a grounded Amazon purchase write_lock
+    after `Cannot humanize input_text … no coordinates available` (CDP: no node for
+    backend id 87012), then failed only on no_tool_failures.
+
+    Outcome-proof agent 3cb17215-4a2a-4a13-8afb-52d087da0e27 showed the same class on
+    click (`Cannot humanize click …`); live GET payloads carry the body in `text`,
+    while archived transcripts remap to `message` — both shapes must classify.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                # Live agent GET shape (API field name).
+                "text": "Cannot humanize input_text for element index 87012: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": 'Typed \'[encrypted_data]\' into <input name="password">',
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_4CoEgNcqTgih86rhKhCOCU88",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "Cannot humanize click for element index 91731: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": "Clicked <input #signInSubmit>",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_u8k10geKSNi8U0RrsOGEM1Dr",
+                },
+            },
+            {
+                "role": "TOOL",
+                # Archived run-JSON shape after extract_message_transcript.
+                "message": "No node found for given backend id",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_stale_backend_node",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "write_lock",
+                    "toolCallId": "call_write_lock_ok",
+                    "title": "Purchase write lock requested",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_fails = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Kernel session crashed mid-checkout",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "toolCallId": "call_real_failure",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_fails) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -4413,15 +4499,17 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     import benchmarks.run_benchmark as bench
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
     raised = False
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         # Mirror the real signatures: _apply_live_fixture calls
-        # _sync_compute_tokens(tolerate_gpt_code_unavailable=True) and
+        # _sync_compute_tokens → _sync_email_credentials →
         # _sync_browser_credentials(ctx.cookie_domains).
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         bench._sync_browser_credentials = lambda *_a, **_k: False
         bench._apply_live_fixture(
             bench.LiveFixtureContext(
@@ -4434,6 +4522,7 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
         raised = "browser auth" in str(exc).lower()
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         if original_mode is None:
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
@@ -4528,6 +4617,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     }
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_sql = bench._run_local_victoria_sql
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
@@ -4555,6 +4645,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         # The sync COMMAND succeeds — exactly the state that misreported the outage.
         bench._sync_browser_credentials = lambda *_a, **_k: True
         bench._run_local_victoria_sql = fake_sql
@@ -4605,6 +4696,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
         assert sql_calls == []
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         bench._run_local_victoria_sql = original_sql
         if original_mode is None:
@@ -4650,6 +4742,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
     with (
         patch.object(bench, "_is_simulate_mode", return_value=False),
         patch.object(bench, "_sync_compute_tokens", return_value=True),
+        patch.object(bench, "_sync_email_credentials", return_value=True),
         patch.object(bench, "_sync_browser_credentials", side_effect=fake_sync_browser_credentials),
         patch.object(bench, "_live_cookie_domain_credential_summary", side_effect=fake_credential_summary),
     ):
@@ -7008,6 +7101,63 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.44."))
     assert passed is False
     assert "ratchet" in reason.lower()
+
+
+def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
+    """Regex pattern order must not let a prompt example replace the grounded result.
+
+    Browser task instructions contain examples such as ``0.85 / 1.0`` followed by
+    ``risk score``. The evaluator used to append all forward-regex matches and then all
+    reverse-regex matches, so that example became the last score even though the
+    terminal browser row carried a grounded structured response.
+    """
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Task instructions: record the score exactly as shown, for example "
+                    '"0.12", "12", "0.85 / 1.0", "risk score: 42".'
+                ),
+                "created_at": "2026-08-21T01:49:49.633Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_started",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Extracted Output: Risk Score: 0.09."
+                ),
+                "created_at": "2026-08-21T01:51:52.088Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "structured_response": {
+                        "risk_score": "0.09",
+                        "checkbox_passed": True,
+                        "invisible_form_submitted": True,
+                        "verdict_text": "Verified!; Form submission allowed!",
+                    },
+                },
+            },
+        ]
+    }
+
+    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+
+    data["messages"][1]["metadata"]["structured_response"]["risk_score"] = "0.91"
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "structured output risk score 0.910 exceeds ratchet" in reason
 
 
 def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded():
@@ -11493,6 +11643,7 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
     assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
     assert get_task_by_name("browser-smoke").min_steps == {"browser": 1}
+    assert get_task_by_name("cache-coverage").min_steps == {"browser": 2}
     assert get_task_by_name("chat-mode").min_steps == {}
 
     base = {"name": "min-steps-contract", "bench": "rose-bench"}
@@ -11557,6 +11708,158 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert counts == {"browser": {"browser-task": 1}}
     assert task.min_steps == {"browser": 1}
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
+    """cache-coverage's example.com heading read is goto+evaluate; default min_steps=5 is wrong."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("cache-coverage")
+    browser_id = "4eaa7d1f-fade-4db5-9fff-1a6bb9ab6891"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_browser_agent",
+                        "type": "browser",
+                        "tool_call_id": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "goto",
+                "steps_taken": 0,
+                "toolStatus": "FINISHED",
+                "title": "Navigated → https://example.com",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "toolu_01Pv8PTgDN1gpibr4Uq98HRc",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "evaluate",
+                "steps_taken": 1,
+                "toolStatus": "FINISHED",
+                "title": "evaluate",
+                "text": "Executed JS, result: Example Domain",
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+    assert (
+        _validate_agent_class_min_steps({"browser": 5}, counts)
+        == (
+            f"Browser agent {browser_id} recorded 2 trajectory step(s); "
+            "expected at least 5 per browser agent"
+        )
+    )
+
+
+def test_live_fixture_refreshes_email_credentials_before_browser_auth():
+    """cache-coverage message_person needs from_email; live overlay must sync email rows."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    calls: list[str] = []
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: calls.append("compute") or True
+        bench._sync_email_credentials = lambda: calls.append("email") or True
+        bench._sync_browser_credentials = lambda *_a, **_k: calls.append("browser") or True
+        manifest = bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert calls == ["compute", "email", "browser"]
+    assert manifest == {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
+
+
+def test_live_fixture_fails_closed_when_email_credentials_refresh_fails():
+    """A frozen dump without usable Gmail tokens must abort before the agent runs."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: False
+        bench._sync_browser_credentials = lambda *_a, **_k: True
+        bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "email credentials" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "live fixture must fail closed when email credential refresh fails"
+
+
+def test_message_person_tasks_refresh_email_credentials_in_local_preflight():
+    """Local runs with message_person must overlay email creds after compute tokens."""
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("cache-coverage")
+    assert "message_person" in task.expected_tools
+    source = inspect.getsource(bench.main_async)
+    assert "_sync_email_credentials" in source
+    assert 'any("message_person" in (t.expected_tools or []) for t in tasks)' in source
 
 
 def test_payment_abandonment_accepts_captured_two_step_trajectory():
@@ -13365,6 +13668,10 @@ async def run_all_tests():
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
     )
     r.record(
+        "webdecoy_biometrics_grounded_result_precedence",
+        test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples,
+    )
+    r.record(
         "webdecoy_biometrics_exact_network_score",
         test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded,
     )
@@ -13886,6 +14193,10 @@ async def run_all_tests():
         "declared_static_no_tool_failures_ignores_challenge_recovery",
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
     )
+    r.record(
+        "declared_static_no_tool_failures_ignores_stale_dom_node",
+        test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
+    )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
         test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_approval,
@@ -14056,6 +14367,22 @@ async def run_all_tests():
     r.record(
         "browser_smoke_single_step_trajectory",
         test_browser_smoke_accepts_captured_single_step_trajectory,
+    )
+    r.record(
+        "cache_coverage_two_step_browser_trajectory",
+        test_cache_coverage_accepts_captured_two_step_browser_trajectory,
+    )
+    r.record(
+        "live_fixture_refreshes_email_credentials",
+        test_live_fixture_refreshes_email_credentials_before_browser_auth,
+    )
+    r.record(
+        "live_fixture_fails_closed_email_credentials",
+        test_live_fixture_fails_closed_when_email_credentials_refresh_fails,
+    )
+    r.record(
+        "message_person_tasks_refresh_email_credentials",
+        test_message_person_tasks_refresh_email_credentials_in_local_preflight,
     )
     r.record(
         "payment_abandonment_two_step_trajectory",
