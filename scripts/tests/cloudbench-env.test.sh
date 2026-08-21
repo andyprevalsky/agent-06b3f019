@@ -1679,8 +1679,18 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'return "$sync_rc"' \
   "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
 
-# --single-box must print the parallel-safety rejection even in a scripts-only
-# sandbox (no agents/), matching cloudbench-multi-workstream scenario 14.
+# --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
+# (cloudbench-multi scenario 14) and cement ordering vs the production-only
+# classifier so a missing tasks.json never swallows the parallel-safety message.
+python3 - "$ROOT_DIR/scripts/run-bench" <<'PY' || fail "run-bench --single-box must precede production-only classifier"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+sb = text.find('[[ "${1:-}" == "--single-box" ]]')
+prod = text.find("cloudbench-production-only-tasks.py")
+if sb < 0 or prod < 0 or not (sb < prod):
+    raise SystemExit(f"single-box at {sb}, production-only at {prod}")
+PY
 single_box_root="$TMP_ROOT/scripts-only-sandbox"
 mkdir -p "$single_box_root"
 cp -R "$ROOT_DIR/scripts" "$single_box_root/scripts"

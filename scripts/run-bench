@@ -9,7 +9,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # box, which is NOT parallel-safe — two worktrees collide on the same machine and
 # whichever stops it kills the other's in-flight run. The default fleet path
 # already isolates each bench on its own cloned machine, so a single bench is
-# just `run-bench <task>`. (run-bench-cloud enforces the same guard directly.)
+# just `run-bench <task>`. Reject at arg-parse time BEFORE cd/catalog/Fly work
+# (cloudbench-multi scenario 14; run-bench-cloud enforces the same guard).
 if [[ "${1:-}" == "--single-box" ]]; then
     echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
     echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
@@ -50,23 +51,6 @@ fi
 if [[ "${1:-}" == "--local" ]]; then
     shift
     exec "$PY" -u benchmarks/local.py "$@"
-fi
-
-# --single-box is DISABLED: it ran every task directly on the ONE shared warm
-# box, which is NOT parallel-safe — two worktrees collide on the same machine and
-# whichever stops it kills the other's in-flight run. Reject it before the
-# production-only classifier sees the legacy dispatcher flag, so the safety
-# explanation is preserved even when the task name is not in the catalog or the
-# multi-workstream sandbox has no tasks.json (scenario 14 requires the rejection
-# message to include "parallel-safe").
-# The default fleet path already isolates each bench on its own cloned machine,
-# so a single bench is just `run-bench <task>`. (run-bench-cloud enforces the
-# same guard directly.)
-if [[ "${1:-}" == "--single-box" ]]; then
-    echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
-    echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
-    echo "       bash scripts/run-bench <task...>" >&2
-    exit 2
 fi
 
 # Production-only tasks hit live Temporal/API (roselabs / Render). They must not

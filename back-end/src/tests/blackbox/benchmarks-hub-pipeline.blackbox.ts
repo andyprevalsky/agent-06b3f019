@@ -33,7 +33,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { config } from 'dotenv';
-import { writeForeignArtifactRunner, writeStubRunner } from './benchmarks-hub-pipeline.support';
+import {
+  writeForeignArtifactRunner,
+  writeGatedStubRunner,
+  writeStubRunner,
+} from './benchmarks-hub-pipeline.support';
 
 config();
 
@@ -431,7 +435,7 @@ async function legForeignArtifactIsolation(tmp: string): Promise<void> {
 }
 
 async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
-  const stub = writeStubRunner(tmp, 'pass');
+  const { gateFile, stub } = writeGatedStubRunner(tmp);
   const pollerLog = path.join(tmp, 'poller-snapshot-teardown.log');
   let runId: string | null = null;
   let poller: ChildProcess | null = null;
@@ -509,8 +513,23 @@ async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
     const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
 
-    poller = startPoller(stub, pollerLog, proxyUrl);
+    poller = startPoller(stub, pollerLog, proxyUrl, false, {
+      HUB_PIPELINE_RUNNER_GATE_FILE: gateFile,
+    });
     await within('snapshot upload enters proxy', 30_000, async () => snapshotStarted || null);
+    const finalArtifact = path.join(
+      REPO_ROOT,
+      'agents',
+      '.context',
+      'benchmarks',
+      request.runId!,
+      'run.json'
+    );
+    assert(
+      !fs.existsSync(finalArtifact),
+      'gated runner wrote final artifacts before the snapshot rendezvous released it'
+    );
+    fs.writeFileSync(gateFile, 'release\n');
     await awaitStatus(request.id, 'completes after snapshot cancel', 60_000, 'completed');
     assert(terminalSeen, 'terminal completion PATCH never reached the hub');
     // Release the exact blocked request immediately instead of waiting for a
@@ -622,6 +641,19 @@ async function legProductionDefaultsRemainPinned(): Promise<void> {
     pollerSource.includes('math.isfinite(snapshot_interval)') &&
       pollerSource.includes('0 < snapshot_interval <= 3600'),
     'snapshot interval must reject non-finite and oversized sleep values'
+  );
+  // Sleep-before-first-poll reaped the uploader before POST /runs?live=1 under
+  // deploy coverage load. The loop must inspect artifacts before sleeping.
+  const snapshotLoop = pollerSource.slice(
+    pollerSource.indexOf('snapshot_loop()'),
+    pollerSource.indexOf('kill_snapshot_loop()')
+  );
+  const whileIdx = snapshotLoop.indexOf('while True:');
+  const sleepIdx = snapshotLoop.indexOf('time.sleep(snapshot_interval)');
+  const tryIdx = snapshotLoop.indexOf('try:');
+  assert(
+    whileIdx !== -1 && tryIdx !== -1 && sleepIdx !== -1 && whileIdx < tryIdx && tryIdx < sleepIdx,
+    'snapshot_loop must poll (try) before sleeping on each cadence'
   );
   assert(
     pollerSource.includes(
