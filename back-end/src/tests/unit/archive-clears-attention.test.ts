@@ -25,11 +25,11 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
   try {
     await fn();
     passed += 1;
-    console.log(`  PASS ${name}`);
+    process.stdout.write(`  PASS ${name}\n`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     failures.push(`${name}: ${message}`);
-    console.log(`  FAIL ${name} - ${message}`);
+    process.stdout.write(`  FAIL ${name} - ${message}\n`);
   }
 }
 
@@ -162,9 +162,9 @@ async function main(): Promise<void> {
     }
   });
 
-  console.log(`\nResults: ${passed} passed, ${failures.length} failed`);
+  process.stdout.write(`\nResults: ${passed} passed, ${failures.length} failed\n`);
   if (failures.length > 0) {
-    for (const failure of failures) console.error(`  - ${failure}`);
+    for (const failure of failures) process.stderr.write(`  - ${failure}\n`);
     process.exitCode = 1;
   }
 }
