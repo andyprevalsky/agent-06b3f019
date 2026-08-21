@@ -4349,7 +4349,8 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
         "Alchemy Springs",
         "Alchemy Sauna Garden",
     ]
-    assert task.expected_tool_counts == {"spawn_agent": 1}
+    assert task.expected_tools == ["spawn_browser_agent"]
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
