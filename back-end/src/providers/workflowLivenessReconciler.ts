@@ -75,6 +75,8 @@ export interface WorkflowLivenessDependencies {
   now: () => number;
   batchSize: number;
   concurrency: number;
+  finalizeInterruptedTools: typeof finalizeInterruptedWorkflowTools;
+  releaseBrowserSessions: typeof releaseAgentBrowserSessions;
 }
 
 function defaultDependencies(): WorkflowLivenessDependencies {
@@ -92,6 +94,8 @@ function defaultDependencies(): WorkflowLivenessDependencies {
     now: () => Date.now(),
     batchSize: DEFAULT_BATCH_SIZE,
     concurrency: DEFAULT_CONCURRENCY,
+    finalizeInterruptedTools: finalizeInterruptedWorkflowTools,
+    releaseBrowserSessions: releaseAgentBrowserSessions,
   };
 }
 
@@ -126,7 +130,11 @@ export async function findLivenessCandidates(
  * non-terminal, so a concurrent reconciler or a late in-workflow write wins
  * without producing a second transition.
  */
-async function sealAgent(candidate: LivenessCandidate, temporalStatus: string): Promise<boolean> {
+async function sealAgent(
+  candidate: LivenessCandidate,
+  temporalStatus: string,
+  deps: Pick<WorkflowLivenessDependencies, 'finalizeInterruptedTools' | 'releaseBrowserSessions'>
+): Promise<boolean> {
   // Reconcile the generation that actually died — `candidate.workflowId` — not the
   // agent id. They differ for every agent that already survived a deploy
   // (`<agentId>:replacement:<token>`), and chips plus attention requests are both
@@ -150,11 +158,15 @@ async function sealAgent(candidate: LivenessCandidate, temporalStatus: string): 
   if (count === 0) return false;
 
   // Close dangling IN_PROGRESS chips and open approvals so the UI settles too.
-  await finalizeInterruptedWorkflowTools(candidate.agentId, candidate.workflowId, inProgressTools);
-  // This seal writes the row directly, so it bypasses `updateAgentStatus`'s terminal
-  // hook. Release the rented browser here too, or an out-of-band kill leaves a
-  // provider session running forever (prod agent bfcfc074-0e61-41ef-b072-23376583b85a).
-  await releaseAgentBrowserSessions(candidate.agentId);
+  try {
+    await deps.finalizeInterruptedTools(candidate.agentId, candidate.workflowId, inProgressTools);
+  } finally {
+    // This seal writes the row directly, so it bypasses `updateAgentStatus`'s
+    // terminal hook. Cleanup of chips and approvals is best effort with respect
+    // to releasing the rented browser: a failure there must never leak a provider
+    // session after the row has already been sealed.
+    await deps.releaseBrowserSessions(candidate.agentId);
+  }
   log.warn('Sealed agent whose workflow was already closed', {
     agentId: candidate.agentId,
     workflowId: candidate.workflowId,
@@ -207,7 +219,7 @@ export async function reconcileWorkflowLiveness(
     const normalized = temporalStatus.replace(/^WORKFLOW_EXECUTION_STATUS_/, '').toUpperCase();
     if (normalized !== 'NOT_FOUND' && !CLOSED_TEMPORAL_STATUSES.has(normalized)) return;
 
-    if (await sealAgent(candidate, normalized)) sealed++;
+    if (await sealAgent(candidate, normalized, deps)) sealed++;
   });
 
   if (sealed > 0 || inconclusive > 0) {

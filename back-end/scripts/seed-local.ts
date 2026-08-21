@@ -38,6 +38,7 @@ import {
 } from './cookie-domain-scope';
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
 import { streamCookies, streamJsonbOrigins, type JsonbOriginTable } from './seed-jsonb-stream';
+import { createRetryableProbe } from './retryable-probe';
 import {
   SEED_PEAK_RSS_BUDGET_MB,
   SEED_RSS_REPORT_ENV,
@@ -369,18 +370,16 @@ type ProdIntegrationRow = Prisma.IntegrationGetPayload<{
   select: typeof PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT;
 }>;
 
-let remoteIntegrationAccountColumnsProbe: Promise<boolean> | undefined;
-
-async function remoteHasIntegrationAccountColumns(): Promise<boolean> {
-  remoteIntegrationAccountColumnsProbe ??= remote.$queryRaw<Array<{ columnCount: number }>>`
+const remoteHasIntegrationAccountColumns = createRetryableProbe(async () => {
+  const rows = await remote.$queryRaw<Array<{ columnCount: number }>>`
       SELECT COUNT(*)::int AS "columnCount"
       FROM information_schema.columns
       WHERE table_schema = current_schema()
         AND table_name = 'Integration'
         AND column_name IN ('accountId', 'accountEmail')
-    `.then((rows) => rows[0]?.columnCount === 2);
-  return remoteIntegrationAccountColumnsProbe;
-}
+    `;
+  return rows[0]?.columnCount === 2;
+});
 
 async function findProdIntegrations(
   where: Prisma.IntegrationWhereInput

@@ -75,11 +75,22 @@ export type AuthAssistanceCompletionResult =
       workflowId: string;
     };
 
+export interface AuthAssistanceCompletionDependencies {
+  signalCompleted: typeof signalAuthAssistanceCompleted;
+  resumeAgent: typeof resumeAgentWorkflow;
+}
+
 export async function completeAuthAssistanceForUser(
   id: string,
   userId: string,
-  now = new Date()
+  now = new Date(),
+  overrides: Partial<AuthAssistanceCompletionDependencies> = {}
 ): Promise<AuthAssistanceCompletionResult> {
+  const deps: AuthAssistanceCompletionDependencies = {
+    signalCompleted: signalAuthAssistanceCompleted,
+    resumeAgent: resumeAgentWorkflow,
+    ...overrides,
+  };
   const result = await runTransactionWithRetry(async (tx) => {
     const request = await tx.userAuthAssistanceRequest.findUnique({
       where: { id },
@@ -221,12 +232,21 @@ export async function completeAuthAssistanceForUser(
       where: { id, userResponse: null },
       data: { userResponse: AUTH_ASSISTANCE_COMPLETED_RESPONSE },
     });
+    const persistedAttention =
+      answered.count === 0
+        ? await tx.agentAttentionRequest.findUnique({
+            where: { id },
+            select: { userResponse: true },
+          })
+        : null;
 
     return {
       status: 'completed' as const,
       request: completed,
       steelSessionAuthId,
-      interrupted: answered.count === 0,
+      interrupted:
+        answered.count === 0 &&
+        persistedAttention?.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
       workflowId: request.attentionRequest.workflowId,
     };
   });
@@ -263,13 +283,9 @@ export async function completeAuthAssistanceForUser(
         workflow_id: result.workflowId,
       });
     } else {
-      await signalAuthAssistanceCompleted(
-        result.workflowId,
-        result.request.agentId,
-        result.request.id
-      );
+      await deps.signalCompleted(result.workflowId, result.request.agentId, result.request.id);
     }
-    await resumeAgentWorkflow(result.request.agentId);
+    await deps.resumeAgent(result.request.agentId);
   }
 
   if (result.status === 'already_completed') {
@@ -280,14 +296,10 @@ export async function completeAuthAssistanceForUser(
         workflow_id: result.workflowId,
       });
     } else {
-      await signalAuthAssistanceCompleted(
-        result.workflowId,
-        result.request.agentId,
-        result.request.id
-      );
+      await deps.signalCompleted(result.workflowId, result.request.agentId, result.request.id);
     }
     try {
-      await resumeAgentWorkflow(result.request.agentId);
+      await deps.resumeAgent(result.request.agentId);
     } catch (error) {
       log.warn('Failed to resume already-completed auth assistance request', {
         request_id: result.request.id,
