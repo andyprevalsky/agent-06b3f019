@@ -6316,12 +6316,52 @@ async def test_upload_file_to_session_success():
             # assert multipart file shape
             assert "files" in kw
             assert kw["files"]["file"][0] == "f.pdf"
+            assert kw.get("data") is None
             return _Resp()
 
     with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
         cfg = _fake_config()
         out = await repo.upload_file_to_session(cfg, "s1", "f.pdf", b"PDFDATA", "application/pdf")
     assert out == {"path": "/tmp/f.pdf"}
+
+
+async def test_upload_file_to_session_downloads_directory():
+    """Persisted Kernel downloads must POST directory=/tmp/downloads."""
+    from domains.spawn_browser_agent_v3 import repo
+
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"path": "/tmp/downloads/rs.jpeg", "size": 4}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            seen["data"] = kw.get("data")
+            seen["files"] = kw.get("files")
+            return _Resp()
+
+    with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
+        cfg = _fake_config()
+        out = await repo.upload_file_to_session(
+            cfg,
+            "s1",
+            "rs.jpeg",
+            b"JPEG",
+            "image/jpeg",
+            directory="/tmp/downloads",
+        )
+    assert out == {"path": "/tmp/downloads/rs.jpeg", "size": 4}
+    assert seen["data"] == {"directory": "/tmp/downloads"}
+    assert seen["files"]["file"][0] == "rs.jpeg"
 
 async def test_upload_file_to_session_non_200_returns_none():
     from domains.spawn_browser_agent_v3 import repo
@@ -10114,6 +10154,301 @@ async def test_dom_service_disconnect_stops_browser_session_without_killing_remo
     assert dom.session is None
     assert dom.selector_map == {}
 
+
+def test_browser_downloads_path_for_provider_kernel_vs_steel():
+    """Kernel CDP downloads must land in /tmp/downloads (listed by session_files)."""
+    from browser_tools.dom_service import (
+        KERNEL_DOWNLOADS_PATH,
+        STEEL_DOWNLOADS_PATH,
+        browser_downloads_path_for_provider,
+    )
+
+    assert browser_downloads_path_for_provider("kernel") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("KERNEL") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("steel") == STEEL_DOWNLOADS_PATH
+    assert KERNEL_DOWNLOADS_PATH == "/tmp/downloads"
+    assert STEEL_DOWNLOADS_PATH == "/files"
+    # Pre-fix bug: Kernel sessions used Steel's /files, so CDP downloads never
+    # appeared in Kernel listFiles(/tmp/downloads) → session_files missed compressed output.
+    assert browser_downloads_path_for_provider("kernel") != STEEL_DOWNLOADS_PATH
+
+
+def test_is_browser_attachment_download_tinypng_vs_ad_script():
+    """TinyPNG attachment Fetch/Document must persist; Google Ads Script must not."""
+    from domains.spawn_browser_agent_v3.download_persist import is_browser_attachment_download
+
+    tinypng_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
+    assert is_browser_attachment_download(
+        url=tinypng_url,
+        resource_type="Fetch",
+        mime_type="",
+        response_headers={"content-disposition": "attachment", "content-length": "149852"},
+    )
+    assert is_browser_attachment_download(
+        url=tinypng_url,
+        resource_type="Document",
+        mime_type="image/jpeg",
+        response_headers={"content-disposition": "attachment", "content-length": "149852"},
+    )
+    assert not is_browser_attachment_download(
+        url="https://securepubads.g.doubleclick.net/tag/js/gpt.js",
+        resource_type="Script",
+        mime_type="text/javascript",
+        response_headers={"content-disposition": 'attachment; filename="f.txt"'},
+    )
+
+
+async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
+    """Owning boundary: attachment bytes must land under /tmp/downloads via upload API."""
+    from domains.spawn_browser_agent_v3 import download_persist
+
+    calls = []
+
+    async def fake_upload(
+        config,
+        session_id,
+        filename,
+        file_content,
+        mime_type="application/octet-stream",
+        *,
+        directory=None,
+    ):
+        calls.append(
+            {
+                "session_id": session_id,
+                "filename": filename,
+                "content": file_content,
+                "mime_type": mime_type,
+                "directory": directory,
+            }
+        )
+        return {"path": f"{directory}/{filename}", "size": len(file_content)}
+
+    with patch(
+        "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
+        new=fake_upload,
+    ):
+        out = await download_persist.persist_bytes_to_session_downloads(
+            _fake_config(),
+            "sess-1",
+            filename="rs.jpeg",
+            content=b"JPEGBYTES",
+            mime_type="image/jpeg",
+        )
+    assert out == {
+        "path": "/tmp/downloads/rs.jpeg",
+        "size": 9,
+        "filename": "rs.jpeg",
+        "mime_type": "image/jpeg",
+    }
+    assert calls == [
+        {
+            "session_id": "sess-1",
+            "filename": "rs.jpeg",
+            "content": b"JPEGBYTES",
+            "mime_type": "image/jpeg",
+            "directory": "/tmp/downloads",
+        }
+    ]
+
+
+async def test_browser_download_persister_captures_attachment_via_cdp_body():
+    """CDP loadingFinished for Content-Disposition: attachment writes session downloads."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    persisted = []
+
+    class _NetworkSend:
+        async def getResponseBody(self, params=None, session_id=None):
+            assert params == {"requestId": "req-1"}
+            return {"body": base64.b64encode(b"COMPRESSED").decode(), "base64Encoded": True}
+
+        async def enable(self, session_id=None):
+            return {}
+
+    class _Send:
+        Network = _NetworkSend()
+
+    class _RegisterNetwork:
+        def __init__(self):
+            self.handlers = {}
+
+        def responseReceived(self, cb):
+            self.handlers["responseReceived"] = cb
+
+        def loadingFinished(self, cb):
+            self.handlers["loadingFinished"] = cb
+
+        def loadingFailed(self, cb):
+            self.handlers["loadingFailed"] = cb
+
+    class _Register:
+        def __init__(self):
+            self.Network = _RegisterNetwork()
+
+    class _CdpClient:
+        def __init__(self):
+            self.register = _Register()
+            self.send = _Send()
+
+    class _CdpSession:
+        session_id = "cdp-sess"
+        cdp_client = None
+
+    cdp_client = _CdpClient()
+    cdp_session = _CdpSession()
+    cdp_session.cdp_client = cdp_client
+
+    class _BrowserSession:
+        async def get_or_create_cdp_session(self, *a, **kw):
+            return cdp_session
+
+    async def fake_persist(config, session_id, *, filename, content, mime_type="application/octet-stream"):
+        persisted.append(
+            {
+                "session_id": session_id,
+                "filename": filename,
+                "content": content,
+                "mime_type": mime_type,
+            }
+        )
+        return {"path": f"/tmp/downloads/{filename}", "size": len(content), "filename": filename, "mime_type": mime_type}
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        with patch(
+            "domains.spawn_browser_agent_v3.download_persist.persist_bytes_to_session_downloads",
+            new=fake_persist,
+        ):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=_BrowserSession(),
+                session_id="kernel-sess",
+                config=_fake_config(),
+                agent_id="agent-1",
+                task_id="task-1",
+            )
+            assert persister is not None
+            handlers = cdp_client.register.Network.handlers
+            handlers["responseReceived"](
+                {
+                    "requestId": "req-1",
+                    "type": "Fetch",
+                    "response": {
+                        "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
+                        "status": 200,
+                        "mimeType": "",
+                        "headers": {"content-disposition": "attachment", "content-length": "10"},
+                    },
+                },
+                "cdp-sess",
+            )
+            handlers["loadingFinished"]({"requestId": "req-1", "encodedDataLength": 10}, "cdp-sess")
+            # Allow the created persist task to run.
+            await asyncio.sleep(0)
+            if persister._tasks:
+                await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+            await persister.close()
+
+    assert persisted == [
+        {
+            "session_id": "kernel-sess",
+            "filename": "rs.jpeg",
+            "content": b"COMPRESSED",
+            "mime_type": "image/jpeg",
+        }
+    ]
+
+
+def test_dom_service_defaults_downloads_path_from_browser_provider_env():
+    """DOMService must default downloads_path from BROWSER_PROVIDER, not hardcode /files."""
+    import os
+
+    from browser_tools.dom_service import KERNEL_DOWNLOADS_PATH, STEEL_DOWNLOADS_PATH, DOMService
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == STEEL_DOWNLOADS_PATH
+    assert DOMService(cdp_url="wss://example", downloads_path="/custom").downloads_path == "/custom"
+
+
+
+
+async def test_evaluate_awaits_promises():
+    """Runtime.evaluate must set awaitPromise so async fetch results are returned."""
+    from domains.spawn_browser_agent_v3.service_actions import _execute_inspection_action
+
+    evaluate = AsyncMock(return_value={"result": {"value": {"ok": True, "size": 3}}})
+    cdp_session = SimpleNamespace(
+        session_id="cdp",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+    )
+    session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp_session))
+    history = SimpleNamespace(record_action=AsyncMock())
+    ctx = SimpleNamespace(
+        action_name="evaluate",
+        params={"code": "(async () => ({ok:true,size:3}))()"},
+        session=session,
+        dom_service=SimpleNamespace(),
+        action_history=history,
+        thinking=None,
+        config=None,
+        session_id="s",
+        humanizer=None,
+        browser_network_recorder=None,
+        navigation_pin_host=None,
+        navigation_origin_base_domain=None,
+        current_url="https://tinypng.com/",
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+    )
+    result = await _execute_inspection_action(ctx)
+    assert result["success"] is True
+    assert result["value"]["size"] == 3
+    assert evaluate.await_args.kwargs["params"]["awaitPromise"] is True
+
+
+async def test_goto_err_aborted_persists_download_to_session():
+    """goto net::ERR_ABORTED on attachment URLs must persist bytes under /tmp/downloads."""
+    import domains.spawn_browser_agent_v3.download_persist as download_persist
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    class Bus:
+        def dispatch(self, event):
+            return self
+        def __await__(self):
+            async def _done():
+                return None
+            return _done().__await__()
+        async def event_result(self, **kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    session = SimpleNamespace(event_bus=Bus())
+    history = SimpleNamespace(record_action=AsyncMock())
+    with patch.object(
+        download_persist,
+        "persist_navigation_download_via_page_fetch",
+        new=AsyncMock(
+            return_value={
+                "path": "/tmp/downloads/rs.jpeg",
+                "size": 149852,
+                "filename": "rs.jpeg",
+            }
+        ),
+    ):
+        result = await _execute_goto(
+            session=session,
+            dom_service=SimpleNamespace(),
+            action_history=history,
+            params={"url": "https://tinypng.com/backend/opt/download/x/rs.jpeg"},
+            thinking=None,
+            session_id="sess",
+            config=object(),
+        )
+    assert result["success"] is True
+    assert result["download"]["path"] == "/tmp/downloads/rs.jpeg"
+    history.record_action.assert_awaited()
+
+
 async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     """Steel/CDP sessions expose cdp_client.send.WebAuthn, not cdp_session.send."""
     from browser_tools.dom_service import DOMService
@@ -12109,6 +12444,57 @@ async def test_execute_goto_auto_adds_https():
     assert out["success"] is True
 
 
+async def test_execute_goto_err_aborted_persists_attachment_download():
+    """goto net::ERR_ABORTED on a download URL must persist bytes under /tmp/downloads."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class _FailEvent:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    session = SimpleNamespace(
+        event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_FailEvent())),
+    )
+    ah = SimpleNamespace(record_action=AsyncMock())
+    download_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
+
+    async def fake_persist(**kwargs):
+        assert kwargs["url"] == download_url
+        assert kwargs["session_id"] == "sess-dl"
+        return {
+            "path": "/tmp/downloads/rs.jpeg",
+            "size": 149852,
+            "filename": "rs.jpeg",
+            "content_type": "image/jpeg",
+            "source_url": download_url,
+        }
+
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+        new=fake_persist,
+    ):
+        out = await service_actions._execute_goto(
+            session=session,
+            dom_service=MagicMock(),
+            action_history=ah,
+            params={"url": download_url},
+            thinking=None,
+            session_id="sess-dl",
+            config=_fake_config(),
+        )
+    assert out["success"] is True
+    assert out["download"]["path"] == "/tmp/downloads/rs.jpeg"
+    assert "saved to session" in out["message"]
+    ah.record_action.assert_awaited_once()
+
+
+# ── live challenge helpers ───────────────────────────────────────────
 
 async def test_live_tab_looks_challenged_helpers():
     """Clean live tabs must skip recovery; challenged tabs must still recover."""
@@ -16074,6 +16460,97 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
+def test_browser_tool_events_declare_action_type():
+    """Every workflow-scope spawn_browser_agent event must declare action_type.
+
+    The front-end decides whether a browser task is over from `action_type`
+    alone (front-end/src/features/terminal/hooks/derivations.ts,
+    .../message-bubble/useMessageRouting.ts). An event that omits it is
+    indistinguishable from the legacy untyped terminal, so a *progress* event
+    silently closes a live browser panel and renders the chip as "Done".
+
+    Prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f hit exactly that: "Payment
+    card ready" (untyped) closed the panel while the same browser task ran for
+    another five minutes. Commit e5f87f9a4 had already fixed this class for the
+    auth-handoff events but nothing enforced it, so the payment and write-lock
+    events were missed. This test is that enforcement.
+    """
+    handler_path = (
+        Path(__file__).resolve().parents[2]
+        / "domains"
+        / "spawn_browser_agent_v3"
+        / "handler.py"
+    )
+    tree = ast.parse(handler_path.read_text())
+
+    untyped_lines = []
+    typed_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        literal_items = {
+            key.value: value.value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and isinstance(value, ast.Constant)
+        }
+        if literal_items.get("toolName") != "spawn_browser_agent":
+            continue
+        declared_keys = {
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "action_type" in declared_keys:
+            typed_count += 1
+        else:
+            untyped_lines.append(node.lineno)
+
+    assert not untyped_lines, (
+        "spawn_browser_agent event metadata missing an explicit action_type at "
+        f"handler.py lines {untyped_lines}. Add a terminal action_type "
+        "('task_complete'/'session_paused') for real terminals, or a distinct "
+        "progress action_type — never leave it absent."
+    )
+    assert typed_count >= 18, (
+        f"expected at least 18 typed spawn_browser_agent events, found {typed_count} "
+        "— did the scan stop matching?"
+    )
+
+    # The other half of the contract: a completion message
+    # (is_completion_message drops subAgentId, so it lands in the main chat and
+    # closes the chip) must declare an explicitly terminal action_type. Without
+    # this, a terminal is inferred from message shape — the same failure mode in
+    # reverse.
+    terminal_action_types = {"task_complete", "session_paused"}
+    untyped_completions = []
+    completion_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        flag = keywords.get("is_completion_message")
+        if not (isinstance(flag, ast.Constant) and flag.value is True):
+            continue
+        completion_count += 1
+        action_type = keywords.get("action_type")
+        if not (
+            isinstance(action_type, ast.Constant)
+            and action_type.value in terminal_action_types
+        ):
+            untyped_completions.append(node.lineno)
+
+    assert not untyped_completions, (
+        "browser completion messages must declare a terminal action_type "
+        f"({sorted(terminal_action_types)}) at handler.py lines {untyped_completions}"
+    )
+    assert completion_count >= 5, (
+        f"expected at least 5 completion-message call sites, found {completion_count} "
+        "— did the scan stop matching?"
+    )
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -16557,6 +17034,10 @@ async def run_all_tests():
         test_inject_local_storage_network_error_returns_none,
     )
     await r.record_async("upload_file_session_success", test_upload_file_to_session_success)
+    await r.record_async(
+        "upload_file_session_downloads_directory",
+        test_upload_file_to_session_downloads_directory,
+    )
     await r.record_async("upload_file_session_non_200", test_upload_file_to_session_non_200_returns_none)
     await r.record_async("upload_file_session_network", test_upload_file_to_session_network_error)
 
@@ -16870,6 +17351,26 @@ async def run_all_tests():
         test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser,
     )
     r.record(
+        "browser_downloads_path_for_provider",
+        test_browser_downloads_path_for_provider_kernel_vs_steel,
+    )
+    r.record(
+        "attachment_download_tinypng_vs_ad_script",
+        test_is_browser_attachment_download_tinypng_vs_ad_script,
+    )
+    await r.record_async(
+        "persist_bytes_to_session_downloads",
+        test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads,
+    )
+    await r.record_async(
+        "browser_download_persister_cdp_attachment",
+        test_browser_download_persister_captures_attachment_via_cdp_body,
+    )
+    r.record(
+        "dom_service_defaults_downloads_path_from_env",
+        test_dom_service_defaults_downloads_path_from_browser_provider_env,
+    )
+    r.record(
         "browser_activity_memory_cleanup_clears_buffers",
         test_browser_activity_memory_cleanup_clears_retained_buffers,
     )
@@ -17046,6 +17547,10 @@ async def run_all_tests():
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
+    await r.record_async(
+        "execute_goto_err_aborted_persists_download",
+        test_execute_goto_err_aborted_persists_attachment_download,
+    )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
     r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
@@ -17571,6 +18076,10 @@ async def run_all_tests():
     await r.record_async(
         "goto_action_returns_current_url_for_recovery_fallback",
         test_goto_action_returns_current_url_for_recovery_fallback,
+    )
+    r.record(
+        "browser_tool_events_declare_action_type",
+        test_browser_tool_events_declare_action_type,
     )
     return r.all_passed
 

@@ -280,11 +280,28 @@ router.post(
         return;
       }
 
+      const directoryRaw = typeof req.body?.directory === 'string' ? req.body.directory.trim() : '';
+      const directory =
+        directoryRaw === '/tmp/downloads' || directoryRaw === 'downloads'
+          ? '/tmp/downloads'
+          : directoryRaw === '/tmp/rose-uploads' ||
+              directoryRaw === 'uploads' ||
+              directoryRaw === ''
+            ? undefined
+            : null;
+      if (directory === null) {
+        res.status(400).json({
+          error: 'Invalid directory; use downloads (/tmp/downloads) or uploads (/tmp/rose-uploads)',
+        });
+        return;
+      }
+
       const result = await uploadFile(
         sessionId,
         req.file.buffer,
         req.file.originalname,
-        req.file.mimetype
+        req.file.mimetype,
+        directory ? { directory } : {}
       );
 
       res.json({ success: true, ...result });
