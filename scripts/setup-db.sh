@@ -207,17 +207,13 @@ fi
 # overlap the next reset.
 setup_db_child_records() {
     local group="$1"
-    # Always return 0. When this runs inside a TERM/INT trap that interrupted
-    # `wait`, bash can leave $? as 128+signal (143/130) on the pipeline or a
-    # bare `return`; under `set -e` / `pipefail` that aborts teardown before it
-    # can kill descendants — the case 6 failure mode after interruptible wait.
     if [ -n "$group" ] && [ "$group" = "$$" ]; then
         ps -axo pid=,ppid=,pgid=,stat=,lstart= 2>/dev/null | awk -v self="$$" -v group="$group" '
             $3 == group && $1 != self && $4 !~ /^Z/ {
                 print $1 "|" $2 "|" $3 "|" $5 " " $6 " " $7 " " $8 " " $9
             }
-        ' || true
-        return 0
+        '
+        return
     fi
 
     # setup-db normally shares its caller's process group, which must never be
@@ -245,8 +241,7 @@ setup_db_child_records() {
                 }
             }
         }
-    ' || true
-    return 0
+    '
 }
 
 setup_db_pid_matches_record() {
@@ -307,29 +302,13 @@ setup_db_term_records() {
 SETUP_DB_TEARDOWN_SIGNAL=""
 
 setup_db_signal_teardown() {
-    # First signal wins. Case 6 of setup-db-concurrency.test.sh sends TERM then
-    # INT in quick succession; without this guard the second trap overwrites
-    # SETUP_DB_TEARDOWN_SIGNAL (15 → 2) and the script exits 130 instead of 143
-    # even though teardown already started under TERM.
-    if [ -n "${SETUP_DB_TEARDOWN_SIGNAL:-}" ]; then
-        return 0
+    # First signal wins once masked. Callers register traps as
+    # `trap 'trap "" INT TERM; setup_db_signal_teardown N' SIG` so a second
+    # signal cannot overwrite TERM→143 with INT→130 mid-handler.
+    if [ -z "$SETUP_DB_TEARDOWN_SIGNAL" ]; then
+        SETUP_DB_TEARDOWN_SIGNAL="$1"
     fi
-    SETUP_DB_TEARDOWN_SIGNAL="$1"
     setup_db_teardown
-}
-
-# Bash defers traps for signals received while a *foreground* child is running
-# until that child exits (bash(1) SIGNALS). A seed that ignores TERM therefore
-# swallows TERM for the whole seed window; a later INT (which bash delivers to
-# the wait path immediately) then "wins" and we exit 130 instead of 143.
-# Background + wait makes the wait builtin return as soon as the trap signal
-# arrives, so TERM teardown can claim exit 143 before INT arrives.
-setup_db_run_interruptible() {
-    "$@" &
-    local child=$!
-    local rc=0
-    wait "$child" || rc=$?
-    return "$rc"
 }
 
 setup_db_teardown() {
@@ -337,11 +316,6 @@ setup_db_teardown() {
     local group targets current record pid reap_pids any_running
     local grace="${SETUP_DB_TEARDOWN_GRACE_SECONDS:-10}"
     local grace_started force_started
-
-    # Teardown must finish even when invoked from a signal trap that interrupted
-    # `wait` (bash may surface 128+signal on otherwise-harmless builtins). The
-    # script is about to exit anyway; never let `set -e` abort mid-cleanup.
-    set +e
 
     # Remove the recursive EXIT handler, but keep both interactive termination
     # signals masked until descendants are gone and the lock is released.
@@ -357,6 +331,17 @@ setup_db_teardown() {
     group="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
     targets=""
     reap_pids=""
+    # Prefer the known interruptible child — process-group scans can miss a
+    # just-orphaned TERM-resistant seed while the shell is mid-signal teardown.
+    if [ -n "$SETUP_DB_INTERRUPTIBLE_PID" ]; then
+        setup_db_remember_records "$(setup_db_child_records "$group")"
+        if setup_db_pid_is_running "$SETUP_DB_INTERRUPTIBLE_PID"; then
+            case " $reap_pids " in
+                *" $SETUP_DB_INTERRUPTIBLE_PID "*) ;;
+                *) reap_pids="$reap_pids $SETUP_DB_INTERRUPTIBLE_PID" ;;
+            esac
+        fi
+    fi
     current="$(setup_db_child_records "$group")"
     setup_db_remember_records "$current"
     if [ -n "$group" ] && [ "$group" = "$$" ]; then
@@ -441,12 +426,14 @@ setup_db_teardown() {
     done <<< "$targets"
 
     release_workspace_db_lock
-    trap - INT TERM
+    # Keep INT/TERM ignored through exit. Restoring the default disposition here
+    # lets a queued second Ctrl-C (case 6 sends INT 100ms after TERM) fire with
+    # the default handler and overwrite cooperative 143 with 130.
     exit "$exit_code"
 }
 trap setup_db_teardown EXIT
-trap 'setup_db_signal_teardown 2' INT
-trap 'setup_db_signal_teardown 15' TERM
+trap 'trap "" INT TERM; setup_db_signal_teardown 2' INT
+trap 'trap "" INT TERM; setup_db_signal_teardown 15' TERM
 
 # Reset local schema, push schema, then sync data. This must be a true reset,
 # not an upsert-only refresh, so removed/disabled remote rows disappear locally.
@@ -468,44 +455,54 @@ else
         -c 'GRANT ALL ON SCHEMA public TO public;' >/dev/null
 fi
 
+# Run a long critical-section command so INT/TERM traps can fire mid-flight.
+# A foreground child keeps bash from delivering TERM until that child exits, so a
+# TERM'd setup-db never tore down an in-flight seed — only a later INT interrupted
+# (exit 130). `wait` also defers traps until the job completes on some bash builds,
+# which returned 143 via set -e without running teardown (orphaning TERM-resistant
+# seed children). Poll with sleep so traps run, then reap descendants before exit.
+SETUP_DB_INTERRUPTIBLE_PID=""
+setup_db_run_interruptible() {
+    "$@" &
+    SETUP_DB_INTERRUPTIBLE_PID=$!
+    local pid="$SETUP_DB_INTERRUPTIBLE_PID"
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.05
+    done
+    wait "$pid" 2>/dev/null || return $?
+    SETUP_DB_INTERRUPTIBLE_PID=""
+    return 0
+}
+
 echo "🐘 Syncing Prisma schema..."
-setup_db_run_interruptible bash -c '
-  cd back-end && DATABASE_URL="$1" DIRECT_URL="$1" \
-    npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3
-' _ "$LOCAL_DB_URL"
+setup_db_run_interruptible bash -c \
+    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3' \
+    "$LOCAL_DB_URL"
 if $USE_SYSTEM_PG; then
-    setup_db_run_interruptible env \
-        DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        LOCAL_DB_NAME=victoria \
-        bash -c 'cd back-end && bash scripts/apply-local-workflow-ddl.sh'
+    setup_db_run_interruptible bash -c \
+        'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh' \
+        "$LOCAL_DB_URL"
 else
-    setup_db_run_interruptible env \
-        DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-        DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME=victoria \
-        bash -c 'cd back-end && bash scripts/apply-local-workflow-ddl.sh'
+    setup_db_run_interruptible bash -c \
+        'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" DB_CONTAINER="$1" LOCAL_DB_NAME=victoria bash scripts/apply-local-workflow-ddl.sh' \
+        "$LOCAL_DB_URL" "$DB_CONTAINER"
 fi
-setup_db_run_interruptible env \
-    DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-    bash -c 'cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts'
+setup_db_run_interruptible bash -c \
+    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx tsx scripts/ensure-agent-network-grep-indexes.ts' \
+    "$LOCAL_DB_URL"
 
 echo "🌱 Syncing production data to local database..."
-setup_db_run_interruptible env \
-    DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
-    bash -c 'cd back-end && npx tsx scripts/seed-local.ts'
+setup_db_run_interruptible bash -c \
+    'cd back-end && DATABASE_URL="$0" DIRECT_URL="$0" npx tsx scripts/seed-local.ts' \
+    "$LOCAL_DB_URL"
 
 echo "🗜️  Publishing synchronized DB for isolated local benchmarks..."
-# Do not capture via $(...) — command substitution is a foreground wait and
-# would again defer TERM until the child finished.
-_setup_db_bench_out="$(mktemp)"
-setup_db_run_interruptible bash -c '
-  bash "$1" materialize "$2" "$3" "$4" > "$5"
-' _ "$SCRIPT_DIR/benchmark-seed-cache" \
-    "$REPO_ROOT/back-end/prisma/schema.prisma" \
-    "$REPO_ROOT/.context/benchmarks/seed-cache" \
-    "$SEED_DUMP_SOURCE" \
-    "$_setup_db_bench_out"
-BENCHMARK_SEED_PATH="$(tr -d '\n' < "$_setup_db_bench_out")"
-rm -f "$_setup_db_bench_out"
+BENCHMARK_SEED_PATH="$(
+    bash "$SCRIPT_DIR/benchmark-seed-cache" materialize \
+        "$REPO_ROOT/back-end/prisma/schema.prisma" \
+        "$REPO_ROOT/.context/benchmarks/seed-cache" \
+        "$SEED_DUMP_SOURCE"
+)"
 echo "   ✅ Local benchmark seed dump: $BENCHMARK_SEED_PATH"
 
 echo "🐘 Local database setup complete."
