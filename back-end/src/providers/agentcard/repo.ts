@@ -51,6 +51,23 @@ export async function findConnectedConfig(userId: string): Promise<unknown | und
   return row?.status === IntegrationStatus.CONNECTED && row.isActive ? row.config : undefined;
 }
 
+/**
+ * Every user id already bound to this AgentCard cardholder.
+ *
+ * A cardholder owns a funding wallet, so two users sharing one cardholder share one wallet and
+ * commingle funds. Used to enforce the 1 user : 1 cardholder : 1 wallet invariant on write.
+ */
+export async function findUserIdsByCardholderId(cardholderId: string): Promise<string[]> {
+  const rows = await prisma.integration.findMany({
+    where: {
+      name: AGENTCARD_INTEGRATION_NAME,
+      config: { path: ['cardholderId'], equals: cardholderId },
+    },
+    select: { userId: true },
+  });
+  return rows.map((row) => row.userId);
+}
+
 export async function saveIntegrationConfig(
   userId: string,
   config: Prisma.InputJsonObject,

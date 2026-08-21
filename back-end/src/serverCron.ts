@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { runAgentCardOrgWalletMonitor } from './providers/agentcard/org-wallet-monitor';
+import { runCoinbaseFloatReplenishJob } from './providers/brex/replenish';
 import { createLogger } from './providers/logger';
 import {
   abandonStaleFundingPending,
@@ -179,6 +180,40 @@ function scheduleAgentCardOrgWalletMonitor(): void {
   cronLog.info('AgentCard org-wallet monitor scheduled (every minute)');
 }
 
+/**
+ * Replenish the Coinbase USDC float from Brex. Hourly, not per-minute: the transfer is an ACH that
+ * settles over days, and the job's own settlement-window lock already prevents stacking.
+ */
+function scheduleCoinbaseFloatReplenish(): void {
+  const cronLog = createLogger('Cron');
+  if (process.env.COINBASE_FLOAT_REPLENISH_ENABLED !== '1') {
+    cronLog.info('Coinbase float replenish disabled (COINBASE_FLOAT_REPLENISH_ENABLED != 1)');
+    return;
+  }
+  let replenishRunning = false;
+  const runReplenish = () => {
+    if (replenishRunning) {
+      cronLog.info('Coinbase float replenish already running; skipping overlapping tick');
+      return;
+    }
+    replenishRunning = true;
+    runCoinbaseFloatReplenishJob()
+      .then((result) => {
+        cronLog.info('Coinbase float replenish evaluated', { status: result.status });
+      })
+      .catch((err) => {
+        cronLog.error('Coinbase float replenish error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        replenishRunning = false;
+      });
+  };
+  cron.schedule('0 * * * *', runReplenish);
+  cronLog.info('Coinbase float replenish scheduled (hourly)');
+}
+
 function scheduleProactiveSmsOutreach(isProduction: boolean): void {
   if (!isProduction || process.env.DISABLE_PROACTIVE_SMS === '1') {
     createLogger('Cron').info('Proactive SMS outreach disabled', {
@@ -220,5 +255,6 @@ export function registerCronJobs(isProduction: boolean): void {
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();
+  scheduleCoinbaseFloatReplenish();
   scheduleProactiveSmsOutreach(isProduction);
 }

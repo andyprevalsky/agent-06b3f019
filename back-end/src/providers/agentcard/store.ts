@@ -140,12 +140,54 @@ export async function saveOrgOnboardingConfig(
   await repo.saveIntegrationConfig(userId, config, false);
 }
 
-export async function saveOrgCardholderId(userId: string, cardholderId: string): Promise<void> {
-  const existing = configRecord(await repo.findTokenConfig(userId));
+export class AgentCardCardholderConflictError extends Error {
+  readonly cardholderId: string;
+  readonly ownerUserId: string;
+
+  constructor(cardholderId: string, ownerUserId: string, userId: string) {
+    super(
+      `AgentCard cardholder ${cardholderId} is already bound to user ${ownerUserId}; ` +
+        `refusing to also bind it to ${userId}`
+    );
+    this.name = 'AgentCardCardholderConflictError';
+    this.cardholderId = cardholderId;
+    this.ownerUserId = ownerUserId;
+  }
+}
+
+/**
+ * Bind a user to an org-managed cardholder, enforcing 1 user : 1 cardholder : 1 wallet.
+ *
+ * A cardholder owns a funding wallet and issues MANY cards from it (one per purchase). Binding a
+ * second user to the same cardholder makes those users share one wallet and spend each other's
+ * funds. That is exactly how a benchmark fixture user ended up bound to a live cardholder in
+ * prod, so this refuses rather than silently overwriting.
+ */
+export interface SaveOrgCardholderDeps {
+  findUserIdsByCardholderId: (cardholderId: string) => Promise<string[]>;
+  findTokenConfig: (userId: string) => Promise<unknown | undefined>;
+  saveIntegrationConfig: (
+    userId: string,
+    config: Prisma.InputJsonObject,
+    connected: boolean
+  ) => Promise<void>;
+}
+
+export async function saveOrgCardholderId(
+  userId: string,
+  cardholderId: string,
+  deps: SaveOrgCardholderDeps = repo
+): Promise<void> {
+  const owners = await deps.findUserIdsByCardholderId(cardholderId);
+  const conflicting = owners.find((owner) => owner !== userId);
+  if (conflicting !== undefined) {
+    throw new AgentCardCardholderConflictError(cardholderId, conflicting, userId);
+  }
+  const existing = configRecord(await deps.findTokenConfig(userId));
   delete existing.onboardingSessionId;
   delete existing.onboardingSetupUrl;
   delete existing.onboardingExpiresAt;
-  await repo.saveIntegrationConfig(
+  await deps.saveIntegrationConfig(
     userId,
     { ...existing, orgManaged: true, cardholderId } as Prisma.InputJsonObject,
     true

@@ -170,7 +170,42 @@ export function verifyAgentCardWebhookSignature(rawBody: string, signatureHeader
  *  - `transaction.voided` → reclaim the transfer and refund the captured funding charge.
  * Already-terminal (VOIDED/REFUNDED) rows are never resurrected by a late/duplicate event.
  */
+/**
+ * Recovery events carry a recovery id and cardholder, never a card id, so they must be handled
+ * BEFORE the card lookup below — otherwise they fall into the "webhook without card id" branch and
+ * are silently dropped as noise.
+ *
+ * There is nothing to reconcile in our own tables: recoveries move value between AgentCard-side
+ * balances (cardholder headroom -> company pool) and we hold no local row for them. The pool
+ * balance is read live on every top-up. So this is deliberately observability only — it exists so
+ * a stalled or rejected recovery is visible in logs rather than invisible, which is exactly the
+ * failure mode that stranded $127.88 for ~6 days behind an alert that never fired upstream.
+ */
+function handleRecoveryEvent(event: AgentCardWebhookEvent): { ok: true } {
+  const data = (event.data ?? {}) as Record<string, unknown>;
+  const context = {
+    type: event.type,
+    recovery_id: typeof data.id === 'string' ? data.id : undefined,
+    cardholder_id: typeof data.cardholder_id === 'string' ? data.cardholder_id : undefined,
+    amount_cents: typeof data.amount_cents === 'number' ? data.amount_cents : undefined,
+    status: typeof data.status === 'string' ? data.status : undefined,
+  };
+  if (event.type === 'recovery.rejected') {
+    log.error('AgentCard rejected a residual recovery; pool capital stays in the cardholder', {
+      ...context,
+      failure_reason: typeof data.failure_reason === 'string' ? data.failure_reason : undefined,
+    });
+  } else {
+    log.info('AgentCard recovery event', context);
+  }
+  return { ok: true };
+}
+
 export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Promise<{ ok: true }> {
+  if (typeof event.type === 'string' && event.type.startsWith('recovery.')) {
+    return handleRecoveryEvent(event);
+  }
+
   const cardId = extractWebhookCardId(event);
   if (!hasValue(cardId)) {
     log.warn('Ignoring AgentCard webhook without card id', { type: event.type });
