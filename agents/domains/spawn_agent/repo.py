@@ -69,7 +69,11 @@ async def save_explore_message(
 
         await get_http_client().post(
             f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"message": message, "role": "TOOL", "metadata": metadata},
             timeout=SAVE_MESSAGE_TIMEOUT,
         )

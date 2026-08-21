@@ -196,7 +196,11 @@ async def save_browser_action_message(
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"message": message, "role": "TOOL", "metadata": metadata},
             )
             if not response.is_success:
@@ -230,7 +234,11 @@ async def save_browser_assistant_message(
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"message": message, "role": "ASSISTANT", "metadata": metadata},
             )
     except Exception as e:
@@ -286,7 +294,11 @@ async def save_browser_credential_ref_message(
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"message": message, "role": role, "metadata": metadata},
             )
             if response.is_error:
@@ -448,7 +460,11 @@ async def init_browser_session(
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/init",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"user_id": user_id, "agent_id": agent_id, "start_url": start_url},
         )
     if response.status_code in [200, 201]:
@@ -474,7 +490,11 @@ async def resume_browser_session(
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
         )
     if response.status_code in [200, 201]:
@@ -524,7 +544,11 @@ async def recover_browser_challenge(
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/recover-challenge",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json=payload,
         )
     if response.status_code in [200, 201]:
@@ -680,7 +704,11 @@ async def acknowledge_browser_user_control(config: Any, task_id: str) -> str:
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"mode": "acknowledge"},
         )
     if response.status_code == 200:
@@ -710,7 +738,11 @@ async def inject_local_storage(config: Any, session_id: str, origin: str) -> Opt
         async with httpx.AsyncClient(timeout=5.0) as client:
             inject_response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/{session_id}/inject-localStorage",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"origin": origin},
             )
             if inject_response.status_code == 200:
@@ -757,7 +789,11 @@ async def take_browser_computer_screenshot(config: Any, session_id: str) -> Dict
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/{session_id}/screenshot",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
         )
         response.raise_for_status()
         result = response.json()

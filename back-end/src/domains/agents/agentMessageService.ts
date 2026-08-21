@@ -203,7 +203,16 @@ export async function postMessage(
   };
   let message;
   if (isInternal) {
-    const generation = workflowGeneration ?? agentId;
+    // An internal write with no X-Agent-Workflow-Generation header is
+    // UNATTRIBUTED, not "generation 1". Defaulting it to the agent id
+    // fabricated a real-but-wrong generation, because generation 1's Temporal
+    // workflow id IS the agent id — so after any replacement every unattributed
+    // write looked stale and got rewritten into the terminal
+    // "Tool interrupted by deployment" error. In prod that turned one live
+    // browser sub-agent into ~20 red chips while it was succeeding. An
+    // unattributed write now joins the agent's CURRENT generation.
+    const generation =
+      workflowGeneration ?? (await repo.currentAgentWorkflowGeneration(agentId)) ?? agentId;
     const result = await createWorkflowMessageGroup(
       messageParams,
       (body.attachments ?? []) as Array<Record<string, unknown>>,

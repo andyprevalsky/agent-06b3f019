@@ -9,7 +9,10 @@ import httpx
 import structlog
 
 from config import load_config
-from helpers.workflow_generation import stamp_tool_workflow_generation
+from helpers.workflow_generation import (
+    stamp_tool_workflow_generation,
+    workflow_generation_headers,
+)
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
 
@@ -83,6 +86,7 @@ async def save_claude_code_message(
                 headers={
                     "x-api-key": config.backend.api_key or "",
                     "Content-Type": "application/json",
+                    **workflow_generation_headers(),
                 },
                 json={
                     "message": message,
