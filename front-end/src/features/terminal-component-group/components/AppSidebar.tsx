@@ -59,6 +59,8 @@ interface AppSidebarProps {
   onCreateAgent: () => void;
   /** Reload the agent list after a row mutation (rename/pin/archive/restore). */
   onRefreshAgents: () => void | Promise<void>;
+  /** Reload attention inbox after archive (optional; see useAgentRowActions). */
+  onRefreshAttention?: () => void | Promise<void>;
   /**
    * Agent ids blocked on a user answer. Passed in rather than read from context
    * so the sidebar stays fully props-driven (see AttentionRequestsProvider).
@@ -169,10 +171,12 @@ function useCollapsingViewChange(onViewChange: (view: SidebarView) => void, coll
  */
 function useSidebarAgentActions({
   onRefreshAgents,
+  onRefreshAttention,
   selectedAgentId,
   onSelectAgent,
 }: {
   onRefreshAgents: () => void | Promise<void>;
+  onRefreshAttention?: () => void | Promise<void>;
   selectedAgentId: string | null;
   onSelectAgent: (agentId: string | null) => void;
 }) {
@@ -185,6 +189,7 @@ function useSidebarAgentActions({
 
   const { handlers, renameDialog } = useAgentRowActions({
     onRefresh: refreshAll,
+    onRefreshAttention,
     selectedAgentId,
     onSelectAgent,
   });
@@ -203,6 +208,7 @@ export default function AppSidebar({
   onSelectAgent,
   onCreateAgent,
   onRefreshAgents,
+  onRefreshAttention,
   attentionAgentIds,
   user,
   onLogout,
@@ -223,6 +229,7 @@ export default function AppSidebar({
 
   const { handlers, renameDialog, archiveRefreshToken } = useSidebarAgentActions({
     onRefreshAgents,
+    onRefreshAttention,
     selectedAgentId,
     onSelectAgent,
   });
