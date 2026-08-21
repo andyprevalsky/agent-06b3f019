@@ -641,6 +641,20 @@ def _benchmark_context_path() -> Path:
     return REPO_ROOT / path
 
 
+DURABLE_BENCHMARK_FRONTEND_URL = "https://roselabs.ai"
+
+
+def _is_ephemeral_frontend_url(url: str) -> bool:
+    """Localhost / tunnel hosts die when the stack that minted them tears down."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return True
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return host.endswith((".ngrok.app", ".ngrok-free.app", ".trycloudflare.com", ".loca.lt"))
+
+
 def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
@@ -653,7 +667,7 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     # prod run to an unreachable tunnel.
     parsed = urlparse(base_url)
     if parsed.hostname not in {"localhost", "127.0.0.1"}:
-        return "https://roselabs.ai"
+        return DURABLE_BENCHMARK_FRONTEND_URL
     # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
     # This is the only URL the cloud browser agent can actually reach, so prefer it over any
     # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
@@ -674,14 +688,30 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
         return f"http://localhost:{int(conductor_port) + 1}"
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
-    return "https://roselabs.ai"
+    return DURABLE_BENCHMARK_FRONTEND_URL
 
 
 def _report_frontend_url_for_benchmark(base_url: str) -> str:
+    """Human-facing agent links for report cards / RCA / descend evidence.
+
+    These links must outlive the ephemeral stack that produced the run. Prefer
+    the always-on prod viewer (hub archive fallback via findAgentAcrossRuns).
+    Ephemeral hosts (localhost, ngrok, trycloudflare) are rejected even when
+    set via BENCHMARK_REPORT_FRONTEND_URL unless
+    BENCHMARK_REPORT_ALLOW_EPHEMERAL=1 is set for an intentional live-only view.
+    """
+    _ = base_url  # report links are host-stable; prompt URLs use _frontend_url_for_benchmark
     explicit = os.environ.get("BENCHMARK_REPORT_FRONTEND_URL", "").strip()
+    allow_ephemeral = os.environ.get("BENCHMARK_REPORT_ALLOW_EPHEMERAL", "").strip() == "1"
     if explicit:
-        return explicit.rstrip("/")
-    return _frontend_url_for_benchmark(base_url)
+        if allow_ephemeral or not _is_ephemeral_frontend_url(explicit):
+            return explicit.rstrip("/")
+    return DURABLE_BENCHMARK_FRONTEND_URL
+
+
+def durable_agent_frontend_url(agent_id: str) -> str:
+    """Canonical persistent FE deep link for an agent (live or hub-archived)."""
+    return f"{DURABLE_BENCHMARK_FRONTEND_URL}/?agent-id={agent_id}"
 
 
 def _payment_receipt_from_attention_request(req: dict) -> dict:
@@ -10831,7 +10861,6 @@ async def main_async(args):
 
     def _report_snapshot(running_names: set[str]) -> RunState:
         finished = {r.name for r in run.task_results}
-        fe = _report_frontend_url_for_benchmark(base_url)
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
@@ -10847,7 +10876,7 @@ async def main_async(args):
                     status=status,
                     duration_s=r.duration_seconds,
                     cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
-                    agent_url=f"{fe}/?agent-id={r.agent_id}" if r.agent_id else None,
+                    agent_url=durable_agent_frontend_url(r.agent_id) if r.agent_id else None,
                     llm_call_count=r.llm_call_count,
                     tree_agent_count=r.tree_agent_count,
                     tokens_in=r.tokens_in,
@@ -10864,7 +10893,7 @@ async def main_async(args):
                     TaskCard(
                         name=name,
                         status="running",
-                        agent_url=f"{fe}/?agent-id={live_agent_id}" if live_agent_id else None,
+                        agent_url=durable_agent_frontend_url(live_agent_id) if live_agent_id else None,
                         world_model_mode=task_world_model_modes.get(name),
                     )
                 )
