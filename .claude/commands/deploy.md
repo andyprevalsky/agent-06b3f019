@@ -441,6 +441,7 @@ their assertions or test counts:
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,
+`bash scripts/tests/durable-evidence-links.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,

@@ -87,6 +87,14 @@ require_text "$FORMAT" 'expired/unreachable' \
   "approval requests must report dead FE links honestly"
 require_text "$FORMAT" 'restore an archived viewer without rerunning a' \
   "approval requests must restore archived FE evidence when safe"
+require_text "$FORMAT" 'https://www.roselabs.ai/open-agent?agent-id=' \
+  "approval FE links must prefer the durable open-agent deep link"
+require_text "$FORMAT" 'python3 scripts/publish_evidence_links.py' \
+  "approval Evidence must publish FE + LLM dumps via publish_evidence_links"
+require_text "$FORMAT" '/opt/cursor/artifacts' \
+  "approval LLM dumps must land under Cursor artifacts for multi-day reachability"
+require_text "$FORMAT" 'Never link `file://…/.context/rendered-llm-dumps/…`' \
+  "approval LLM dumps must not cite workspace-local file:// render paths alone"
 require_text "$FORMAT" "Never invent a failing test." \
   "approval requests must distinguish proactive changes from reproduced failures"
 require_text "$FORMAT" "Not applicable — <reason>" \
@@ -115,7 +123,7 @@ require_text "$DESCEND" "Tests: <one sentence naming the actual assertion>" \
   "/descend Stop 1 must describe what the local repro tests"
 require_text "$DESCEND" "**<how checked>**" \
   "/descend Stop 1 must name how each evaluator is checked"
-require_text "$RCA" "task-framed \`What failed:\` sentence, the FE link, last-call" \
+require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
   "/rca approval output must require the Evidence pack"
 
 if grep -Fq "exact five-part RCA narrative" "$DESCEND"; then

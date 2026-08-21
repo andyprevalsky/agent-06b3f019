@@ -51,6 +51,10 @@ GATES = (
     ),
     Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
     Gate(
+        "durable-evidence-links",
+        ("bash", "scripts/tests/durable-evidence-links.test.sh"),
+    ),
+    Gate(
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
     ),

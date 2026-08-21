@@ -28,4 +28,13 @@ accounts).
   mandatory unless the user overrides that specific gate.
 - **Isolated stacks:** do not let `.cloud-env` force `CONDUCTOR_PORT=3001` onto
   benchmark/AgentCard stacks — `run.sh` / `run-bench` must keep per-run ports.
+- **Durable FE + LLM dumps (multi-day):** Never cite ephemeral
+  `localhost`/`ngrok` FE links or `file://…/.context/rendered-llm-dumps/…` as
+  approval Evidence. After a bench/agent run, publish with
+  `python3 scripts/publish_evidence_links.py --run-json <run.json> --agent-id <id>`
+  (uploads the Hub bundle to prod if needed, verifies
+  `https://www.roselabs.ai/open-agent?agent-id=<id>`, writes the last LLM dump
+  under `/opt/cursor/artifacts/rca_evidence/<id>/`). Local benches dual-write
+  terminal Hub bundles to prod automatically; Cloud Agents fail closed if that
+  mirror fails.
 - Standard run/test commands: `CLAUDE.md` + `docs/testing.md`.

@@ -21,7 +21,7 @@ sources:
   - memory:project_bench_agent_rehydration_idea
   - plan:docs/plans/active/bench-agent-rehydration.md
 repro: none-recorded
-status: open
+status: mitigated
 ---
 
 ## Problem
@@ -53,20 +53,28 @@ finalize + index their bundle for `findAgentAcrossRuns` to resolve it on prod.
 
 ## Solution
 
-Not yet landed. The tracked work is: emit the durable
-`open-agent?agent-id=X` URL against an always-on backend instead of the
-ephemeral hub URL (quick win); add a backend route serving archived
-`media/browser/...` artifacts and have `getRunAgent` rewrite the recording
-pointer to it; and guarantee cloud/fleet runs finalize the bundle (including
-media) to R2 and index the run. Plan:
-`docs/plans/active/bench-agent-rehydration.md`.
+Landed in stages:
+
+1. **Emit durable FE links / dual-write Hub bundles** (2026-08-21): local
+   `run-bench` stacks still fail-closed-register against the ephemeral Hub, but
+   terminal bundles are mirrored to the always-on production Hub
+   (`agents/benchmarks/hub_upload.py::mirror_run_bundle_to_durable_hub`) and
+   runs print `https://www.roselabs.ai/open-agent?agent-id=…`. Cloud Agents
+   (`CURSOR_AGENT`) fail closed if the durable mirror fails. RCA/approval
+   Evidence must use that durable URL via
+   `scripts/publish_evidence_links.py`, not localhost/ngrok.
+2. **Still open:** rewrite archived `recording_file_pointer` to durable R2
+   media, and guarantee cloud/fleet runs finalize media into the indexed
+   bundle. Plan remnants may still live under `docs/plans/`.
 
 ## Human feedback
 
 The human re-scoped this from "nice to have" to a follow-up he greenlit
 explicitly: dead-stack bench agents must be viewable later "like a db snapshot
 or archive", in the "exact same FE, all features incl. browser recordings" —
-not a reduced or bespoke viewer.
+not a reduced or bespoke viewer. On 2026-08-21 he further required FE links
+and LLM dumps to remain reachable for multiple days for current and future
+agents (Cursor artifacts + durable open-agent).
 
 ## Reusable lesson
 
