@@ -4136,7 +4136,8 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     expecting a bare write_lock could never be satisfied. Rather than requiring
     both approvals in order — which would mean the benchmark actually buys three
     tickets every run — the task now terminates at exactly one unresolved
-    payment approval, and the judge owns what that approval must say.
+    payment approval. Pass criteria are static_check only (same shape as
+    browser-event-ticket); no LLM adjacency/earliest-showtime judge.
     """
     from benchmarks.benchmark_tasks import get_task_by_name
 
@@ -4149,9 +4150,8 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     assert task.success_on_payment_card_request is True
     assert getattr(task, "expected_attention_kinds", None) in (None, [], ["payment_approval"])
 
-    semantic = next(e for e in task.evaluators if e["method"] != "static_check")
-    criteria = " ".join(semantic["criteria"]).lower()
-    # Approval contents stay judge-owned, never substring-matched.
+    assert [e["method"] for e in task.evaluators] == ["static_check"]
+    assert not any(e.get("id") == "imax-group-ticket-adjacency-semantics" for e in task.evaluators)
     static = next(e for e in task.evaluators if e["method"] == "static_check")
     static_types = {c["type"] for c in static["checks"]}
     assert "approval_request_details" not in static_types
@@ -4162,12 +4162,9 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     assert any(
         "unresolved payment-card approval" in line.lower() for line in static.get("criteria", [])
     )
-    for required in ("venue", "date", "showtime", "seat", "total amount"):
+    criteria = " ".join(static.get("criteria", [])).lower()
+    for required in ("metreon", "date", "showtime", "seat", "total amount"):
         assert required in criteria
-    assert "unresolved payment approval" in criteria
-
-    prompt = semantic["judge_prompt"].lower()
-    assert "do not require or accept an approved charge or completed purchase" in prompt
 
 
 def test_imax_runtime_contract_allows_active_after_payment_approval():
