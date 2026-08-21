@@ -38,6 +38,17 @@ def test_prepare_schema_for_openai():
     assert result["additionalProperties"] is False
 
 
+def test_generated_agent_title_normalization():
+    """Structured schema titles are cleaned and bounded before persistence."""
+    from helpers.llm import _normalize_generated_agent_title
+
+    assert _normalize_generated_agent_title("Soho Sushi Reservation") == "Soho Sushi Reservation"
+    assert _normalize_generated_agent_title('Title: "Simple Arithmetic."') == "Simple Arithmetic"
+    assert _normalize_generated_agent_title("Browser Agent Stall\nextra text") == "Browser Agent Stall"
+    assert _normalize_generated_agent_title(" ") is None
+    assert _normalize_generated_agent_title("x" * 100) == "x" * 80
+
+
 def test_prepare_schema_for_openai_nested_and_array():
     """Schema preparation handles nested models, arrays, and union types recursively."""
     from typing import List, Optional, Union
@@ -1831,6 +1842,7 @@ async def test_set_response_schema_activity_success():
                 content=json.dumps(
                     {
                         "reasoning": "Need a concise summary.",
+                        "title": "Goal Summary",
                         "fields": [{"name": "summary", "type": "str"}],
                     }
                 ),
@@ -1858,10 +1870,11 @@ async def test_set_response_schema_activity_success():
     ):
         from helpers.llm import set_response_schema_activity
 
-        result = await set_response_schema_activity("agent-abc", ["goal 1", "goal 2"])
+        result = await set_response_schema_activity("agent-abc", ["goal 1", "goal 2"], include_title=True)
 
     assert result is not None
     assert result["schema"]["fields"][0]["name"] == "summary"
+    assert result["title"] == "Goal Summary"
     assert result["usage"]["prompt_tokens"] == 100
     assert result["usage"]["completion_tokens"] == 50
     assert result["usage"]["total_tokens"] == 150
@@ -1869,6 +1882,8 @@ async def test_set_response_schema_activity_success():
     assert rose_calls
     assert rose_calls[0]["pool"] == "rose-1-lite"
     assert rose_calls[0]["call_site"] == "response_schema"
+    assert rose_calls[0]["response_model"].__name__ == "_GeneratedResponseSchemaWithTitle"
+    assert "SAME JSON response" in rose_calls[0]["messages"][0]["content"]
 
     # Verify it saved through the backend, without using backend schema generation.
     captures = get_captured_requests()
@@ -1877,6 +1892,7 @@ async def test_set_response_schema_activity_success():
     assert any("/api/agents/agent-abc" in u for u in urls)
     schema_save = next(c for c in captures if "/api/agents/agent-abc" in c["url"])
     assert schema_save["requestHeaders"]["x-agent-workflow-generation"] == generation
+    assert json.loads(schema_save["requestBody"])["generated_title"] == "Goal Summary"
 
 
 async def test_set_response_schema_activity_uses_internal_auth_only():
@@ -1913,11 +1929,13 @@ async def test_set_response_schema_activity_uses_internal_auth_only():
     assert result is not None
     assert rose_calls[0]["claude_auth"] is None
     assert rose_calls[0]["gpt_auth"] is None
+    assert rose_calls[0]["response_model"].__name__ == "_GeneratedResponseSchema"
     captures = get_captured_requests()
     assert not any("generate-response-schema" in c["url"] for c in captures)
     save_requests = [c for c in captures if "/api/agents/agent-abc" in c["url"]]
     assert save_requests
     headers = {k.lower(): v for k, v in save_requests[0]["requestHeaders"].items()}
+    assert "generated_title" not in json.loads(save_requests[0]["requestBody"])
     assert "x-api-key" in headers
     assert "x-user-id" not in headers
     assert "x-compute-token-type" not in headers
@@ -7204,6 +7222,7 @@ async def run_all_tests():
     r.record("extract_nested_agent_json_blob_none_cases", test_extract_nested_agent_json_blob_none_cases)
     r.record("extract_nested_agent_json_blob_braces_embedded", test_extract_nested_agent_json_blob_braces_embedded)
     r.record("build_verifier_json_schema", test_build_verifier_json_schema)
+    r.record("generated_agent_title_normalization", test_generated_agent_title_normalization)
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
     r.record("build_verifier_json_schema_with_response_schema", test_build_verifier_json_schema_with_response_schema)
     r.record("build_verifier_json_schema_all_types", test_build_verifier_json_schema_all_types)

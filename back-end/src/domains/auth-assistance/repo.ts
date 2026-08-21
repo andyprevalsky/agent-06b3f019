@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { randomUUID } from '../../providers/crypto';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import type { CreateAuthAssistanceInput } from './types';
 
 type Tx = Prisma.TransactionClient;
@@ -82,7 +82,7 @@ export async function createRequest(
     },
   };
 
-  return prisma.$transaction(async (tx) => {
+  return runTransactionWithRetry(async (tx) => {
     if (input.currentUrl !== undefined && input.currentUrl !== '') {
       await tx.browserSession.updateMany({
         where: {

@@ -183,8 +183,6 @@ jobs:
           codesign --force --options runtime --timestamp --sign "$IDENTITY" \
             --entitlements entitlements.mac.plist "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
-
-          SKIP_NOTARIZATION=true npx electron-builder --prepackaged "$APP" --mac dmg zip --publish=never
         env:
           NODE_OPTIONS: --max-old-space-size=4096
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -220,17 +218,43 @@ jobs:
             echo "Provider provisioning profile is missing AutoFill credential provider entitlement"
             exit 1
           fi
-          # Guard the shipped artifacts, not just the pre-signing bundle: the
-          # `--prepackaged ... --mac dmg zip` step above is what actually
-          # produces the zip electron-updater downloads. Assert app-update.yml
-          # survived into both the final .app and the shipped zip so a future
-          # electron-builder/--prepackaged regression can't silently reintroduce
-          # the ENOENT-on-download bug this PR fixes.
           echo "Verifying app-update.yml is present for the auto-updater..."
           test -f dist/mac-arm64/Rose.app/Contents/Resources/app-update.yml \
             || { echo "app-update.yml missing from built app — auto-update downloads would fail"; exit 1; }
+
+      - name: Notarize and staple application bundle
+        working-directory: mac-app
+        run: |
+          set -euo pipefail
+          APP="dist/mac-arm64/Rose.app"
+          node scripts/notarize.js --app "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=2 "$APP"
+
+      - name: Build distribution artifacts from stapled app
+        working-directory: mac-app
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APP="dist/mac-arm64/Rose.app"
+          SKIP_NOTARIZATION=true npx electron-builder --prepackaged "$APP" --mac dmg zip --publish=never
+
+      - name: Verify distribution artifacts
+        working-directory: mac-app
+        run: |
+          set -euo pipefail
+          # Guard the actual updater ZIP, not just the working app bundle. This
+          # catches packaging steps that strip the inner app's notarization
+          # ticket or app-update.yml before release.
           unzip -l dist/Rose-mac.zip | grep -q 'Contents/Resources/app-update.yml' \
             || { echo "app-update.yml missing from shipped Rose-mac.zip — auto-update downloads would fail"; exit 1; }
+          ZIP_CHECK_DIR="$RUNNER_TEMP/rose-zip-ticket-check"
+          rm -rf "$ZIP_CHECK_DIR"
+          mkdir -p "$ZIP_CHECK_DIR"
+          ditto -x -k dist/Rose-mac.zip "$ZIP_CHECK_DIR"
+          xcrun stapler validate "$ZIP_CHECK_DIR/Rose.app"
           echo "Verifying DMG signature..."
           codesign --verify --verbose=2 dist/Rose-mac.dmg || true
 

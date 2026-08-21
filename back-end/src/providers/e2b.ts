@@ -11,7 +11,10 @@ import {
 } from './codeAgentFastModeEnv';
 import { FilePointer, downloadFromStorage } from './storage';
 import { v4 as uuidv4 } from 'uuid';
-import { fetchClaudeCodeCredentialsWithMeta, type ClaudeCodeCredentialResult } from './claudeCredentials';
+import {
+  fetchClaudeCodeCredentialsWithMeta,
+  type ClaudeCodeCredentialResult,
+} from './claudeCredentials';
 import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
 import {
   fetchGptCodeCredentialsWithMeta,
@@ -328,8 +331,6 @@ export async function createClaudeCodeSession(
       'Fast Mode cache active but FAST_MODE_ANTHROPIC_PROXY_URL unset — code agent not cached'
     );
   }
-  const sandboxBaseUrl = envs.ANTHROPIC_BASE_URL;
-
   // Only consult the shared Anthropic-org cooldown when the sandbox would use
   // that same shared key against api.anthropic.com.
   const apiKeyOnCooldown =

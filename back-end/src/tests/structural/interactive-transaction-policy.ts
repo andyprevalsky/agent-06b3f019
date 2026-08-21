@@ -37,12 +37,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   },
   {
     file: 'domains/auth-assistance/repo.ts',
-    scope: 'createRequest',
-    fingerprint: '363b182fffe86b00',
-    reason: 'legacy migration debt',
-  },
-  {
-    file: 'domains/auth-assistance/repo.ts',
     scope: 'updateLiveViewHandoff',
     fingerprint: 'd2b826adb47d80a7',
     reason: 'legacy migration debt',

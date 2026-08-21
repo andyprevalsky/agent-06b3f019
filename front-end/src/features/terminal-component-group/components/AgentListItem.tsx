@@ -2,176 +2,320 @@
  * STATE MACHINE: AgentListItem
  *
  * This component is stateless - receives all state via props.
- * Renders agent status visualization (progress wheel, status indicators).
+ * Renders one agent row: pin marker, display name, and hover actions.
+ *
+ * ROW INTERACTIONS:
+ * [REST] --hover--------> [HOVERED]  (pin/archive replace elapsed time)
+ * [REST] --right-click--> [MENU OPEN] (Rename | Copy Link | Pin | Archive)
+ * [REST] --click--------> onClick (select agent)
+ *
+ * No pause/resume control lives here: run control belongs to the agent view, and
+ * a play button in a navigation list invited mis-clicks while scanning.
  *
  * Props-driven states:
  * - isSelected: boolean (highlight styling)
- * - isResuming: boolean (shows loading spinner on play button)
- * - agent.status: 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'OUT_OF_CREDITS' | 'COST_LIMIT_REACHED' | etc
- * - agent.progress: number (0-1 for progress wheel)
+ * - isArchived: boolean (menu swaps Archive for Restore, hides Pin)
+ * - hasAttentionRequest: boolean (forces the needs-help indicator)
+ * - agent.status: drives the leading run indicator (see agentRunState.ts)
+ *
+ * The leading slot carries a three-state run indicator — working (animated),
+ * needs-help (static), done (static). Deliberately NOT rendered here: the
+ * progress percentage/wheel and the separate out-of-credits / cost-limit chips.
+ * Those competed with the title for the row and said more than a navigation list
+ * needs to; out-of-credits and cost-limit now fold into needs-help, and exact
+ * progress lives in the agent view. The right-hand slot stays reserved for
+ * elapsed time or row actions.
  */
 
-import type { Agent } from '../hooks';
-import { cn } from '@/lib/utils';
-import { Play, Loader2, CreditCard, Bot, DollarSign } from 'lucide-react';
+import { forwardRef, type ComponentPropsWithoutRef } from 'react';
+import { Archive, ArchiveRestore, Bot, Pin } from 'lucide-react';
 
-interface AgentListItemProps {
+import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { cn } from '@/lib/utils';
+
+import AgentRowMenu, { type AgentRowActions } from './AgentRowMenu';
+import AgentStatusIndicator from './AgentStatusIndicator';
+import { agentDisplayName } from './agentDisplayName';
+import { agentRunStatus } from './agentRunState';
+import { elapsedSince, formatElapsed } from './formatElapsed';
+import type { Agent } from '../hooks';
+
+interface AgentListItemProps extends AgentRowActions {
   agent: Agent;
   isSelected: boolean;
   onClick: () => void;
-  onResume?: (agentId: string) => void;
-  isResuming?: boolean;
   isCompact?: boolean;
+  isArchived?: boolean;
+  hasAttentionRequest?: boolean;
+  /** Shared clock from the list; only read by active rows. */
+  now?: number;
 }
 
-const PROGRESS_RADIUS = 8;
-const PROGRESS_CIRCUMFERENCE = 2 * Math.PI * PROGRESS_RADIUS;
-
-function ProgressWheel({ progress }: { progress: number }) {
-  const progressOffset = PROGRESS_CIRCUMFERENCE - progress * PROGRESS_CIRCUMFERENCE;
+/** A row action (pin, archive, restore). Visibility is owned by RowTrailing. */
+function RowActionButton({
+  icon,
+  label,
+  tooltip,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  tooltip: string;
+  onClick: (e: React.MouseEvent) => void;
+}) {
   return (
-    <div className="flex items-center gap-2 flex-shrink-0">
-      <span className="text-xs text-gray-500">{Math.round(progress * 100)}%</span>
-      <svg className="transform -rotate-90" viewBox="0 0 20 20" width="18" height="18">
-        <circle
-          className="fill-none stroke-gray-300 opacity-70"
-          cx="10"
-          cy="10"
-          r={PROGRESS_RADIUS}
-          strokeWidth="3"
-        />
-        <circle
-          className="fill-none stroke-gray-500"
-          cx="10"
-          cy="10"
-          r={PROGRESS_RADIUS}
-          strokeWidth="3"
-          strokeLinecap="round"
-          strokeDasharray={PROGRESS_CIRCUMFERENCE}
-          strokeDashoffset={progressOffset}
-          style={{
-            transition: 'stroke-dashoffset 500ms ease',
-            stroke: 'url(#progress-gradient)',
-          }}
-        />
-        <defs>
-          <linearGradient id="progress-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#FE7503" />
-            <stop offset="20%" stopColor="#FC585C" />
-            <stop offset="40%" stopColor="#FD5776" />
-            <stop offset="60%" stopColor="#E062CC" />
-            <stop offset="80%" stopColor="#A76CED" />
-            <stop offset="100%" stopColor="#7A6BEC" />
-          </linearGradient>
-        </defs>
-      </svg>
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          onClick={onClick}
+          aria-label={label}
+          className="flex-shrink-0 rounded p-0.5 hover:bg-gray-200"
+        >
+          {icon}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6} className="px-2 py-1 text-xs">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
-interface StatusIndicatorProps {
-  agent: Agent;
-  isResuming: boolean;
-  onPlayClick: (e: React.MouseEvent) => void;
+const ACTION_ICON = 'h-3.5 w-3.5 text-gray-500';
+
+/**
+ * The row's trailing slot: run duration at rest, row actions on hover.
+ *
+ * Both occupy the SAME trailing slot — the duration sits in normal flow and
+ * the actions are layered over it. At rest the slot is only as wide as what is
+ * visible (pin and/or elapsed time), so invisible controls never steal title
+ * width. On hover the actions anchor to the row's right edge and cover only the
+ * text underneath them.
+ *
+ * Visibility is opacity-based, never `hidden`: display:none would drop the
+ * buttons out of the tab order entirely. `group-focus-within` reveals them for
+ * keyboard users, who get no hover event.
+ *
+ * `tabular-nums` stops the duration jittering as digits change width.
+ */
+function RowTrailing({
+  elapsed,
+  isPinned,
+  children,
+}: {
+  elapsed: string | null;
+  isPinned: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <span className="relative flex h-4 min-w-0 flex-shrink-0 items-center justify-end">
+      <span className="flex items-center gap-1 whitespace-nowrap transition-opacity group-hover/row:opacity-0 group-focus-within/row:opacity-0">
+        {/* Pinned is a persistent user-set state, so it must survive the actions
+            being hidden — otherwise a pinned row is indistinguishable at rest
+            except by its sort position. */}
+        {isPinned && (
+          <Pin className="h-3 w-3 flex-shrink-0 fill-current text-gray-500" aria-hidden="true" />
+        )}
+        {elapsed !== null && (
+          <span
+            className="whitespace-nowrap text-[11px] leading-none tabular-nums text-gray-400"
+            title={`Running for ${elapsed}`}
+          >
+            {elapsed}
+          </span>
+        )}
+      </span>
+      <span className="absolute inset-y-0 right-0 z-10 flex items-center gap-0.5 rounded bg-navi-white-dark opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
+        {children}
+      </span>
+    </span>
+  );
 }
 
-function StatusIndicator({ agent, isResuming, onPlayClick }: StatusIndicatorProps) {
-  if (agent.status === 'OUT_OF_CREDITS') {
-    return (
-      <div
-        className="flex-shrink-0 p-1.5 rounded-full border-2 border-red-400 dark:border-red-500"
-        title="Agent ran out of credits - add more to continue"
-      >
-        <CreditCard className="w-3.5 h-3.5 text-red-500" />
+/**
+ * Collapsed-rail row: too narrow for a label, so show an agent glyph with the
+ * run indicator tucked at the corner — the rail is where a user is most likely
+ * to miss an agent that has gone quiet waiting on them.
+ */
+const CompactRow = forwardRef<
+  HTMLDivElement,
+  {
+    runStatus: ReturnType<typeof agentRunStatus>;
+    seed: string;
+    isSelected: boolean;
+    onClick: () => void;
+  } & ComponentPropsWithoutRef<'div'>
+>(function CompactRow({ runStatus, seed, isSelected, onClick, ...triggerProps }, ref) {
+  return (
+    <div
+      ref={ref}
+      onClick={onClick}
+      {...triggerProps}
+      className={cn(
+        'relative flex w-full cursor-pointer items-center justify-center rounded-lg p-2 transition-colors',
+        isSelected ? 'bg-navi-white-dark' : 'hover:bg-navi-white-dark',
+      )}
+    >
+      {/* A shared agent glyph, not the title's initial: a column of unrelated
+          letters read as noise, and the run indicator in the corner already
+          carries the per-row state. */}
+      <Bot
+        data-sidebar-agent-icon
+        className={cn('h-5 w-5', isSelected ? 'text-gray-800' : 'text-gray-500')}
+      />
+      {runStatus.state !== 'active' && (
+        <span className="absolute -top-0.5 right-0.5">
+          <AgentStatusIndicator status={runStatus} seed={seed} />
+        </span>
+      )}
+    </div>
+  );
+});
+
+/**
+ * Full-width row: run indicator, title, then one trailing elapsed/actions slot.
+ *
+ * Layout order matters. The duration and actions occupy the same fixed-width
+ * slot, so hover never displaces the title or shifts a control under the pointer.
+ */
+const ExpandedRow = forwardRef<
+  HTMLDivElement,
+  {
+    agent: Agent;
+    displayName: string;
+    runStatus: ReturnType<typeof agentRunStatus>;
+    isPinned: boolean;
+    isSelected: boolean;
+    isArchived: boolean;
+    now: number;
+    onClick: () => void;
+    onArchiveClick: (e: React.MouseEvent) => void;
+    onPinClick: (e: React.MouseEvent) => void;
+  } & ComponentPropsWithoutRef<'div'>
+>(function ExpandedRow(
+  {
+    agent,
+    displayName,
+    runStatus,
+    isPinned,
+    isSelected,
+    isArchived,
+    now,
+    onClick,
+    onArchiveClick,
+    onPinClick,
+    ...triggerProps
+  },
+  ref,
+) {
+  return (
+    <div
+      ref={ref}
+      onClick={onClick}
+      {...triggerProps}
+      className={cn(
+        'group/row w-full cursor-pointer rounded-md px-2 py-1 text-left transition-colors',
+        // No chrome at rest: a list of filled cards fights the content. Colour
+        // appears on hover, and selection keeps a persistent fill so the current
+        // agent is still identifiable once the pointer moves away.
+        isSelected ? 'bg-navi-white-dark' : 'hover:bg-navi-white-dark',
+      )}
+    >
+      <div className="flex items-center gap-1.5">
+        <AgentStatusIndicator status={runStatus} seed={agent.agent_id} />
+        <h3 className="ml-0.5 min-w-0 flex-1 truncate text-sm font-medium" title={agent.goal}>
+          {displayName}
+        </h3>
+        <RowTrailing
+          isPinned={isPinned}
+          elapsed={
+            runStatus.state === 'active' ? formatElapsed(elapsedSince(agent.created_at, now)) : null
+          }
+        >
+          {!isArchived && (
+            <RowActionButton
+              label={isPinned ? `Unpin ${displayName}` : `Pin ${displayName}`}
+              tooltip={isPinned ? 'Unpin Agent' : 'Pin Agent'}
+              onClick={onPinClick}
+              icon={<Pin className={cn(ACTION_ICON, isPinned && 'fill-current text-gray-600')} />}
+            />
+          )}
+          <RowActionButton
+            label={`${isArchived ? 'Restore' : 'Archive'} ${displayName}`}
+            tooltip={isArchived ? 'Restore Agent' : 'Archive Agent'}
+            onClick={onArchiveClick}
+            icon={
+              isArchived ? (
+                <ArchiveRestore className={ACTION_ICON} />
+              ) : (
+                <Archive className={ACTION_ICON} />
+              )
+            }
+          />
+        </RowTrailing>
       </div>
-    );
-  }
-  if (agent.status === 'COST_LIMIT_REACHED') {
-    return (
-      <div
-        className="flex-shrink-0 p-1.5 rounded-full border-2 border-amber-400 dark:border-amber-500"
-        title="Agent cost limit reached - increase limit to continue"
-      >
-        <DollarSign className="w-3.5 h-3.5 text-amber-500" />
-      </div>
-    );
-  }
-  if (agent.status === 'PAUSED') {
-    return (
-      <button
-        onClick={onPlayClick}
-        disabled={isResuming}
-        className={cn(
-          'flex-shrink-0 p-1.5 rounded-full transition-colors border-2 border-gray-300 dark:border-gray-600',
-          isResuming
-            ? 'cursor-not-allowed opacity-70'
-            : 'hover:bg-gray-200 dark:hover:bg-gray-700 cursor-pointer',
-        )}
-        title={isResuming ? 'Resuming agent...' : 'Resume agent'}
-      >
-        {isResuming ? (
-          <Loader2 className="w-3.5 h-3.5 text-gray-500 animate-spin" />
-        ) : (
-          <Play className="w-3.5 h-3.5 text-gray-500" fill="currentColor" />
-        )}
-      </button>
-    );
-  }
-  return <ProgressWheel progress={agent.progress} />;
-}
+    </div>
+  );
+});
 
 export default function AgentListItem({
   agent,
   isSelected,
   onClick,
-  onResume,
-  isResuming = false,
   isCompact = false,
+  isArchived = false,
+  hasAttentionRequest = false,
+  now = 0,
+  onRename,
+  onCopyLink,
+  onTogglePin,
+  onArchive,
+  onRestore,
 }: AgentListItemProps) {
-  const handlePlayClick = (e: React.MouseEvent) => {
+  const stop = (handler: () => void) => (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (onResume) {
-      onResume(agent.agent_id);
-    }
+    handler();
   };
 
-  if (isCompact) {
-    return (
-      <div
-        onClick={onClick}
-        className={cn(
-          'w-full flex items-center justify-center p-2 rounded-lg transition-all cursor-pointer',
-          isSelected ? 'bg-gray-200 dark:bg-zinc-700' : 'hover:bg-gray-100 dark:hover:bg-zinc-800',
-        )}
-      >
-        <Bot
-          className={cn(
-            'h-5 w-5',
-            isSelected ? 'text-gray-800 dark:text-gray-200' : 'text-gray-500 dark:text-gray-400',
-          )}
-        />
-      </div>
-    );
-  }
+  const isPinned = agent.pinned_at !== null && agent.pinned_at !== undefined;
+  const displayName = agentDisplayName(agent);
+  const runStatus = agentRunStatus(agent, { hasAttentionRequest, isArchived });
 
   return (
-    <div className="w-full space-y-1.5">
-      <div
-        onClick={onClick}
-        className={cn(
-          'w-full text-left p-3 rounded-lg transition-all border cursor-pointer',
-          isSelected
-            ? 'bg-navi-white-dark dark:bg-navi-light-light-black border-border'
-            : 'bg-navi-white dark:bg-navi-light-black hover:bg-navi-white-dark dark:hover:bg-navi-light-light-black border-border',
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        {isCompact ? (
+          <CompactRow
+            runStatus={runStatus}
+            seed={agent.agent_id}
+            isSelected={isSelected}
+            onClick={onClick}
+          />
+        ) : (
+          <ExpandedRow
+            agent={agent}
+            displayName={displayName}
+            runStatus={runStatus}
+            isPinned={isPinned}
+            isSelected={isSelected}
+            isArchived={isArchived}
+            now={now}
+            onClick={onClick}
+            onArchiveClick={stop(isArchived ? () => onRestore?.() : onArchive)}
+            onPinClick={stop(onTogglePin)}
+          />
         )}
-      >
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="font-medium text-sm line-clamp-2 flex-1">{agent.goal}</h3>
-            <StatusIndicator agent={agent} isResuming={isResuming} onPlayClick={handlePlayClick} />
-          </div>
-        </div>
-      </div>
-    </div>
+      </ContextMenuTrigger>
+      <AgentRowMenu
+        isPinned={isPinned}
+        isArchived={isArchived}
+        onRename={onRename}
+        onCopyLink={onCopyLink}
+        onTogglePin={onTogglePin}
+        onArchive={onArchive}
+        onRestore={onRestore}
+      />
+    </ContextMenu>
   );
 }
