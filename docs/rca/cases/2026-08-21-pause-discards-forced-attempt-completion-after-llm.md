@@ -25,7 +25,7 @@ sources:
   - PR #1021
   - fleet run descend-20260820T202555Z-gate-sub
 repro: agents/tests/blackbox/run_agent.blackbox.py::test_pause_after_forced_completion_llm_still_dispatches_attempt_completion
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -75,11 +75,12 @@ Local owning-boundary repro fails on HEAD (~0.43s):
 
 ## Solution
 
-Pending approval. Proposed generalizable fix: after an accepted LLM response that
-already contains tool_calls (especially required `attempt_completion` on the
-completed-child force path), dispatch those tools before honoring an external
-PAUSE. Do not raise the dynamic timeout. Optional follow-up: harden blank-SPA
-recovery so k=5 navigations remount Vite before model wait loops burn the budget.
+After an accepted LLM response that already contains tool_calls, dispatch those
+tools before honoring an external PAUSE (`agents/loop/run_agent.py` post-
+`_account_llm_usage` gate). Do not raise the dynamic timeout. Cemented by
+`test_pause_after_forced_completion_llm_still_dispatches_attempt_completion`.
+Optional follow-up: harden blank-SPA recovery so k=5 navigations remount Vite
+before model wait loops burn the budget.
 
 ## Human feedback
 
