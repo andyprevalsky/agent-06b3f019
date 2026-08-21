@@ -13,12 +13,12 @@ async def test_fetch_pricing_pool_average():
 
         result = await fetch_model_pricing("rose-1-ultra")
 
-    # rose-1-ultra waterfall: anthropic/claude-opus-4.8 ($5/$25 per M) +
-    # openai/gpt-5.6-terra ($2.50/$15 per M) + openai/gpt-5.6-sol ($5/$30 per M).
-    # Average input: (5+2.5+5)/3 = $4.1666.../M -> 0.41666... cents/1k
-    assert abs(result["input_cents_per_1k"] - (12.5 / 30)) < 1e-9
-    # Average output: (25+15+30)/3 = $23.333.../M -> 2.3333... cents/1k
-    assert abs(result["output_cents_per_1k"] - (70 / 30)) < 1e-9
+    # rose-1-ultra waterfall: openai/gpt-5.6-sol ($2.50/$15 per M) +
+    # moonshotai/kimi-k3 ($3/$15 per M).
+    # Average input: (2.5+3)/2 = $2.75/M -> 0.275 cents/1k
+    assert abs(result["input_cents_per_1k"] - 0.275) < 1e-9
+    # Average output: (15+15)/2 = $15.00/M -> 1.5 cents/1k
+    assert abs(result["output_cents_per_1k"] - 1.5) < 1e-9
 
 
 async def test_every_pool_model_has_provider_pricing():
@@ -87,8 +87,9 @@ async def test_get_gpt_56_sol_openrouter_pricing():
     result = await get_model_pricing("openai/gpt-5.6-sol")
 
     assert result is not None
-    assert abs(result["input_cents_per_1k"] - 0.5) < 1e-9
-    assert abs(result["output_cents_per_1k"] - 3.0) < 1e-9
+    # $2.50/$15 per M -> 0.25 / 1.5 cents per 1k.
+    assert abs(result["input_cents_per_1k"] - 0.25) < 1e-9
+    assert abs(result["output_cents_per_1k"] - 1.5) < 1e-9
 
 
 async def test_get_openrouter_anthropic_pricing_exact():

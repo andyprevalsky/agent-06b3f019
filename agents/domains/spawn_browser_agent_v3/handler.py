@@ -33,11 +33,6 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
-from utils.payment_card import (
-    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-    build_payment_question,
-    normalize_payment_payload,
-)
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -55,6 +50,11 @@ from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import build_browser_state_message_content
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
+from utils.payment_card import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    build_payment_question,
+    normalize_payment_payload,
+)
 from utils.prompts import build_verifier_prompt
 
 from .cdp_urls import steel_cdp_connection_url
@@ -90,12 +90,13 @@ from .config import (
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
 from .credential_runtime import build_realm_credential_state
+from .download_persist import BrowserDownloadPersister
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
-    blocked_resource_url_for_recovery,
     blocked_resource_requires_payment_cdn,
+    blocked_resource_url_for_recovery,
     browser_recording_output_dir,
     normalize_simulated_browser_frame,
 )
@@ -4887,6 +4888,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     browser_recorder: Optional[BrowserAgentRecorder] = None
     browser_network_recorder: Optional[BrowserNetworkRecorder] = None
     network_recorder_task: Optional[asyncio.Task] = None
+    browser_download_persister: Optional[BrowserDownloadPersister] = None
+    download_persister_task: Optional[asyncio.Task] = None
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
@@ -4942,7 +4945,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     navigation_pin_url: Optional[str] = None
     handoff_payment_fill_attempts = 0
     handoff_payment_fill_succeeded = False
-    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 5
+    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 8
     # Session origin registrable domain — when the live page leaves this domain
     # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
     # without path or product-name allowlists.
@@ -5677,6 +5680,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         # attaches in the background (resolved before session close).
         network_recorder_task = asyncio.create_task(_create_network_recorder())
 
+        async def _create_download_persister():
+            # Kernel CDP downloads_path alone does not always yield listFiles entries;
+            # materialize Content-Disposition attachments under /tmp/downloads.
+            return await BrowserDownloadPersister.create(
+                browser_session=dom_service.session,
+                session_id=session_id,
+                config=config,
+                agent_id=agent_id,
+                task_id=task_id or "",
+            )
+
+        download_persister_task = asyncio.create_task(_create_download_persister())
+
         async def _init_humanizer():
             if not _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
                 logger.info("\U0001f916 BrowserHumanizer disabled by env; using browser-use input events")
@@ -6383,16 +6399,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             wait_for_payment_ref_fields,
                         )
 
-                        _autofill_page = None
-                        if humanizer is not None and "input_page" in getattr(
-                            humanizer, "__dict__", {}
-                        ):
-                            _autofill_page = getattr(humanizer, "input_page", None)
+                        _autofill_page = input_page
+                        if _autofill_page is None and humanizer is not None:
+                            if "input_page" in getattr(humanizer, "__dict__", {}):
+                                _autofill_page = getattr(humanizer, "input_page", None)
+                        # Keep the wait short: long polls burned the 900s budget
+                        # before titled payment iframes mounted on the handoff page.
                         fields_ready = await wait_for_payment_ref_fields(
                             dom_service.session,
                             ref_names=["card_number"],
                             input_page=_autofill_page,
-                            timeout_seconds=18.0,
+                            timeout_seconds=4.0,
                         )
                         if not fields_ready:
                             await save_browser_action_message(
@@ -7039,6 +7056,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                if download_persister_task.done():
+                                    browser_download_persister = download_persister_task.result()
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
                         humanizer = await _replace_browser_humanizer(
                             current_humanizer=humanizer,
                             enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
@@ -7252,7 +7279,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     and not await live_tab_looks_challenged(input_page)
                 ):
                     skip_message = (
-                        f"Current page does not look challenged"
+                        "Current page does not look challenged"
                         + (f" ({current_url})" if current_url else "")
                         + ". Continue the task on this page — do not start "
                         "challenge recovery unless the document itself is blocked."
@@ -7471,6 +7498,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if browser_network_recorder is not None:
                             with contextlib.suppress(Exception):
                                 await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                browser_download_persister = await asyncio.wait_for(
+                                    asyncio.shield(download_persister_task),
+                                    timeout=10,
+                                )
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
@@ -8725,6 +8764,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     error=extract_error_message(diagnostics_error),
                 )
+        if browser_download_persister is None and download_persister_task is not None:
+            with contextlib.suppress(Exception):
+                browser_download_persister = await asyncio.wait_for(
+                    asyncio.shield(download_persister_task),
+                    timeout=10,
+                )
+        if browser_download_persister is not None:
+            with contextlib.suppress(Exception):
+                await browser_download_persister.close()
         _schedule_browser_cleanup(
             agent_id=agent_id,
             task_id=task_id,
@@ -8792,30 +8840,55 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         agent_id = workflow_instance.agent_id
 
         attachments: List[Dict[str, Any]] = []
-        if requested_attachments and hasattr(workflow_instance, "context"):
+        if hasattr(workflow_instance, "context"):
             context_attachments = extract_attachments_from_context(workflow_instance.context)
             filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
 
-            for filename in requested_attachments:
-                if filename in filename_to_pointer:
-                    fp = filename_to_pointer[filename]
-                    attachments.append(
-                        {
-                            "id": fp.id,
-                            "storage_path": fp.storage_path,
-                            "original_filename": fp.original_filename,
-                            "mime_type": fp.mime_type,
-                            "size_bytes": fp.size_bytes,
-                            "created_at": fp.created_at,
-                        }
-                    )
-                else:
+            def _fp_dict(fp: Any) -> Dict[str, Any]:
+                return {
+                    "id": fp.id,
+                    "storage_path": fp.storage_path,
+                    "original_filename": fp.original_filename,
+                    "mime_type": fp.mime_type,
+                    "size_bytes": fp.size_bytes,
+                    "created_at": fp.created_at,
+                }
+
+            if requested_attachments:
+                if isinstance(requested_attachments, str):
+                    requested_attachments = [requested_attachments]
+                for filename in requested_attachments:
+                    if filename in filename_to_pointer:
+                        attachments.append(_fp_dict(filename_to_pointer[filename]))
+                    else:
+                        logger.warning(
+                            "[BrowserAgent] Attachment not found in context",
+                            agent_id=agent_id,
+                            filename=filename,
+                            available_files=list(filename_to_pointer.keys()),
+                        )
+                # Wrong/missing names previously left available_files empty so
+                # upload_file could never succeed. Fall back to every parent
+                # attachment when nothing matched.
+                if not attachments and filename_to_pointer:
                     logger.warning(
-                        "[BrowserAgent] Attachment not found in context",
+                        "[BrowserAgent] No requested attachments matched; "
+                        "falling back to all parent context attachments",
                         agent_id=agent_id,
-                        filename=filename,
+                        requested=requested_attachments,
                         available_files=list(filename_to_pointer.keys()),
                     )
+                    attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+            elif filename_to_pointer:
+                # Parent omitted attachments but context has files — forward them
+                # so upload tasks (e.g. tinypng) do not spawn with an empty set.
+                logger.info(
+                    "[BrowserAgent] No attachments requested; forwarding parent context files",
+                    agent_id=agent_id,
+                    available_files=list(filename_to_pointer.keys()),
+                )
+                attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+
 
         logger.info(
             "Browser agent starting (v3)",
@@ -8829,7 +8902,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             title="Starting up a browser",
             message="",
             status=MessageStatus.IN_PROGRESS,
-            metadata={"toolName": "spawn_browser_agent"},
+            metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
         )
 
         try:
@@ -9043,6 +9116,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             status=MessageStatus.FINISHED,
                             metadata={
                                 "toolName": "spawn_browser_agent",
+                                # Progress, not a terminal: the browser task
+                                # resumes on the same session right after this.
+                                "action_type": "write_lock_granted",
                                 "task_id": write_lock_resume_state.get("task_id"),
                                 "requestUserApproval": {
                                     "writePermission": True,
@@ -9538,6 +9614,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         status=MessageStatus.FINISHED,
                         metadata={
                             "toolName": "spawn_browser_agent",
+                            # Progress, not a terminal: the browser task resumes
+                            # on the same session right after this event.
+                            "action_type": "payment_card_ready",
                             "task_id": result.get("task_id"),
                             "requestUserApproval": {
                                 "writePermission": True,
@@ -9658,7 +9737,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             output_files = result.get("output_files", [])
             final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
-            final_metadata = {"toolName": "spawn_browser_agent"}
+            # Declare terminality explicitly. The front-end must never have to
+            # infer "this browser task is over" from a missing action_type — a
+            # workflow-scope progress event would look identical.
+            final_metadata = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
             for key in (
                 "task_id",
                 "world_model_simulated",
@@ -9740,7 +9822,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_browser_agent"},
+                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
             )
 
 

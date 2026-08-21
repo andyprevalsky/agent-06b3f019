@@ -19,6 +19,26 @@ from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger(__name__)
 
+# Steel's Files API only sees CDP downloads written under /files.
+# Kernel session file listing only scans /tmp/downloads (+ uploads / share).
+STEEL_DOWNLOADS_PATH = "/files"
+KERNEL_DOWNLOADS_PATH = "/tmp/downloads"
+
+
+def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
+    """Return the CDP download directory for the active browser provider.
+
+    ``Browser.setDownloadBehavior`` must write into a directory the provider's
+    session-file listing actually exposes. Using Steel's ``/files`` on Kernel
+    makes downloads invisible to ``session_files`` / attempt_completion.
+    """
+    import os
+
+    resolved = (provider if provider is not None else os.getenv("BROWSER_PROVIDER", "kernel")).strip().lower()
+    if resolved == "steel":
+        return STEEL_DOWNLOADS_PATH
+    return KERNEL_DOWNLOADS_PATH
+
 
 _IMAGE_ATTR_KEYS = (
     "currentSrc",
@@ -461,17 +481,26 @@ class DOMService:
         element = await dom_service.get_element_at_coordinates(x=500, y=300)
     """
 
-    def __init__(self, cdp_url: str, viewport_width: int = 1280, viewport_height: int = 800):
+    def __init__(
+        self,
+        cdp_url: str,
+        viewport_width: int = 1280,
+        viewport_height: int = 800,
+        downloads_path: Optional[str] = None,
+    ):
         """Initialize DOM service.
 
         Args:
-            cdp_url: WebSocket URL for CDP connection (from Steel)
+            cdp_url: WebSocket URL for CDP connection (from Steel/Kernel)
             viewport_width: Browser viewport width (WXGA default)
             viewport_height: Browser viewport height (WXGA default)
+            downloads_path: CDP download directory. Defaults to the path for
+                ``BROWSER_PROVIDER`` (Kernel ``/tmp/downloads``, Steel ``/files``).
         """
         self.cdp_url = cdp_url
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
+        self.downloads_path = downloads_path or browser_downloads_path_for_provider()
         self._session = None
         self._selector_map: Dict[int, Any] = {}
         # Passkey (cloud-custody) state.
@@ -502,21 +531,25 @@ class DOMService:
             from browser_use.browser.profile import BrowserProfile
             from browser_use.browser.session import BrowserSession
 
-            # Create profile with CDP URL for remote browser
-            # downloads_path="/files" is required for Steel's Files API to capture downloads
+            # Create profile with CDP URL for remote browser.
+            # downloads_path must match the provider's session-file root:
+            # Steel Files API → /files; Kernel fs.listFiles → /tmp/downloads.
             profile = BrowserProfile(
                 cdp_url=self.cdp_url,
-                is_local=False,  # Remote browser (Steel)
-                downloads_path="/files",  # Steel captures files from /files directory
+                is_local=False,  # Remote browser (Steel/Kernel)
+                downloads_path=self.downloads_path,
             )
 
             # Must pass cdp_url directly to prevent BrowserSession from overriding is_local=True
             self._session = BrowserSession(browser_profile=profile, cdp_url=self.cdp_url)
             await self._session.start()
-            logger.info(f"🌐 Connected to browser via CDP: {self.cdp_url[:50]}...")
+            logger.info(
+                f"🌐 Connected to browser via CDP: {self.cdp_url[:50]}... "
+                f"(downloads_path={self.downloads_path})"
+            )
 
             # Note: Download behavior is configured automatically by browser-use DownloadsWatchdog
-            # using the downloads_path="/files" setting in BrowserProfile
+            # using the downloads_path setting in BrowserProfile
 
             # Post-start CDP setup, all against the same pooled CDP session:
             #   - scrollbar-hiding CSS (viewport must match the 1280x800 screenshot;

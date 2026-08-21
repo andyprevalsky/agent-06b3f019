@@ -56,3 +56,39 @@ None recorded.
 
 Generate a database archive with the binary of the server that will restore it — never
 the host's — and invalidate published archives once they are proven unreadable.
+
+## Recurrence — 2026-08-19 (deploy Step 4r, seed-memory ratchet)
+
+The original fix made seed-dump *publication* use the target container's own
+`pg_dump`. It did not cover a second **consumer** that reads the shared
+`.context/benchmarks/seed-cache/*.dump` with a hardcoded reader image:
+
+`back-end/scripts/measure-seed-memory.sh` restored the cache dump into a
+`postgres:16-alpine` container. Today's cached dump is archive format **1.16**
+(PG18 publisher), so `pg_restore` refused it outright:
+
+```
+pg_restore: error: unsupported version (1.16) in file header
+```
+
+Two defects compounded:
+
+1. The reader image was pinned to `postgres:16-alpine` regardless of the dump it
+   was about to read, so the guardrail "publish with the reader's binary" did not
+   protect a consumer that picks its own reader.
+2. The restore was `>/dev/null 2>&1 || true` ("dumps carry role/ext noise"). A
+   header-level refusal restores **nothing**, but the masking turned that into an
+   empty database, and the gate then failed with the misleading
+   `❌ source restore produced no Cookie rows for seed user` — which reads like a
+   data problem, not a version problem. That cost the whole diagnosis.
+
+Fixed on both axes: the reader image is now derived from the dump's archive-format
+version in the file header, and header-level `pg_restore` refusals
+(`unsupported version`, `did not find magic string`, `input file does not appear`)
+now fail loudly and name the dump instead of being swallowed. Role/extension noise
+stays non-fatal. Verified: the same dump now restores 20470 Cookie rows.
+
+**Why the earlier guardrail missed it:** it constrained the producer only. Any
+consumer that chooses its own `pg_restore` can still be older than the artifact.
+The durable rule is that a reader must derive its version from the artifact, and
+must never mask a refusal to read it.

@@ -104,6 +104,13 @@ const SEED_USER_ID = process.env.SEED_LOCAL_USER_ID?.trim() || DEFAULT_DEV_USER_
 // --passkeys-only benchmark mode is authoritative and removes stale local
 // passkeys so its live-fixture preflight cannot succeed on obsolete material.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
+// Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential tokens from
+// prod. The canonical base-image dump can freeze abandoned OAuth rows
+// (null email / null accessToken); cache-coverage and any message_person email
+// path then fail closed with "Missing from_email" because Connected Integrations
+// never lists a usable send-from address. Benchmark runs that need email pull
+// this overlay the same way compute tokens are refreshed.
+const EMAIL_CREDENTIALS_ONLY = process.argv.includes('--email-credentials-only');
 const SKIP_BROWSER_AUTH_SYNC =
   process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
   process.env.BENCHMARK_WORLD_MODEL_MODE === 'simulate';
@@ -147,6 +154,7 @@ const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
   ['--passkeys-only', PASSKEYS_ONLY],
   ['--credentials-only', CREDENTIALS_ONLY],
+  ['--email-credentials-only', EMAIL_CREDENTIALS_ONLY],
 ].filter(([, enabled]) => enabled);
 if (requestedSeedModes.length > 1) {
   throw new Error(
@@ -392,6 +400,80 @@ async function syncIntegrations(): Promise<number> {
     console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
   }
   return syncedIds.length;
+}
+
+/** Email providers refreshed by `--email-credentials-only` (no compute-token churn). */
+const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
+
+/**
+ * Sync only Gmail/Yahoo integration rows for the dev user. Unlike
+ * `syncIntegrations`, this never imports pool tokens and never deletes
+ * `claude_code` / `gpt_code` rows — email overlay must not disturb compute
+ * tokens already present in an isolated benchmark DB.
+ *
+ * Returns a remote-integration-id → local-integration-id map so credential
+ * upserts can rewrite foreign keys onto the preserved local IDs.
+ */
+async function syncEmailIntegrations(): Promise<Map<string, string>> {
+  const emailIntegrations = await remote.integration.findMany({
+    where: {
+      userId: DEV_USER_ID,
+      name: { in: [...EMAIL_INTEGRATION_NAMES] },
+    },
+    select: PROD_INTEGRATION_COLUMNS,
+  });
+  const remoteToLocal = new Map<string, string>();
+  for (const integration of emailIntegrations) {
+    const { id: remoteId, ...updateData } = integration;
+    const synced = await local.integration.upsert({
+      where: {
+        userId_name: {
+          userId: integration.userId,
+          name: integration.name,
+        },
+      },
+      create: integration,
+      update: updateData,
+      select: { id: true },
+    });
+    remoteToLocal.set(remoteId, synced.id);
+  }
+  return remoteToLocal;
+}
+
+/** Rewrite credential.integrationId onto the local Integration id when IDs diverge. */
+function remapEmailCredentialIntegrationIds<
+  T extends { integrationId: string; [key: string]: unknown },
+>(creds: T[], remoteToLocal: Map<string, string>): T[] {
+  return creds.map((cred) => {
+    const localId = remoteToLocal.get(cred.integrationId);
+    if (!localId || localId === cred.integrationId) return cred;
+    return { ...cred, integrationId: localId };
+  });
+}
+
+/**
+ * Build remote→local Integration id map for the email providers that own
+ * EmailIntegrationCredential rows. Used after any integration sync that
+ * preserves local primary keys via (userId, name).
+ */
+async function emailIntegrationIdMap(): Promise<Map<string, string>> {
+  const remoteRows = await remote.integration.findMany({
+    where: {
+      userId: DEV_USER_ID,
+      name: { in: [...EMAIL_INTEGRATION_NAMES] },
+    },
+    select: { id: true, userId: true, name: true },
+  });
+  const remoteToLocal = new Map<string, string>();
+  for (const row of remoteRows) {
+    const localRow = await local.integration.findUnique({
+      where: { userId_name: { userId: row.userId, name: row.name } },
+      select: { id: true },
+    });
+    if (localRow) remoteToLocal.set(row.id, localRow.id);
+  }
+  return remoteToLocal;
 }
 
 /**
@@ -991,6 +1073,25 @@ async function sync() {
     return;
   }
 
+  if (EMAIL_CREDENTIALS_ONLY) {
+    let remoteToLocal = new Map<string, string>();
+    await syncTable('Integrations', async () => {
+      remoteToLocal = await syncEmailIntegrations();
+      return remoteToLocal.size;
+    });
+    await syncTable('Email Credentials', async () => {
+      const creds = await remote.emailIntegrationCredential.findMany({
+        where: { userId: DEV_USER_ID },
+      });
+      return upsertById(
+        local.emailIntegrationCredential,
+        remapEmailCredentialIntegrationIds(creds, remoteToLocal)
+      );
+    });
+    console.log('\n🔄 Email credential sync complete.');
+    return;
+  }
+
   // ── Global: Tools ──
   await syncTable('Tools', async () => {
     const tools = await remote.tool.findMany();
@@ -1038,7 +1139,11 @@ async function sync() {
     const creds = await remote.emailIntegrationCredential.findMany({
       where: { userId: SEED_USER_ID },
     });
-    return upsertById(local.emailIntegrationCredential, creds);
+    const remoteToLocal = await emailIntegrationIdMap();
+    return upsertById(
+      local.emailIntegrationCredential,
+      remapEmailCredentialIntegrationIds(creds, remoteToLocal)
+    );
   });
 
   // ── People (contacts) ──

@@ -1171,10 +1171,28 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             )
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={"expression": code, "returnByValue": True},
+            params={"expression": code, "returnByValue": True, "awaitPromise": True},
             session_id=cdp_session.session_id,
         )
         value = result.get("result", {}).get("value")
+        # CDP returns exceptionDetails when the expression throws; surface that
+        # instead of a silent null/empty value (async fetch failures used to look
+        # like successful empty objects).
+        exception = result.get("exceptionDetails")
+        if exception:
+            error_text = (
+                exception.get("text")
+                or (exception.get("exception") or {}).get("description")
+                or "evaluate raised"
+            )
+            await context.action_history.record_action(
+                dom_service=context.dom_service,
+                action="evaluate",
+                thinking=context.thinking,
+                params={"code": code},
+                result={"success": False, "error": error_text},
+            )
+            return {"success": False, "error": error_text, "value": value}
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="evaluate",
@@ -1675,6 +1693,15 @@ _PAYMENT_REF_PLAYWRIGHT_LABELS: Dict[str, tuple[str, ...]] = {
     "card_cvv": (r"cvc", r"cvv", r"security code", r"código"),
 }
 
+# Hosted checkout widgets often isolate each field in a titled iframe
+# ("Secure card number input frame"). Title text is semantic — not a host allowlist.
+_PAYMENT_REF_IFRAME_TITLE_PATTERNS: Dict[str, tuple[str, ...]] = {
+    "card_number": ("card number", "cardnumber", "cc-number"),
+    "card_name": ("name on card", "cardholder", "card name", "name input"),
+    "card_expiry": ("expir", "exp date", "mm / yy", "mm/yy"),
+    "card_cvv": ("cvc", "cvv", "security code", "securitycode"),
+}
+
 _PAYMENT_REF_LOCATE_JS = f"""
 (refName) => {{
     const {{ findField }} = {_PAYMENT_FIELD_FINDER_JS};
@@ -1882,6 +1909,57 @@ async def _evaluate_on_payment_fill_target(
         return None
 
 
+async def _payment_ref_iframe_title_present(input_page: Any, ref_name: str) -> bool:
+    """True when a semantically titled payment iframe has an attached input."""
+    if input_page is None or ref_name not in _PAYMENT_REF_IFRAME_TITLE_PATTERNS:
+        return False
+    if not hasattr(input_page, "frame_locator"):
+        return False
+    for pattern in _PAYMENT_REF_IFRAME_TITLE_PATTERNS[ref_name]:
+        try:
+            frame = input_page.frame_locator(f'iframe[title*="{pattern}" i]')
+            locator = frame.locator("input, textarea").first
+            count = await _maybe_await(locator.count())
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 1:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _resolve_payment_ref_via_iframe_title(
+    input_page: Any,
+    ref_name: str,
+) -> Optional[tuple[int, int]]:
+    """Locate a payment input inside a semantically titled iframe (host-agnostic)."""
+    if input_page is None or ref_name not in _PAYMENT_REF_IFRAME_TITLE_PATTERNS:
+        return None
+    if not hasattr(input_page, "frame_locator"):
+        return None
+    for pattern in _PAYMENT_REF_IFRAME_TITLE_PATTERNS[ref_name]:
+        try:
+            frame = input_page.frame_locator(f'iframe[title*="{pattern}" i]')
+            locator = frame.locator("input, textarea").first
+            count = await _maybe_await(locator.count())
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                continue
+            box = await _maybe_await(locator.bounding_box())
+            if not isinstance(box, dict) or box.get("x") is None:
+                continue
+            return (
+                int(box["x"] + (box.get("width") or 0) / 2),
+                int(box["y"] + (box.get("height") or 0) / 2),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Payment ref iframe-title locate miss",
+                ref_name=ref_name,
+                pattern=pattern,
+                error=str(exc)[:160],
+            )
+    return None
+
+
 async def _resolve_payment_ref_coordinates(
     session: Any,
     ref_name: str,
@@ -1891,6 +1969,15 @@ async def _resolve_payment_ref_coordinates(
     """Resolve coordinates for a visible payment input by semantic card ref."""
     if not session or ref_name not in PAYMENT_CARD_SECRET_REFS:
         return None
+
+    iframe_coords = await _resolve_payment_ref_via_iframe_title(input_page, ref_name)
+    if iframe_coords is not None:
+        logger.debug(
+            "Resolved payment ref coordinates via iframe title",
+            ref_name=ref_name,
+            coords=iframe_coords,
+        )
+        return iframe_coords
 
     for label, target in await _iter_payment_fill_targets(session, input_page):
         result = await _evaluate_on_payment_fill_target(target, _PAYMENT_REF_LOCATE_JS, ref_name)
@@ -1964,12 +2051,15 @@ async def wait_for_payment_ref_fields(
     """
     names = list(ref_names or ["card_number"])
     targets = await _iter_payment_fill_targets(session, input_page)
-    if not targets:
+    # Titled payment iframes may exist even when evaluate targets are empty.
+    if not targets and input_page is None:
         return False
     deadline = time_module.monotonic() + max(0.5, float(timeout_seconds))
     nudged = False
     while True:
         for name in names:
+            if await _payment_ref_iframe_title_present(input_page, name):
+                return True
             if await _resolve_payment_ref_coordinates(session, name, input_page=input_page):
                 return True
         if not nudged and time_module.monotonic() + 2.0 < deadline:
@@ -2046,6 +2136,20 @@ async def _fill_payment_ref_via_playwright_locator(
                 error=str(exc)[:160],
             )
             return None
+
+    # Prefer semantically titled payment iframes (hosted field isolation).
+    if hasattr(input_page, "frame_locator"):
+        for pattern in _PAYMENT_REF_IFRAME_TITLE_PATTERNS.get(ref_name, ()):
+            frame = input_page.frame_locator(f'iframe[title*="{pattern}" i]')
+            hit = await _try_locator(
+                input_page,
+                0,
+                frame.locator("input, textarea"),
+                f'iframe[title*="{pattern}" i] >> input',
+            )
+            if hit:
+                hit["method"] = "playwright_iframe_title"
+                return hit
 
     for root_index, root in enumerate(roots):
         if not hasattr(root, "locator"):
@@ -3035,12 +3139,58 @@ async def _execute_goto(
                 if key in prepared
             }
 
-    event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
-    await event
-    await event.event_result(raise_if_any=True, raise_if_none=False)
+    try:
+        event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
 
-    navigation_waiter = wait_for_navigation or wait_for_navigation_ready
-    await navigation_waiter(dom_service, url=url)
+        navigation_waiter = wait_for_navigation or wait_for_navigation_ready
+        await navigation_waiter(dom_service, url=url)
+    except Exception as nav_error:
+        error_text = extract_error_message(nav_error)
+        if (
+            session_id
+            and config is not None
+            and url.startswith(("http://", "https://"))
+            and "ERR_ABORTED" in error_text
+        ):
+            try:
+                from domains.spawn_browser_agent_v3.download_persist import (
+                    persist_navigation_download_via_page_fetch,
+                )
+
+                download = await persist_navigation_download_via_page_fetch(
+                    session=session,
+                    url=url,
+                    session_id=session_id,
+                    config=config,
+                )
+            except Exception as persist_error:
+                logger.warning(
+                    "ERR_ABORTED download persist failed",
+                    url=url[:200],
+                    error=f"{type(persist_error).__name__}:{extract_error_message(persist_error)[:160]}",
+                )
+                download = None
+            if download:
+                result = {
+                    "success": True,
+                    "message": (
+                        f"Navigation aborted into a file download; saved to session "
+                        f"as {download.get('path')} ({download.get('size')} bytes)"
+                    ),
+                    "current_url": url,
+                    "download": download,
+                }
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="goto",
+                    thinking=thinking,
+                    params={"url": url},
+                    result=result,
+                )
+                return result
+        raise
 
     result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:

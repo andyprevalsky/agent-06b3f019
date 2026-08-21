@@ -351,11 +351,13 @@ export async function uploadSessionFile(
   sessionId: string,
   fileBuffer: Buffer,
   filename: string,
-  mimeType = 'application/octet-stream'
+  mimeType = 'application/octet-stream',
+  options: { directory?: string } = {}
 ): Promise<{ path: string; size: number }> {
   const provider = await providerForSession(sessionId);
+  // Steel's Files API owns /files; directory overrides only apply to Kernel.
   return provider === 'kernel'
-    ? uploadKernelSessionFile(sessionId, fileBuffer, filename)
+    ? uploadKernelSessionFile(sessionId, fileBuffer, filename, options)
     : uploadFileToSession(sessionId, fileBuffer, filename, mimeType);
 }
 

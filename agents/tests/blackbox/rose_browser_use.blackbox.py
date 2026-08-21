@@ -58,9 +58,13 @@ def test_browser_use_pool_registered():
     assert spec.name == "rose-1-browser-use"
     assert spec.claude_auth_model == "claude-fable-5"
     assert spec.gpt_auth_model == "gpt-5.6-sol"
-    assert "anthropic/claude-opus-4.8" in spec.waterfall
-    assert spec.waterfall[-1] == "openai/gpt-5.6-sol"
-    # Legacy bu/yutori models removed; waterfall is opus → GPT-5.6 Sol.
+    # Waterfall is GPT-5.6 Sol → Kimi K3. Opus 4.8 was dropped: it was the
+    # priciest layer while scoring below sol on all three AA indices, and the
+    # two survivors come from different vendors so one provider outage cannot
+    # drain the whole waterfall.
+    assert spec.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert not any(m.startswith("anthropic/") for m in spec.waterfall)
+    # Legacy bu/yutori models removed.
     assert all("yutori" not in m and "browser-use" not in m for m in spec.waterfall)
 
 
