@@ -838,6 +838,40 @@ def test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start():
         local.configure_task_environment(["gate-kyc-card-mint"])
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        # Admin-bypass shares /test_payment + public Kernel tunnel; omitting it
+        # from TEST_PAYMENT_FRONTEND_TASK_NAMES served Vite DEV and left #root
+        # blank for minutes under pass@5 concurrency.
+        local.configure_task_environment(["gate-subscription-card-mint-admin-bypass"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+        assert local.needs_frontend_tunnel(["gate-subscription-card-mint-admin-bypass"])
+
+
+def test_public_tunnel_benchmarks_enable_bundled_frontend_by_default():
+    """Bundling follows needs_public_tunnel — not a hand-maintained allowlist."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    # browser-agent needs a public tunnel but is not a /test_payment task.
+    assert local.needs_public_tunnel(["browser-agent"]) is True
+    assert local.needs_frontend_tunnel(["browser-agent"]) is False
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        local.configure_task_environment(["browser-agent"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ["BENCHMARK_FRONTEND_URL"] = "https://example.test"
+        local.configure_task_environment(["browser-agent"])
+        assert "BENCHMARK_BUNDLED_FRONTEND" not in os.environ
+
 
 def test_benchmark_bundled_frontend_build_has_cloud_heap_budget():
     """Cloud build hosts default near 2GB old-space, below the frontend bundle need."""
@@ -1270,6 +1304,34 @@ def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
         os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
         local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
         assert os.environ.get("ADMIN_USER_IDS_EXTRA", "") == ""
+
+
+def test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard():
+    """Depleted purchase-subscription cleanup deletes integrations; admin company_flow mint needs one.
+
+    Observed 2026-08-20: `gate-subscription-card-mint-admin-bypass` reached
+    `issueAdminCompanyCard` (ADMIN_USER_IDS_EXTRA worked) then AgentCardRoutingProvider threw
+    `cardholder_onboarding_required` because the gate fixture left zero integrations for the
+    synthetic admin. The fixture must re-seed an org-managed agentcard row after cleanup,
+    using a KYC-ready cardholder (prefer andy@roselabs.ai, else agentcard-benchmark@).
+    """
+    from pathlib import Path
+
+    from benchmarks.run_benchmark import ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+
+    root = Path(__file__).resolve().parents[3]
+    fixture = (root / "back-end" / "scripts" / "gate-benchmark-fixture.ts").read_text()
+    float_src = (
+        root / "back-end" / "src" / "providers" / "agentcard" / "benchmark-float.ts"
+    ).read_text()
+    assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID in fixture
+    assert "seedOrgManagedAgentCardForUser" in fixture
+    assert "resolveBenchmarkCardholderId" in fixture
+    assert "ensureBenchmarkOrgCardholder" in fixture
+    assert "orgManaged: true" in fixture
+    assert "agentcard_org_cardholder_id" in fixture
+    assert "andy@roselabs.ai" in float_src
+    assert "agentcard-benchmark@roselabs.ai" in float_src
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -3119,6 +3181,73 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors():
+    """Host-pin evaluate refusals may ERROR then continue to write_lock; do not fail closed.
+
+    Local repro: browser-doordash-usb-c-cable agent
+    b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached Place Order write_lock after
+    call_F5UFL3phdf5e1hNqYAizEq1T evaluate pin-guard ERROR, then failed only on
+    no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": (
+                    "Refusing evaluate that would navigate away from pinned host "
+                    "'www.doordash.com'. Current page URL: "
+                    "https://www.doordash.com/consumer/checkout/?lat=37.79184297658503"
+                    "&lng=-122.39233201369643&order_cart_id=8cb87c3b-a1d2-4eb1-a381-6356e100cb19"
+                    "&overridePageType=nv_checkout. Use input_text/click on this page "
+                    "instead of location/history/window.open scripts."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_F5UFL3phdf5e1hNqYAizEq1T",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "toolCallId": "call_LZiLVA70u6O8RU855bnoqaZ5",
+                    "title": 'Clicked <button "Place Order\\n$21.30">',
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_terminal = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Browser crashed while evaluating page state",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_real_failure",
+                    "title": "evaluate",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_terminal) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, still_terminal)[0] is False
+
 def test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment():
     """Stale DOM index ERRORs recovered before payment must not fail closed.
 
@@ -3158,7 +3287,6 @@ def test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment(
     }
     assert _tool_runtime_failures(data) == []
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
-
 
 def test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment():
     """Antibot pinned-host escape refusals recovered before payment must not fail closed.
@@ -3217,7 +3345,6 @@ def test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment
     }
     assert _tool_runtime_failures(data) == []
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
-
 
 def test_no_tool_failures_counts_unrecovered_pinned_host_refusal():
     """Pinned-host refusals with no later browser recovery still fail closed."""
@@ -3411,7 +3538,6 @@ def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
         "spawn_browser_agent call_real_failure status=ERROR"
     ]
 
-
 def test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field():
     """Live agent API exposes body as `text`; ignore must not require artifact `message`.
 
@@ -3454,7 +3580,6 @@ def test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_fie
     assert _tool_runtime_failures(data) == []
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
-
 def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
     """A terminal unrecovered DOM index miss remains a grounded tool failure."""
     from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
@@ -3481,7 +3606,6 @@ def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
     passed, reason = _run_declared_static_check(evaluator, data)
     assert passed is False
     assert "tool failure" in reason.lower()
-
 
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
@@ -3580,7 +3704,6 @@ def test_completion_summary_and_sms_static_checks_are_fail_closed():
     assert passed is False
     assert "exactly 1" in reason
 
-
 def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
     """The incident benchmark owns deterministic summary and SMS regressions."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -3663,20 +3786,26 @@ async def test_declared_evaluator_hydrates_completion_sms_receipt():
     assert results[0]["passed"] is True
     assert data["_benchmark"]["completion_sms_events"][0]["path"] == path
 
-
-def test_doordash_catalog_requires_single_clean_completed_browser_run():
-    """DoorDash combines deterministic runtime invariants with product semantics."""
+def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
+    """DoorDash stages checkout then stops at an unresolved place-order write lock."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-doordash-usb-c-cable")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
     assert task.prompt.endswith("Complete checkout.")
-    assert task.approval_handling == "auto_approve"
+    assert task.approval_handling == "ignore"
     assert task.expected_approval_count == 1
+    assert task.expected_attention_kind == "write_lock"
     assert task.expected_attention_kinds == []
-    assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
+    assert task.expected_attention_kind_any_of == []
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
+    assert task.environment["context_notes"] == (
+        "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and "
+        "delivery timing. The runner treats the final place-order write lock as completion, leaves "
+        "that request unresolved, and does not place the order. The task may exercise guest "
+        "checkout and does not require an injected cookie bundle."
+    )
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -3685,12 +3814,34 @@ def test_doordash_catalog_requires_single_clean_completed_browser_run():
     assert static_types == {
         "no_tool_failures",
         "browser_agent_session_count",
-        "agent_status",
         "approval_request_count",
+        "approval_request_details",
     }
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["USB-C"]
+    assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "write lock" in runtime_criteria
+    assert "unresolved" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("usb-c to usb-c", "6 feet", "60w", "$30", "earliest"):
+    for requirement in (
+        "usb-c to usb-c",
+        "6 feet",
+        "60w",
+        "$30",
+        "san francisco",
+        "unresolved",
+        "not placed",
+    ):
         assert requirement in semantic_criteria
+    assert "earliest available delivery option" not in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("payment-card approval", "approval of the write lock", "order confirmation"):
+        assert failure in judge_prompt
+    assert "write-lock attention request itself is valid grounding" in judge_prompt
+    assert "do not fail solely because the write-lock shipping line does not literally say earliest" in judge_prompt
 
 
 def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
@@ -4261,8 +4412,8 @@ async def test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_a
     assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
 
 
-async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
-    """DoorDash accepts either supported checkout gate without requiring a second request."""
+async def test_doordash_poll_stops_at_write_lock_without_resolving_it():
+    """DoorDash completion is one unresolved place-order write lock; never auto-approve."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     write_lock = {
@@ -4271,6 +4422,11 @@ async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
         "question": "Approve the $17.42 DoorDash order?",
         "metadata": {"requestUserApproval": {"writePermission": True}},
     }
+    payment = {
+        "id": "doordash-payment",
+        "agentId": "agent-doordash",
+        "metadata": {"requestPaymentCard": {}},
+    }
 
     (data, triggered, resolved, failure), responses = await _run_attention_poll(
         get_task_by_name("browser-doordash-usb-c-cable"),
@@ -4278,13 +4434,19 @@ async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
     )
 
     assert failure is None
-    assert (triggered, resolved) == (1, 1)
-    assert responses == [("doordash-write-lock", "approved")]
+    assert (triggered, resolved) == (1, 0)
+    assert responses == []
     assert data["_benchmark"]["attention_request_kind_seen"] == "write_lock"
-    assert data["_benchmark"]["expected_attention_kind_any_of"] == [
-        "payment_approval",
-        "write_lock",
-    ]
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "write_lock"
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        get_task_by_name("browser-doordash-usb-c-cable"),
+        [payment],
+    )
+    assert failure == "Expected attention kind write_lock, observed payment_approval"
+    assert data["_benchmark"]["unexpected_attention_kind"] == "payment_approval"
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
 
 
 async def test_instacart_proposed_checkout_boundary_accepts_exactly_one_supported_kind():
@@ -11221,6 +11383,26 @@ def test_admin_bypass_card_mint_variant_wiring():
     assert "expected_gate" not in admin_checks
     assert "expected_payment_receipt" in admin_checks
 
+    # `true` must validate without AttributeError (harness used to crash on `.get`).
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    admin_req = {
+        "metadata": {
+            "requestPaymentCard": {
+                "merchant": "Rose Labs Test Payment",
+                "currency": "USD",
+                "subtotalCents": 3600,
+                "totalCents": 4396,
+                "lineItems": [],
+                "fees": [],
+            }
+        }
+    }
+    assert _validate_payment_receipt(admin, admin_req, messages=[]) is None
+    assert "missing requestPaymentCard metadata" in (
+        _validate_payment_receipt(admin, {"metadata": {}}, messages=[]) or ""
+    )
+
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     """The parallel search smoke should exercise execute-phase explore fanout."""
@@ -14361,6 +14543,10 @@ async def run_all_tests():
         test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start,
     )
     r.record(
+        "public_tunnel_benchmark_bundled_frontend_default",
+        test_public_tunnel_benchmarks_enable_bundled_frontend_by_default,
+    )
+    r.record(
         "benchmark_bundled_frontend_cloud_heap_budget",
         test_benchmark_bundled_frontend_build_has_cloud_heap_budget,
     )
@@ -14403,6 +14589,10 @@ async def run_all_tests():
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",
         test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
+    )
+    r.record(
+        "admin_bypass_gate_fixture_reseeds_org_managed_agentcard",
+        test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard,
     )
     r.record(
         "success_on_payment_card_request",
@@ -14589,6 +14779,10 @@ async def run_all_tests():
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
     )
     r.record(
+        "declared_static_no_tool_failures_ignores_navigation_pin_guard",
+        test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors,
+    )
+    r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss",
         test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment,
     )
@@ -14637,8 +14831,8 @@ async def run_all_tests():
         test_declared_evaluator_hydrates_completion_sms_receipt,
     )
     r.record(
-        "doordash_single_clean_completed_browser_run",
-        test_doordash_catalog_requires_single_clean_completed_browser_run,
+        "doordash_unresolved_place_order_write_lock_catalog",
+        test_doordash_catalog_stops_at_unresolved_place_order_write_lock,
     )
     r.record(
         "uber_normal_single_browser_task",
@@ -14677,8 +14871,8 @@ async def run_all_tests():
         test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it,
     )
     await r.record_async(
-        "doordash_single_write_lock_checkout_approval",
-        test_doordash_poll_accepts_single_write_lock_as_checkout_approval,
+        "doordash_write_lock_stops_without_resolving",
+        test_doordash_poll_stops_at_write_lock_without_resolving_it,
     )
     await r.record_async(
         "instacart_exactly_one_supported_checkout_boundary",

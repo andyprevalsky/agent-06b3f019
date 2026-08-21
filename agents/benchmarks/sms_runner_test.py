@@ -499,6 +499,29 @@ def test_public_tunnel_can_be_forced_on(monkeypatch):
     assert needs_public_tunnel([TASK_NAME]) is True
 
 
+def test_ambient_skip_public_tunnel_cleared_for_browser_payment_tasks():
+    """/deploy Group 4 may export SKIP=1; AgentCard must not inherit it.
+
+    Observed: agent-payment-test-shop timed out with Kernel
+    net::ERR_CONNECTION_REFUSED against http://localhost:<fe>/test_payment
+    because deploy-group4/env.sh exported BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for
+    the Step-5 semantic stack and local.py copied os.environ into run.sh
+    without clearing the skip when needs_public_tunnel(tasks) was True.
+    """
+    from benchmarks.local import AGENT_PAYMENT_TASK_NAMES, apply_public_tunnel_env
+
+    ambient = {"BENCHMARK_SKIP_PUBLIC_TUNNEL": "1", "OTHER": "keep"}
+    payment_tasks = sorted(AGENT_PAYMENT_TASK_NAMES)
+    assert apply_public_tunnel_env(ambient, payment_tasks) is False
+    assert "BENCHMARK_SKIP_PUBLIC_TUNNEL" not in ambient
+    assert ambient["OTHER"] == "keep"
+
+    sms_only = {"BENCHMARK_SKIP_PUBLIC_TUNNEL": "0", "OTHER": "keep"}
+    assert apply_public_tunnel_env(sms_only, [TASK_NAME]) is True
+    assert sms_only["BENCHMARK_SKIP_PUBLIC_TUNNEL"] == "1"
+    assert sms_only["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "0"
+
+
 def test_seeded_transcript_round_trips_through_the_session_shape():
     """Seeded history must read back exactly as contextBuilder will see it.
 

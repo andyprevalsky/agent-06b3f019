@@ -658,6 +658,11 @@ fi
 
 # Warm-source fleet gate: transitional donor states must wait for stopped, not
 # abort (observed: state=started / replacing → immediate fleet INFRA fail).
+printf 'started\nreplacing\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-0 3 0 ||
+  fail "warm source wait must tolerate started→replacing→stopped"
+[ ! -s "$machine_states" ] || fail "started→replacing→stopped wait must consume the sequence"
+
 printf 'replacing\nstopping\nstopped\n' > "$machine_states"
 cloudbench_wait_machine_stopped read_machine_state warm-1 5 0 ||
   fail "warm source wait must tolerate replacing→stopping→stopped"

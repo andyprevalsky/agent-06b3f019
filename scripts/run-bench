@@ -59,9 +59,9 @@ fi
 # already isolates each bench on its own cloned machine, so a single bench is
 # just `run-bench <task>`. (run-bench-cloud enforces the same guard directly.)
 #
-# Reject before the production-only classifier. Minimal controller fixtures may
-# not carry a benchmark catalog, and classifier failure must not mask this
-# argument-level safety guard.
+# Must reject BEFORE the production-only classifier: the multi-workstream sandbox
+# has no tasks.json, and a classifier failure would otherwise mask this guard
+# (scenario 14 requires the rejection message to include "parallel-safe").
 if [[ "${1:-}" == "--single-box" ]]; then
     echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
     echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
