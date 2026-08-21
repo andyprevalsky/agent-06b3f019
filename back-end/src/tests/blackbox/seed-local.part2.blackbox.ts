@@ -229,6 +229,15 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
     ),
     'email-credentials-only must not call full syncIntegrations (compute-token churn)'
   );
+  // @@unique([userId, name, accountId]) upserts require accountId on the select;
+  // omitting it fails email overlay with "Argument accountId is missing".
+  const columns = source.indexOf('const PROD_INTEGRATION_COLUMNS');
+  const columnsEnd = source.indexOf('} as const;', columns);
+  assert(columns > 0 && columnsEnd > columns, 'expected PROD_INTEGRATION_COLUMNS block');
+  assert(
+    /accountId:\s*true/.test(source.slice(columns, columnsEnd)),
+    'PROD_INTEGRATION_COLUMNS must select accountId for multi-account upserts'
+  );
 });
 
 test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
