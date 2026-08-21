@@ -49,14 +49,17 @@ could click a single showtime and rely on thinking text alone.
   `build_browser_use_system_prompt_requires_ordered_option_set_capture` in
   `agents/tests/blackbox/rose_browser_use.blackbox.py`.
 
-## Fix
+## Fix (superseded by Andy edit)
 
-Add a Browser Rules bullet: when the goal requires choosing among ordered
-options, capture the full filtered option set in the trajectory (scroll +
-screenshot, or `evaluate` labels/times) before selecting.
+Initial proposal: Browser Rules bullet requiring filtered option-set capture
+before ordered picks (landed on branch as defense-in-depth).
+
+**Andy edit (H-05):** remove evaluator `imax-group-ticket-adjacency-semantics`.
+Only that judge failed; `imax-group-ticket-runtime-contract` already passed.
+Task becomes static_check-only, matching sibling `browser-event-ticket`.
 
 ## Outcome proof (pending)
 
 Exact local `scripts/run-bench --local browser-imax-group-tickets` after Andy
-approves this prompt change (snapshot-scoped). Owning-boundary green does not
+approves the evaluator-removal snapshot. Owning-boundary green does not
 complete the benchmark RCA.
