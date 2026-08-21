@@ -62,9 +62,12 @@ Render the last LLM call in the entire trajectory — root agent plus every
 spawned sub-agent. Collect `.llm-dumps/<agent_id>/*.json` for all of those
 ids, sort by the millisecond prefix in the filename, and render the latest
 file with `python3 scripts/render_llm_dump.py <dump> --no-open`. Link the
-HTML URL the renderer prints. Never pick an earlier failing call, a directory
-listing, or raw JSON. If there was no LLM call, write
-`**LLM dump:** Not applicable — <reason>`.
+path the renderer prints. That command copies the HTML plus its `_assets`
+sidecar into `/opt/cursor/artifacts` when that directory exists so a remote
+reviewer can open it. Never link a `file://` URL — those only exist on the
+render machine and show `ERR_FILE_NOT_FOUND` in the reviewer's browser. Never
+pick an earlier failing call, a directory listing, or raw JSON. If there was
+no LLM call, write `**LLM dump:** Not applicable — <reason>`.
 
 **Local repro (<wall-clock>):**
 

@@ -4882,7 +4882,7 @@ def test_build_verifier_context_messages_includes_assistant_file_evidence_withou
                 "tool_name": "artifact_file",
                 "artifact": {"original_filename": "calendar.csv", "mime_type": "text/csv"},
                 "content_inlined": True,
-                "result": "[File: calendar.csv]\n```\ndate,platform\n2026-07-06,YouTube\n```",
+                "result": "file_pointer:\n  original_filename: calendar.csv\n  mime_type: text/csv\n  content:\n```\ndate,platform\n2026-07-06,YouTube\n```",
             }
         ]
     }
