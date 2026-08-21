@@ -35,6 +35,7 @@ import {
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldInjectClaudeCodeFastModeProxy,
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
+  shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
 export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
 export {
@@ -59,6 +60,7 @@ export {
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldInjectClaudeCodeFastModeProxy,
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
+  shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
 
 const log = createLogger('E2B');
@@ -280,7 +282,37 @@ export async function createClaudeCodeSession(
         }
       )
     : {};
-  if (preferSandboxBase && sandboxTransport.baseUrl) {
+  const sandboxBaseUrlCandidate = sandboxTransport.baseUrl;
+  const ignoreSharedCooldown = shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey,
+    sharedAnthropicApiKey,
+    sandboxBaseUrl: sandboxBaseUrlCandidate,
+  });
+  // A refreshable OAuth envelope after direct-token auth_error must not block the
+  // funded API-key path when the envelope's refresh_token is also dead
+  // (invalid_grant): Claude Code would 401 in-sandbox instead of using the key.
+  // Resolve this BEFORE choosing ANTHROPIC_BASE_URL so a nulled envelope can
+  // still take the OpenRouter gateway, while a live oauth_token never does.
+  if (credentialMeta && isRefreshOnlyOauthEnvelope(credentialMeta) && sandboxApiKey) {
+    // Dedicated gateway keys / ANTHROPIC_BASE_URL overrides are never gated by
+    // the shared Anthropic-org cooldown (that cooldown tracks api.anthropic.com).
+    const envelopeBlockedBySharedCooldown = !ignoreSharedCooldown && sharedKeyOnCooldown;
+    if (!envelopeBlockedBySharedCooldown) {
+      log.info(
+        `Preferring sandbox Anthropic API key over refresh-only OAuth envelope for agent ${agentId}`
+      );
+      credentialMeta = null;
+    }
+  }
+
+  // OAuth sessions must hit api.anthropic.com. OpenRouter + oauth_token produced
+  // "401 Missing Authentication header" on Pre-Deploy claude-code-agent (2026-08-21).
+  const skipGatewayForOauth = shouldSkipSandboxAnthropicGatewayForOauth(credentialMeta);
+  if (skipGatewayForOauth) {
+    log.info(
+      `Using Claude OAuth for agent ${agentId} — Anthropic default host (sandbox gateway base skipped)`
+    );
+  } else if (preferSandboxBase && sandboxTransport.baseUrl) {
     envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
     log.info(
       `Routing sandbox Anthropic calls via funded gateway ${envs.ANTHROPIC_BASE_URL} (Fast Mode proxy skipped)`
@@ -297,25 +329,6 @@ export async function createClaudeCodeSession(
     );
   }
   const sandboxBaseUrl = envs.ANTHROPIC_BASE_URL;
-  const ignoreSharedCooldown = shouldIgnoreAnthropicApiKeyCooldownForSandbox({
-    sandboxApiKey,
-    sharedAnthropicApiKey,
-    sandboxBaseUrl,
-  });
-  // A refreshable OAuth envelope after direct-token auth_error must not block the
-  // funded API-key path when the envelope's refresh_token is also dead
-  // (invalid_grant): Claude Code would 401 in-sandbox instead of using the key.
-  if (credentialMeta && isRefreshOnlyOauthEnvelope(credentialMeta) && sandboxApiKey) {
-    // Dedicated gateway keys / ANTHROPIC_BASE_URL overrides are never gated by
-    // the shared Anthropic-org cooldown (that cooldown tracks api.anthropic.com).
-    const envelopeBlockedBySharedCooldown = !ignoreSharedCooldown && sharedKeyOnCooldown;
-    if (!envelopeBlockedBySharedCooldown) {
-      log.info(
-        `Preferring sandbox Anthropic API key over refresh-only OAuth envelope for agent ${agentId}`
-      );
-      credentialMeta = null;
-    }
-  }
 
   // Only consult the shared Anthropic-org cooldown when the sandbox would use
   // that same shared key against api.anthropic.com.

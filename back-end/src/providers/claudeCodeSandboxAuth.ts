@@ -179,6 +179,23 @@ export function shouldPreferSandboxAnthropicBaseUrlOverFastMode(
   }
 }
 
+/**
+ * Usable Claude OAuth must talk to api.anthropic.com — never OpenRouter.
+ *
+ * Pre-Deploy smoke 2026-08-21: OpenRouter was selected as the funded gateway
+ * (`ANTHROPIC_BASE_URL=https://openrouter.ai/api`) while `resolveClaudeCodeAuthEnvs`
+ * still injected the user's `oauth_token`. Claude Code then failed with
+ * `401 Missing Authentication header` (OAuth is not an OpenRouter API key).
+ * When OAuth is the session auth, skip every sandbox/gateway/Fast-Mode base URL
+ * override so the CLI hits Anthropic's default host.
+ */
+export function shouldSkipSandboxAnthropicGatewayForOauth(
+  credentialMeta: ClaudeCodeCredentialResult | null
+): boolean {
+  if (!credentialMeta) return false;
+  return Boolean(credentialMeta.accessToken || credentialMeta.credentials);
+}
+
 /** Anthropic-compatible OpenRouter base used for Claude Code funded fallback. */
 export const OPENROUTER_ANTHROPIC_COMPAT_BASE_URL = 'https://openrouter.ai/api';
 
