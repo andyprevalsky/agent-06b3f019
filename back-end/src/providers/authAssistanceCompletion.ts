@@ -59,6 +59,12 @@ export type AuthAssistanceCompletionResult =
       request: AuthAssistanceRequestRecord;
       /** True when the completed request belongs to a deploy-fenced generation. */
       interrupted: boolean;
+      /**
+       * True for a later client retry, which may safely retry signaling/resume.
+       * False when this invocation lost the atomic completion claim and must
+       * leave every post-transaction side effect to the winning invocation.
+       */
+      retrySideEffects: boolean;
       workflowId: string;
     }
   | {
@@ -78,6 +84,8 @@ export type AuthAssistanceCompletionResult =
 export interface AuthAssistanceCompletionDependencies {
   signalCompleted: typeof signalAuthAssistanceCompleted;
   resumeAgent: typeof resumeAgentWorkflow;
+  /** Deterministic race seam for the completion-claim regression. */
+  beforeCompletionClaim: () => Promise<void>;
 }
 
 export async function completeAuthAssistanceForUser(
@@ -89,6 +97,7 @@ export async function completeAuthAssistanceForUser(
   const deps: AuthAssistanceCompletionDependencies = {
     signalCompleted: signalAuthAssistanceCompleted,
     resumeAgent: resumeAgentWorkflow,
+    beforeCompletionClaim: async () => undefined,
     ...overrides,
   };
   const result = await runTransactionWithRetry(async (tx) => {
@@ -112,6 +121,7 @@ export async function completeAuthAssistanceForUser(
         status: 'already_completed' as const,
         request,
         interrupted: request.attentionRequest.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        retrySideEffects: true,
         workflowId: request.attentionRequest.workflowId,
       };
     }
@@ -219,10 +229,30 @@ export async function completeAuthAssistanceForUser(
       }
     }
 
-    const completed = await tx.userAuthAssistanceRequest.update({
-      where: { id },
+    await deps.beforeCompletionClaim();
+    const completionClaim = await tx.userAuthAssistanceRequest.updateMany({
+      where: { id, completedAt: null },
       data: { completedAt: now },
     });
+    if (completionClaim.count === 0) {
+      const persisted = await tx.userAuthAssistanceRequest.findUnique({
+        where: { id },
+        include: {
+          attentionRequest: {
+            select: { workflowId: true, userResponse: true },
+          },
+        },
+      });
+      if (persisted === null) return { status: 'not_found' as const };
+      return {
+        status: 'already_completed' as const,
+        request: persisted,
+        interrupted: persisted.attentionRequest.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        retrySideEffects: false,
+        workflowId: persisted.attentionRequest.workflowId,
+      };
+    }
+    const completed = await tx.userAuthAssistanceRequest.findUniqueOrThrow({ where: { id } });
     // Compare-and-swap on the pending predicate, exactly like every other
     // resolver (`gateResolution.resolveAndSignal`). An unconditional write would
     // overwrite whatever already answered the row — in practice the deploy fence's
@@ -289,23 +319,25 @@ export async function completeAuthAssistanceForUser(
   }
 
   if (result.status === 'already_completed') {
-    if (result.interrupted) {
-      log.warn('Skipped retry signal for deploy-fenced auth assistance request', {
-        request_id: result.request.id,
-        agent_id: result.request.agentId,
-        workflow_id: result.workflowId,
-      });
-    } else {
-      await deps.signalCompleted(result.workflowId, result.request.agentId, result.request.id);
-    }
-    try {
-      await deps.resumeAgent(result.request.agentId);
-    } catch (error) {
-      log.warn('Failed to resume already-completed auth assistance request', {
-        request_id: result.request.id,
-        agent_id: result.request.agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    if (result.retrySideEffects) {
+      if (result.interrupted) {
+        log.warn('Skipped retry signal for deploy-fenced auth assistance request', {
+          request_id: result.request.id,
+          agent_id: result.request.agentId,
+          workflow_id: result.workflowId,
+        });
+      } else {
+        await deps.signalCompleted(result.workflowId, result.request.agentId, result.request.id);
+      }
+      try {
+        await deps.resumeAgent(result.request.agentId);
+      } catch (error) {
+        log.warn('Failed to resume already-completed auth assistance request', {
+          request_id: result.request.id,
+          agent_id: result.request.agentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 

@@ -407,6 +407,84 @@ async function testCompetingCompletionIsNotMisclassifiedAsDeployInterruption(): 
   }
 }
 
+async function testConcurrentCompletionsRunExternalSideEffectsOnce(): Promise<void> {
+  const userId = `auth-assist-concurrent-completion-${RUN_ID}-${randomUUID().slice(0, 8)}`;
+  await prisma.user.create({ data: { userId } });
+  try {
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'Complete one concurrent login handoff', status: 'PAUSED' },
+    });
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { temporalWorkflowId: agent.id },
+    });
+    const context = await prisma.browserContext.create({
+      data: { userId, contextId: `kernel-profile-${randomUUID()}` },
+    });
+    const browserSession = await prisma.browserSession.create({
+      data: {
+        contextId: context.id,
+        agentId: agent.id,
+        sessionId: `kernel-session-${randomUUID()}`,
+        debugUrl: 'https://debug.kernel.test/session/concurrent-completion',
+        status: 'ACTIVE',
+        provider: 'kernel',
+      },
+    });
+    const createRes = await request('/api/auth-assistance', userId, {
+      agentId: agent.id,
+      authRealm: 'https://example.com/login',
+      mode: 'live_view',
+      browserSessionId: browserSession.id,
+      steelSessionId: browserSession.sessionId,
+    });
+    assertStatus(createRes, 201);
+    const requestId = String(asRecord(asRecord(createRes.data).request).id);
+
+    let arrivals = 0;
+    let releaseBarrier: () => void = () => undefined;
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const beforeCompletionClaim = async (): Promise<void> => {
+      arrivals++;
+      if (arrivals === 2) releaseBarrier();
+      await barrier;
+    };
+    let signalCount = 0;
+    let resumeCount = 0;
+    const dependencies = {
+      beforeCompletionClaim,
+      signalCompleted: async () => {
+        signalCount++;
+      },
+      resumeAgent: async () => {
+        resumeCount++;
+      },
+    };
+
+    const results = await Promise.all([
+      completeAuthAssistanceForUser(requestId, userId, new Date(), dependencies),
+      completeAuthAssistanceForUser(requestId, userId, new Date(), dependencies),
+    ]);
+    const completed = results.filter((result) => result.status === 'completed');
+    const raced = results.find((result) => result.status === 'already_completed');
+
+    assert(
+      completed.length === 1,
+      `exactly one caller should claim completion, got ${completed.length}`
+    );
+    assert(
+      raced?.status === 'already_completed' && !raced.retrySideEffects,
+      'the caller that loses the completion claim must suppress retry side effects'
+    );
+    assert(signalCount === 1, `completion signaling must run once, got ${signalCount}`);
+    assert(resumeCount === 1, `workflow resume must run once, got ${resumeCount}`);
+  } finally {
+    await cleanupFixture(userId);
+  }
+}
+
 export const authAssistanceDeploymentFenceTests: TestCase[] = [
   [
     'deploy fence closes the pending auth assistance request with its tool chip',
@@ -419,5 +497,9 @@ export const authAssistanceDeploymentFenceTests: TestCase[] = [
   [
     'competing completion is not misclassified as a deploy interruption',
     testCompetingCompletionIsNotMisclassifiedAsDeployInterruption,
+  ],
+  [
+    'concurrent completions run external side effects exactly once',
+    testConcurrentCompletionsRunExternalSideEffectsOnce,
   ],
 ];
