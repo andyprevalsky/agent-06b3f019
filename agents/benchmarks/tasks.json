@@ -3862,6 +3862,8 @@
       "services": [
         "write_lock"
       ],
+      "secrets": [],
+      "live_targets": [],
       "context_notes": "Pass when wait_for fires and the agent opens a phone-call write_lock. approval_handling=ignore leaves that lock unresolved so no real outbound call is placed; agent COMPLETED is not required."
     }
   },
