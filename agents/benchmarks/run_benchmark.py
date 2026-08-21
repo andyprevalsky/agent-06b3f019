@@ -7862,7 +7862,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
-        message_text = str(message.get("message") or "")
+        message_text = _tool_message_body(message)
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -8142,6 +8142,11 @@ def _is_recoverable_browser_element_miss_failure(
     return _has_later_browser_recovery(messages, message_index)
 
 
+def _tool_message_body(message: dict) -> str:
+    """Return tool/user-visible body text from either API (`text`) or artifact (`message`)."""
+    return str(message.get("text") or message.get("message") or "")
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -8150,7 +8155,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
-        message_text = str(message.get("message") or "")
+        message_text = _tool_message_body(message)
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
