@@ -502,18 +502,21 @@ cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
 }
 
 cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-01>
-  # Fly guests can fetch only objects reachable from an advertised origin ref.
-  # When the requested local commit is unpushed, run from its fetchable
-  # origin/main ancestor and let create-worktree-patch carry the complete
-  # committed + uncommitted workspace delta.
+  # Fly guests can fetch only objects already reachable from origin/main.
+  # A SHA that exists only on a pushed feature branch is not guest-fetchable:
+  # warm-box git-sync has no interactive GitHub credentials, and treating any
+  # origin/* containment as fetchable made --refresh-deps fetch a feature SHA
+  # over unauthenticated HTTPS (`could not read Username for 'https://github.com'`).
+  # When the requested commit is not on origin/main, run from that ancestor and
+  # let create-worktree-patch carry the complete committed + uncommitted delta.
   local root="$1" requested="$2" allow_patch="$3" resolved base
   if ! resolved="$(git -C "$root" rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
     # Preserve remote-only branch/tag names that this checkout cannot resolve.
     printf '%s' "$requested"
     return 0
   fi
-  if git -C "$root" branch -r --contains "$resolved" --format='%(refname:short)' 2>/dev/null \
-      | grep -q '^origin/'; then
+  if git -C "$root" rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1 \
+      && git -C "$root" merge-base --is-ancestor "$resolved" origin/main 2>/dev/null; then
     printf '%s' "$resolved"
     return 0
   fi
@@ -531,6 +534,115 @@ cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-0
   }
   echo "📦 local commit $resolved is not on origin; guest will fetch $base and receive the complete workspace delta as a patch" >&2
   printf '%s' "$base"
+}
+
+# Resolve a request-scoped GitHub token for private-repo git-sync on Fly guests.
+# Cursor Cloud / CI often inject an invalid GITHUB_TOKEN while the working
+# credential lives in git url.insteadOf (or gh hosts.yml). Prefer those live
+# controller credentials over durable Fly/.env secrets that go stale.
+cloudbench_git_insteadof_github_token() {
+  local cfg line token=""
+  cfg="$(git config --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true)"
+  [ -n "$cfg" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      *'https://x-access-token:'*'@github.com/'*|*x-access-token:*@github.com*)
+        token="${line#*x-access-token:}"
+        token="${token%%@github.com*}"
+        token="${token%%@github.com/*}"
+        ;;
+    esac
+    [ -n "$token" ] && printf '%s' "$token" && return 0
+  done <<< "$cfg"
+  return 1
+}
+
+cloudbench_resolve_controller_github_token() {
+  local token="" dotenv
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+    token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  fi
+  token="$(cloudbench_git_insteadof_github_token 2>/dev/null || true)"
+  [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  if command -v gh >/dev/null 2>&1; then
+    # gh prefers $GITHUB_TOKEN even when it is invalid; strip it so hosts.yml wins.
+    # Also clear GH_TOKEN for this subprocess; keep `env -u GITHUB_TOKEN gh auth token`
+    # contiguous so cloudbench-env.test.sh can pin the contract.
+    token="$(GH_TOKEN= env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  fi
+  token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -z "$token" ]; then
+    for dotenv in "${CLOUDBENCH_FLEET_ROOT:-.}/back-end/.env" "${CLOUDBENCH_FLEET_ROOT:-.}/agents/.env" \
+      "back-end/.env" "agents/.env"; do
+      [ -f "$dotenv" ] || continue
+      token="$(cloudbench_env_value "$dotenv" GITHUB_TOKEN 2>/dev/null || true)"
+      [ -z "$token" ] || break
+    done
+  fi
+  [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
+# Canonical name used by main's warm_source_fetch_ref / export helpers.
+cloudbench_controller_github_token() {
+  cloudbench_resolve_controller_github_token "$@"
+}
+
+cloudbench_github_basic_auth_header() {  # <token>
+  local token="$1"
+  [ -n "$token" ] || return 1
+  printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+}
+
+# Upsert KEY=value in a dotenv file without printing the value.
+cloudbench_upsert_env_key() {
+  local dest="$1" key="$2" val="$3"
+  [ -n "$dest" ] && [ -n "$key" ] || return 1
+  DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PYINNER'
+import os
+from pathlib import Path
+
+p = Path(os.environ["DEST"])
+key = os.environ["KEY"]
+val = os.environ["VAL"]
+if any(ch in val for ch in ' \t\n"\'#$`\\'):
+    escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+    rendered = f'{key}="{escaped}"'
+else:
+    rendered = f"{key}={val}"
+lines = p.read_text().splitlines() if p.exists() else []
+out = []
+found = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(rendered)
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(rendered)
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text("\n".join(out) + "\n")
+os.chmod(p, 0o600)
+PYINNER
+}
+
+# I-03 ignored invalid $GITHUB_TOKEN for fetch-ref but left the process env and
+# local .env files on the injected github_pat_. Children that still read
+# $GITHUB_TOKEN (gh, git extraheader, dotenv) then 401. Export the working
+# hosts.yml / insteadOf credential into this process and any listed .env paths.
+cloudbench_export_controller_github_token() {
+  local token dest
+  token="$(cloudbench_controller_github_token)" || return 1
+  export GITHUB_TOKEN="$token"
+  for dest in "$@"; do
+    [ -n "$dest" ] || continue
+    cloudbench_upsert_env_key "$dest" GITHUB_TOKEN "$token" || return 1
+  done
+  echo "controller GITHUB_TOKEN exported (len=${#GITHUB_TOKEN})" >&2
+  return 0
 }
 
 cloudbench_retry_command() {
@@ -738,6 +850,40 @@ cloudbench_wait_machine_startable() {
   done
 
   echo "Machine $machine_id did not become startable (last_state=${state:-unknown})" >&2
+  return 1
+}
+
+# Warm-source clones require a fully stopped donor. Transitional states
+# (started/starting/stopping/replacing/created/creating/updating/restarting)
+# are normal during concurrent maintenance; aborting immediately turns a brief
+# race into a fleet-wide INFRA failure. Wait for stopped, fail closed on
+# destroy or timeout.
+cloudbench_wait_machine_stopped() {
+  local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
+  local attempt state
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    state="$($state_reader "$machine_id" 2>/dev/null || true)"
+    case "$state" in
+      stopped) return 0 ;;
+      destroyed|destroying)
+        echo "Machine $machine_id became unavailable while waiting to stop (state=$state)" >&2
+        return 1
+        ;;
+      created|creating|replacing|started|starting|stopping|updating|restarting|"")
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+          echo "⏳ waiting for machine $machine_id to stop (state=${state:-unknown}, attempt $attempt/$max_attempts)"
+        fi
+        ;;
+      *)
+        echo "Machine $machine_id has unexpected state while waiting to stop (state=$state)" >&2
+        return 1
+        ;;
+    esac
+    [ "$attempt" -ge "$max_attempts" ] || sleep "$retry_delay_seconds"
+  done
+
+  echo "Machine $machine_id did not become stopped (last_state=${state:-unknown})" >&2
   return 1
 }
 

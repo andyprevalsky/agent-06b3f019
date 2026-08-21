@@ -222,6 +222,33 @@ def test_message_renderer_compacts_structured_response_values():
     assert "added_to_cart: True" in html
 
 
+def test_publish_rendered_dump_copies_html_and_assets():
+    renderer = _load_renderer()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src_dir = Path(tmp) / "rendered"
+        artifacts_dir = Path(tmp) / "artifacts"
+        src_dir.mkdir()
+        artifacts_dir.mkdir()
+        html_path = src_dir / "llm_dump_browser_use_step_24.html"
+        assets_dir = src_dir / "llm_dump_browser_use_step_24_assets"
+        assets_dir.mkdir()
+        html_path.write_text(
+            '<html><img src="llm_dump_browser_use_step_24_assets/shot.png"></html>',
+            encoding="utf-8",
+        )
+        (assets_dir / "shot.png").write_bytes(b"png-bytes")
+
+        published = renderer.publish_rendered_dump(html_path, artifacts_dir)
+
+        assert published == artifacts_dir / "llm_dump_browser_use_step_24.html"
+        assert published is not None
+        assert published.read_text(encoding="utf-8") == html_path.read_text(encoding="utf-8")
+        copied_asset = artifacts_dir / "llm_dump_browser_use_step_24_assets" / "shot.png"
+        assert copied_asset.read_bytes() == b"png-bytes"
+        assert renderer.publish_rendered_dump(html_path, Path(tmp) / "missing") is None
+
+
 async def run_all_tests():
     r = BlackboxResult()
     r.record(
@@ -251,5 +278,9 @@ async def run_all_tests():
     r.record(
         "message_renderer_compacts_structured_response_values",
         test_message_renderer_compacts_structured_response_values,
+    )
+    r.record(
+        "publish_rendered_dump_copies_html_and_assets",
+        test_publish_rendered_dump_copies_html_and_assets,
     )
     return r.all_passed

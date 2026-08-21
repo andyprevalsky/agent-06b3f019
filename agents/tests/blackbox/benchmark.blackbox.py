@@ -324,7 +324,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "14 passed" in result.stdout
+    # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases plus
+    # controller-token / private-repo auth cementing raised this to 17.
+    assert "17 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -859,6 +861,7 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         "SEED_ALLOW_MISSING_GPT_CODE",
         "AGENTCARD_ONBOARDING_RETURN_URL",
         "BENCHMARK_AGENT_PAYMENT_USER_ID",
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH",
     )
     with patch.dict(os.environ, {}, clear=False):
         for key in keys:
@@ -868,21 +871,22 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
         assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
         assert os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
         assert (
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
             == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
         )
 
 
-def test_payment_benchmark_seeds_non_admin_fixture_identity():
-    """Stripe lifecycle tasks must not inherit the admin operator's no-charge semantics."""
+def test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path():
+    """Sandbox lifecycle benches run as the admin account and force the charged mint path."""
     import os
     from unittest.mock import patch
 
     from benchmarks import local
     from benchmarks import run_benchmark as bench
 
-    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID != local.BENCHMARK_USER_ID
+    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID == local.BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_BENCHMARK_USER_ID == local.AGENT_PAYMENT_BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_SANDBOX_TASK_NAMES == local.AGENT_PAYMENT_TASK_NAMES
 
@@ -894,6 +898,11 @@ def test_payment_benchmark_seeds_non_admin_fixture_identity():
 
     command = run.call_args.args[0]
     assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH", None)
+        local.configure_task_environment(["agent-payment-test-shop"])
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
+        assert os.environ[local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
 
 
 async def test_agentcard_setup_targets_effective_benchmark_user():
@@ -1041,6 +1050,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
+    assert "export BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1" in helper
+    assert "1f85ff25-6e29-4c1b-8739-f917bd101a30" in helper
     assert "DATABASE_URL=" in helper
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
     assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
@@ -1058,8 +1069,12 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in import_block, (
         "setup-benchmark-payment.ts must import BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
     )
-    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in fixture
-    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in fixture
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in import_block
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID" in import_block
+    assert "benchmarkPaymentIdentity" in import_block
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in fixture
+    assert "assertDedicatedBenchmarkUser(userId, mode)" in fixture
     assert "pg_advisory_xact_lock" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "await prisma.$transaction" in fixture
@@ -1096,15 +1111,15 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_AGENTCARD_ORG_ID" in dotenv_helper
 
 
-def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
-    """The four AgentCard lifecycle benchmarks must run as the NON-ADMIN payment fixture user.
+def test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path():
+    """Sandbox AgentCard lifecycle benches run as the default admin account.
 
-    `resolveAndIssuePurchaseCard` routes ADMIN_USER_IDS to `issueAdminCompanyCard`, which mints a
-    company-funded card and never authorizes a personal Stripe hold. Every one of these tasks
-    asserts `expected_payment_lifecycle.stripeHold`, so running them as the default (admin)
-    benchmark user makes that assertion unreachable by construction. Three places must agree on
-    the identity — the harness run-user override, the local stack's fixture seeding, and the
-    back-end constant the seeding script and back-end blackbox share — so pin all three here.
+    Credit checks use the admin unlimited path so the agent is not gated at
+    `gate:subscription`. `BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH` (honored only
+    when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+    `resolveAndIssuePurchaseCard` onto `chargeAndIssueCard` so stripeHold /
+    payment_approval stay reachable. The disposable `…106` identity remains
+    the non-admin blackbox fixture (`BENCHMARK_PAYMENT_LIFECYCLE_USER_ID`).
     """
     import re
 
@@ -1118,27 +1133,40 @@ def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
 
     repo_root = Path(__file__).resolve().parents[3]
     config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts)
-    assert match, "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID =\s*'([^']+)'",
+        config_ts,
+    )
+    assert match, (
+        "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID"
+    )
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_USER_ID, (
         "benchmark payment identity drifted between the harness and the back-end: "
         f"{AGENT_PAYMENT_LIFECYCLE_USER_ID} vs {match.group(1)}"
     )
+    assert "function benchmarkForceCustomerPurchasePath()" in config_ts
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in config_ts
+    disposable = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts
+    )
+    assert disposable, "back-end purchases/config.ts must keep BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    assert disposable.group(1) == "00000000-0000-4000-8000-000000000106"
+    assert disposable.group(1) != AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_LIFECYCLE_USER_ID == AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_TASK_NAMES == AGENT_PAYMENT_LIFECYCLE_TASK_NAMES
-    # Never the default (admin) benchmark user, and never a hardcoded ADMIN_USER_IDS entry.
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID != USER_ID
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID == USER_ID
     admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID not in admin_ts
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID in admin_ts
 
     for name in sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES):
         task = get_task_by_name(name)
         assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
         assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
-            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding path can produce"
+            f"{name} asserts a captured Stripe hold, which the forced customer path must produce"
         )
         assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
         assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
+        assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in task.environment["context_notes"]
 
 
 def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
@@ -1237,7 +1265,7 @@ def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
         local.configure_task_environment([local.ADMIN_BYPASS_TASK_NAME])
         assert os.environ["ADMIN_USER_IDS_EXTRA"] == local.ADMIN_BYPASS_USER_ID
 
-    # Only that task opts in; the lifecycle tasks must stay NON-admin on the same stack.
+    # Only that task opts in; lifecycle benches are already hardcoded admins and must not get EXTRA.
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
         local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
@@ -2173,6 +2201,51 @@ def test_agent_payment_accepts_current_payment_confirmation_schema_key():
     blob = _extract_agent_payment_output_blob(data)
     assert "tp_058813d0" in blob
     assert "Aurora Notebook" in blob
+
+
+def test_agent_payment_accepts_grounded_finished_browser_text_without_structured_metadata():
+    """A completed browser result remains evidence when its structured metadata is absent."""
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
+
+    browser_result = {
+        "role": "TOOL",
+        "message": (
+            "Checkout complete on the Rose Labs Test Payment page.\n"
+            "Order confirmation ID: tp_74fcd5b4\n"
+            "Total amount paid: 43.96"
+        ),
+        "metadata": {
+            "action_type": "task_complete",
+            "title": "Browser automation complete",
+            "toolName": "spawn_browser_agent",
+            "toolStatus": "FINISHED",
+        },
+    }
+
+    blob = _extract_agent_payment_output_blob({"messages": [browser_result]})
+    assert "tp_74fcd5b4" in blob
+
+    invalid_terminal_markers = (
+        {**browser_result, "role": "ASSISTANT"},
+        {
+            **browser_result,
+            "metadata": {**browser_result["metadata"], "toolName": "spawn_agent"},
+        },
+        {
+            **browser_result,
+            "metadata": {**browser_result["metadata"], "toolStatus": "IN_PROGRESS"},
+        },
+        {
+            **browser_result,
+            "metadata": {
+                key: value
+                for key, value in browser_result["metadata"].items()
+                if key != "action_type"
+            },
+        },
+    )
+    for invalid_result in invalid_terminal_markers:
+        assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
 
 
 def test_production_payment_lifecycle_refuses_sandbox_target():
@@ -3112,6 +3185,92 @@ def test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors():
         "spawn_browser_agent call_real_failure status=ERROR"
     ]
     assert _run_declared_static_check(evaluator, still_terminal)[0] is False
+
+
+def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
+    """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
+
+    Local repro: browser-agent-amazon-cookie-payment agent
+    b87b27c5-a055-41bf-ab63-8d2e90547f04 reached a grounded Amazon purchase write_lock
+    after `Cannot humanize input_text … no coordinates available` (CDP: no node for
+    backend id 87012), then failed only on no_tool_failures.
+
+    Outcome-proof agent 3cb17215-4a2a-4a13-8afb-52d087da0e27 showed the same class on
+    click (`Cannot humanize click …`); live GET payloads carry the body in `text`,
+    while archived transcripts remap to `message` — both shapes must classify.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                # Live agent GET shape (API field name).
+                "text": "Cannot humanize input_text for element index 87012: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": 'Typed \'[encrypted_data]\' into <input name="password">',
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_4CoEgNcqTgih86rhKhCOCU88",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "Cannot humanize click for element index 91731: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": "Clicked <input #signInSubmit>",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_u8k10geKSNi8U0RrsOGEM1Dr",
+                },
+            },
+            {
+                "role": "TOOL",
+                # Archived run-JSON shape after extract_message_transcript.
+                "message": "No node found for given backend id",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_stale_backend_node",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "write_lock",
+                    "toolCallId": "call_write_lock_ok",
+                    "title": "Purchase write lock requested",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_fails = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Kernel session crashed mid-checkout",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "toolCallId": "call_real_failure",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_fails) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
 
 
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
@@ -4493,15 +4652,17 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     import benchmarks.run_benchmark as bench
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
     raised = False
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         # Mirror the real signatures: _apply_live_fixture calls
-        # _sync_compute_tokens(tolerate_gpt_code_unavailable=True) and
+        # _sync_compute_tokens → _sync_email_credentials →
         # _sync_browser_credentials(ctx.cookie_domains).
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         bench._sync_browser_credentials = lambda *_a, **_k: False
         bench._apply_live_fixture(
             bench.LiveFixtureContext(
@@ -4514,6 +4675,7 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
         raised = "browser auth" in str(exc).lower()
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         if original_mode is None:
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
@@ -4608,6 +4770,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     }
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_sql = bench._run_local_victoria_sql
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
@@ -4635,6 +4798,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         # The sync COMMAND succeeds — exactly the state that misreported the outage.
         bench._sync_browser_credentials = lambda *_a, **_k: True
         bench._run_local_victoria_sql = fake_sql
@@ -4685,6 +4849,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
         assert sql_calls == []
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         bench._run_local_victoria_sql = original_sql
         if original_mode is None:
@@ -4730,6 +4895,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
     with (
         patch.object(bench, "_is_simulate_mode", return_value=False),
         patch.object(bench, "_sync_compute_tokens", return_value=True),
+        patch.object(bench, "_sync_email_credentials", return_value=True),
         patch.object(bench, "_sync_browser_credentials", side_effect=fake_sync_browser_credentials),
         patch.object(bench, "_live_cookie_domain_credential_summary", side_effect=fake_credential_summary),
     ):
@@ -5701,17 +5867,21 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
         environment = {"live_fixtures": ["live"]}
 
     setup_timeline = []
+    setup_started = threading.Event()
+    setup_release = threading.Event()
 
     def blocking_applier(_ctx):
         setup_timeline.append("setup-start")
-        time.sleep(0.1)
+        setup_started.set()
+        assert setup_release.wait(timeout=2), "parallel heartbeat could not release fixture setup"
         setup_timeline.append("setup-end")
         return {"fixture": "live"}
 
     async def setup_probe():
         async def heartbeat():
-            await asyncio.sleep(0.02)
+            await asyncio.to_thread(setup_started.wait, 2)
             setup_timeline.append("parallel-tick")
+            setup_release.set()
 
         with (
             patch.dict(bench.LIVE_FIXTURE_APPLIERS, {"live": blocking_applier}),
@@ -5727,6 +5897,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     assert setup_timeline.index("parallel-tick") < setup_timeline.index("setup-end")
 
     restore_timeline = []
+    restore_started = threading.Event()
+    restore_release = threading.Event()
     manifest = {
         "scenario": "fresh_browser_state",
         "fixture": "live",
@@ -5735,7 +5907,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     def blocking_restore(_manifest, *, label):
         assert label == "fresh browser state"
         restore_timeline.append("restore-start")
-        time.sleep(0.1)
+        restore_started.set()
+        assert restore_release.wait(timeout=2), "parallel heartbeat could not release fixture restore"
         restore_timeline.append("restore-end")
 
     async def restore_probe():
@@ -5743,8 +5916,9 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
             await bench._restore_live_fixture_scenarios_async([manifest])
 
         async def heartbeat():
-            await asyncio.sleep(0.02)
+            await asyncio.to_thread(restore_started.wait, 2)
             restore_timeline.append("parallel-tick")
+            restore_release.set()
 
         with patch.object(bench, "_restore_isolated_browser_state_scenario", blocking_restore):
             await asyncio.gather(restore(), heartbeat())
@@ -6782,16 +6956,23 @@ async def test_claude_code_preflight_uses_runtime_credential_route():
 
 
 async def test_claude_code_preflight_rejects_generic_claude_compute_token():
-    """A generic Claude compute token cannot prove Claude Code session credentials exist."""
+    """A generic Claude compute token cannot prove Claude Code session credentials exist.
+
+    After the OAuth credential route 404s, preflight still probes the funded
+    Anthropic/OpenRouter fallback via anthropic-key/cooldown — rejection requires
+    that probe to report neither a clear shared key nor OpenRouter.
+    """
     import benchmarks.run_benchmark as bench
 
     calls = []
 
     class FakeResponse:
-        status_code = 404
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
 
         def json(self):
-            return {"error": "Claude Code credentials not found"}
+            return self._body
 
     class FakeClient:
         async def __aenter__(self):
@@ -6802,7 +6983,14 @@ async def test_claude_code_preflight_rejects_generic_claude_compute_token():
 
         async def get(self, url, *, headers, timeout):
             calls.append((url, headers, timeout))
-            return FakeResponse()
+            if url.endswith("/api/integrations/claude-code/credentials/token"):
+                return FakeResponse(404, {"error": "Claude Code credentials not found"})
+            if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
+                return FakeResponse(
+                    200,
+                    {"configured": False, "onCooldown": False, "openrouterConfigured": False},
+                )
+            raise AssertionError(f"unexpected URL {url}")
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
@@ -6824,7 +7012,12 @@ async def test_claude_code_preflight_rejects_generic_claude_compute_token():
             "http://localhost:55120/api/integrations/claude-code/credentials/token",
             {"X-API-Key": "test-key"},
             10.0,
-        )
+        ),
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        ),
     ]
 
 
@@ -7088,6 +7281,63 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.44."))
     assert passed is False
     assert "ratchet" in reason.lower()
+
+
+def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
+    """Regex pattern order must not let a prompt example replace the grounded result.
+
+    Browser task instructions contain examples such as ``0.85 / 1.0`` followed by
+    ``risk score``. The evaluator used to append all forward-regex matches and then all
+    reverse-regex matches, so that example became the last score even though the
+    terminal browser row carried a grounded structured response.
+    """
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Task instructions: record the score exactly as shown, for example "
+                    '"0.12", "12", "0.85 / 1.0", "risk score: 42".'
+                ),
+                "created_at": "2026-08-21T01:49:49.633Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_started",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Extracted Output: Risk Score: 0.09."
+                ),
+                "created_at": "2026-08-21T01:51:52.088Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "structured_response": {
+                        "risk_score": "0.09",
+                        "checkbox_passed": True,
+                        "invisible_form_submitted": True,
+                        "verdict_text": "Verified!; Form submission allowed!",
+                    },
+                },
+            },
+        ]
+    }
+
+    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+
+    data["messages"][1]["metadata"]["structured_response"]["risk_score"] = "0.91"
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "structured output risk score 0.910 exceeds ratchet" in reason
 
 
 def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded():
@@ -9520,8 +9770,15 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     assert reachable_probe in run_script
     assert ownership_probe in run_script
     assert run_script.index(ownership_probe) < run_script.index(reachable_probe)
-    workspace_daemon_probe = 'docker_available_for_workspace_db "$DB_CONTAINER"; then'
+    # The probe receives this workspace's container AND the isolated-run flag. An
+    # isolated benchmark stack creates its DB container later in the same run, so
+    # it must be allowed to accept a responsive daemon before that container
+    # exists; a normal workspace still has to see its own container.
+    workspace_daemon_probe = (
+        'docker_available_for_workspace_db "$DB_CONTAINER" "$BENCHMARK_ISOLATED_RUN"'
+    )
     assert workspace_daemon_probe in run_script
+    assert f"{workspace_daemon_probe}; then" in run_script
     assert run_script.index(reachable_probe) < run_script.index(workspace_daemon_probe)
     assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
 
@@ -11566,6 +11823,7 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
     assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
     assert get_task_by_name("browser-smoke").min_steps == {"browser": 1}
+    assert get_task_by_name("cache-coverage").min_steps == {"browser": 2}
     assert get_task_by_name("chat-mode").min_steps == {}
 
     base = {"name": "min-steps-contract", "bench": "rose-bench"}
@@ -11630,6 +11888,158 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert counts == {"browser": {"browser-task": 1}}
     assert task.min_steps == {"browser": 1}
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
+    """cache-coverage's example.com heading read is goto+evaluate; default min_steps=5 is wrong."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("cache-coverage")
+    browser_id = "4eaa7d1f-fade-4db5-9fff-1a6bb9ab6891"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_browser_agent",
+                        "type": "browser",
+                        "tool_call_id": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "goto",
+                "steps_taken": 0,
+                "toolStatus": "FINISHED",
+                "title": "Navigated → https://example.com",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "toolu_01Pv8PTgDN1gpibr4Uq98HRc",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "evaluate",
+                "steps_taken": 1,
+                "toolStatus": "FINISHED",
+                "title": "evaluate",
+                "text": "Executed JS, result: Example Domain",
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+    assert (
+        _validate_agent_class_min_steps({"browser": 5}, counts)
+        == (
+            f"Browser agent {browser_id} recorded 2 trajectory step(s); "
+            "expected at least 5 per browser agent"
+        )
+    )
+
+
+def test_live_fixture_refreshes_email_credentials_before_browser_auth():
+    """cache-coverage message_person needs from_email; live overlay must sync email rows."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    calls: list[str] = []
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: calls.append("compute") or True
+        bench._sync_email_credentials = lambda: calls.append("email") or True
+        bench._sync_browser_credentials = lambda *_a, **_k: calls.append("browser") or True
+        manifest = bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert calls == ["compute", "email", "browser"]
+    assert manifest == {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
+
+
+def test_live_fixture_fails_closed_when_email_credentials_refresh_fails():
+    """A frozen dump without usable Gmail tokens must abort before the agent runs."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: False
+        bench._sync_browser_credentials = lambda *_a, **_k: True
+        bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "email credentials" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "live fixture must fail closed when email credential refresh fails"
+
+
+def test_message_person_tasks_refresh_email_credentials_in_local_preflight():
+    """Local runs with message_person must overlay email creds after compute tokens."""
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("cache-coverage")
+    assert "message_person" in task.expected_tools
+    source = inspect.getsource(bench.main_async)
+    assert "_sync_email_credentials" in source
+    assert 'any("message_person" in (t.expected_tools or []) for t in tasks)' in source
 
 
 def test_payment_abandonment_accepts_captured_two_step_trajectory():
@@ -13438,6 +13848,10 @@ async def run_all_tests():
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
     )
     r.record(
+        "webdecoy_biometrics_grounded_result_precedence",
+        test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples,
+    )
+    r.record(
         "webdecoy_biometrics_exact_network_score",
         test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded,
     )
@@ -13744,8 +14158,8 @@ async def run_all_tests():
         test_payment_benchmark_preserves_lifecycle_stack_contract,
     )
     r.record(
-        "payment_benchmark_non_admin_fixture_identity",
-        test_payment_benchmark_seeds_non_admin_fixture_identity,
+        "payment_benchmark_admin_run_user_forced_customer_path",
+        test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path,
     )
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
@@ -13768,8 +14182,8 @@ async def run_all_tests():
         test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
     )
     r.record(
-        "agent_payment_lifecycle_user_is_non_admin",
-        test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user,
+        "agent_payment_lifecycle_user_is_admin_with_forced_customer_path",
+        test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path,
     )
     r.record(
         "production_payment_lifecycle_user_is_non_admin",
@@ -13872,6 +14286,10 @@ async def run_all_tests():
         test_agent_payment_accepts_current_payment_confirmation_schema_key,
     )
     r.record(
+        "agent_payment_grounded_finished_browser_text",
+        test_agent_payment_accepts_grounded_finished_browser_text_without_structured_metadata,
+    )
+    r.record(
         "production_payment_rejects_sandbox_target",
         test_production_payment_lifecycle_refuses_sandbox_target,
     )
@@ -13962,6 +14380,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_navigation_pin_guard",
         test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_stale_dom_node",
+        test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
     )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
@@ -14133,6 +14555,22 @@ async def run_all_tests():
     r.record(
         "browser_smoke_single_step_trajectory",
         test_browser_smoke_accepts_captured_single_step_trajectory,
+    )
+    r.record(
+        "cache_coverage_two_step_browser_trajectory",
+        test_cache_coverage_accepts_captured_two_step_browser_trajectory,
+    )
+    r.record(
+        "live_fixture_refreshes_email_credentials",
+        test_live_fixture_refreshes_email_credentials_before_browser_auth,
+    )
+    r.record(
+        "live_fixture_fails_closed_email_credentials",
+        test_live_fixture_fails_closed_when_email_credentials_refresh_fails,
+    )
+    r.record(
+        "message_person_tasks_refresh_email_credentials",
+        test_message_person_tasks_refresh_email_credentials_in_local_preflight,
     )
     r.record(
         "payment_abandonment_two_step_trajectory",

@@ -4,10 +4,12 @@
  * `hidden md:flex`). Verifies the trigger is mobile-scoped, opening surfaces
  * the shared SidebarAgentList, and selecting/creating closes the drawer.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
 import { renderWithProviders } from './test-wrapper';
+import { server } from './msw/server';
 import MobileAgentDrawer from '@/features/terminal-component-group/components/MobileAgentDrawer';
 import type { Agent } from '@/lib/api';
 
@@ -46,8 +48,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof MobileAgent
     selectedAgentId: null,
     onSelectAgent: vi.fn(),
     onCreateAgent: vi.fn(),
-    onResumeAgent: vi.fn().mockResolvedValue(undefined),
-    resumingAgentId: null,
+    onRefreshAgents: vi.fn().mockResolvedValue(undefined),
     realtimeReady: false,
     isSignedIn: true,
     onLoginClick: vi.fn(),
@@ -56,7 +57,29 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof MobileAgent
   };
 }
 
+/** Row mutations go through getAuthHeaders(), which throws without a session. */
+function mockSession() {
+  const session = {
+    access_token: 'test-token',
+    refresh_token: 'test-refresh',
+    expires_in: 3600,
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    token_type: 'bearer',
+    user: { id: 'test-user', is_anonymous: false },
+  };
+  localStorage.setItem('rose-session', JSON.stringify(session));
+  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
+}
+
 describe('MobileAgentDrawer', () => {
+  beforeEach(() => {
+    mockSession();
+  });
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
   it('renders a mobile-only trigger (hidden at >= md)', () => {
     renderWithProviders(<MobileAgentDrawer {...defaultProps()} />);
     const trigger = screen.getByRole('button', { name: 'Open menu' });
@@ -96,13 +119,32 @@ describe('MobileAgentDrawer', () => {
     renderWithProviders(<MobileAgentDrawer {...defaultProps({ onCreateAgent })} />);
 
     await u.click(screen.getByRole('button', { name: 'Open menu' }));
-    const createButton = await screen.findByRole('button', { name: /Create Agent/ });
+    const createButton = await screen.findByRole('button', { name: /New Agent/ });
     await u.click(createButton);
 
     expect(onCreateAgent).toHaveBeenCalledTimes(1);
     await waitFor(() => {
-      expect(screen.queryByRole('button', { name: /Create Agent/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /New Agent/ })).not.toBeInTheDocument();
     });
+  });
+
+  it('shows the same New Agent and Search chrome above the mobile list', async () => {
+    const u = userEvent.setup();
+    const agents = [
+      makeAgent({ agent_id: 'a1', goal: 'Book Tokyo flight' }),
+      makeAgent({ agent_id: 'a2', goal: 'Order groceries' }),
+    ];
+    renderWithProviders(<MobileAgentDrawer {...defaultProps({ agents })} />);
+
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
+
+    const create = await screen.findByRole('button', { name: 'New Agent' });
+    const search = screen.getByRole('searchbox', { name: 'Search agents' });
+    expect(create.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await u.type(search, 'grocer');
+    await waitFor(() => expect(screen.queryByText('Book Tokyo flight')).not.toBeInTheDocument());
+    expect(screen.getByText('Order groceries')).toBeInTheDocument();
   });
 
   it('shows an empty-state placeholder when there are no agents', async () => {
@@ -121,5 +163,40 @@ describe('MobileAgentDrawer', () => {
     expect(await screen.findByRole('dialog')).toHaveClass('pt-[var(--safe-area-inset-top)]');
     expect(screen.getByRole('button', { name: 'Agents' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Notifications' })).toBeVisible();
+  });
+
+  it('shows the generated title rather than the raw goal', async () => {
+    const u = userEvent.setup();
+    const agents = [
+      makeAgent({ goal: 'a very long raw goal that would wrap', title: 'Short Label' }),
+    ];
+    renderWithProviders(<MobileAgentDrawer {...defaultProps({ agents })} />);
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
+
+    expect(await screen.findByText('Short Label')).toBeInTheDocument();
+    expect(screen.queryByText('a very long raw goal that would wrap')).not.toBeInTheDocument();
+  });
+
+  it('archives from the drawer and refreshes the list', async () => {
+    const u = userEvent.setup();
+    let deletedId: string | null = null;
+    server.use(
+      http.delete('*/api/agents/:agentId', ({ params }) => {
+        deletedId = params.agentId as string;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+    // Regression guard: the drawer builds its own useAgentRowActions, so a
+    // caller that forgets onRefreshAgents would throw here rather than at
+    // render time.
+    const onRefreshAgents = vi.fn().mockResolvedValue(undefined);
+    const agents = [makeAgent({ agent_id: 'a1', goal: 'Row A' })];
+    renderWithProviders(<MobileAgentDrawer {...defaultProps({ agents, onRefreshAgents })} />);
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
+
+    await u.click(await screen.findByLabelText('Archive Row A'));
+
+    await waitFor(() => expect(deletedId).toBe('a1'));
+    await waitFor(() => expect(onRefreshAgents).toHaveBeenCalled());
   });
 });

@@ -6316,12 +6316,52 @@ async def test_upload_file_to_session_success():
             # assert multipart file shape
             assert "files" in kw
             assert kw["files"]["file"][0] == "f.pdf"
+            assert kw.get("data") is None
             return _Resp()
 
     with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
         cfg = _fake_config()
         out = await repo.upload_file_to_session(cfg, "s1", "f.pdf", b"PDFDATA", "application/pdf")
     assert out == {"path": "/tmp/f.pdf"}
+
+
+async def test_upload_file_to_session_downloads_directory():
+    """Persisted Kernel downloads must POST directory=/tmp/downloads."""
+    from domains.spawn_browser_agent_v3 import repo
+
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"path": "/tmp/downloads/rs.jpeg", "size": 4}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            seen["data"] = kw.get("data")
+            seen["files"] = kw.get("files")
+            return _Resp()
+
+    with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
+        cfg = _fake_config()
+        out = await repo.upload_file_to_session(
+            cfg,
+            "s1",
+            "rs.jpeg",
+            b"JPEG",
+            "image/jpeg",
+            directory="/tmp/downloads",
+        )
+    assert out == {"path": "/tmp/downloads/rs.jpeg", "size": 4}
+    assert seen["data"] == {"directory": "/tmp/downloads"}
+    assert seen["files"]["file"][0] == "rs.jpeg"
 
 async def test_upload_file_to_session_non_200_returns_none():
     from domains.spawn_browser_agent_v3 import repo
@@ -10114,6 +10154,299 @@ async def test_dom_service_disconnect_stops_browser_session_without_killing_remo
     assert dom.session is None
     assert dom.selector_map == {}
 
+
+def test_browser_downloads_path_for_provider_kernel_vs_steel():
+    """Kernel CDP downloads must land in /tmp/downloads (listed by session_files)."""
+    from browser_tools.dom_service import (
+        KERNEL_DOWNLOADS_PATH,
+        STEEL_DOWNLOADS_PATH,
+        browser_downloads_path_for_provider,
+    )
+
+    assert browser_downloads_path_for_provider("kernel") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("KERNEL") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("steel") == STEEL_DOWNLOADS_PATH
+    assert KERNEL_DOWNLOADS_PATH == "/tmp/downloads"
+    assert STEEL_DOWNLOADS_PATH == "/files"
+    # Pre-fix bug: Kernel sessions used Steel's /files, so CDP downloads never
+    # appeared in Kernel listFiles(/tmp/downloads) → session_files missed compressed output.
+    assert browser_downloads_path_for_provider("kernel") != STEEL_DOWNLOADS_PATH
+
+
+def test_is_browser_attachment_download_tinypng_vs_ad_script():
+    """TinyPNG attachment Fetch/Document must persist; Google Ads Script must not."""
+    from domains.spawn_browser_agent_v3.download_persist import is_browser_attachment_download
+
+    tinypng_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
+    assert is_browser_attachment_download(
+        url=tinypng_url,
+        resource_type="Fetch",
+        mime_type="",
+        response_headers={"content-disposition": "attachment", "content-length": "149852"},
+    )
+    assert is_browser_attachment_download(
+        url=tinypng_url,
+        resource_type="Document",
+        mime_type="image/jpeg",
+        response_headers={"content-disposition": "attachment", "content-length": "149852"},
+    )
+    assert not is_browser_attachment_download(
+        url="https://securepubads.g.doubleclick.net/tag/js/gpt.js",
+        resource_type="Script",
+        mime_type="text/javascript",
+        response_headers={"content-disposition": 'attachment; filename="f.txt"'},
+    )
+
+
+async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
+    """Owning boundary: attachment bytes must land under /tmp/downloads via upload API."""
+    from domains.spawn_browser_agent_v3 import download_persist
+
+    calls = []
+
+    async def fake_upload(
+        config,
+        session_id,
+        filename,
+        file_content,
+        mime_type="application/octet-stream",
+        *,
+        directory=None,
+    ):
+        calls.append(
+            {
+                "session_id": session_id,
+                "filename": filename,
+                "content": file_content,
+                "mime_type": mime_type,
+                "directory": directory,
+            }
+        )
+        return {"path": f"{directory}/{filename}", "size": len(file_content)}
+
+    with patch(
+        "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
+        new=fake_upload,
+    ):
+        out = await download_persist.persist_bytes_to_session_downloads(
+            _fake_config(),
+            "sess-1",
+            filename="rs.jpeg",
+            content=b"JPEGBYTES",
+            mime_type="image/jpeg",
+        )
+    assert out == {
+        "path": "/tmp/downloads/rs.jpeg",
+        "size": 9,
+        "filename": "rs.jpeg",
+        "mime_type": "image/jpeg",
+    }
+    assert calls == [
+        {
+            "session_id": "sess-1",
+            "filename": "rs.jpeg",
+            "content": b"JPEGBYTES",
+            "mime_type": "image/jpeg",
+            "directory": "/tmp/downloads",
+        }
+    ]
+
+
+async def test_browser_download_persister_captures_attachment_via_cdp_body():
+    """CDP loadingFinished for Content-Disposition: attachment writes session downloads."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    persisted = []
+
+    class _NetworkSend:
+        async def getResponseBody(self, params=None, session_id=None):
+            assert params == {"requestId": "req-1"}
+            return {"body": base64.b64encode(b"COMPRESSED").decode(), "base64Encoded": True}
+
+        async def enable(self, session_id=None):
+            return {}
+
+    class _Send:
+        Network = _NetworkSend()
+
+    class _RegisterNetwork:
+        def __init__(self):
+            self.handlers = {}
+
+        def responseReceived(self, cb):
+            self.handlers["responseReceived"] = cb
+
+        def loadingFinished(self, cb):
+            self.handlers["loadingFinished"] = cb
+
+        def loadingFailed(self, cb):
+            self.handlers["loadingFailed"] = cb
+
+    class _Register:
+        def __init__(self):
+            self.Network = _RegisterNetwork()
+
+    class _CdpClient:
+        def __init__(self):
+            self.register = _Register()
+            self.send = _Send()
+
+    class _CdpSession:
+        session_id = "cdp-sess"
+        cdp_client = None
+
+    cdp_client = _CdpClient()
+    cdp_session = _CdpSession()
+    cdp_session.cdp_client = cdp_client
+
+    class _BrowserSession:
+        async def get_or_create_cdp_session(self, *a, **kw):
+            return cdp_session
+
+    async def fake_persist(config, session_id, *, filename, content, mime_type="application/octet-stream"):
+        persisted.append(
+            {
+                "session_id": session_id,
+                "filename": filename,
+                "content": content,
+                "mime_type": mime_type,
+            }
+        )
+        return {"path": f"/tmp/downloads/{filename}", "size": len(content), "filename": filename, "mime_type": mime_type}
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        with patch(
+            "domains.spawn_browser_agent_v3.download_persist.persist_bytes_to_session_downloads",
+            new=fake_persist,
+        ):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=_BrowserSession(),
+                session_id="kernel-sess",
+                config=_fake_config(),
+                agent_id="agent-1",
+                task_id="task-1",
+            )
+            assert persister is not None
+            handlers = cdp_client.register.Network.handlers
+            handlers["responseReceived"](
+                {
+                    "requestId": "req-1",
+                    "type": "Fetch",
+                    "response": {
+                        "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
+                        "status": 200,
+                        "mimeType": "",
+                        "headers": {"content-disposition": "attachment", "content-length": "10"},
+                    },
+                },
+                "cdp-sess",
+            )
+            handlers["loadingFinished"]({"requestId": "req-1", "encodedDataLength": 10}, "cdp-sess")
+            # Allow the created persist task to run.
+            await asyncio.sleep(0)
+            if persister._tasks:
+                await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+            await persister.close()
+
+    assert persisted == [
+        {
+            "session_id": "kernel-sess",
+            "filename": "rs.jpeg",
+            "content": b"COMPRESSED",
+            "mime_type": "image/jpeg",
+        }
+    ]
+
+
+def test_dom_service_defaults_downloads_path_from_browser_provider_env():
+    """DOMService must default downloads_path from BROWSER_PROVIDER, not hardcode /files."""
+    import os
+
+    from browser_tools.dom_service import KERNEL_DOWNLOADS_PATH, STEEL_DOWNLOADS_PATH, DOMService
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == STEEL_DOWNLOADS_PATH
+    assert DOMService(cdp_url="wss://example", downloads_path="/custom").downloads_path == "/custom"
+
+
+
+
+async def test_evaluate_awaits_promises():
+    """Runtime.evaluate must set awaitPromise so async fetch results are returned."""
+    from domains.spawn_browser_agent_v3.service_actions import _execute_inspection_action
+
+    evaluate = AsyncMock(return_value={"result": {"value": {"ok": True, "size": 3}}})
+    cdp_session = SimpleNamespace(
+        session_id="cdp",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+    )
+    session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp_session))
+    history = SimpleNamespace(record_action=AsyncMock())
+    ctx = SimpleNamespace(
+        action_name="evaluate",
+        params={"code": "(async () => ({ok:true,size:3}))()"},
+        session=session,
+        dom_service=SimpleNamespace(),
+        action_history=history,
+        thinking=None,
+        config=None,
+        session_id="s",
+        humanizer=None,
+        browser_network_recorder=None,
+        current_url="https://tinypng.com/",
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+    )
+    result = await _execute_inspection_action(ctx)
+    assert result["success"] is True
+    assert result["value"]["size"] == 3
+    assert evaluate.await_args.kwargs["params"]["awaitPromise"] is True
+
+
+async def test_goto_err_aborted_persists_download_to_session():
+    """goto net::ERR_ABORTED on attachment URLs must persist bytes under /tmp/downloads."""
+    import domains.spawn_browser_agent_v3.download_persist as download_persist
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    class Bus:
+        def dispatch(self, event):
+            return self
+        def __await__(self):
+            async def _done():
+                return None
+            return _done().__await__()
+        async def event_result(self, **kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    session = SimpleNamespace(event_bus=Bus())
+    history = SimpleNamespace(record_action=AsyncMock())
+    with patch.object(
+        download_persist,
+        "persist_navigation_download_via_page_fetch",
+        new=AsyncMock(
+            return_value={
+                "path": "/tmp/downloads/rs.jpeg",
+                "size": 149852,
+                "filename": "rs.jpeg",
+            }
+        ),
+    ):
+        result = await _execute_goto(
+            session=session,
+            dom_service=SimpleNamespace(),
+            action_history=history,
+            params={"url": "https://tinypng.com/backend/opt/download/x/rs.jpeg"},
+            thinking=None,
+            session_id="sess",
+            config=object(),
+        )
+    assert result["success"] is True
+    assert result["download"]["path"] == "/tmp/downloads/rs.jpeg"
+    history.record_action.assert_awaited()
+
+
 async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     """Steel/CDP sessions expose cdp_client.send.WebAuthn, not cdp_session.send."""
     from browser_tools.dom_service import DOMService
@@ -10169,6 +10502,94 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     webauthn.addCredential.assert_awaited_once()
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
     assert await dom.get_used_passkey_credential_ids() == ["cred-1"]
+
+
+async def test_dom_service_passkeys_follow_focus_target_for_sso_transition():
+    """A popup/redirect target must receive a fresh authenticator and the held key union.
+
+    Normal-site passkeys are seeded on the initial page.  When that page opens
+    an SSO target, WebAuthn state from the original CDP target is not visible in
+    the new one.  Re-seeding must therefore follow ``agent_focus_target_id`` and
+    restore both the original key and the newly-fetched IdP key.
+    """
+    from browser_tools.dom_service import DOMService
+
+    class _FakeWebAuthn:
+        def __init__(self, authenticator_id: str):
+            self.credentials = []
+            self.enable = AsyncMock(return_value={})
+            self.addVirtualAuthenticator = AsyncMock(
+                return_value={"authenticatorId": authenticator_id}
+            )
+
+            async def _add_credential(*, params, session_id):
+                self.credentials.append(dict(params["credential"]))
+                return {}
+
+            async def _get_credentials(*, params, session_id):
+                return {"credentials": list(self.credentials)}
+
+            self.addCredential = AsyncMock(side_effect=_add_credential)
+            self.getCredentials = AsyncMock(side_effect=_get_credentials)
+
+    class _FakePage:
+        def __init__(self):
+            self.setInterceptFileChooserDialog = AsyncMock(return_value={})
+
+    def _cdp_session(session_id: str, authenticator_id: str):
+        webauthn = _FakeWebAuthn(authenticator_id)
+        page = _FakePage()
+        return (
+            SimpleNamespace(
+                session_id=session_id,
+                cdp_client=SimpleNamespace(send=SimpleNamespace(WebAuthn=webauthn, Page=page)),
+            ),
+            webauthn,
+        )
+
+    target_a, webauthn_a = _cdp_session("cdp-amazon", "auth-amazon")
+    target_b, webauthn_b = _cdp_session("cdp-google", "auth-google")
+
+    class _FakeSession:
+        agent_focus_target_id = "amazon-target"
+
+        async def get_or_create_cdp_session(self, target_id=None, focus=False):
+            assert focus is False
+            return {
+                "amazon-target": target_a,
+                "google-target": target_b,
+            }[target_id]
+
+    amazon = {
+        "credentialId": "amazon-cred",
+        "privateKey": "amazon-pkcs8",
+        "rpId": "amazon.com",
+        "userHandle": "amazon-user",
+        "signCount": 3,
+    }
+    google = {
+        "credentialId": "google-cred",
+        "privateKey": "google-pkcs8",
+        "rpId": "google.com",
+        "userHandle": "google-user",
+        "signCount": 5,
+    }
+
+    dom = DOMService(cdp_url="")
+    dom._session = _FakeSession()
+    await dom._suppress_browser_overlays()
+    assert await dom.inject_passkeys([amazon]) == 1
+
+    dom._session.agent_focus_target_id = "google-target"
+    assert await dom.inject_passkeys([amazon, google]) == 2
+
+    assert [item["credentialId"] for item in webauthn_a.credentials] == ["amazon-cred"]
+    assert [item["credentialId"] for item in webauthn_b.credentials] == [
+        "amazon-cred",
+        "google-cred",
+    ]
+    assert webauthn_a.addVirtualAuthenticator.await_count == 1
+    assert webauthn_b.addVirtualAuthenticator.await_count == 1
 
 async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
     """A sign-counter advance must be durable before approvals pause the browser task."""
@@ -11063,6 +11484,7 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.click_at_coords.assert_not_called()
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
+
 
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -12109,6 +12531,57 @@ async def test_execute_goto_auto_adds_https():
     assert out["success"] is True
 
 
+async def test_execute_goto_err_aborted_persists_attachment_download():
+    """goto net::ERR_ABORTED on a download URL must persist bytes under /tmp/downloads."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class _FailEvent:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    session = SimpleNamespace(
+        event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_FailEvent())),
+    )
+    ah = SimpleNamespace(record_action=AsyncMock())
+    download_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
+
+    async def fake_persist(**kwargs):
+        assert kwargs["url"] == download_url
+        assert kwargs["session_id"] == "sess-dl"
+        return {
+            "path": "/tmp/downloads/rs.jpeg",
+            "size": 149852,
+            "filename": "rs.jpeg",
+            "content_type": "image/jpeg",
+            "source_url": download_url,
+        }
+
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+        new=fake_persist,
+    ):
+        out = await service_actions._execute_goto(
+            session=session,
+            dom_service=MagicMock(),
+            action_history=ah,
+            params={"url": download_url},
+            thinking=None,
+            session_id="sess-dl",
+            config=_fake_config(),
+        )
+    assert out["success"] is True
+    assert out["download"]["path"] == "/tmp/downloads/rs.jpeg"
+    assert "saved to session" in out["message"]
+    ah.record_action.assert_awaited_once()
+
+
+# ── live challenge helpers ───────────────────────────────────────────
 
 async def test_live_tab_looks_challenged_helpers():
     """Clean live tabs must skip recovery; challenged tabs must still recover."""
@@ -12158,11 +12631,9 @@ async def test_live_tab_looks_challenged_helpers():
     assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
-def test_url_looks_like_api_surface_and_navigation_pin():
-    """Shape-only API refuse + recovery pin + cross-origin handoff pin (no path allowlists)."""
+def test_url_looks_like_api_surface_guard():
+    """Shape-only API refuse remains; host pinning is gone (Blue Bottle → order.online)."""
     from domains.spawn_browser_agent_v3.service_actions import (
-        effective_navigation_pin_host,
-        navigation_leaves_pinned_host,
         url_looks_like_api_surface,
         _navigation_guard_error,
         _ActionContext,
@@ -12176,104 +12647,11 @@ def test_url_looks_like_api_surface_and_navigation_pin():
     # Single-letter / vendor CDN labels are not special-cased.
     assert url_looks_like_api_surface("https://r.example.com/") is False
 
-    pin = "checkout.example.com"
-    current = "https://checkout.example.com/c/pay/cs_live_x"
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="navback",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://api.example.com/",
-            pin_host=pin,
-            action="goto",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://www.merchant.com/cart",
-            pin_host=pin,
-            action="goto",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://checkout.example.com/c/pay/other",
-            pin_host=pin,
-            action="goto",
-        )
-        is False
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="close_tab",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="switch_tab",
-        )
-        is True
-    )
-    # Off the pin already — do not trap.
-    assert (
-        navigation_leaves_pinned_host(
-            current_url="https://www.merchant.com/cart",
-            target_url="https://elsewhere.com/",
-            pin_host=pin,
-            action="goto",
-        )
-        is False
-    )
-
-    # Cross-origin handoff: live host ≠ session origin → pin to live host.
-    assert (
-        effective_navigation_pin_host(
-            current_url=current,
-            recovery_pin_host=None,
-            origin_base_domain="merchant.com",
-        )
-        == "checkout.example.com"
-    )
-    assert (
-        effective_navigation_pin_host(
-            current_url="https://www.merchant.com/cart",
-            recovery_pin_host=None,
-            origin_base_domain="merchant.com",
-        )
-        is None
-    )
-    assert (
-        effective_navigation_pin_host(
-            current_url="https://www.merchant.com/cart",
-            recovery_pin_host="www.merchant.com",
-            origin_base_domain="merchant.com",
-        )
-        == "www.merchant.com"
-    )
-
     ctx = _ActionContext(
         dom_service=None,  # type: ignore[arg-type]
         action_history=None,  # type: ignore[arg-type]
         session=None,
-        action_name="navback",
+        action_name="goto",
         index=None,
         params={},
         thinking=None,
@@ -12286,7 +12664,7 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         secret_refs=None,
         password_origins=None,
         credential_refs_by_secret_ref=None,
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        current_url="https://www.bluebottlecoffee.com/us/eng/cafes/ferry-building",
         trusted_page_urls=None,
         write_lock_enabled=False,
         write_lock_approvals=None,
@@ -12294,32 +12672,25 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         browser_network_recorder=None,
         current_auth_realm="",
         prepare_credentials_for_url=None,
-        navigation_pin_host=None,
-        navigation_origin_base_domain="merchant.com",
     )
-    assert "leave pinned page host" in (_navigation_guard_error(ctx, action="navback") or "")
-    ctx.action_name = "goto"
+    # Cross-origin merchant → order platform must be allowed (no host pin).
     assert (
         _navigation_guard_error(
-            ctx, action="goto", target_url="https://www.merchant.com/about"
+            ctx,
+            action="goto",
+            target_url="https://order.online/business/BlueBottleCoffee-156787",
+        )
+        is None
+    )
+    assert _navigation_guard_error(ctx, action="navback") is None
+    assert _navigation_guard_error(ctx, action="close_tab") is None
+    assert _navigation_guard_error(ctx, action="open_new_tab", target_url="https://order.online/") is None
+    # API surfaces still refused.
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://api.example.com/"
         )
         is not None
-    )
-    # Same handoff host stays allowed.
-    assert (
-        _navigation_guard_error(
-            ctx, action="goto", target_url="https://checkout.example.com/c/pay/other"
-        )
-        is None
-    )
-    # Still on origin domain — no handoff pin; free to navigate.
-    ctx.current_url = "https://www.merchant.com/cart"
-    assert _navigation_guard_error(ctx, action="navback") is None
-    assert (
-        _navigation_guard_error(
-            ctx, action="goto", target_url="https://www.merchant.com/other"
-        )
-        is None
     )
 
 
@@ -12344,7 +12715,8 @@ async def test_execute_goto_refuses_api_surface_urls():
     ah.record_action.assert_awaited_once()
 
 
-async def test_execute_navback_refuses_when_host_pinned():
+async def test_execute_allows_cross_origin_navigation():
+    """Host pin removed: cross-origin navback/goto/open_new_tab must not refuse."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
@@ -12352,21 +12724,73 @@ async def test_execute_navback_refuses_when_host_pinned():
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
+
     out = await service_actions.execute_action(
         dom_service=dom,
         action_history=ah,
         action={"action": "navback", "params": {}},
         current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_pin_host="checkout.example.com",
     )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
-    ah.record_action.assert_awaited_once()
+    err = str(out.get("error") or "").lower()
+    assert "leave pinned" not in err
+    assert "pinned page host" not in err
+    session.event_bus.dispatch.assert_called()
+
+    # Guard-level cement for merchant → order.online (the Blue Bottle failure).
+    ctx = service_actions._ActionContext(
+        dom_service=dom,
+        action_history=ah,
+        session=session,
+        action_name="goto",
+        index=None,
+        params={},
+        thinking=None,
+        coords=None,
+        element=None,
+        available_file_paths=None,
+        session_id=None,
+        config=None,
+        humanizer=None,
+        secret_refs=None,
+        password_origins=None,
+        credential_refs_by_secret_ref=None,
+        current_url="https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
+        trusted_page_urls=None,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        system_name="Rose",
+        browser_network_recorder=None,
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+    )
+    order_url = "https://order.online/business/BlueBottleCoffee-156787"
+    assert (
+        service_actions._navigation_guard_error(ctx, action="goto", target_url=order_url)
+        is None
+    )
+    assert (
+        service_actions._navigation_guard_error(
+            ctx, action="open_new_tab", target_url=order_url
+        )
+        is None
+    )
+    assert service_actions._navigation_guard_error(ctx, action="close_tab") is None
+    assert service_actions._navigation_guard_error(ctx, action="switch_tab") is None
+    assert service_actions._navigation_guard_error(ctx, action="navback") is None
+
+    # Click-off-host path: press_key no longer consults a pin.
+    out_key = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+    )
+    assert "pinned" not in str(out_key.get("error") or "").lower()
+    assert "key chord" not in str(out_key.get("error") or "").lower()
 
 
-async def test_execute_navback_refuses_on_cross_origin_handoff():
-    """Place-order handoff sticks without recovery pin or path allowlists (ea340c81)."""
+async def test_execute_click_and_evaluate_allow_leave_hosts():
+    """Off-host href clicks and navigation evaluate are no longer refused by a pin."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
@@ -12374,156 +12798,45 @@ async def test_execute_navback_refuses_on_cross_origin_handoff():
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "navback", "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
 
-    out_goto = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={
-            "action": "goto",
-            "params": {"url": "https://www.merchant.com/test_payment"},
-        },
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_goto["success"] is False
-    assert "leave pinned page host" in out_goto["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-
-async def test_execute_close_tab_refuses_on_cross_origin_handoff():
-    """Fleet 1bffacc0: close_tab on handoff host crashed the browser session."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "close_tab", "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-    out_switch = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "switch_tab", "params": {"tab_id": "ab12"}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_switch["success"] is False
-    assert "leave pinned page host" in out_switch["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-
-async def test_execute_evaluate_refuses_navigation_while_pinned():
-    """Fleet 0b3b582b: evaluate location/href escapes the handoff pin."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    assert service_actions.evaluate_code_looks_like_navigation(
-        "window.location.href = 'https://www.merchant.com/'"
-    )
-    assert service_actions.evaluate_code_looks_like_navigation("history.back()")
-    assert not service_actions.evaluate_code_looks_like_navigation(
-        "document.querySelector('#card-number')?.value"
-    )
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
     out = await service_actions.execute_action(
         dom_service=dom,
         action_history=ah,
         action={
             "action": "evaluate",
-            "params": {"code": "window.location.href = 'https://www.merchant.com/cart'"},
+            "params": {"code": "window.location.href = 'https://order.online/'"},
         },
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
+        current_url="https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
     )
-    assert out["success"] is False
-    assert "evaluate that would navigate" in out["error"]
-
-
-async def test_execute_press_key_and_click_refuse_leave_while_pinned():
-    """Fleet d2a9805f: Ctrl+Shift+W and Return-to-merchant href escaped the pin."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    assert service_actions.press_key_looks_like_leave_page("Control+Shift+W")
-    assert service_actions.press_key_looks_like_leave_page("Alt+Left")
-    assert not service_actions.press_key_looks_like_leave_page("Enter")
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "key chord" in out["error"]
+    assert "pinned" not in str(out.get("error") or "").lower()
+    assert "evaluate that would navigate" not in str(out.get("error") or "")
 
     leave_el = MagicMock()
-    leave_el.attributes = {"href": "https://www.merchant.com/cart"}
-    same_el = MagicMock()
-    same_el.attributes = {"href": "https://pay.example.com/confirm"}
-    assert (
-        service_actions.click_href_leaves_pinned_base(leave_el, "checkout.example.com")
-        == "https://www.merchant.com/cart"
-    )
-    assert (
-        service_actions.click_href_leaves_pinned_base(same_el, "checkout.example.com")
-        is None
-    )
-
-    dom.selector_map = {3: leave_el}
-    out_click = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "click", "index": 3, "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_click["success"] is False
-    assert "click that navigates off pinned host" in out_click["error"]
-    session.event_bus.dispatch.assert_not_called()
+    leave_el.attributes = {
+        "href": "https://order.online/business/BlueBottleCoffee-156787"
+    }
+    # Click path needs more of the click helper; assert guard helpers are gone
+    # and href leave helper no longer exists.
+    assert not hasattr(service_actions, "click_href_leaves_pinned_base")
+    assert not hasattr(service_actions, "effective_navigation_pin_host")
+    assert not hasattr(service_actions, "navigation_leaves_pinned_host")
+    assert not hasattr(service_actions, "press_key_looks_like_leave_page")
 
 
-def test_handoff_pin_is_sticky_in_handler():
-    """Once handoff is observed, pin host is persisted (not cleared on return to origin)."""
+def test_handoff_payment_autofill_without_host_pin():
+    """Payment auto-fill still runs on cross-origin handoff; no sticky host pin."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    assert "navigation_pin_url" in source
-    assert "Auto-returning to pinned handoff host" in source
+    assert "navigation_pin_host" not in source
+    assert "navigation_pin_url" not in source
+    assert "Auto-returning to pinned handoff host" not in source
     assert "navigation_origin_base_domain" in source
-    assert "Auto-filled payment refs on pinned handoff page" in source
-    assert "Handoff payment auto-fill exhausted; pin retained" in source
+    assert "_on_cross_origin_handoff" in source
+    assert "Auto-filled payment refs on handoff page" in source
+    assert "Handoff payment auto-fill exhausted" in source
     assert "handoff_payment_fill_attempts" in source
     assert '"text": "card_number"' in source
     assert "wait_for_payment_ref_fields" in source
@@ -12535,16 +12848,16 @@ def test_handoff_pin_is_sticky_in_handler():
     wait_offset = source.index("wait_for_payment_ref_fields")
     attempt_offset = source.index("handoff_payment_fill_attempts += 1")
     assert wait_offset < attempt_offset
-    # Auto-fill gate must stay host/path agnostic.
+    # Auto-fill gate must stay host/path agnostic and must not reintroduce pinning.
     auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
     auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
     auto_fill_block = source[auto_fill_start:auto_fill_end]
     assert "checkout.stripe" not in auto_fill_block
     assert "test_payment" not in auto_fill_block
     assert "api.stripe" not in auto_fill_block
-    assert "Payment auto-fill exhausted — pin held; fill manually" in auto_fill_block
-    assert "Released handoff pin — no payment fields found" not in auto_fill_block
-    assert "navigation_pin_host = None" not in auto_fill_block
+    assert "pin held" not in auto_fill_block
+    assert "Pinned handoff" not in auto_fill_block
+    assert "leave pinned" not in source
 
 
 def test_recovery_skips_when_live_tab_already_clear():
@@ -12572,7 +12885,7 @@ def test_recovery_skips_when_live_tab_already_clear():
 
 
 def test_navigation_guard_has_no_endpoint_path_allowlists():
-    """Nav guards must not special-case payment/checkout path markers."""
+    """Nav guards must not special-case payment/checkout path markers or host pins."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import service_actions
@@ -12580,7 +12893,8 @@ def test_navigation_guard_has_no_endpoint_path_allowlists():
     source = inspect.getsource(service_actions._navigation_guard_error)
     assert "target_looks_like_payment_document" not in source
     assert "payment page" not in source
-    assert "effective_navigation_pin_host" in source
+    assert "effective_navigation_pin_host" not in source
+    assert "pinned page host" not in source
     assert "url_looks_like_api_surface" in source
 
 
@@ -16074,6 +16388,97 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
+def test_browser_tool_events_declare_action_type():
+    """Every workflow-scope spawn_browser_agent event must declare action_type.
+
+    The front-end decides whether a browser task is over from `action_type`
+    alone (front-end/src/features/terminal/hooks/derivations.ts,
+    .../message-bubble/useMessageRouting.ts). An event that omits it is
+    indistinguishable from the legacy untyped terminal, so a *progress* event
+    silently closes a live browser panel and renders the chip as "Done".
+
+    Prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f hit exactly that: "Payment
+    card ready" (untyped) closed the panel while the same browser task ran for
+    another five minutes. Commit e5f87f9a4 had already fixed this class for the
+    auth-handoff events but nothing enforced it, so the payment and write-lock
+    events were missed. This test is that enforcement.
+    """
+    handler_path = (
+        Path(__file__).resolve().parents[2]
+        / "domains"
+        / "spawn_browser_agent_v3"
+        / "handler.py"
+    )
+    tree = ast.parse(handler_path.read_text())
+
+    untyped_lines = []
+    typed_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        literal_items = {
+            key.value: value.value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and isinstance(value, ast.Constant)
+        }
+        if literal_items.get("toolName") != "spawn_browser_agent":
+            continue
+        declared_keys = {
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "action_type" in declared_keys:
+            typed_count += 1
+        else:
+            untyped_lines.append(node.lineno)
+
+    assert not untyped_lines, (
+        "spawn_browser_agent event metadata missing an explicit action_type at "
+        f"handler.py lines {untyped_lines}. Add a terminal action_type "
+        "('task_complete'/'session_paused') for real terminals, or a distinct "
+        "progress action_type — never leave it absent."
+    )
+    assert typed_count >= 18, (
+        f"expected at least 18 typed spawn_browser_agent events, found {typed_count} "
+        "— did the scan stop matching?"
+    )
+
+    # The other half of the contract: a completion message
+    # (is_completion_message drops subAgentId, so it lands in the main chat and
+    # closes the chip) must declare an explicitly terminal action_type. Without
+    # this, a terminal is inferred from message shape — the same failure mode in
+    # reverse.
+    terminal_action_types = {"task_complete", "session_paused"}
+    untyped_completions = []
+    completion_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        flag = keywords.get("is_completion_message")
+        if not (isinstance(flag, ast.Constant) and flag.value is True):
+            continue
+        completion_count += 1
+        action_type = keywords.get("action_type")
+        if not (
+            isinstance(action_type, ast.Constant)
+            and action_type.value in terminal_action_types
+        ):
+            untyped_completions.append(node.lineno)
+
+    assert not untyped_completions, (
+        "browser completion messages must declare a terminal action_type "
+        f"({sorted(terminal_action_types)}) at handler.py lines {untyped_completions}"
+    )
+    assert completion_count >= 5, (
+        f"expected at least 5 completion-message call sites, found {completion_count} "
+        "— did the scan stop matching?"
+    )
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -16100,6 +16505,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_passkey_webauthn_uses_cdp_client_session_api",
         test_dom_service_passkey_webauthn_uses_cdp_client_session_api,
+    )
+    await r.record_async(
+        "dom_service_passkeys_follow_focus_target_for_sso_transition",
+        test_dom_service_passkeys_follow_focus_target_for_sso_transition,
     )
     await r.record_async(
         "passkey_usage_recorded_before_completion",
@@ -16557,6 +16966,10 @@ async def run_all_tests():
         test_inject_local_storage_network_error_returns_none,
     )
     await r.record_async("upload_file_session_success", test_upload_file_to_session_success)
+    await r.record_async(
+        "upload_file_session_downloads_directory",
+        test_upload_file_to_session_downloads_directory,
+    )
     await r.record_async("upload_file_session_non_200", test_upload_file_to_session_non_200_returns_none)
     await r.record_async("upload_file_session_network", test_upload_file_to_session_network_error)
 
@@ -16870,6 +17283,26 @@ async def run_all_tests():
         test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser,
     )
     r.record(
+        "browser_downloads_path_for_provider",
+        test_browser_downloads_path_for_provider_kernel_vs_steel,
+    )
+    r.record(
+        "attachment_download_tinypng_vs_ad_script",
+        test_is_browser_attachment_download_tinypng_vs_ad_script,
+    )
+    await r.record_async(
+        "persist_bytes_to_session_downloads",
+        test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads,
+    )
+    await r.record_async(
+        "browser_download_persister_cdp_attachment",
+        test_browser_download_persister_captures_attachment_via_cdp_body,
+    )
+    r.record(
+        "dom_service_defaults_downloads_path_from_env",
+        test_dom_service_defaults_downloads_path_from_browser_provider_env,
+    )
+    r.record(
         "browser_activity_memory_cleanup_clears_buffers",
         test_browser_activity_memory_cleanup_clears_retained_buffers,
     )
@@ -17046,27 +17479,22 @@ async def run_all_tests():
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
+    await r.record_async(
+        "execute_goto_err_aborted_persists_download",
+        test_execute_goto_err_aborted_persists_attachment_download,
+    )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
-    r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
+    r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
-    await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
+    await r.record_async("cross_origin_nav_allowed", test_execute_allows_cross_origin_navigation)
     await r.record_async(
-        "navback_refuses_cross_origin_handoff",
-        test_execute_navback_refuses_on_cross_origin_handoff,
+        "click_evaluate_allow_leave_hosts",
+        test_execute_click_and_evaluate_allow_leave_hosts,
     )
-    await r.record_async(
-        "close_tab_refuses_cross_origin_handoff",
-        test_execute_close_tab_refuses_on_cross_origin_handoff,
+    r.record(
+        "handoff_payment_autofill_without_host_pin",
+        test_handoff_payment_autofill_without_host_pin,
     )
-    await r.record_async(
-        "evaluate_refuses_nav_while_pinned",
-        test_execute_evaluate_refuses_navigation_while_pinned,
-    )
-    await r.record_async(
-        "press_key_click_refuse_leave_while_pinned",
-        test_execute_press_key_and_click_refuse_leave_while_pinned,
-    )
-    r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
     r.record(
         "nav_guard_no_endpoint_path_allowlists",
         test_navigation_guard_has_no_endpoint_path_allowlists,
@@ -17571,6 +17999,10 @@ async def run_all_tests():
     await r.record_async(
         "goto_action_returns_current_url_for_recovery_fallback",
         test_goto_action_returns_current_url_for_recovery_fallback,
+    )
+    r.record(
+        "browser_tool_events_declare_action_type",
+        test_browser_tool_events_declare_action_type,
     )
     return r.all_passed
 

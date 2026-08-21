@@ -37,14 +37,25 @@ import {
 } from './profileBinding';
 import { kernelTimeoutSeconds, readOnlyLiveView } from './kernelSessionConfig';
 import { kernelClient } from './kernelClient';
-export {
+import {
   captureKernelScreenshot,
+  ensureKernelSessionFileDirectories,
   getKernelCaptchaTelemetry,
   listKernelSessionFiles,
   readKernelSessionFile,
   resizeKernelViewport,
   uploadKernelSessionFile,
 } from './kernelSessionIo';
+
+export {
+  captureKernelScreenshot,
+  ensureKernelSessionFileDirectories,
+  getKernelCaptchaTelemetry,
+  listKernelSessionFiles,
+  readKernelSessionFile,
+  resizeKernelViewport,
+  uploadKernelSessionFile,
+};
 
 const log = createLogger('Kernel');
 
@@ -257,6 +268,7 @@ async function createRemoteSession(
         const validationBrowser = await connectValidatedBrowser(session.cdp_ws_url);
         if (validationBrowser !== null) {
           try {
+            await ensureKernelSessionFileDirectories(session.session_id);
             const closedTabCount = await resetKernelSessionTabs(validationBrowser);
             log.info('Reset restored Kernel profile tabs', {
               sessionId: session.session_id,
@@ -464,10 +476,12 @@ export async function closeKernelSession(
   pause = false,
   currentUrl?: string
 ): Promise<void> {
+  let releaseError: unknown = null;
   try {
     await releaseKernelRemoteSession(sessionId);
   } catch (error) {
-    log.warn('Failed to delete Kernel session; finalizing local session state', {
+    releaseError = error;
+    log.warn('Failed to delete Kernel session; retaining retryable local session state', {
       sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -476,11 +490,13 @@ export async function closeKernelSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: pause ? 'PAUSED' : 'CLOSED',
-      closedAt: pause ? undefined : new Date(),
+      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      closedAt: releaseError === null && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined,
     },
   });
+
+  if (releaseError !== null) throw releaseError;
 }
 
 /**

@@ -19,17 +19,18 @@ cat > "$TMP/probe.sh" <<'PROBE'
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Mirror scripts/run.sh cloud-env sourcing + isolated preserve.
+# Mirror scripts/run.sh cloud-env sourcing + isolated/strict preserve.
 if [ -f "$SCRIPT_DIR/.cloud-env" ]; then
     _cloud_env_saved_port="${CONDUCTOR_PORT:-}"
     _cloud_env_saved_workspace="${CONDUCTOR_WORKSPACE_NAME:-}"
     _cloud_env_isolated="${BENCHMARK_ISOLATED_RUN:-false}"
+    _cloud_env_strict="${RUN_SH_STRICT_CONDUCTOR_PORT:-0}"
     . "$SCRIPT_DIR/.cloud-env"
-    if [ "$_cloud_env_isolated" = "true" ]; then
+    if [ "$_cloud_env_isolated" = "true" ] || [ "$_cloud_env_strict" = "1" ]; then
         [ -n "$_cloud_env_saved_port" ] && CONDUCTOR_PORT="$_cloud_env_saved_port"
         [ -n "$_cloud_env_saved_workspace" ] && CONDUCTOR_WORKSPACE_NAME="$_cloud_env_saved_workspace"
     fi
-    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated
+    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated _cloud_env_strict
 fi
 printf 'port=%s ws=%s\n' "${CONDUCTOR_PORT:-}" "${CONDUCTOR_WORKSPACE_NAME:-}"
 PROBE
@@ -38,7 +39,10 @@ chmod +x "$TMP/probe.sh"
 out=$(cd "$TMP" && BENCHMARK_ISOLATED_RUN=true CONDUCTOR_PORT=3201 CONDUCTOR_WORKSPACE_NAME=bench-x bash probe.sh)
 [ "$out" = "port=3201 ws=bench-x" ] || { echo "FAIL isolated preserve: $out" >&2; exit 1; }
 
-out=$(cd "$TMP" && CONDUCTOR_PORT=3201 CONDUCTOR_WORKSPACE_NAME=bench-x bash probe.sh)
+out=$(cd "$TMP" && env -u BENCHMARK_ISOLATED_RUN RUN_SH_STRICT_CONDUCTOR_PORT=1 CONDUCTOR_PORT=56000 CONDUCTOR_WORKSPACE_NAME=deploy-ws bash probe.sh)
+[ "$out" = "port=56000 ws=deploy-ws" ] || { echo "FAIL strict preserve: $out" >&2; exit 1; }
+
+out=$(cd "$TMP" && env -u BENCHMARK_ISOLATED_RUN -u RUN_SH_STRICT_CONDUCTOR_PORT CONDUCTOR_PORT=3201 CONDUCTOR_WORKSPACE_NAME=bench-x bash probe.sh)
 [ "$out" = "port=3001 ws=shared-ws" ] || { echo "FAIL shared cloud-env wins: $out" >&2; exit 1; }
 
 # AgentCard lifecycle launches run.sh --benchmark and must export the isolated

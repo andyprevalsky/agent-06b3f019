@@ -277,10 +277,45 @@ export async function uploadAttachment(
   return { file_pointer: filePointer };
 }
 
+/** True when the requester may mint a signed URL for this storage path. */
+export function canAccessAttachmentPath(args: {
+  requesterUserId: string;
+  storagePath: string;
+  agentOwnerUserId?: string;
+  isAdmin: boolean;
+}): boolean {
+  if (args.storagePath.startsWith(`${args.requesterUserId}/`)) {
+    return true;
+  }
+  // Admins can inspect other users' agents (same as GET /agents/:id) but may
+  // only sign files stored under that agent's owner — not arbitrary prefixes.
+  return (
+    args.isAdmin &&
+    typeof args.agentOwnerUserId === 'string' &&
+    args.agentOwnerUserId.length > 0 &&
+    args.storagePath.startsWith(`${args.agentOwnerUserId}/`)
+  );
+}
+
 /** Get a signed URL for a file attachment. */
-export async function getAttachmentSignedUrl(userId: string, storagePath: string) {
-  // Verify the storage path belongs to this user (files are stored under userId/)
-  if (!storagePath.startsWith(`${userId}/`)) {
+export async function getAttachmentSignedUrl(
+  userId: string,
+  storagePath: string,
+  access: { agentId?: string; isAdmin?: boolean } = {}
+) {
+  let agentOwnerUserId: string | undefined;
+  if (access.isAdmin === true && typeof access.agentId === 'string' && access.agentId.length > 0) {
+    const agent = await repo.findAgentById(access.agentId);
+    agentOwnerUserId = agent?.userId;
+  }
+  if (
+    !canAccessAttachmentPath({
+      requesterUserId: userId,
+      storagePath,
+      agentOwnerUserId,
+      isAdmin: access.isAdmin === true,
+    })
+  ) {
     return { error: 'Access denied to this file', status: 403 };
   }
 

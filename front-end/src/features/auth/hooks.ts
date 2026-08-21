@@ -12,7 +12,7 @@ import {
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import { sendOTP, verifyOTP } from './api';
-import { initAuthSession, logAuth } from './hooks/initAuthSession';
+import { initAuthSession } from './hooks/initAuthSession';
 import { useAuthFormState } from './hooks/useAuthFormState';
 import { useAuthActions } from './hooks/useAuthActions';
 import { useAuthStateLogging } from './hooks/useAuthStateLogging';

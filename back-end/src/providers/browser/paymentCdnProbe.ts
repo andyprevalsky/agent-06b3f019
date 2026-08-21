@@ -80,7 +80,15 @@ export async function probePaymentCdnReachable(
 
   const paymentCdnHosts = await page
     .evaluate(
-      async ({ url, hostKey, loadAsScript }: { url: string; hostKey: string; loadAsScript: boolean }) => {
+      async ({
+        url,
+        hostKey,
+        loadAsScript,
+      }: {
+        url: string;
+        hostKey: string;
+        loadAsScript: boolean;
+      }) => {
         const hosts: Record<string, boolean> = {};
         try {
           const controller = new AbortController();

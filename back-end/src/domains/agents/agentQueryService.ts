@@ -9,32 +9,54 @@ import { findAgentAcrossRuns, findTreeAcrossRuns } from '../../providers/benchma
 // List agents
 // ---------------------------------------------------------------------------
 
-/** Get all top-level agents for a user. */
+type ListedAgent = Awaited<ReturnType<typeof repo.findTopLevelAgents>>[number];
+
+/** Shared row shape for the active and archived sidebar lists. */
+function toListItem(agent: ListedAgent) {
+  return {
+    agent_id: agent.id,
+    goal: agent.goal,
+    title: agent.title,
+    pinned_at: agent.pinnedAt,
+    archived_at: agent.deletedAt,
+    model: agent.model,
+    source: agent.source,
+    reasoning_max_tokens: agent.reasoningMaxTokens,
+    progress: agent.progress,
+    status: agent.status,
+    status_message: agent.statusMessage,
+    temporal_workflow_id: agent.temporalWorkflowId,
+    token_count: agent.tokenCount,
+    tokens_in: agent.tokensIn,
+    tokens_out: agent.tokensOut,
+    context_size: agent.contextSize,
+    message_count: agent.messageCount,
+    fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+    world_model_mode: agent.worldModelMode,
+    created_at: agent.createdAt,
+    updated_at: agent.updatedAt,
+  };
+}
+
+/** Get all top-level, non-archived agents for a user (pinned first). */
 export async function listAgents(userId: string) {
   const agents = await repo.findTopLevelAgents(userId);
 
-  return {
-    agents: agents.map((agent) => ({
-      agent_id: agent.id,
-      goal: agent.goal,
-      model: agent.model,
-      source: agent.source,
-      reasoning_max_tokens: agent.reasoningMaxTokens,
-      progress: agent.progress,
-      status: agent.status,
-      status_message: agent.statusMessage,
-      temporal_workflow_id: agent.temporalWorkflowId,
-      token_count: agent.tokenCount,
-      tokens_in: agent.tokensIn,
-      tokens_out: agent.tokensOut,
-      context_size: agent.contextSize,
-      message_count: agent.messageCount,
-      fast_mode_cache_enabled: agent.fastModeCacheEnabled,
-      world_model_mode: agent.worldModelMode,
-      created_at: agent.createdAt,
-      updated_at: agent.updatedAt,
-    })),
-  };
+  return { agents: agents.map(toListItem) };
+}
+
+/** Search a user's active top-level chats across title, goal, and messages. */
+export async function searchAgents(userId: string, query: string) {
+  const agents = await repo.findTopLevelAgentsMatching(userId, query);
+
+  return { agents: agents.map(toListItem) };
+}
+
+/** Get a user's archived (soft-deleted) top-level agents, newest archive first. */
+export async function listArchivedAgents(userId: string, limit: number) {
+  const agents = await repo.findArchivedTopLevelAgents(userId, limit);
+
+  return { agents: agents.map(toListItem) };
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +192,9 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       parent_agent_id: agent.parentAgentId,
       parent_goal: parentGoal,
       goal: agent.goal,
+      title: agent.title,
+      pinned_at: agent.pinnedAt,
+      archived_at: agent.deletedAt,
       model: agent.model,
       source: agent.source,
       reasoning_max_tokens: agent.reasoningMaxTokens,

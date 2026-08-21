@@ -138,7 +138,7 @@ test('POST /passkeys/upload — happy path stores an encrypted PasskeyCredential
     );
 
     const integration = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'cdp_virtual_passkeys' } },
+      where: { userId_name_accountId: { userId, name: 'cdp_virtual_passkeys', accountId: '' } },
     });
     assert(integration !== null, 'expected passkey upload to create integration');
     assert(integration.status === 'CONNECTED', `expected CONNECTED, got ${integration.status}`);
@@ -181,7 +181,7 @@ test('POST /passkeys/upload — Apple Credential Exchange source marks Apple pas
     assert((res.data as { passkeyCount: number }).passkeyCount === 1, 'expected count 1');
 
     const integration = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'apple_passwords_passkeys' } },
+      where: { userId_name_accountId: { userId, name: 'apple_passwords_passkeys', accountId: '' } },
     });
     assert(integration !== null, 'expected apple passkey upload to create integration');
     assert(integration.status === 'CONNECTED', `expected CONNECTED, got ${integration.status}`);

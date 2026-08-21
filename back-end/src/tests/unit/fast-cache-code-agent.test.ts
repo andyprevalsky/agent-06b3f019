@@ -35,10 +35,22 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'backend must use the upgraded Claude Code model by default'
   );
   assert.ok(
-    e2bProvider.includes(
+    e2bProvider.includes('shouldEnableClaudeCodeFastMode'),
+    'Claude Code Fast Mode must go through the opt-in gate (not raw write-through)'
+  );
+  assert.ok(
+    e2bProvider.includes('shouldInjectClaudeCodeFastModeProxy'),
+    'tee-proxy injection must be gated so Andy write-through cannot bypass opt-in'
+  );
+  assert.ok(
+    !e2bProvider.includes(
       'const codeAgentFastModeActive = fastModeCacheEnabled === true || fastModeWriteEnabled'
     ),
-    'write-only cache runs must use the same Claude Code provider envelope as read-enabled runs'
+    'must not re-enable Fast Mode from write-through alone (k=5 t5 403/cache recurrence)'
+  );
+  assert.ok(
+    e2bProvider.includes('const injectFastModeProxy = shouldInjectClaudeCodeFastModeProxy'),
+    'createClaudeCodeSession must compute injectFastModeProxy before buildFastModeAnthropicEnv'
   );
   assert.ok(
     !e2bProvider.includes('ANTHROPIC_DEFAULT_OPUS_MODEL'),
