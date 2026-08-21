@@ -1,6 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
-
 /**
  * Pins nonLocalDatabaseReason — the shared "is this DATABASE_URL local?"
  * predicate used by unit-test / checkpoint runners to refuse prod writes.
@@ -11,9 +9,9 @@ import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 function test(name: string, fn: () => void): void {
   try {
     fn();
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (error) {
-    console.error(`  ❌ ${name}`);
+    process.stderr.write(`  ❌ ${name}\n`);
     throw error;
   }
 }
@@ -40,4 +38,4 @@ test('refuses an unparseable URL', () => {
   assert.equal(reason, 'DATABASE_URL is not a parseable URL: not-a-url');
 });
 
-console.log('local-database-url: all tests passed');
+process.stdout.write('local-database-url: all tests passed\n');
