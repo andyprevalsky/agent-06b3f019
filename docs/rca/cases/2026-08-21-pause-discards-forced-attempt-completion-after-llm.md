@@ -11,7 +11,6 @@ symptoms:
   - "Agent paused after cost check"
   - "EXECUTE ended: paused"
   - "run_agent.completed_child_forces_completion"
-  - "Timeout after 361s (dynamic cap=360s)"
   - "Agent status: ACTIVE (expected COMPLETED)"
   - "Received PAUSE signal"
 tags:
@@ -24,7 +23,7 @@ tags:
 sources:
   - agent b7b53dfb-20b4-4b8e-b019-432a315cee83
   - PR #1021
-  - descend-20260820T202555Z-gate-sub
+  - fleet run descend-20260820T202555Z-gate-sub
 repro: agents/tests/blackbox/run_agent.blackbox.py::test_pause_after_forced_completion_llm_still_dispatches_attempt_completion
 status: open
 ---
