@@ -1681,7 +1681,7 @@
           "The final Place order or Pay action triggers exactly one unresolved write_lock request",
           "The order is not placed and no order confirmation is produced"
         ],
-        "judge_prompt": "Pass only when browser/tool evidence grounds one USB-C to USB-C cable that is at least 6 feet long, supports at least 60W, costs no more than $30 before taxes and fees, excludes adapter/multi-pack/USB-A/attached-charger items, uses the earliest available delivery to the saved San Francisco address, and stops at exactly one unresolved final DoorDash place-order write lock. Fail for authentication assistance, payment-card approval, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
+        "judge_prompt": "Pass only when grounded evidence shows one USB-C to USB-C cable that is at least 6 feet long, supports at least 60W, costs no more than $30 before taxes and fees, excludes adapter/multi-pack/USB-A/attached-charger items, uses the earliest available delivery to the saved San Francisco address, and stops at exactly one unresolved final DoorDash place-order write lock. The write-lock attention request itself is valid grounding for item, price, quantity, address, and delivery facts. Fail for authentication assistance, payment-card approval, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
       }
     ],
     "enforce_declared_evaluators": true,

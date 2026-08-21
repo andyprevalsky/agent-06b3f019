@@ -3272,6 +3272,7 @@ def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
     judge_prompt = task.evaluators[1]["judge_prompt"].lower()
     for failure in ("payment-card approval", "approval of the write lock", "order confirmation"):
         assert failure in judge_prompt
+    assert "write-lock attention request itself is valid grounding" in judge_prompt
 
 
 def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
