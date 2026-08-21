@@ -251,6 +251,22 @@ export function shouldEnableClaudeCodeFastMode(params: {
 }
 
 /**
+ * Whether createClaudeCodeSession may inject the Fast Mode tee-proxy env.
+ *
+ * Must stay false whenever `shouldEnableClaudeCodeFastMode` is false — Andy
+ * write-through (`fastModeWriteEnabled`) alone used to call
+ * `buildFastModeAnthropicEnv` whenever `preferSandboxBase` was false, which
+ * re-enabled stale 0-interaction cache hits / HTTP 403 on fleet
+ * files-in-sub-agents (k=5 t5, 2026-08-21) after the opt-in gate landed.
+ */
+export function shouldInjectClaudeCodeFastModeProxy(params: {
+  codeAgentFastModeActive: boolean;
+  preferSandboxBase: boolean;
+}): boolean {
+  return params.codeAgentFastModeActive === true && params.preferSandboxBase !== true;
+}
+
+/**
  * Funded Anthropic-compatible gateways (OpenRouter auto-fallback when the shared
  * Anthropic org is credit-dead) must win over the Fast Mode tee-proxy.
  *
@@ -311,11 +327,17 @@ export function resolveClaudeCodeSandboxApiKey(
   const openrouterBase = OPENROUTER_ANTHROPIC_COMPAT_BASE_URL;
 
   if (dedicated) {
-    // Dedicated OpenRouter keys still need the OpenRouter base — controller
-    // exports of ANTHROPIC_BASE_URL do not reach fleet guests.
-    const base =
-      hostBase ?? (/^sk-or-/i.test(dedicated) ? openrouterBase : undefined);
-    return { apiKey: dedicated, baseUrl: base };
+    // Dedicated OpenRouter keys must never ride a host base that points at
+    // api.anthropic.com — that yields HTTP 403 and also flips preferSandboxBase
+    // false so the Fast Mode tee can re-engage.
+    if (/^sk-or-/i.test(dedicated)) {
+      const base =
+        hostBase && /openrouter\.ai/i.test(hostBase) ? hostBase : openrouterBase;
+      return { apiKey: dedicated, baseUrl: base };
+    }
+    // Dedicated non-OpenRouter keys still need the host base when set —
+    // controller exports of ANTHROPIC_BASE_URL do not reach fleet guests.
+    return { apiKey: dedicated, baseUrl: hostBase };
   }
   if (hostBase && openrouter && /openrouter\.ai/i.test(hostBase)) {
     return { apiKey: openrouter, baseUrl: hostBase };
@@ -513,16 +535,20 @@ export async function createClaudeCodeSession(
   const preferSandboxBase = shouldPreferSandboxAnthropicBaseUrlOverFastMode(
     sandboxTransport.baseUrl
   );
-  // Fast Mode CLI flags only when we actually inject the tee-proxy. A funded
-  // OpenRouter transport must not advertise Fast Mode (stale cache / 403 path).
-  if (codeAgentFastModeActive && !preferSandboxBase) {
+  // Fast Mode CLI flags + tee-proxy only when opt-in Fast Mode is active and we
+  // are not already on a funded non-Anthropic gateway. Andy write-through alone
+  // must not inject the proxy (k=5 t5 recurrence, 2026-08-21).
+  const injectFastModeProxy = shouldInjectClaudeCodeFastModeProxy({
+    codeAgentFastModeActive,
+    preferSandboxBase,
+  });
+  if (injectFastModeProxy) {
     envs.CLAUDE_CODE_FAST_MODE = '1';
     envs.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS = '1';
     envs.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1';
   }
-  const fastModeEnv: Record<string, string> = preferSandboxBase
-    ? {}
-    : buildFastModeAnthropicEnv(
+  const fastModeEnv: Record<string, string> = injectFastModeProxy
+    ? buildFastModeAnthropicEnv(
         goal,
         fastModeCacheEnabled === true,
         process.env.FAST_MODE_ANTHROPIC_PROXY_URL,
@@ -542,7 +568,8 @@ export async function createClaudeCodeSession(
             githubRepoUrl,
           },
         }
-      );
+      )
+    : {};
   if (preferSandboxBase && sandboxTransport.baseUrl) {
     envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
     log.info(
