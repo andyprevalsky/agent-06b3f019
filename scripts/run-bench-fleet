@@ -76,6 +76,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-port-lease.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-github-token.sh" \
        "$CLOUDBENCH_SCRIPT_SNAPSHOT/"
     export CLOUDBENCH_SCRIPT_SNAPSHOT CLOUDBENCH_FLEET_ROOT="$ROOT_DIR"
     exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet" "$@"
@@ -3323,10 +3324,21 @@ _SEED_GUEST_TOKEN="$(
         "$ROOT_DIR/back-end/prisma/schema.prisma"
 )"
 _SEED_GUEST_PROBE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-seed-probe.XXXXXX")"
-if ! (
-        cd "$ROOT_DIR/back-end" &&
-            npx tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
-    ) || [ ! -s "$_SEED_GUEST_PROBE" ]; then
+# Retry transient npx/tsx install races (ENOENT spawn sh under concurrent
+# controllers / npm cache contention) before failing closed on a missing dump.
+_SEED_GUEST_OK=0
+for _seed_try in 1 2 3 4 5; do
+    rm -f "$_SEED_GUEST_PROBE"
+    if (
+            cd "$ROOT_DIR/back-end" &&
+                npx --yes tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
+        ) && [ -s "$_SEED_GUEST_PROBE" ]; then
+        _SEED_GUEST_OK=1
+        break
+    fi
+    sleep "$_seed_try"
+done
+if [ "$_SEED_GUEST_OK" -ne 1 ]; then
     rm -f "$_SEED_GUEST_PROBE"
     echo "❌ Missing canonical base fixture for cloud guests: $_SEED_GUEST_TOKEN" >&2
     echo "   Publish a dump produced by a pg${CLOUDBENCH_GUEST_PG_MAJOR} client before provisioning." >&2
@@ -3369,6 +3381,8 @@ read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 # Concurrent maintenance (or a sibling fleet's park/update) can leave the shared
 # warm donor in started/stopping/replacing. Wait for stopped instead of aborting
 # the whole fleet on a transient race — clones still require a stopped source.
+# Never stop the warm machine ourselves (another workspace may own an in-flight
+# prepare_warm_source); only poll via cloudbench_wait_machine_stopped.
 if [ "$warm_state" != "stopped" ]; then
     echo "⏳ warm source is $warm_state; waiting until stopped before fleet provisioning"
     warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
