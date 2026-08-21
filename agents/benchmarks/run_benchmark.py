@@ -7089,6 +7089,19 @@ def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     return scores[-1]
 
 
+def _webdecoy_parse_score_value(raw_score: object) -> Optional[float]:
+    """Parse a structured FCaptcha risk score (numeric or numeric string)."""
+    if isinstance(raw_score, bool):
+        return None
+    if isinstance(raw_score, (int, float)):
+        return float(raw_score)
+    if isinstance(raw_score, str):
+        match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*", raw_score)
+        if match is not None:
+            return float(match.group(1))
+    return None
+
+
 def _webdecoy_structured_score(data: dict) -> Optional[float]:
     """Read the terminal browser task's grounded FCaptcha score."""
     scores: List[float] = []
@@ -7107,19 +7120,39 @@ def _webdecoy_structured_score(data: dict) -> Optional[float]:
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
         if not isinstance(structured, dict):
             continue
-        raw_score = structured.get("risk_score")
-        if isinstance(raw_score, bool):
-            continue
-        if isinstance(raw_score, (int, float)):
-            scores.append(float(raw_score))
-            continue
-        if isinstance(raw_score, str):
-            match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*", raw_score)
-            if match is not None:
-                scores.append(float(match.group(1)))
+        # Schema field is fcaptcha_risk_score; risk_score kept for older fixtures.
+        raw_score = structured.get("fcaptcha_risk_score")
+        if raw_score is None:
+            raw_score = structured.get("risk_score")
+        parsed = _webdecoy_parse_score_value(raw_score)
+        if parsed is not None:
+            scores.append(parsed)
     if not scores:
         return None
     return scores[-1]
+
+
+def _webdecoy_visible_risk_scores(text: str) -> list[float]:
+    """Extract visible FCaptcha risk scores from agent transcript text.
+
+    Rejects numbered-list false positives like "(3) Risk score: ..." where the
+    list ordinal would otherwise become scores[-1] and fail the ratchet gate.
+    """
+    score_patterns = (
+        # "Risk Score (lower = human): 0.00" / "risk score:** 0.09"
+        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
+        # "0.09 risk score" — require a decimal so list ordinals ("3) Risk score")
+        # cannot match.
+        r"([0-9]+\.[0-9]+)\s*[^a-z0-9]{0,12}risk\s*score",
+    )
+    scores: list[float] = []
+    for pattern in score_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            try:
+                scores.append(float(match.group(1)))
+            except ValueError:
+                continue
+    return scores
 
 
 def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str]]:
@@ -7131,17 +7164,7 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     if not any(marker in text for marker in ("benchmark-human@example.com", "invisible mode", "submit")):
         return False, "No grounded evidence of invisible-mode form interaction"
 
-    score_patterns = (
-        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
-        r"([0-9]+(?:\.[0-9]+)?)\s*[^a-z0-9]{0,12}risk\s*score",
-    )
-    scores: list[float] = []
-    for pattern in score_patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            try:
-                scores.append(float(match.group(1)))
-            except ValueError:
-                continue
+    scores = _webdecoy_visible_risk_scores(text)
 
     exact_score = _webdecoy_exact_score_from_recordings(data)
     structured_score = _webdecoy_structured_score(data)
