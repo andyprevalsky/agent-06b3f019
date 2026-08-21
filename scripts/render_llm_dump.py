@@ -2485,25 +2485,88 @@ def build_html(data: dict[str, Any], source_path: Path, output_path: Path) -> st
 
 
 def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) -> Path | None:
-    """Copy the HTML plus its `_assets` sidecar to a viewer-reachable artifacts dir.
+    """Copy a self-contained HTML dump to a viewer-reachable artifacts dir.
 
     `file://` URLs only work on the machine that rendered the dump. Cursor Cloud
     reviewers open artifacts from `/opt/cursor/artifacts`, so the renderer must
-    publish there (when the directory exists) instead of asking humans to click
-    a VM-local file URI.
+    publish a single self-contained HTML file there (when the directory exists)
+    instead of asking humans to click a VM-local file URI or rely on a sidecar
+    `_assets/` tree that many artifact viewers cannot resolve.
     """
     target_root = artifacts_dir if artifacts_dir is not None else DEFAULT_ARTIFACTS_DIR
     if not target_root.is_dir():
         return None
+    standalone = make_html_self_contained(html_path)
     dest = target_root / html_path.name
-    shutil.copy2(html_path, dest)
+    # Prefer the inlined standalone body so the published path is one file.
+    shutil.copy2(standalone, dest)
+    # Best-effort sidecar copy for local offline browsing; never required for
+    # the published link to remain viewable.
     assets = sibling_assets_dir(html_path)
     if assets.is_dir():
         dest_assets = target_root / assets.name
-        if dest_assets.exists():
-            shutil.rmtree(dest_assets)
-        shutil.copytree(assets, dest_assets)
+        try:
+            if dest_assets.exists():
+                shutil.rmtree(dest_assets)
+            _copy_tree_best_effort(assets, dest_assets)
+        except OSError:
+            pass
     return dest
+
+
+def _copy_tree_best_effort(src: Path, dst: Path) -> None:
+    """Copy a directory tree file-by-file (some artifact FS overlays reject copytree)."""
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in src.rglob("*"):
+        rel = path.relative_to(src)
+        target = dst / rel
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def make_html_self_contained(html_path: Path) -> Path:
+    """Inline `_assets/` references as data URIs so one HTML file stays viewable alone."""
+    html = html_path.read_text(encoding="utf-8")
+    assets_dir = sibling_assets_dir(html_path)
+    if not assets_dir.is_dir():
+        out = html_path.with_name(f"{html_path.stem}.standalone.html")
+        out.write_text(html, encoding="utf-8")
+        return out
+
+    replacements: list[tuple[str, str]] = []
+    for asset in assets_dir.rglob("*"):
+        if not asset.is_file():
+            continue
+        rel = asset.relative_to(html_path.parent).as_posix()
+        raw = asset.read_bytes()
+        suffix = asset.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            mime = "image/jpeg"
+        elif suffix == ".png":
+            mime = "image/png"
+        elif suffix == ".gif":
+            mime = "image/gif"
+        elif suffix in {".html", ".htm"}:
+            mime = "text/html"
+        else:
+            mime = "application/octet-stream"
+        data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        replacements.append((rel, data_uri))
+
+    # Longest paths first so nested prefixes do not partially rewrite.
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+    for rel, data_uri in replacements:
+        html = html.replace(rel, data_uri)
+
+    if "file://" in html:
+        raise RuntimeError(f"self-contained dump still contains file:// URIs: {html_path}")
+
+    out = html_path.with_name(f"{html_path.stem}.standalone.html")
+    out.write_text(html, encoding="utf-8")
+    return out
 
 
 def parse_args() -> argparse.Namespace:
