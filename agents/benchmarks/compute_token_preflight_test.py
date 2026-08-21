@@ -452,8 +452,8 @@ def test_blanket_preflight_uses_tolerant_sync():
     assert captured == {"gpt": True, "claude": True, "required": None}
 
 
-def test_claude_code_required_preflight_is_strict():
-    """Claude Code tasks must not inherit ANTHROPIC_API_KEY tolerance."""
+def test_claude_code_required_preflight_tolerates_funded_anthropic_key():
+    """Claude Code tasks may proceed on ANTHROPIC_API_KEY when OAuth sync is empty."""
     captured: dict[str, object] = {}
 
     def fake_sync(
@@ -472,7 +472,43 @@ def test_claude_code_required_preflight_is_strict():
         patch.object(
             rb,
             "_has_usable_anthropic_api_key_fallback",
-            new=AsyncMock(side_effect=AssertionError("Anthropic fallback must not gate Claude Code")),
+            new=AsyncMock(return_value=True),
+        ),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=False),
+    ):
+        asyncio.run(
+            rb._refresh_local_compute_tokens_for_run(
+                "http://127.0.0.1:3999",
+                require_claude_code=True,
+            )
+        )
+
+    assert captured == {"gpt": True, "claude": True, "required": None}
+
+
+def test_claude_code_required_preflight_is_strict_without_anthropic_key():
+    """Without a funded Anthropic key, Claude Code tasks still require OAuth sync."""
+    captured: dict[str, object] = {}
+
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
+    ) -> bool:
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
+        captured["required"] = required_token_types
+        return True
+
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
         ),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),

@@ -2591,6 +2591,7 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 124.4, "cost_cents": 0.0, "timestamp": "2026-08-20T22:12:28.069215+00:00", "agent_id": "39b7cce5-c2e0-47a0-82f2-36f2ae548df5"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 245.5, "cost_cents": 1.0, "timestamp": "2026-08-20T22:12:28.069215+00:00", "agent_id": "0b3afbe4-c345-4513-83f8-fc11fc7820a1"}
 {"task": "agent-payment-abandonment", "duration_seconds": 251.9, "cost_cents": 0.0, "timestamp": "2026-08-20T22:12:28.069215+00:00", "agent_id": "84f3fc93-662e-4744-b8a4-c5778ee8e882"}
+{"task": "files-in-sub-agents", "duration_seconds": 185.3, "cost_cents": 12.0, "timestamp": "2026-08-21T00:16:55.104793+00:00", "agent_id": "20d2e6c8-6172-4699-a559-1d3cd067de9d"}
 {"task": "spawn-sub-agents", "duration_seconds": 132.7, "cost_cents": 2.0, "timestamp": "2026-08-20T23:11:33.003523+00:00", "agent_id": "7a843f85-2e3e-44d6-b809-7561248ffc3d"}
 {"task": "parallel-tool-calls", "duration_seconds": 103.7, "cost_cents": 12.0, "timestamp": "2026-08-20T23:11:33.003523+00:00", "agent_id": "82fb52e8-f6ba-4d01-8559-47092f06e417"}
 {"task": "claude-code-agent", "duration_seconds": 48.6, "cost_cents": 1.0, "timestamp": "2026-08-20T23:11:33.003523+00:00", "agent_id": "502d0d80-216c-46ee-b711-069d37c41a56"}
