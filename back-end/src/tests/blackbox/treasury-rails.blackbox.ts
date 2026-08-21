@@ -50,9 +50,11 @@ async function waitForTransferReclaimed(
   let last = { status: 'not_found', releasedCents: 0 };
   for (;;) {
     const transfers =
-      ((await callOrgTool('list_transfers', { limit: 25 })) as {
-        structuredContent?: { transfers?: Array<Record<string, unknown>> };
-      }).structuredContent?.transfers ?? [];
+      (
+        (await callOrgTool('list_transfers', { limit: 25 })) as {
+          structuredContent?: { transfers?: Array<Record<string, unknown>> };
+        }
+      ).structuredContent?.transfers ?? [];
     const mine = transfers.find((t) => t.card_id === cardId);
     if (mine !== undefined) {
       last = {
@@ -91,9 +93,11 @@ async function waitForRecoverable(
       // Surface the transfer state so a timeout is diagnosable rather than just "nothing happened".
       // `consumed` here means the release has not settled yet; `reclaimed` means it has.
       const transfers =
-        ((await callOrgTool('list_transfers', { limit: 10 })) as {
-          structuredContent?: { transfers?: Array<Record<string, unknown>> };
-        }).structuredContent?.transfers ?? [];
+        (
+          (await callOrgTool('list_transfers', { limit: 10 })) as {
+            structuredContent?: { transfers?: Array<Record<string, unknown>> };
+          }
+        ).structuredContent?.transfers ?? [];
       const mine = transfers.find((t) => t.card_id === cardId);
       console.error(
         `  recovery never yielded after ${attempt} attempts; transfer for ${cardId}: ` +
@@ -101,7 +105,8 @@ async function waitForRecoverable(
       );
       return sweep;
     }
-    if (attempt % 3 === 0) console.log(`  (still waiting for release to settle, attempt ${attempt})`);
+    if (attempt % 3 === 0)
+      console.log(`  (still waiting for release to settle, attempt ${attempt})`);
     await sleep(8_000);
   }
 }
@@ -150,7 +155,10 @@ async function main(): Promise<void> {
   let floatCents = 0;
   if (coinbaseConfig !== undefined) {
     floatCents = await createCoinbaseTreasury(coinbaseConfig).getUsdcBalanceCents();
-    assert.ok(Number.isInteger(floatCents) && floatCents >= 0, 'float must be a non-negative integer');
+    assert.ok(
+      Number.isInteger(floatCents) && floatCents >= 0,
+      'float must be a non-negative integer'
+    );
     record(`Coinbase float readable: ${usd(floatCents)} on ${coinbaseConfig.network}`);
   } else {
     console.log('  SKIP Coinbase leg: COINBASE_TREASURY_API_KEY_ID not configured');
@@ -195,13 +203,17 @@ async function main(): Promise<void> {
 
   // ── Leg 3: the AgentCard money loop (REAL, on sandbox) ───────────────────────────────────────
   const cardholders =
-    ((await callOrgTool('list_cardholders', {})) as { structuredContent?: { cardholders?: Array<{ id: string }> } })
-      .structuredContent?.cardholders ?? [];
+    (
+      (await callOrgTool('list_cardholders', {})) as {
+        structuredContent?: { cardholders?: Array<{ id: string }> };
+      }
+    ).structuredContent?.cardholders ?? [];
   assert.ok(cardholders.length > 0, 'sandbox org has no cardholders to test with');
   const cardholderId = cardholders[0].id;
 
-  const poolBefore = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}))
-    .availableCents;
+  const poolBefore = extractAgentCardOrgWallet(
+    await callOrgTool('get_company_wallet', {})
+  ).availableCents;
   const mintCents = 1_300;
 
   const minted = (await callOrgTool('create_card', {
@@ -214,8 +226,9 @@ async function main(): Promise<void> {
   assert.ok(cardId !== undefined, 'create_card returned no cardId');
   record(`minted ${usd(mintCents)} card ${cardId}`);
 
-  const poolAfterMint = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}))
-    .availableCents;
+  const poolAfterMint = extractAgentCardOrgWallet(
+    await callOrgTool('get_company_wallet', {})
+  ).availableCents;
   const drawn = poolBefore - poolAfterMint;
   // Either the pool funded it, or existing cardholder headroom netted it. Both are valid; what is
   // NOT valid is the pool moving by some other amount.
@@ -223,7 +236,11 @@ async function main(): Promise<void> {
     drawn === mintCents || drawn === 0,
     `pool moved ${usd(drawn)} for a ${usd(mintCents)} mint — expected a full draw or a clean net`
   );
-  record(drawn === 0 ? 'mint netted against existing headroom (pool untouched)' : 'mint drew from the pool');
+  record(
+    drawn === 0
+      ? 'mint netted against existing headroom (pool untouched)'
+      : 'mint drew from the pool'
+  );
 
   // Close it unused, then prove recovery returns the value to the POOL (not the cardholder).
   const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
@@ -261,9 +278,11 @@ async function main(): Promise<void> {
 
   // ── Cleanup: never leave open cards behind ───────────────────────────────────────────────────
   const cards =
-    ((await callOrgTool('list_cards', { cardholder_id: cardholderId, limit: 25 })) as {
-      structuredContent?: { cards?: Array<{ id: string; status: string }> };
-    }).structuredContent?.cards ?? [];
+    (
+      (await callOrgTool('list_cards', { cardholder_id: cardholderId, limit: 25 })) as {
+        structuredContent?: { cards?: Array<{ id: string; status: string }> };
+      }
+    ).structuredContent?.cards ?? [];
   const stillOpen = cards.filter((card) => card.status === 'OPEN');
   for (const card of stillOpen) await callOrgTool('close_card', { card_id: card.id });
   if (stillOpen.length > 0) record(`cleanup: closed ${stillOpen.length} lingering open card(s)`);
@@ -272,6 +291,8 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
-  console.error(`treasury-rails blackbox FAILED: ${error instanceof Error ? error.message : String(error)}`);
+  console.error(
+    `treasury-rails blackbox FAILED: ${error instanceof Error ? error.message : String(error)}`
+  );
   process.exit(1);
 });

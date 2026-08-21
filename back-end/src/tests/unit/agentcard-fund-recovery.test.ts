@@ -177,16 +177,34 @@ async function testParsing(): Promise<void> {
       return {
         structuredContent: {
           recoveries: [
-            { id: 'rcv_old', status: 'requested', amount_cents: 12_688, created_at: new Date(Date.now() - 140 * 3600_000).toISOString() },
-            { id: 'rcv_new', status: 'requested', amount_cents: 100, created_at: new Date(Date.now() - 60_000).toISOString() },
-            { id: 'rcv_done', status: 'completed', amount_cents: 500, created_at: new Date().toISOString() },
+            {
+              id: 'rcv_old',
+              status: 'requested',
+              amount_cents: 12_688,
+              created_at: new Date(Date.now() - 140 * 3600_000).toISOString(),
+            },
+            {
+              id: 'rcv_new',
+              status: 'requested',
+              amount_cents: 100,
+              created_at: new Date(Date.now() - 60_000).toISOString(),
+            },
+            {
+              id: 'rcv_done',
+              status: 'completed',
+              amount_cents: 500,
+              created_at: new Date().toISOString(),
+            },
           ],
         },
       };
     });
     assert.strictEqual(sweep.settledCents, 0, 'this sweep recovered nothing');
     assert.strictEqual(sweep.pendingCents, 12_788, 'but $127.88 is still in flight from before');
-    assert.ok((sweep.oldestPendingAgeMs ?? 0) > 100 * 3600_000, 'oldest age drives the stuck guard');
+    assert.ok(
+      (sweep.oldestPendingAgeMs ?? 0) > 100 * 3600_000,
+      'oldest age drives the stuck guard'
+    );
   });
 
   await check('never re-requests for a cardholder with one already in flight', async () => {
@@ -201,12 +219,21 @@ async function testParsing(): Promise<void> {
         return {
           structuredContent: {
             recoveries: [
-              { id: 'rcv_x', status: 'requested', amount_cents: 500, cardholder_id: 'busy', created_at: new Date().toISOString() },
+              {
+                id: 'rcv_x',
+                status: 'requested',
+                amount_cents: 500,
+                cardholder_id: 'busy',
+                created_at: new Date().toISOString(),
+              },
             ],
           },
         };
-      assert.strictEqual((args as { cardholder_id?: string }).cardholder_id, 'free',
-        'must never call recover_funds for the busy cardholder');
+      assert.strictEqual(
+        (args as { cardholder_id?: string }).cardholder_id,
+        'free',
+        'must never call recover_funds for the busy cardholder'
+      );
       return { structuredContent: { recovery: { status: 'completed', amount_cents: 700 } } };
     });
     assert.strictEqual(calls.filter((c) => c === 'recover_funds').length, 1, 'only the free one');

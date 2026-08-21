@@ -233,7 +233,9 @@ export async function oldestPendingRecoveryAgeMs(
   if (!Array.isArray(list)) return undefined;
   const ages = list
     .map((entry) => asRecord(entry))
-    .filter((entry) => entry !== undefined && !isSettledRecovery(optionalString(entry, 'status') ?? ''))
+    .filter(
+      (entry) => entry !== undefined && !isSettledRecovery(optionalString(entry, 'status') ?? '')
+    )
     .map((entry) => Date.parse(optionalString(entry, 'created_at') ?? ''))
     .filter((parsed) => Number.isFinite(parsed))
     .map((parsed) => now - parsed);
