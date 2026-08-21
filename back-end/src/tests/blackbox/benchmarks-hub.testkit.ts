@@ -170,3 +170,48 @@ export function syntheticBenchmarkBundle(
     ],
   };
 }
+
+export async function assertEnvironmentReconcileFromFile(): Promise<void> {
+  // environment is not hub-editable; insert-only seed must still heal catalog
+  // contract fields (secrets/live_targets) when tasks.json advances.
+  const prisma = new PrismaClient();
+  try {
+    const current = await prisma.benchmarkTask.findUnique({ where: { name: 'wait-for-trigger' } });
+    if (!current) throw new Error('wait-for-trigger missing before environment reconcile test');
+    const definition = { ...(current.definition as Record<string, unknown>) };
+    const env = { ...((definition.environment as Record<string, unknown> | undefined) ?? {}) };
+    delete env.secrets;
+    delete env.live_targets;
+    definition.environment = env;
+    await prisma.benchmarkTask.update({
+      where: { name: 'wait-for-trigger' },
+      data: {
+        environment: env as Prisma.InputJsonObject,
+        definition: definition as Prisma.InputJsonObject,
+      },
+    });
+
+    const { seedBenchmarkTasks } = await import('../../domains/benchmarks/hubCatalogSeed');
+    await seedBenchmarkTasks();
+
+    const healed = await prisma.benchmarkTask.findUnique({ where: { name: 'wait-for-trigger' } });
+    if (!healed) throw new Error('wait-for-trigger missing after environment reconcile');
+    const healedEnv = healed.environment as Record<string, unknown>;
+    if (!Array.isArray(healedEnv.secrets)) {
+      throw new Error('seed did not restore environment.secrets');
+    }
+    if (!Array.isArray(healedEnv.live_targets)) {
+      throw new Error('seed did not restore environment.live_targets');
+    }
+    const healedDefinition = healed.definition as Record<string, unknown>;
+    const defEnv = healedDefinition.environment as Record<string, unknown>;
+    if (!Array.isArray(defEnv.secrets)) {
+      throw new Error('definition.environment.secrets still missing');
+    }
+    if (!Array.isArray(defEnv.live_targets)) {
+      throw new Error('definition.environment.live_targets still missing');
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
+}
