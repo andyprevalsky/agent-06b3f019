@@ -151,10 +151,24 @@ function main(): void {
     false
   );
 
-  assert.equal(resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared'), 'sk-ant-shared');
+  assert.equal(resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared').apiKey, 'sk-ant-shared');
   assert.equal(
-    resolveClaudeCodeSandboxApiKey('sk-or-gateway', 'sk-ant-shared'),
+    resolveClaudeCodeSandboxApiKey('sk-or-gateway', 'sk-ant-shared').apiKey,
     'sk-or-gateway'
+  );
+  assert.equal(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://openrouter.ai/api',
+      openrouterApiKey: 'sk-or-gateway',
+    }).apiKey,
+    'sk-or-gateway'
+  );
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      openrouterApiKey: 'sk-or-gateway',
+      sharedKeyOnCooldown: true,
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
   );
   assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
     sandboxApiKey: 'sk-or-gateway',
