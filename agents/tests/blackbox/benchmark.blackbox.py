@@ -3374,6 +3374,87 @@ def test_no_tool_failures_counts_unrecovered_pinned_host_refusal():
     ]
     assert _run_declared_static_check(evaluator, data)[0] is False
 
+
+def test_no_tool_failures_ignores_recoverable_evaluate_uncaught_before_payment():
+    """Page-evaluate Uncaught ERRORs recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    482d6aa2-90f0-4173-95a4-f51bfbce2055 reached grounded payment_approval ($89.94)
+    after spawn_browser_agent ERROR message "Uncaught" (title evaluate), then failed
+    only on no_tool_failures (pass@k=5 run 20260821_211830, 4/5).
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Uncaught",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_O8B2G1YRpMDNojCZ8kTMhUs8",
+                    "title": "evaluate",
+                    "error": True,
+                    "steps_taken": 27,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "goto",
+                    "toolCallId": "call_6RtvbC0A0pYse7xd4b99Nfly",
+                    "steps_taken": 28,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_Pla3gjNQE1KQgwl2eOvtbJ55",
+                    "title": "Payment card requested ($89.94)",
+                    "steps_taken": 31,
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+def test_no_tool_failures_counts_unrecovered_evaluate_uncaught():
+    """Evaluate Uncaught with no later browser recovery still fails closed."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Uncaught TypeError: Cannot read properties of null",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_eval",
+                    "title": "evaluate",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "spawn_browser_agent call_terminal_eval status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
+
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
 
@@ -14816,6 +14897,14 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_counts_unrecovered_pinned_host_refusal",
         test_no_tool_failures_counts_unrecovered_pinned_host_refusal,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_evaluate_uncaught",
+        test_no_tool_failures_ignores_recoverable_evaluate_uncaught_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_evaluate_uncaught",
+        test_no_tool_failures_counts_unrecovered_evaluate_uncaught,
     )
     r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",

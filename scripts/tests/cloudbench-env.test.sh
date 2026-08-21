@@ -1685,6 +1685,17 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'return "$sync_rc"' \
   "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
 
+# Branch collateral (image-handling I-01): stripped PATH must fail closed.
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'npx not found on PATH; cannot verify the cloud-guest seed dump' \
+  "fleet seed-dump probe must fail closed with a clear npx PATH error"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '.nvm/versions/node' \
+  "fleet seed-dump probe must restore nvm npx onto PATH when stripped"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'Never stop the warm machine ourselves' \
+  "fleet must wait for warm stop without stopping a sibling-owned warm source"
+
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
 # (cloudbench-multi scenario 14) and cement ordering vs the production-only
 # classifier so a missing tasks.json never swallows the parallel-safety message.
