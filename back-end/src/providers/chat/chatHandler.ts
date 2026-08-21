@@ -16,7 +16,7 @@
  *                             │                 ├─ escalation ──> Temporal (router only)
  *                             │                 v
  *                             │             Generator (Lite)
- *                             │                 └─ Cerebras GLM-4.7
+ *                             │                 └─ Cerebras Gemma-4-31B
  *                             ├─ direct_answer ──> reuse initial message snapshot
  *                             │    └─ Router-start Generator ──> buffered until commit
  *                             ├─ web_search/future writes ──> refresh messages
