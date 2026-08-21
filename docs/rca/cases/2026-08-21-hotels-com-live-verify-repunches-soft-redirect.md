@@ -46,12 +46,21 @@ Critical path: recover-challenge lane search → promote preloaded session →
 Owned contract bug: stability checks must re-nav the settled same-site document
 after a clean soft-redirect, not re-punch the poisoned deep link.
 
+Follow-on (agent `dd72618c-da69-46c4-80ba-f7fbe6d776a2`): soft-redirect settle
+landed, but `runLaneConfigSearch` used `Promise.allSettled` so the
+recover-challenge HTTP stayed open while the sibling `auth_kept` lane kept
+probing. Promote had already released the live Kernel session → CDP died →
+reconnect failed before the agent received the new `ws_url`. Fix: resolve as
+soon as promote succeeds.
+
 ## Solution
 
 - `_probe_page` / backend `probeCandidateBrowser`: after a clean settle, follow-up
   attempts navigate `same_site_navigation_url(target, page.url)`.
 - `searchAndPromoteBrowserConfig` returns `saved_url` as that settled URL.
 - Handler live verify prefers `config_result.saved_url`.
+- `runLaneConfigSearch` returns immediately after promote (does not await sibling
+  lane probes).
 
 ## Verification
 

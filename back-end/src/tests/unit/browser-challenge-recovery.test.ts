@@ -194,6 +194,38 @@ async function testParallelCookieLanesFirstFullClearWins(): Promise<void> {
   assert.deepStrictEqual(promoted, [winner.config.key]);
 }
 
+async function testLaneSearchReturnsBeforeSlowSiblingFinishes(): Promise<void> {
+  /** Hotels.com: sibling auth_kept probe held recover-challenge HTTP open after
+   * promote released the live CDP — agent reconnect had no ws_url yet. */
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
+  let slowSiblingFinished = false;
+  const started = Date.now();
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: {} },
+      { key: 'stripped', storageState: {} },
+    ],
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (_config, _session, lane) => {
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        slowSiblingFinished = true;
+        return { stablePasses: 0, attempts: 2, latencyMs: 400, paymentCdnOk: true };
+      },
+      promote: async () => undefined,
+      release: async () => undefined,
+    }
+  );
+  const elapsed = Date.now() - started;
+  assert.strictEqual(winner.config.key, configs[0]!.key);
+  assert.ok(elapsed < 250, `must return right after promote, not wait for sibling (${elapsed}ms)`);
+  assert.equal(slowSiblingFinished, false, 'sibling probe must still be in flight when we return');
+}
+
 async function testNoStableCandidateCleansEverything(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US' });
   const released: string[] = [];
@@ -728,6 +760,7 @@ async function main(): Promise<void> {
   testConfigSearchUsesHiddenRemoteSessionsOnly();
   await testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear();
   await testParallelCookieLanesFirstFullClearWins();
+  await testLaneSearchReturnsBeforeSlowSiblingFinishes();
   await testNoStableCandidateCleansEverything();
   await testPartialStableCandidateIsNeverPromoted();
   // Payment-CDN / Stripe.js ranking + hard gates live in

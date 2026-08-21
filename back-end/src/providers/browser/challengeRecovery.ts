@@ -204,6 +204,9 @@ export interface LaneConfigSearchOptions {
  * - inside a lane, browser configs are tried one at a time
  * - first fully-stable probe (stablePasses === attempts) wins; siblings cancel
  * - partial clears are never promoted
+ * - returns as soon as promote succeeds (must not await sibling lane probes —
+ *   holding the recover-challenge HTTP open after releasing the old live
+ *   session leaves the agent without a CDP URL while siblings still probe)
  */
 export async function runLaneConfigSearch(
   configs: BrowserRecoveryConfig[],
@@ -274,55 +277,73 @@ export async function runLaneConfigSearch(
     throw new Error(`No stable browser configuration in lane ${lane.key}`);
   };
 
-  const laneResults = await Promise.allSettled(
-    lanes.map(async (lane) => {
-      const candidate = await runLane(lane);
-      if (claimLock.claimed) {
-        await dependencies.release(candidate.config, candidate.session).catch(() => {});
-        throw new Error('lane_aborted');
-      }
-      claimLock.claimed = true;
-      claimed = candidate;
-      abort.abort();
-      log.info('Challenge recovery promoting lane winner', {
-        laneKey: lane.key,
-        configKey: candidate.config.key,
-        provider: candidate.config.provider,
-        proxyMode: candidate.config.proxyMode,
-        stablePasses: candidate.probe.stablePasses,
-        attempts: candidate.probe.attempts,
-        avoidConfigKey: avoidConfigKey ?? null,
-        latencyMs: candidate.probe.latencyMs,
+  return await new Promise<SuccessfulRecoveryCandidate>((resolve, reject) => {
+    let settled = false;
+    const laneErrors: string[] = [];
+    let pendingLanes = lanes.length;
+
+    const finishFailure = () => {
+      if (settled || claimLock.claimed) return;
+      settled = true;
+      log.error('Challenge recovery found no stable browser configuration', {
+        candidateCount: configs.length,
+        laneCount: lanes.length,
+        laneKeys: lanes.map((lane) => lane.key),
+        configKeys: configs.map((config) => config.key),
+        errors: laneErrors.slice(0, 8),
       });
-      try {
-        await dependencies.promote(candidate);
-      } catch (error) {
-        await dependencies.release(candidate.config, candidate.session).catch(() => {});
-        claimLock.claimed = false;
-        claimed = undefined;
-        throw error;
-      }
-      return candidate;
-    })
-  );
+      reject(new Error('No stable browser configuration cleared the challenge'));
+    };
 
-  if (claimed) {
-    return claimed;
-  }
+    const onLaneSettled = () => {
+      pendingLanes -= 1;
+      if (pendingLanes <= 0) finishFailure();
+    };
 
-  const errors = laneResults
-    .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-    .map((result) =>
-      result.reason instanceof Error ? result.reason.message : String(result.reason)
-    );
-  log.error('Challenge recovery found no stable browser configuration', {
-    candidateCount: configs.length,
-    laneCount: lanes.length,
-    laneKeys: lanes.map((lane) => lane.key),
-    configKeys: configs.map((config) => config.key),
-    errors: errors.slice(0, 8),
+    for (const lane of lanes) {
+      void (async () => {
+        try {
+          const candidate = await runLane(lane);
+          if (claimLock.claimed || settled) {
+            await dependencies.release(candidate.config, candidate.session).catch(() => {});
+            return;
+          }
+          claimLock.claimed = true;
+          claimed = candidate;
+          abort.abort();
+          log.info('Challenge recovery promoting lane winner', {
+            laneKey: lane.key,
+            configKey: candidate.config.key,
+            provider: candidate.config.provider,
+            proxyMode: candidate.config.proxyMode,
+            stablePasses: candidate.probe.stablePasses,
+            attempts: candidate.probe.attempts,
+            avoidConfigKey: avoidConfigKey ?? null,
+            latencyMs: candidate.probe.latencyMs,
+          });
+          try {
+            await dependencies.promote(candidate);
+          } catch (error) {
+            await dependencies.release(candidate.config, candidate.session).catch(() => {});
+            claimLock.claimed = false;
+            claimed = undefined;
+            throw error;
+          }
+          if (!settled) {
+            settled = true;
+            resolve(candidate);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message !== 'lane_aborted') {
+            laneErrors.push(message);
+          }
+        } finally {
+          onLaneSettled();
+        }
+      })();
+    }
   });
-  throw new Error('No stable browser configuration cleared the challenge');
 }
 
 /**
