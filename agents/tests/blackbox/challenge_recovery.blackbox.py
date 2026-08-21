@@ -607,7 +607,6 @@ async def test_live_tab_verify_follows_same_site_soft_redirect():
             # Simulate pre-fix behavior: always navigate target_url.
             from domains.spawn_browser_agent_v3 import challenge_recovery as cr
 
-            collected = []
             for _ in range(kwargs.get("attempts", 2)):
                 await page_obj.goto(target)
                 if not await cr._wait_for_clean_page(
@@ -619,6 +618,14 @@ async def test_live_tab_verify_follows_same_site_soft_redirect():
         # Document the failure mode the fix closes (2× Kabuki → Bot or Not).
         assert not await always_kabuki(poisoned, kabuki, attempts=2, solver_timeout_seconds=0)
         assert poisoned.kabuki_hits == 2
+
+        # Preloaded promote path: one live navigation after 2/2 candidate probes.
+        once = SoftRedirectPage()
+        assert await verify_live_page_cleared_challenge(
+            once, kabuki, attempts=1, solver_timeout_seconds=0
+        )
+        assert once.kabuki_hits == 1
+        assert once.goto_urls == [kabuki]
 
 
 def test_payment_document_url_detection():

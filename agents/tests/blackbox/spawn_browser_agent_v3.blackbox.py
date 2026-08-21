@@ -5749,6 +5749,9 @@ def test_recovery_requires_live_tab_verify_before_success():
     # Soft-redirect resume: live verify prefers probe saved_url over poisoned deep link.
     assert 'config_result.get("saved_url")' in recovery_block
     assert "live_verify_url" in recovery_block
+    # Preloaded winners: one live navigation-probe (not a second soft-block punch).
+    assert "live_verify_attempts" in recovery_block
+    assert "storage_state_preloaded" in recovery_block[verify_offset - 400 : verify_offset + 200]
 
 
 def test_recovery_restore_failure_is_not_suppressed():

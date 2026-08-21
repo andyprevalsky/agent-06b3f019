@@ -7591,9 +7591,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         live_verify_url = str(
                             config_result.get("saved_url") or current_url or ""
                         ).strip() or current_url
+                        # Preloaded winners already cleared 2/2 navigations on this
+                        # remote session. A second live goto re-triggers Hotels.com
+                        # soft-block (probe clean → live attempt-2 429). One fresh
+                        # navigation-probe is enough to catch Eventim false-stable.
+                        live_verify_attempts = (
+                            1 if bool(config_result.get("storage_state_preloaded")) else 2
+                        )
                         if not await verify_live_page_cleared_challenge(
                             input_page,
                             live_verify_url,
+                            attempts=live_verify_attempts,
                             agent_id=agent_id,
                             user_id=user_id,
                             claude_token=token_state.access_token,
