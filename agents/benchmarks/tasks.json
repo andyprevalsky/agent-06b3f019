@@ -3324,6 +3324,9 @@
       "spawn_claude_code_agent": 1,
       "message_person": 1
     },
+    "min_steps": {
+      "browser": 2
+    },
     "tool_count_scope": "root",
     "bench": "pipeline-e2e",
     "group": "daily"
