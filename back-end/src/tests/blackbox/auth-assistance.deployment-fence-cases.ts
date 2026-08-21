@@ -1,5 +1,8 @@
 import { randomUUID } from 'crypto';
-import { completeAuthAssistanceForUser } from '../../providers/authAssistanceCompletion';
+import {
+  AUTH_ASSISTANCE_COMPLETED_RESPONSE,
+  completeAuthAssistanceForUser,
+} from '../../providers/authAssistanceCompletion';
 import { prisma } from '../../providers/database';
 import {
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
@@ -340,6 +343,70 @@ async function runCompletionAfterFenceCase(userId: string): Promise<void> {
   );
 }
 
+async function testCompetingCompletionIsNotMisclassifiedAsDeployInterruption(): Promise<void> {
+  const userId = `auth-assist-competing-completion-${RUN_ID}-${randomUUID().slice(0, 8)}`;
+  await prisma.user.create({ data: { userId } });
+  try {
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'Complete a competing login handoff', status: 'PAUSED' },
+    });
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { temporalWorkflowId: agent.id },
+    });
+    const context = await prisma.browserContext.create({
+      data: { userId, contextId: `kernel-profile-${randomUUID()}` },
+    });
+    const browserSession = await prisma.browserSession.create({
+      data: {
+        contextId: context.id,
+        agentId: agent.id,
+        sessionId: `kernel-session-${randomUUID()}`,
+        debugUrl: 'https://debug.kernel.test/session/competing-completion',
+        status: 'ACTIVE',
+        provider: 'kernel',
+      },
+    });
+    const createRes = await request('/api/auth-assistance', userId, {
+      agentId: agent.id,
+      authRealm: 'https://example.com/login',
+      mode: 'live_view',
+      browserSessionId: browserSession.id,
+      steelSessionId: browserSession.sessionId,
+    });
+    assertStatus(createRes, 201);
+    const requestId = String(asRecord(asRecord(createRes.data).request).id);
+
+    // Model a competing resolver winning the attention-row CAS without yet
+    // marking the auth-assistance row complete.
+    await prisma.agentAttentionRequest.update({
+      where: { id: requestId },
+      data: { userResponse: AUTH_ASSISTANCE_COMPLETED_RESPONSE },
+    });
+
+    let signaledWorkflowId: string | null = null;
+    let resumedAgentId: string | null = null;
+    const result = await completeAuthAssistanceForUser(requestId, userId, new Date(), {
+      signalCompleted: async (workflowId: string) => {
+        signaledWorkflowId = workflowId;
+      },
+      resumeAgent: async (id: string) => {
+        resumedAgentId = id;
+      },
+    });
+
+    assert(result.status === 'completed', `expected completed result, got ${result.status}`);
+    assert(!result.interrupted, 'a competing completion sentinel is not a deploy interruption');
+    assert(
+      signaledWorkflowId === agent.id,
+      'the live workflow generation should still be signaled'
+    );
+    assert(resumedAgentId === agent.id, 'the agent should still be resumed after completion');
+  } finally {
+    await cleanupFixture(userId);
+  }
+}
+
 export const authAssistanceDeploymentFenceTests: TestCase[] = [
   [
     'deploy fence closes the pending auth assistance request with its tool chip',
@@ -348,5 +415,9 @@ export const authAssistanceDeploymentFenceTests: TestCase[] = [
   [
     'completion after a deploy fence keeps the interrupted marker',
     testCompletionAfterFenceKeepsTheInterruptedMarker,
+  ],
+  [
+    'competing completion is not misclassified as a deploy interruption',
+    testCompetingCompletionIsNotMisclassifiedAsDeployInterruption,
   ],
 ];

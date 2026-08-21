@@ -194,6 +194,43 @@ test('reconciler seals an agent whose workflow no longer exists', async () => {
   );
 });
 
+test('reconciler releases browser sessions even when interrupted-tool cleanup fails', async () => {
+  const session = await createAnonymousSession('liveness-cleanup-failure');
+  const { agentId, workflowId } = await seedLivenessAgent(
+    session.user.id,
+    'cleanup-failure',
+    'ACTIVE'
+  );
+  let releasedAgentId: string | null = null;
+
+  await makeEligible([agentId]);
+  let cleanupRejected = false;
+  try {
+    await reconcileWorkflowLiveness({
+      batchSize: 1000,
+      describeStatus: async (id: string) => (id === workflowId ? 'TERMINATED' : 'RUNNING'),
+      finalizeInterruptedTools: async () => {
+        throw new Error('tool cleanup failed');
+      },
+      releaseBrowserSessions: async (id: string) => {
+        releasedAgentId = id;
+      },
+    });
+  } catch (error) {
+    cleanupRejected = error instanceof Error && error.message === 'tool cleanup failed';
+  }
+
+  assert(cleanupRejected, 'expected interrupted-tool cleanup failure to remain observable');
+  assert(
+    releasedAgentId === agentId,
+    `browser release must run after the row is sealed (released=${String(releasedAgentId)})`
+  );
+  assert(
+    (await statusOf(agentId)) === 'FAILED',
+    'the row should remain sealed after cleanup fails'
+  );
+});
+
 test('reconciler is idempotent and never re-transitions a settled agent', async () => {
   const session = await createAnonymousSession('liveness-idempotent');
   const { agentId, workflowId } = await seedLivenessAgent(session.user.id, 'idempotent', 'ACTIVE');

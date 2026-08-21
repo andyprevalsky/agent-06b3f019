@@ -7,6 +7,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createRetryableProbe } from '../../../scripts/retryable-probe';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -293,6 +294,26 @@ test('integration seed discovers account columns before selecting them', async (
     helper.includes("accountId: '', accountEmail: null"),
     'expected legacy Integration rows to receive the local migration defaults'
   );
+});
+
+test('integration capability probe retries after a transient rejection and caches success', async () => {
+  let attempts = 0;
+  const probe = createRetryableProbe(async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('transient schema probe failure');
+    return true;
+  });
+
+  let firstRejected = false;
+  try {
+    await probe();
+  } catch (error) {
+    firstRejected = error instanceof Error && error.message === 'transient schema probe failure';
+  }
+  assert(firstRejected, 'expected the first transient schema probe failure to reach the caller');
+  assert(await probe(), 'expected the schema probe to retry successfully');
+  assert(await probe(), 'expected the successful schema probe result to stay cached');
+  assert(attempts === 2, `expected one retry and then a cached success, got ${attempts} attempts`);
 });
 
 test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
