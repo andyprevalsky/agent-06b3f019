@@ -372,72 +372,113 @@ async def test_prepare_browser_auth_uses_unified_realm_endpoint() -> None:
     assert call["requestHeaders"]["x-user-id"] == "user-1"
 
 
+def _fake_webauthn_session(send, target_id: str = "target-a"):
+    """Minimal stand-in for browser-use's BrowserSession.
+
+    DOMService resolves the live focus target for every browser-process
+    operation, so tests must be able to move the agent between targets.
+    """
+    session = SimpleNamespace(agent_focus_target_id=target_id)
+
+    async def get_or_create_cdp_session(tid, focus=False):
+        async def scoped_send(method, params=None, _tid=tid):
+            return await send(method, params or {}, _tid)
+
+        return SimpleNamespace(send=scoped_send, session_id=f"session-{tid}")
+
+    session.get_or_create_cdp_session = get_or_create_cdp_session
+    return session
+
+
+def _webauthn_browser_double():
+    """A fake Chrome whose virtual authenticators are target-scoped, like the real one."""
+    state = SimpleNamespace(calls=[], enabled=set(), authenticators={}, next_id=0)
+
+    def reset_environment(target_id: str) -> None:
+        """Mirror Chrome: losing the environment destroys that target's authenticators."""
+        state.enabled.discard(target_id)
+        for authenticator_id, (owner, _) in list(state.authenticators.items()):
+            if owner == target_id:
+                del state.authenticators[authenticator_id]
+
+    state.reset_environment = reset_environment
+
+    async def send(method: str, params: dict, target_id: str):
+        state.calls.append((method, target_id))
+        if method == "WebAuthn.enable":
+            state.enabled.add(target_id)
+            return {}
+        if method == "Page.setInterceptFileChooserDialog":
+            return {}
+        if method == "WebAuthn.addVirtualAuthenticator":
+            if target_id not in state.enabled:
+                raise RuntimeError(
+                    "The Virtual Authenticator Environment has not been enabled for this session"
+                )
+            state.next_id += 1
+            authenticator_id = f"authenticator-{state.next_id}"
+            state.authenticators[authenticator_id] = (target_id, {})
+            return {"authenticatorId": authenticator_id}
+        if method == "WebAuthn.addCredential":
+            if params["authenticatorId"] not in state.authenticators:
+                raise RuntimeError(
+                    {"code": -32602, "message": "Could not find a Virtual Authenticator matching the ID"}
+                )
+            owner, creds = state.authenticators[params["authenticatorId"]]
+            if owner not in state.enabled:
+                raise RuntimeError(
+                    "The Virtual Authenticator Environment has not been enabled for this session"
+                )
+            credential = dict(params["credential"])
+            creds[credential["credentialId"]] = credential
+            return {}
+        if method == "WebAuthn.getCredentials":
+            if params["authenticatorId"] not in state.authenticators:
+                raise RuntimeError(
+                    {"code": -32602, "message": "Could not find a Virtual Authenticator matching the ID"}
+                )
+            owner, creds = state.authenticators[params["authenticatorId"]]
+            if owner not in state.enabled:
+                raise RuntimeError(
+                    "The Virtual Authenticator Environment has not been enabled for this session"
+                )
+            return {"credentials": list(creds.values())}
+        raise AssertionError(method)
+
+    return state, send
+
+
+AMAZON_PASSKEY = {
+    "credentialId": "credential-amazon",
+    "privateKey": "private-amazon",
+    "rpId": "amazon.com.mx",
+    "signCount": 7,
+}
+
+
 async def test_passkey_injection_reenables_virtual_environment_at_use_boundary() -> None:
     """Kernel can drop WebAuthn state after connect but before credential hydration."""
     from browser_tools.dom_service import DOMService
 
-    calls: list[str] = []
-    webauthn_enabled = False
-
-    async def send(method: str, params: dict):
-        nonlocal webauthn_enabled
-        calls.append(method)
-        if method == "WebAuthn.enable":
-            webauthn_enabled = True
-            return {}
-        if method == "WebAuthn.addVirtualAuthenticator":
-            if not webauthn_enabled:
-                raise RuntimeError(
-                    {
-                        "code": -32000,
-                        "message": "The Virtual Authenticator Environment has not been enabled for this session",
-                    }
-                )
-            return {"authenticatorId": "authenticator-1"}
-        if method == "WebAuthn.addCredential":
-            return {}
-        if method == "WebAuthn.getCredentials":
-            return {"credentials": [{"credentialId": "credential-google", "signCount": 0}]}
-        raise AssertionError(method)
-
+    state, send = _webauthn_browser_double()
     dom = DOMService(cdp_url="")
-    dom._webauthn_cdp = SimpleNamespace(send=send)
-    seeded = await dom.inject_passkeys(
-        [
-            {
-                "credentialId": "credential-google",
-                "privateKey": "private-google",
-                "rpId": "google.com",
-                "signCount": 0,
-            }
-        ]
-    )
+    dom._session = _fake_webauthn_session(send)
+
+    seeded = await dom.inject_passkeys([AMAZON_PASSKEY])
 
     assert seeded == 1
-    assert calls[:2] == ["WebAuthn.enable", "WebAuthn.addVirtualAuthenticator"]
+    methods = [method for method, _ in state.calls]
+    assert methods[0] == "WebAuthn.enable"
+    assert methods.index("WebAuthn.enable") < methods.index("WebAuthn.addVirtualAuthenticator")
 
 
 async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> None:
     from browser_tools.dom_service import DOMService
 
-    credentials: list[dict] = []
-    calls: list[str] = []
-
-    async def send(method: str, params: dict):
-        calls.append(method)
-        if method == "WebAuthn.enable":
-            return {}
-        if method == "WebAuthn.addVirtualAuthenticator":
-            return {"authenticatorId": "authenticator-1"}
-        if method == "WebAuthn.addCredential":
-            credentials.append(dict(params["credential"]))
-            return {}
-        if method == "WebAuthn.getCredentials":
-            return {"credentials": list(credentials)}
-        raise AssertionError(method)
-
+    state, send = _webauthn_browser_double()
     dom = DOMService(cdp_url="")
-    dom._webauthn_cdp = SimpleNamespace(send=send)
+    dom._session = _fake_webauthn_session(send)
+
     first = await dom.inject_passkeys(
         [
             {
@@ -460,73 +501,122 @@ async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> N
     )
 
     assert first == 1 and second == 1
-    assert calls.count("WebAuthn.enable") == 1
-    assert calls.count("WebAuthn.addVirtualAuthenticator") == 1
-    assert [credential["credentialId"] for credential in credentials] == [
-        "credential-a",
-        "credential-b",
-    ]
+    methods = [method for method, _ in state.calls]
+    assert methods.count("WebAuthn.enable") == 1
+    assert methods.count("WebAuthn.addVirtualAuthenticator") == 1
+    assert len(state.authenticators) == 1
+    _, creds = next(iter(state.authenticators.values()))
+    assert sorted(creds) == ["credential-a", "credential-b"]
 
 
 async def test_passkey_injection_recovers_after_virtual_environment_loss() -> None:
-    """A navigation-reset WebAuthn environment must be rebuilt before passkey use."""
+    """Chrome's lost-authenticator-id error must rebuild passkey state."""
     from browser_tools.dom_service import DOMService
 
-    calls: list[str] = []
-    credentials: list[dict] = []
-    webauthn_enabled = False
-    authenticator_number = 0
-
-    async def send(method: str, params: dict):
-        nonlocal authenticator_number, webauthn_enabled
-        calls.append(method)
-        if method == "WebAuthn.enable":
-            webauthn_enabled = True
-            return {}
-        if method == "WebAuthn.addVirtualAuthenticator":
-            if not webauthn_enabled:
-                raise AssertionError("authenticator created before WebAuthn.enable")
-            authenticator_number += 1
-            return {"authenticatorId": f"authenticator-{authenticator_number}"}
-        if method == "WebAuthn.addCredential":
-            if not webauthn_enabled:
-                raise AssertionError("credential added before WebAuthn.enable")
-            credentials.append(dict(params["credential"]))
-            return {}
-        if method == "WebAuthn.getCredentials":
-            if not webauthn_enabled:
-                raise RuntimeError(
-                    {
-                        "code": -32000,
-                        "message": "The Virtual Authenticator Environment has not been enabled for this session",
-                    }
-                )
-            return {"credentials": list(credentials)}
-        raise AssertionError(method)
-
+    state, send = _webauthn_browser_double()
     dom = DOMService(cdp_url="")
-    dom._webauthn_cdp = SimpleNamespace(send=send)
-    passkeys = [
-        {
-            "credentialId": "credential-amazon",
-            "privateKey": "private-amazon",
-            "rpId": "amazon.com",
-            "signCount": 7,
-        }
-    ]
+    dom._session = _fake_webauthn_session(send)
 
-    assert await dom.inject_passkeys(passkeys) == 1
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
 
-    # Reproduce the live boundary: the target navigation invalidated WebAuthn,
-    # while DOMService retained the old authenticator id and seed cache.
-    webauthn_enabled = False
-    credentials.clear()
+    # Exact live boundary from benchmark agent 0a15da0a: the target's WebAuthn
+    # environment was reset while DOMService retained the old authenticator id
+    # and seed cache. The next enable succeeds, then getCredentials reports
+    # "Could not find a Virtual Authenticator matching the ID".
+    state.reset_environment("target-a")
 
-    assert await dom.inject_passkeys(passkeys) == 1
-    assert calls.count("WebAuthn.enable") == 2
-    assert calls.count("WebAuthn.addVirtualAuthenticator") == 2
-    assert calls.count("WebAuthn.addCredential") == 2
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    methods = [method for method, _ in state.calls]
+    assert methods.count("WebAuthn.addVirtualAuthenticator") == 2
+    assert methods.count("WebAuthn.addCredential") == 2
     assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target() -> None:
+    """The wedge from agent e36c8759: Chrome scopes both per target.
+
+    Amazon's buy-now flow moved the agent onto a new target. Arming only the
+    connect-time target left the new one with no suppression and no credential,
+    so Chrome raised its own "No passkeys available" modal -- a browser-process
+    surface no CDP input can reach -- while our readback still reported healthy.
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    session = _fake_webauthn_session(send, target_id="target-a")
+    dom._session = session
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+
+    # The agent follows Amazon's sign-in flow onto a different target.
+    session.agent_focus_target_id = "target-b"
+    await dom.ensure_browser_overlays_suppressed()
+
+    assert "target-b" in state.enabled, "native WebAuthn UI was not suppressed on the new target"
+    live = [
+        creds
+        for owner, creds in state.authenticators.values()
+        if owner == "target-b"
+    ]
+    assert live, "no virtual authenticator was created on the new target"
+    assert "credential-amazon" in live[0], "the held passkey was not seeded onto the new target"
+
+
+async def test_native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site() -> None:
+    """Almost every site is one we hold no passkey for; it still must not wedge.
+
+    With suppression armed a ceremony rejects immediately (NotAllowedError) and
+    the site falls back to password. Without it, Chrome raises a native chooser
+    that the agent can neither see in a CDP screenshot nor dismiss with CDP input.
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send, target_id="target-a")
+
+    assert await dom.inject_passkeys([]) == 0
+
+    assert "target-a" in state.enabled, (
+        "WebAuthn native UI was left enabled for a site we hold no passkey for"
+    )
+    assert any(owner == "target-a" for owner, _ in state.authenticators.values()), (
+        "suppression had no empty virtual authenticator to make ceremonies fail fast"
+    )
+
+
+async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> None:
+    """Arming at step start is not enough: the target can change mid-step."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        _CEREMONY_CAPABLE_ACTIONS,
+        execute_action,
+    )
+
+    for action_name in ("click", "input_text", "press_key", "goto"):
+        assert action_name in _CEREMONY_CAPABLE_ACTIONS, action_name
+
+    armed: list[str] = []
+    dom_service = SimpleNamespace(
+        session=SimpleNamespace(),
+        selector_map={},
+        ensure_browser_overlays_suppressed=AsyncMock(
+            side_effect=lambda: armed.append("armed")
+        ),
+    )
+
+    # The action itself needs a real browser to finish; all this asserts is that
+    # arming is ordered BEFORE any of that work is attempted.
+    try:
+        await execute_action(
+            dom_service=dom_service,
+            action_history=SimpleNamespace(),
+            action={"action": "press_key", "params": {"key": "Escape"}},
+        )
+    except Exception:
+        pass
+
+    assert armed == ["armed"], "press_key ran without arming the live target"
 
 
 async def run_all_tests():
@@ -575,5 +665,17 @@ async def run_all_tests():
     await runner.record_async(
         "passkey_injection_recovers_after_virtual_environment_loss",
         test_passkey_injection_recovers_after_virtual_environment_loss,
+    )
+    await runner.record_async(
+        "passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target",
+        test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target,
+    )
+    await runner.record_async(
+        "native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site",
+        test_native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site,
+    )
+    await runner.record_async(
+        "ceremony_capable_actions_arm_the_live_target_before_running",
+        test_ceremony_capable_actions_arm_the_live_target_before_running,
     )
     return runner.all_passed

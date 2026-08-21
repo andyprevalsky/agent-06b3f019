@@ -39,6 +39,14 @@ logger = structlog.get_logger()
 
 STEEL_COMPUTER_SCREENSHOT_WIDTH = 1288
 STEEL_COMPUTER_SCREENSHOT_HEIGHT = 891
+# Actions after which a page can start a WebAuthn ceremony: focusing or typing
+# into an account field triggers conditional UI, clicking activates a
+# "sign in with a passkey" control, and a navigation can land straight on a
+# sign-in page that invokes WebAuthn on load.
+_CEREMONY_CAPABLE_ACTIONS = frozenset(
+    {"click", "input_text", "press_key", "goto", "navback", "switch_tab", "open_new_tab"}
+)
+
 STEEL_VIEWPORT_CROP_X = 4
 STEEL_VIEWPORT_CROP_Y = 87
 STEEL_VIEWPORT_CROP_WIDTH = 1283
@@ -152,6 +160,25 @@ def press_key_looks_like_leave_page(key: str) -> bool:
         "browserforward",
     }
     return normalized in leave_chords
+
+
+def _kernel_computer_key(key: str) -> str:
+    """Translate Playwright-style key names to Kernel/xdotool key symbols."""
+    aliases = {
+        "control": "Ctrl",
+        "ctrl": "Ctrl",
+        "meta": "Super",
+        "command": "Super",
+        "cmd": "Super",
+        "enter": "Return",
+        "arrowup": "Up",
+        "arrowdown": "Down",
+        "arrowleft": "Left",
+        "arrowright": "Right",
+        "escape": "Escape",
+        "esc": "Escape",
+    }
+    return "+".join(aliases.get(part.strip().lower(), part.strip()) for part in key.split("+"))
 
 
 def click_href_leaves_pinned_base(element: Any, pin_host: Optional[str]) -> Optional[str]:
@@ -627,6 +654,7 @@ class _ActionContext:
     element: Any
     available_file_paths: Optional[Dict[str, str]]
     session_id: Optional[str]
+    user_id: str
     config: Any
     humanizer: Optional[BrowserHumanizer]
     secret_refs: Optional[Dict[str, str]]
@@ -917,7 +945,23 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
                 ),
                 params={"key": key},
             )
-        if context.humanizer:
+        provider_pressed = False
+        if context.config is not None and context.session_id:
+            from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
+
+            # Only an explicit provider "unsupported" response may fall back to
+            # renderer-level input. A timeout or lost response is ambiguous: the
+            # browser-process key may already have executed, and replaying a
+            # state-changing key such as Enter through CDP could submit twice.
+            provider_pressed = await press_browser_computer_key(
+                context.config,
+                context.session_id,
+                context.user_id,
+                _kernel_computer_key(str(key)),
+            )
+        if provider_pressed:
+            logger.info("Pressed key through provider computer input", key=key)
+        elif context.humanizer:
             await context.humanizer.press_key(key)
         else:
             logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
@@ -1236,6 +1280,16 @@ async def execute_action(
     thinking = action.get("thinking")
     coords = action.get("coordinates")
 
+    # Anything that can make a relying party call navigator.credentials.get must
+    # run against a target whose native WebAuthn UI is suppressed and whose
+    # virtual authenticator holds our passkeys. Chrome scopes both per target, so
+    # arming at connect (or at step start) strands them the moment the agent
+    # follows a link into a new tab — which is how a real run ended up wedged
+    # behind Chrome's own "No passkeys available" modal, a surface no CDP input
+    # can reach. Arming here is idempotent and costs one round trip.
+    if action_name in _CEREMONY_CAPABLE_ACTIONS:
+        await dom_service.ensure_browser_overlays_suppressed()
+
     try:
         element = None
         if index is not None:
@@ -1255,6 +1309,7 @@ async def execute_action(
             element=element,
             available_file_paths=available_file_paths,
             session_id=session_id,
+            user_id=user_id,
             config=config,
             humanizer=humanizer,
             secret_refs=secret_refs,

@@ -84,3 +84,7 @@ export async function captureKernelScreenshot(sessionId: string): Promise<Buffer
   const response = await kernelClient().browsers.computer.captureScreenshot(sessionId);
   return Buffer.from(await response.arrayBuffer());
 }
+
+export async function pressKernelKeys(sessionId: string, keys: string[]): Promise<void> {
+  await kernelClient().browsers.computer.pressKey(sessionId, { keys });
+}

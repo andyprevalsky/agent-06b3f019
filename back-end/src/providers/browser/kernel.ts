@@ -41,6 +41,7 @@ export {
   captureKernelScreenshot,
   getKernelCaptchaTelemetry,
   listKernelSessionFiles,
+  pressKernelKeys,
   readKernelSessionFile,
   resizeKernelViewport,
   uploadKernelSessionFile,

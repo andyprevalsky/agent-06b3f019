@@ -4,12 +4,52 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import {
   downloadFile,
   InvalidSessionFilePathError,
+  pressKeys,
   SessionNotFoundError,
   takeScreenshot,
 } from './service';
 
 function userIdForSessionAccess(req: AuthRequest): string | undefined {
   return req.isInternal === true ? undefined : req.user?.id;
+}
+
+function userIdForOwnedSessionAccess(req: AuthRequest): string | undefined {
+  const rawUserId = req.isInternal === true ? req.headers['x-user-id'] : req.user?.id;
+  return typeof rawUserId === 'string' && rawUserId.trim() !== '' ? rawUserId.trim() : undefined;
+}
+
+function validKeySymbols(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 16 &&
+    value.every((key: unknown) => typeof key === 'string' && key.length > 0 && key.length <= 64)
+  );
+}
+
+async function handlePressKey(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const userId = userIdForOwnedSessionAccess(req);
+    if (userId === undefined) {
+      res.status(401).json({ error: 'User not authenticated' });
+      return;
+    }
+    const body = req.body as { keys?: unknown } | undefined;
+    if (!validKeySymbols(body?.keys)) {
+      res.status(400).json({
+        error: 'keys must contain between 1 and 16 non-empty key symbols of at most 64 characters',
+      });
+      return;
+    }
+    const result = await pressKeys(req.params.sessionId, body.keys, userId);
+    res.json(result);
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
 }
 
 export function registerBrowserDataRoutes(router: Router): void {
@@ -67,4 +107,6 @@ export function registerBrowserDataRoutes(router: Router): void {
       }
     })
   );
+
+  router.post('/:sessionId/computer/press-key', authenticate, asyncHandler(handlePressKey));
 }

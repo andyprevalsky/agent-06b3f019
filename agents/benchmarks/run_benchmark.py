@@ -64,7 +64,12 @@ from benchmarks.benchmark_tasks import (
     list_all_tasks,
 )
 from benchmarks.context_validator import validate_context
-from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
+from benchmarks.live_fixtures import (
+    LIVE_FIXTURE_NAMES,
+    TAMY_IDENTITY_COOKIE_DOMAINS,
+    TAMY_IDENTITY_USER_ID,
+    resolve_live_fixtures,
+)
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
 from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
@@ -135,6 +140,7 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
+AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
 # Tasks whose fixtures destructively mutate shared benchmark DB state. The
 # parallel scheduler runs these serially before starting any ordinary task so a
 # retained failed agent tree cannot mutate their fixtures. Each fixture must
@@ -142,6 +148,7 @@ AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
+    AMAZON_MX_TAMY_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
@@ -5355,13 +5362,21 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     return True
 
 
-def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
+def _sync_browser_credentials(
+    cookie_domains: tuple[str, ...] = (),
+    *,
+    user_id: Optional[str] = None,
+) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
     prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
     so the live fixture re-pulls them right before the agent starts.
     Best-effort but loud. Reads the prod source from back-end/.env.
+
+    ``user_id`` retargets the sync at a real production identity other than the
+    default benchmark user. The seed upserts that User row before writing any
+    browser-auth rows, so an isolated DB can safely run the task as that person.
 
     When ``cookie_domains`` is given (from the task's environment.live_cookie_domains),
     every domain-bearing browser-auth table is scoped to those domains: cookies,
@@ -5377,6 +5392,8 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    if user_id:
+        env["SEED_LOCAL_USER_ID"] = user_id
     if cookie_domains:
         # seed-local.ts filters every domain-bearing browser-auth read, so the
         # sync is bounded by the task's auth state, not the whole account.
@@ -5412,13 +5429,23 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     return True
 
 
-def _sync_passkeys() -> None:
+def _sync_passkeys(
+    *,
+    user_id: Optional[str] = None,
+    cookie_domains: tuple[str, ...] = (),
+) -> None:
     """Refresh only passkeys from prod into the isolated benchmark DB.
 
     Unlike the broad base fixture, this deliberately excludes cookies, origin
     storage, browser profiles, and passwords. Failure is fatal because an old
     or missing passkey would invalidate the benchmark rather than merely make
     it less convenient.
+
+    ``user_id`` retargets the seed at another real production identity (and
+    makes it upsert that User row first, so later user-scoped writes have a
+    parent). Default None keeps the dev user, which is what every existing
+    caller wants. ``cookie_domains`` scopes the passkey selection to the realms
+    a task actually needs.
     """
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -5426,6 +5453,10 @@ def _sync_passkeys() -> None:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    if user_id:
+        env["SEED_LOCAL_USER_ID"] = user_id
+    if cookie_domains:
+        env["SEED_COOKIE_DOMAINS"] = ",".join(cookie_domains)
     try:
         result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
@@ -5689,7 +5720,7 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         )
     if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
-    if not _sync_browser_credentials(ctx.cookie_domains):
+    if not _sync_browser_credentials(ctx.cookie_domains, user_id=ctx.user_id):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     # A green sync only proves the command exited 0. For domains whose task
     # contract explicitly requires authentication, assert that the post-sync DB
@@ -6024,8 +6055,51 @@ async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
     await asyncio.to_thread(_restore_live_fixture_scenarios, manifests)
 
 
+def _live_fixture_run_user_id(task: "BenchmarkTask") -> Optional[str]:
+    """The production identity a task's declared live fixtures make it run as."""
+    if "live-tamy-identity" in resolve_live_fixtures(task.environment):
+        return TAMY_IDENTITY_USER_ID
+    return None
+
+
+def _apply_live_tamy_identity_fixture(ctx: LiveFixtureContext) -> dict:
+    """Apply the complete live overlay for the Mexico production identity.
+
+    The `live` overlay refreshes credentials for whichever identity the seed is
+    pointed at, but the seed always resolved to the dev user, so a task launched
+    with a different BENCHMARK_RUN_USER_ID ran against a DB that had no row for
+    it at all. That is not a task failure: `POST /api/browser-session/init` 500s
+    with `Foreign key constraint violated: AgentIdentity_userId_fkey` and the
+    browser agent never starts.
+
+    This is a complete live fixture, not a supplement to the default-user
+    fixture: it refreshes compute tokens, retargets the browser-auth seed via
+    SEED_LOCAL_USER_ID, and upserts the User record before any user-scoped row.
+    Scoping the auth graph to her Amazon realms keeps the sync in seconds while
+    retaining profiles, cookies/storage, passwords, passkeys, CookieBundles and
+    Steel session markers. Fails closed if any part of that overlay cannot sync.
+    """
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — skipping the MX identity overlay")
+        return {"fixture": "live-tamy-identity", "skipped": True, "reason": "simulate"}
+    manifest = _apply_live_fixture(
+        replace(
+            ctx,
+            user_id=TAMY_IDENTITY_USER_ID,
+            cookie_domains=TAMY_IDENTITY_COOKIE_DOMAINS,
+        )
+    )
+    print(f"    🇲🇽 Seeded Tamy's production identity {TAMY_IDENTITY_USER_ID} into the isolated DB")
+    return {
+        **manifest,
+        "fixture": "live-tamy-identity",
+        "user_id": TAMY_IDENTITY_USER_ID,
+    }
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
+    "live-tamy-identity": _apply_live_tamy_identity_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
@@ -8410,6 +8484,14 @@ async def run_single_task(
     run_user_id_override = _benchmark_user_id_for_task(task.name, base_url)
     if run_user_id_override is None and task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
         run_user_id_override = benchmark_run_user_id_for_task(task.name)
+    if run_user_id_override is None:
+        # An identity live-fixture both seeds a production person into the
+        # isolated DB and declares who the task runs as. Deriving the run user
+        # from the declared fixture keeps the two in lockstep: seeding her rows
+        # but still running as the dev user would exercise the wrong account,
+        # and running as her without the fixture is the FK crash this fixture
+        # exists to prevent.
+        run_user_id_override = _live_fixture_run_user_id(task)
     if run_user_id_override:
         os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):

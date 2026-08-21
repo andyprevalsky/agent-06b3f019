@@ -16,6 +16,7 @@ import {
   readSessionFile,
   resizeSessionViewport,
   captureScreenshot,
+  pressSessionKeys,
   type BrowserViewport,
   getFingerprintInjectionData,
 } from '../../providers/browser';
@@ -359,5 +360,16 @@ export async function downloadFile(sessionId: string, filePath: string, userId?:
 export async function takeScreenshot(sessionId: string, userId?: string) {
   await requireSessionOwner(sessionId, userId);
   return captureScreenshot(sessionId);
+}
+
+export async function pressKeys(sessionId: string, keys: string[], userId: string) {
+  await requireSessionOwner(sessionId, userId);
+  if (!Array.isArray(keys) || keys.length === 0 || keys.length > 16) {
+    throw new Error('keys must contain between 1 and 16 key symbols');
+  }
+  if (keys.some((key) => typeof key !== 'string' || key.length === 0 || key.length > 64)) {
+    throw new Error('each key symbol must be a non-empty string of at most 64 characters');
+  }
+  return pressSessionKeys(sessionId, keys);
 }
 /* c8 ignore stop */

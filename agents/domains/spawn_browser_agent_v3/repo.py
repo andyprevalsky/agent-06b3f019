@@ -765,6 +765,33 @@ async def take_browser_computer_screenshot(config: Any, session_id: str) -> Dict
     return result
 
 
+async def press_browser_computer_key(
+    config: Any,
+    session_id: str,
+    user_id: str,
+    key: str,
+) -> bool:
+    """Press a key at the browser-window layer when the provider supports it.
+
+    CDP keyboard events stop at the renderer and cannot reach Chrome's own
+    passkey chooser. Kernel's computer API operates on the browser window, so
+    Escape/Tab/Enter can act on browser-process UI as well as the page.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/{session_id}/computer/press-key",
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "x-user-id": user_id,
+                "Content-Type": "application/json",
+            },
+            json={"keys": [key]},
+        )
+        response.raise_for_status()
+        result = response.json()
+    return bool(result.get("supported") and result.get("pressed"))
+
+
 # ========================================
 # EXTRACT LLM CALL (gpt-4.1-mini)
 # ========================================

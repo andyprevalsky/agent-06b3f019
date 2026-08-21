@@ -34,7 +34,24 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
             "profiles, CookieBundles, and Steel sessions."
         ),
     ),
+    "live-tamy-identity": LiveFixtureSpec(
+        name="live-tamy-identity",
+        description=(
+            "The complete current production-credential overlay for the Mexico-based "
+            "identity: her User row, browser context, profiles, cookies/storage, "
+            "passwords, passkeys, CookieBundles, and Steel session authentication, "
+            "plus the shared compute-token refresh. The fixture also selects her as "
+            "the benchmark run user; without it the isolated DB has no parent User "
+            "row and browser-session init fails on AgentIdentity_userId_fkey."
+        ),
+    ),
 }
+
+# The production identity `live-tamy-identity` materializes, and the auth realms it
+# is seeded for. Kept here rather than inline in the runner so the fixture's
+# contract is declared in one place alongside its description.
+TAMY_IDENTITY_USER_ID = "43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9"
+TAMY_IDENTITY_COOKIE_DOMAINS = ("amazon.com.mx", "amazon.com")
 
 LIVE_FIXTURE_NAMES = frozenset(LIVE_FIXTURES)
 

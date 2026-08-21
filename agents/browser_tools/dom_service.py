@@ -474,13 +474,23 @@ class DOMService:
         self.viewport_height = viewport_height
         self._session = None
         self._selector_map: Dict[int, Any] = {}
-        # Passkey (cloud-custody) state. The WebAuthn CDP session created at
-        # connect time is kept alive so a re-injected virtual authenticator
-        # persists for the whole run. _passkey_seed_counts maps credentialId ->
-        # the seeded (block-reserved) base, so we can detect at session end
-        # whether the relying party actually exercised the passkey.
-        self._webauthn_cdp = None
-        self._passkey_authenticator_id: Optional[str] = None
+        # Passkey (cloud-custody) state.
+        #
+        # Chrome scopes a CDP virtual authenticator (and WebAuthn.enable's
+        # native-UI suppression) to the TARGET it was installed on. So this state
+        # is keyed by target id, never cached as a single connect-time session:
+        # the agent follows links into new tabs, and a connect-time handle keeps
+        # reporting a healthy credential on the abandoned target while the live
+        # one is served by Chrome's real platform authenticator.
+        #
+        # _passkey_seed_counts maps credentialId -> the seeded (block-reserved)
+        # base, so we can detect at session end whether the relying party
+        # actually exercised the passkey. It is cross-target on purpose: the
+        # ceremony may happen on any target we armed.
+        self._armed_targets: set = set()
+        self._passkey_authenticator_by_target: Dict[str, str] = {}
+        self._passkey_seeded_by_target: Dict[str, set] = {}
+        self._held_passkeys_by_credential_id: Dict[str, Dict[str, Any]] = {}
         self._passkey_seed_counts: Dict[str, int] = {}
 
     async def connect(self) -> None:
@@ -522,7 +532,7 @@ class DOMService:
             # up — run them concurrently. Each swallows its own failures.
             await asyncio.gather(
                 self._inject_scrollbar_css(),
-                self._suppress_browser_overlays(),
+                self.ensure_browser_overlays_suppressed(),
                 self._inject_anti_detection(),
             )
 
@@ -613,53 +623,90 @@ class DOMService:
         command = getattr(domain, command_name)
         return await command(params=params or {}, session_id=session_id)
 
-    async def _suppress_browser_overlays(self) -> None:
-        """Suppress native browser-chrome overlays that CDP screenshots can't capture.
+    async def _live_cdp_session(self) -> Tuple[Optional[str], Any]:
+        """Resolve the agent's CURRENT focus target and a CDP session for it.
+
+        Every other CDP consumer in this class re-resolves agent_focus_target_id
+        per call; browser-process state must do the same or it strands itself on
+        whichever target happened to be focused at connect time.
+        """
+        session = self._session
+        if session is None:
+            return None, None
+        target_id = getattr(session, "agent_focus_target_id", None)
+        if not target_id:
+            return None, None
+        return target_id, await session.get_or_create_cdp_session(target_id, focus=False)
+
+    async def ensure_browser_overlays_suppressed(self) -> None:
+        """Arm native-overlay suppression and passkey state on the LIVE target.
 
         CDP's Page.captureScreenshot only captures the page content layer. Browser-level UI
         like passkey popups, permission prompts, and download bars are rendered by Chrome's
-        browser process and are invisible to CDP screenshots. This creates a mismatch: the
-        agent can't see the overlay but it blocks page interaction.
+        browser process and are invisible to CDP screenshots. Worse, while such a modal holds
+        focus the renderer receives no input at all — CDP key AND mouse events are swallowed
+        while still reporting success — so the agent can neither see it nor clear it.
 
-        Fix: use CDP domains to suppress these overlays at the source so the agent's
-        screenshots always accurately represent what's interactive on the page.
+        So suppress at the source, and keep it armed. A navigation/provider
+        reconnect can invalidate the target's virtual-authenticator id; the sync
+        below health-checks that id without disturbing a healthy environment,
+        and only re-enables/rebuilds after Chrome reports it missing.
+
+        Suppression is armed even when we hold no passkey for the site. The native
+        chooser is a dead end in a cloud browser either way — it can only offer a
+        local authenticator (ours, which would not prompt) or a cross-device QR
+        nobody can scan. With enableUI=false the ceremony rejects immediately with
+        NotAllowedError and the site falls back to password, instead of wedging the
+        agent behind a modal it cannot reach.
         """
         try:
-            target_id = self._session.agent_focus_target_id
-            if not target_id:
+            target_id, cdp_session = await self._live_cdp_session()
+            if not target_id or cdp_session is None:
                 logger.warning("⚠️ [overlay-suppress] No focused target; cannot suppress overlays")
                 return
-            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
-            session_id = cdp_session.session_id
 
-            # 1. WebAuthn: suppress native passkey/credential popup
-            #    Without this, Chrome shows a modal passkey chooser that blocks the page
-            #    but is invisible to CDP screenshots. With enableUI=false, WebAuthn requests
-            #    fail gracefully and sites fall back to password login.
-            try:
-                await self._send_cdp_command(cdp_session, "WebAuthn.enable", {"enableUI": False})
-                # Keep this session for passkey injection/readback: a virtual
-                # authenticator only lives as long as the CDP session that added
-                # it. enableUI=false is exactly right for cloud custody — the
-                # virtual authenticator auto-signs with no blocking native modal.
-                self._webauthn_cdp = cdp_session
-                logger.info("🛡️ [overlay-suppress] WebAuthn native UI disabled (passkey popups suppressed)")
-            except Exception as e:
-                logger.warning(f"⚠️ [overlay-suppress] Failed to disable WebAuthn UI: {e}")
+            await self._arm_target(target_id, cdp_session)
+        except Exception as e:
+            logger.warning(f"⚠️ [overlay-suppress] Failed to suppress browser overlays: {e}")
 
-            # 2. File chooser: intercept so native file dialog doesn't block
-            #    The agent can handle file uploads programmatically instead.
+    async def _arm_target(self, target_id: str, cdp_session: Any) -> int:
+        """Install browser-process overlay suppression + passkeys on one target.
+
+        The single place any of this is armed. Returns credentials newly seeded.
+        """
+        newly_armed = target_id not in self._armed_targets
+
+        # 1. WebAuthn: suppress the native passkey/credential popup on a new
+        # target. Do NOT reissue WebAuthn.enable on an already-healthy target:
+        # live Chrome invalidates the old virtual-authenticator id when its
+        # environment is re-enabled, which used to force a rebuild before every
+        # action and opened a race with conditional WebAuthn. Existing targets
+        # are health-checked below and re-enabled only after a concrete reset.
+        if newly_armed:
+            await self._send_cdp_command(cdp_session, "WebAuthn.enable", {"enableUI": False})
+            self._armed_targets.add(target_id)
+            logger.info(
+                "🛡️ [overlay-suppress] WebAuthn native UI disabled "
+                f"(passkey popups suppressed) target={target_id[:12]}"
+            )
+
+        # 2. File chooser: interception persists for the life of this target, so
+        # install it once. WebAuthn.enable is intentionally re-issued above at
+        # every ceremony boundary because that environment can reset in-place.
+        if newly_armed:
             try:
-                await cdp_session.cdp_client.send.Page.setInterceptFileChooserDialog(
-                    params={"enabled": True}, session_id=session_id
+                await self._send_cdp_command(
+                    cdp_session, "Page.setInterceptFileChooserDialog", {"enabled": True}
                 )
-                logger.info("🛡️ [overlay-suppress] File chooser dialog interception enabled")
+                logger.info(
+                    "🛡️ [overlay-suppress] File chooser dialog interception enabled "
+                    f"target={target_id[:12]}"
+                )
             except Exception as e:
                 logger.warning(f"⚠️ [overlay-suppress] Failed to intercept file chooser: {e}")
 
-            # Don't detach — CDP session must stay alive for WebAuthn state to persist
-        except Exception as e:
-            logger.warning(f"⚠️ [overlay-suppress] Failed to suppress browser overlays: {e}")
+        # 3. Restore every passkey we hold onto this target's authenticator.
+        return await self._sync_passkeys_onto_live_target(target_id, cdp_session)
 
     # Self-contained browser-side anti-detection script. Static spoofs only (no
     # per-user fingerprint needed) targeting the signals the backend injection
@@ -920,7 +967,7 @@ class DOMService:
             logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
     async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> int:
-        """Seed a CDP virtual authenticator with cloud-custody passkeys.
+        """Record cloud-custody passkeys and seed them onto the live target.
 
         Each passkey dict must carry a DECRYPTED PKCS#8 private key (base64),
         credentialId (base64), rpId, userHandle (base64 or None) and signCount
@@ -928,50 +975,80 @@ class DOMService:
         navigator.credentials.get() the virtual authenticator signs
         automatically — no agent click required for auto-invoked flows, and the
         agent can also click "Sign in with a passkey" for gated flows.
-        """
-        if not passkeys:
-            return 0
-        if self._webauthn_cdp is None:
-            raise RuntimeError("No WebAuthn CDP session is available for passkey injection")
 
-        if self._passkey_authenticator_id is not None:
+        An empty list is NOT a no-op: it still arms native-UI suppression on the
+        live target, which is what keeps a site whose passkey we do not hold from
+        raising an unreachable native chooser over the agent.
+        """
+        for pk in passkeys:
+            credential_id = pk.get("credentialId")
+            private_key = pk.get("privateKey")
+            rp_id = pk.get("rpId")
+            if not credential_id or not private_key or not rp_id:
+                raise RuntimeError(f"Incomplete passkey payload for relying party {rp_id or 'unknown'}")
+            self._held_passkeys_by_credential_id[credential_id] = pk
+
+        target_id, cdp_session = await self._live_cdp_session()
+        if not target_id or cdp_session is None:
+            raise RuntimeError("No focused browser target is available for passkey injection")
+        return await self._arm_target(target_id, cdp_session)
+
+    async def _sync_passkeys_onto_live_target(self, target_id: str, cdp_session: Any) -> int:
+        """Make `target_id`'s virtual authenticator hold every passkey we hold.
+
+        Chrome scopes virtual authenticators per target, so each target the agent
+        lands on needs its own authenticator seeded with the full held set.
+        Returns the number of credentials newly added to THIS target.
+        """
+        authenticator_id = self._passkey_authenticator_by_target.get(target_id)
+        seeded_ids = self._passkey_seeded_by_target.setdefault(target_id, set())
+
+        if authenticator_id is not None:
             try:
                 result = await self._send_cdp_command(
-                    self._webauthn_cdp,
+                    cdp_session,
                     "WebAuthn.getCredentials",
-                    {"authenticatorId": self._passkey_authenticator_id},
+                    {"authenticatorId": authenticator_id},
                 )
                 observed_ids = {
                     credential.get("credentialId")
                     for credential in result.get("credentials", []) or []
                     if credential.get("credentialId")
                 }
-                if not set(self._passkey_seed_counts).issubset(observed_ids):
+                if not seeded_ids.issubset(observed_ids):
                     logger.warning(
                         "⚠️ [passkey] virtual authenticator lost seeded credentials; rebuilding it"
                     )
-                    self._passkey_authenticator_id = None
-                    self._passkey_seed_counts.clear()
+                    authenticator_id = None
+                    seeded_ids.clear()
             except Exception as e:
-                if "virtual authenticator environment has not been enabled" not in str(e).lower():
-                    raise RuntimeError("Failed to verify the browser passkey authenticator") from e
-                logger.warning("⚠️ [passkey] WebAuthn environment was reset; rebuilding it")
-                self._passkey_authenticator_id = None
-                self._passkey_seed_counts.clear()
-
-        if self._passkey_authenticator_id is None:
-            try:
-                # Provider/browser startup can replace or reset the target after
-                # connect-time overlay suppression. Own the WebAuthn precondition
-                # at the operation that requires it instead of relying on that
-                # earlier best-effort side effect to remain live.
-                await self._send_cdp_command(
-                    self._webauthn_cdp,
-                    "WebAuthn.enable",
-                    {"enableUI": False},
+                error = str(e).lower()
+                environment_was_reset = (
+                    "virtual authenticator environment has not been enabled" in error
+                    or "could not find a virtual authenticator matching the id" in error
                 )
+                if not environment_was_reset:
+                    raise RuntimeError("Failed to verify the browser passkey authenticator") from e
+                logger.warning(
+                    "⚠️ [passkey] WebAuthn environment/authenticator was reset; rebuilding it"
+                )
+                authenticator_id = None
+                seeded_ids.clear()
+
+        if authenticator_id is None:
+            try:
+                # A new target was enabled by _arm_target. A reset target gets
+                # here after getCredentials returned the exact missing-
+                # environment/authenticator error, so restore suppression before
+                # creating its replacement authenticator.
+                if target_id in self._passkey_authenticator_by_target:
+                    await self._send_cdp_command(
+                        cdp_session,
+                        "WebAuthn.enable",
+                        {"enableUI": False},
+                    )
                 result = await self._send_cdp_command(
-                    self._webauthn_cdp,
+                    cdp_session,
                     "WebAuthn.addVirtualAuthenticator",
                     {
                         "options": {
@@ -984,26 +1061,23 @@ class DOMService:
                         }
                     },
                 )
-                self._passkey_authenticator_id = result.get("authenticatorId")
+                authenticator_id = result.get("authenticatorId")
             except Exception as e:
                 raise RuntimeError("Failed to create the browser passkey authenticator") from e
-            if not self._passkey_authenticator_id:
+            if not authenticator_id:
                 raise RuntimeError("Browser passkey authenticator did not return an id")
+        self._passkey_authenticator_by_target[target_id] = authenticator_id
 
         seeded = 0
-        for pk in passkeys:
-            credential_id = pk.get("credentialId")
-            private_key = pk.get("privateKey")
-            rp_id = pk.get("rpId")
-            if not credential_id or not private_key or not rp_id:
-                raise RuntimeError(f"Incomplete passkey payload for relying party {rp_id or 'unknown'}")
-            if credential_id in self._passkey_seed_counts:
+        for credential_id, pk in self._held_passkeys_by_credential_id.items():
+            if credential_id in seeded_ids:
                 continue
+            sign_count = int(pk.get("signCount") or 0)
             credential: Dict[str, Any] = {
                 "credentialId": credential_id,
-                "privateKey": private_key,
-                "rpId": rp_id,
-                "signCount": int(pk.get("signCount") or 0),
+                "privateKey": pk.get("privateKey"),
+                "rpId": pk.get("rpId"),
+                "signCount": sign_count,
                 "isResidentCredential": True,
             }
             user_handle = pk.get("userHandle")
@@ -1011,24 +1085,28 @@ class DOMService:
                 credential["userHandle"] = user_handle
             try:
                 await self._send_cdp_command(
-                    self._webauthn_cdp,
+                    cdp_session,
                     "WebAuthn.addCredential",
-                    {"authenticatorId": self._passkey_authenticator_id, "credential": credential},
+                    {"authenticatorId": authenticator_id, "credential": credential},
                 )
-                self._passkey_seed_counts[credential_id] = int(pk.get("signCount") or 0)
+                seeded_ids.add(credential_id)
+                self._passkey_seed_counts.setdefault(credential_id, sign_count)
                 seeded += 1
             except Exception as e:
-                raise RuntimeError(f"Failed to inject passkey for {rp_id}") from e
-        logger.info(f"🔑 [passkey] seeded {seeded} passkey credential(s) on virtual authenticator for the session")
+                raise RuntimeError(f"Failed to inject passkey for {pk.get('rpId')}") from e
+
+        logger.info(
+            f"🔑 [passkey] seeded {seeded} passkey credential(s) on virtual authenticator "
+            f"for target={target_id[:12]}"
+        )
         if seeded:
-            counts = await self.read_passkey_signcounts()
-            expected_ids = set(self._passkey_seed_counts)
+            counts = await self._read_signcounts_for_target(target_id, cdp_session)
             observed_ids = set(counts)
-            missing = expected_ids - observed_ids
+            missing = seeded_ids - observed_ids
             logger.info(
                 "🔑 [passkey] virtual authenticator readback: "
-                f"expected_count={len(expected_ids)} observed_count={len(observed_ids)} "
-                f"missing_count={len(missing)}"
+                f"expected_count={len(seeded_ids)} observed_count={len(observed_ids)} "
+                f"missing_count={len(missing)} target={target_id[:12]}"
             )
             if missing:
                 raise RuntimeError(
@@ -1036,20 +1114,15 @@ class DOMService:
                 )
         return seeded
 
-    async def read_passkey_signcounts(self) -> Dict[str, int]:
-        """Return {credentialId: signCount} for the seeded authenticator.
-
-        Compared against the seeded base, a higher value means the relying party
-        actually invoked our passkey — the signal we use to record a passkey
-        credential_ref so post-run propagation can mark success/failure.
-        """
-        if self._webauthn_cdp is None or self._passkey_authenticator_id is None:
+    async def _read_signcounts_for_target(self, target_id: str, cdp_session: Any) -> Dict[str, int]:
+        authenticator_id = self._passkey_authenticator_by_target.get(target_id)
+        if authenticator_id is None:
             return {}
         try:
             result = await self._send_cdp_command(
-                self._webauthn_cdp,
+                cdp_session,
                 "WebAuthn.getCredentials",
-                {"authenticatorId": self._passkey_authenticator_id},
+                {"authenticatorId": authenticator_id},
             )
         except Exception as e:
             logger.warning(f"⚠️ [passkey] getCredentials failed: {e}")
@@ -1059,6 +1132,29 @@ class DOMService:
             cid = cred.get("credentialId")
             if cid is not None:
                 counts[cid] = int(cred.get("signCount") or 0)
+        return counts
+
+    async def read_passkey_signcounts(self) -> Dict[str, int]:
+        """Return {credentialId: highest observed signCount} across armed targets.
+
+        Compared against the seeded base, a higher value means the relying party
+        actually invoked our passkey — the signal we use to record a passkey
+        credential_ref so post-run propagation can mark success/failure. The
+        ceremony can happen on any target we armed, so take the max across all of
+        them rather than trusting a single handle.
+        """
+        session = self._session
+        if session is None or not self._passkey_authenticator_by_target:
+            return {}
+        counts: Dict[str, int] = {}
+        for target_id in list(self._passkey_authenticator_by_target):
+            try:
+                cdp_session = await session.get_or_create_cdp_session(target_id, focus=False)
+            except Exception:
+                continue
+            for cid, value in (await self._read_signcounts_for_target(target_id, cdp_session)).items():
+                if value > counts.get(cid, -1):
+                    counts[cid] = value
         return counts
 
     async def get_used_passkey_credential_ids(self) -> List[str]:

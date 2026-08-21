@@ -4821,5 +4821,78 @@
     "source": [
       "prod SMS thread +19729777432 2026-07-27T20:50Z; local bench run 2026-07-28 where the supervisor reported the closure and spawned an ordering agent anyway"
     ]
+  },
+  {
+    "name": "browser-agent-amazon-mx-buy-under-5-usd",
+    "title": "Amazon Mexico Sub-$5 Purchase (Tamara)",
+    "description": "Replays prod agent e36c8759 verbatim: an open-ended sub-$5 Amazon purchase for the Mexico-based user, which routed to amazon.com.mx and wedged behind Chrome's native 'No passkeys available' modal on /ap/signin.",
+    "prompt": "Buy me something for < 5$ from amazon, u pick",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "purchase",
+      "passkey"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_browser_provider": "kernel",
+    "browser_auth_realm": "amazon.com.mx",
+    "start_phase": "plan",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live-tamy-identity"
+      ],
+      "services": [
+        "amazon.com.mx",
+        "kernel"
+      ],
+      "secrets": [
+        "amazon_passkey"
+      ],
+      "live_targets": [
+        "https://www.amazon.com.mx"
+      ],
+      "context_notes": "Runs as Tamy's Mexico-based production identity. The live-tamy-identity fixture is a complete live overlay: it seeds her User row and refreshes her current browser context, profiles, cookies/storage, passwords, passkeys, CookieBundles, and Steel session markers for amazon.com.mx and amazon.com, while also refreshing shared compute tokens. The base image predates her account, so without this fixture browser-session init fails on AgentIdentity_userId_fkey before an agent exists. The regression under test is browser-process UI: Chrome can raise a native passkey chooser even while target-scoped virtual-authenticator readback is healthy, so the harness must retain a provider-level input path that can dismiss it.",
+      "live_cookie_domains": [
+        "amazon.com.mx",
+        "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com.mx",
+        "amazon.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "amazon-mx-purchase-not-wedged-on-native-ui",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The browser agent reached an authenticated amazon.com.mx state",
+          "The run did not end in request_user_assistance_for_authentication",
+          "The transcript shows no repeated no-op retyping of the password on /ap/signin",
+          "An order under US$5 was placed, or a specific non-authentication blocker is reported"
+        ],
+        "judge_prompt": "You are grading a browser agent that was asked to buy any item under US$5 from Amazon for a Mexico-based user. The known regression is that the agent reaches https://www.amazon.com.mx/ap/signin, triggers a WebAuthn ceremony, and wedges behind Chrome's native 'No passkeys available' modal: it then repeats clicks, Enter presses and password retypes that never reach the page, and finally emits request_user_assistance_for_authentication.\n\nPASS only if BOTH hold:\n1. The agent got past Amazon sign-in — the transcript shows an authenticated amazon.com.mx state (account greeting, cart, or checkout), OR the passkey/password sign-in visibly succeeded.\n2. The run did NOT end by asking the user for authentication assistance, and does NOT contain a stretch of three or more consecutive interactions with the sign-in form that produce no page-state change.\n\nIf sign-in succeeded but the order was blocked for an unrelated, clearly reported reason (item unavailable, price above US$5, payment declined, shipping restriction), still PASS and say so. FAIL if the agent never authenticated, or wedged on the native passkey modal, or asked the user to sign in."
+      }
+    ],
+    "source": [
+      "agent e36c8759-bc6b-473a-a817-5b9c3a804acf",
+      "rca:2026-08-19-browser-native-ui-observable-but-not-actionable"
+    ],
+    "status": "ready",
+    "bench": "rose-bench",
+    "group": "rose-bench",
+    "runner": "agent"
   }
 ]

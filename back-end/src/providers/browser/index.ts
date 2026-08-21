@@ -22,6 +22,7 @@ import {
   getKernelSessionHealth,
   getKernelCaptchaTelemetry,
   listKernelSessionFiles,
+  pressKernelKeys,
   readKernelSessionFile,
   resizeKernelViewport,
   resumeKernelSession,
@@ -406,6 +407,30 @@ export async function captureScreenshot(sessionId: string): Promise<{
       return { provider, image: Buffer.from(result.base64_image, 'base64') };
     }
   );
+}
+
+export async function pressSessionKeys(
+  sessionId: string,
+  keys: string[]
+): Promise<{ provider: BrowserProviderName; supported: boolean; pressed: boolean }> {
+  return pressSessionKeysUsingDependencies(sessionId, keys, {
+    providerForSession,
+    pressKernelKeys,
+  });
+}
+
+export async function pressSessionKeysUsingDependencies(
+  sessionId: string,
+  keys: string[],
+  dependencies: {
+    providerForSession: (sessionId: string) => Promise<BrowserProviderName>;
+    pressKernelKeys: (sessionId: string, keys: string[]) => Promise<void>;
+  }
+): Promise<{ provider: BrowserProviderName; supported: boolean; pressed: boolean }> {
+  const provider = await dependencies.providerForSession(sessionId);
+  if (provider !== 'kernel') return { provider, supported: false, pressed: false };
+  await dependencies.pressKernelKeys(sessionId, keys);
+  return { provider, supported: true, pressed: true };
 }
 
 export async function closeAllActiveSessions(): Promise<number> {

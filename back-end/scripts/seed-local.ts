@@ -88,7 +88,16 @@ if (!LOCAL_URL) {
   process.exit(1);
 }
 
-const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const DEFAULT_DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+// SEED_LOCAL_USER_ID retargets the whole prod→local sync at another REAL
+// production identity, the same way SEED_COOKIE_DOMAINS scopes it to a subset
+// of domains. Benchmarks that must run as a specific person (a non-admin payer,
+// a different storefront's account) need that person's rows in the isolated DB;
+// without this every sync mode silently resolved to the dev user, so a task
+// launched with BENCHMARK_RUN_USER_ID hit
+// `Foreign key constraint violated: AgentIdentity_userId_fkey` at browser-session
+// init because the identity it ran as had no local User row at all.
+const SEED_USER_ID = process.env.SEED_LOCAL_USER_ID?.trim() || DEFAULT_DEV_USER_ID;
 // Merge production browser auth state into local by each table's natural
 // identity. Matching rows are refreshed and missing production rows are added;
 // local-only rows are deliberately preserved by normal/full sync. The explicit
@@ -182,7 +191,7 @@ const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
-  DEV_USER_ID,
+  SEED_USER_ID,
   SEED_COOKIE_DOMAINS
 );
 
@@ -208,7 +217,7 @@ async function syncJsonbOriginTable(table: JsonbOriginTable): Promise<number> {
   return streamJsonbOrigins({
     remoteUrl: REMOTE_URL!,
     localUrl: LOCAL_URL!,
-    userId: DEV_USER_ID,
+    userId: SEED_USER_ID,
     domains: SEED_COOKIE_DOMAINS,
     table,
   });
@@ -354,11 +363,11 @@ const PROD_INTEGRATION_COLUMNS = {
 async function syncIntegrations(): Promise<number> {
   // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
   const userIntegrations = await remote.integration.findMany({
-    where: { userId: DEV_USER_ID },
+    where: { userId: SEED_USER_ID },
     select: PROD_INTEGRATION_COLUMNS,
   });
   const poolIntegrations = await remote.integration.findMany({
-    where: { poolingEnabled: true, userId: { not: DEV_USER_ID } },
+    where: { poolingEnabled: true, userId: { not: SEED_USER_ID } },
     select: PROD_INTEGRATION_COLUMNS,
   });
   const all = [...userIntegrations, ...poolIntegrations];
@@ -406,7 +415,7 @@ async function poolRequiredDevComputeTokensForSyntheticUsers(): Promise<number> 
   );
   const result = await local.integration.updateMany({
     where: {
-      userId: DEV_USER_ID,
+      userId: SEED_USER_ID,
       name: { in: requiredNames },
       status: 'CONNECTED',
     },
@@ -432,7 +441,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
       // production has not migrated yet; an implicit SELECT * would make the
       // auth-state sync fail before the migration can be exercised locally.
       const ctx = await remote.browserContext.findUnique({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: {
           id: true,
           userId: true,
@@ -444,7 +453,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
       if (!ctx) return 0;
       const { id, ...rest } = ctx;
       await local.browserContext.upsert({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         create: ctx as any,
         update: rest as any,
       });
@@ -461,11 +470,11 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
     'Browser Provider Profiles',
     async () => {
       const remoteContext = await remote.browserContext.findUnique({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: { id: true },
       });
       const localContext = await local.browserContext.findUnique({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: { id: true },
       });
       if (!remoteContext || !localContext) return 0;
@@ -503,7 +512,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
       const synced = await streamCookies({
         remoteUrl: REMOTE_URL!,
         localUrl: LOCAL_URL!,
-        userId: DEV_USER_ID,
+        userId: SEED_USER_ID,
         domains: SEED_COOKIE_DOMAINS,
       });
       if (SEED_COOKIE_DOMAINS.length > 0) {
@@ -628,7 +637,7 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   });
 
   const eligible = integrations.filter((integration) => {
-    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
+    const isAvailableToBench = integration.userId === SEED_USER_ID || integration.poolingEnabled;
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
   });
 
@@ -668,7 +677,7 @@ async function inspectClaudeCodeIntegrations(): Promise<ClaudeCodeAvailability> 
   });
 
   const eligible = integrations.filter((integration) => {
-    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
+    const isAvailableToBench = integration.userId === SEED_USER_ID || integration.poolingEnabled;
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
   });
 
@@ -837,14 +846,14 @@ async function syncPasskeysOnly(
       'Stale Local Passkeys',
       async () => {
         const remoteKeys = await remote.passkeyCredential.findMany({
-          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
+          where: passkeySyncWhere(SEED_USER_ID, SEED_COOKIE_DOMAINS),
           select: { rpId: true, credentialId: true },
         });
         const liveKeys = new Set(
           remoteKeys.map(({ rpId, credentialId }) => `${rpId}\u0000${credentialId}`)
         );
         const localKeys = await local.passkeyCredential.findMany({
-          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
+          where: passkeySyncWhere(SEED_USER_ID, SEED_COOKIE_DOMAINS),
           select: { id: true, rpId: true, credentialId: true },
         });
         const staleIds = localKeys
@@ -924,11 +933,32 @@ function throwBrowserAuthSyncFailures(failures: Error[]): void {
   );
 }
 
+/**
+ * Guarantee the identity being seeded exists locally before any user-scoped row
+ * is written.
+ *
+ * Every browser-auth table (PasskeyCredential, BrowserPassword, CookieBundle,
+ * AgentIdentity, …) carries a userId FK. The full sync happens to create the
+ * User first, but the scoped `--passkeys-only` / `--credentials-only` modes did
+ * not, so they only ever worked by accident: the dev user was already present in
+ * the base image. Any other SEED_LOCAL_USER_ID hit a FK violation — at seed time
+ * for the passkey rows, or later at `POST /api/browser-session/init`.
+ */
+async function ensureSeedUserExists(): Promise<void> {
+  const synced = await syncUserRecord(remote.user, local.user, SEED_USER_ID);
+  if (synced === 0) {
+    throw new Error(
+      `User ${SEED_USER_ID} not found in the remote database; cannot seed credentials for an identity that does not exist upstream`
+    );
+  }
+  console.log(`  ✅ Identity ${SEED_USER_ID} present locally`);
+}
+
 async function sync() {
   console.log('🔄 Syncing from production database...');
   console.log(`   Remote: ${REMOTE_URL.replace(/:[^:@]+@/, ':***@')}`);
   console.log(`   Local:  ${process.env.DATABASE_URL?.replace(/:[^:@]+@/, ':***@') ?? 'default'}`);
-  console.log(`   User:   ${DEV_USER_ID}\n`);
+  console.log(`   User:   ${SEED_USER_ID}\n`);
 
   // Verify remote connectivity
   await remote.$queryRaw`SELECT 1`;
@@ -943,12 +973,14 @@ async function sync() {
     console.log(
       '  ℹ️  Syncing authoritative passkeys only; browser state and passwords are excluded'
     );
+    await ensureSeedUserExists();
     await syncPasskeysOnly(undefined, { authoritative: true });
     console.log('\n🔄 Passkey sync complete.');
     return;
   }
 
   if (CREDENTIALS_ONLY) {
+    await ensureSeedUserExists();
     console.log(
       SEED_COOKIE_DOMAINS.length > 0
         ? `  ℹ️  Refreshing production browser auth for ${SEED_COOKIE_DOMAINS.join(', ')} while preserving local-only rows`
@@ -974,24 +1006,24 @@ async function sync() {
 
   // ── User ──
   await syncTable('User', async () => {
-    const count = await syncUserRecord(remote.user, local.user, DEV_USER_ID);
-    if (count === 0) throw new Error(`User ${DEV_USER_ID} not found in remote`);
+    const count = await syncUserRecord(remote.user, local.user, SEED_USER_ID);
+    if (count === 0) throw new Error(`User ${SEED_USER_ID} not found in remote`);
     return count;
   });
 
   // ── Credits ──
   await syncTable('Credits', async () => {
-    const credits = await remote.credit.findMany({ where: { userId: DEV_USER_ID } });
+    const credits = await remote.credit.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.credit, credits);
   });
 
   // ── Subscription ──
   await syncTable('Subscription', async () => {
-    const sub = await remote.subscription.findUnique({ where: { userId: DEV_USER_ID } });
+    const sub = await remote.subscription.findUnique({ where: { userId: SEED_USER_ID } });
     if (!sub) return 0;
     const { id, ...rest } = sub;
     await local.subscription.upsert({
-      where: { userId: DEV_USER_ID },
+      where: { userId: SEED_USER_ID },
       create: sub as any,
       update: rest as any,
     });
@@ -1004,7 +1036,7 @@ async function sync() {
   // ── Email Integration Credentials ──
   await syncTable('Email Credentials', async () => {
     const creds = await remote.emailIntegrationCredential.findMany({
-      where: { userId: DEV_USER_ID },
+      where: { userId: SEED_USER_ID },
     });
     return upsertById(local.emailIntegrationCredential, creds);
   });
@@ -1016,7 +1048,7 @@ async function sync() {
     let peopleSynced = 0;
     for (let skip = 0; ; skip += PERSON_PAGE_SIZE) {
       const page = await remote.person.findMany({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         orderBy: { id: 'asc' },
         skip,
         take: PERSON_PAGE_SIZE,
@@ -1033,7 +1065,7 @@ async function sync() {
   await syncTable('Message Records', async () => {
     const personIds = (
       await remote.person.findMany({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: { id: true },
       })
     ).map((p) => p.id);
@@ -1086,7 +1118,7 @@ async function sync() {
 
   // ── Rose API Keys ──
   await syncTable('Rose API Keys', async () => {
-    const keys = await remote.roseApiKey.findMany({ where: { userId: DEV_USER_ID } });
+    const keys = await remote.roseApiKey.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.roseApiKey, keys);
   });
 
@@ -1096,23 +1128,23 @@ async function sync() {
 
   // ── Goal Blueprints ──
   await syncTable('Goal Blueprints', async () => {
-    const blueprints = await remote.goalBlueprint.findMany({ where: { userId: DEV_USER_ID } });
+    const blueprints = await remote.goalBlueprint.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.goalBlueprint, blueprints);
   });
 
   // ── GitHub Repo Access ──
   await syncTable('GitHub Repos', async () => {
-    const repos = await remote.githubRepoAccess.findMany({ where: { userId: DEV_USER_ID } });
+    const repos = await remote.githubRepoAccess.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.githubRepoAccess, repos);
   });
 
   // ── SMS Session ──
   await syncTable('SMS Session', async () => {
-    const session = await remote.smsSession.findUnique({ where: { userId: DEV_USER_ID } });
+    const session = await remote.smsSession.findUnique({ where: { userId: SEED_USER_ID } });
     if (!session) return 0;
     const { id, ...rest } = session;
     await local.smsSession.upsert({
-      where: { userId: DEV_USER_ID },
+      where: { userId: SEED_USER_ID },
       create: session as any,
       update: rest as any,
     });
@@ -1121,7 +1153,7 @@ async function sync() {
 
   // ── Feedback ──
   await syncTable('Feedback', async () => {
-    const feedback = await remote.feedback.findMany({ where: { userId: DEV_USER_ID } });
+    const feedback = await remote.feedback.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.feedback, feedback);
   });
 
