@@ -36,6 +36,7 @@ with ``--test browser-cutover`` / ``--test explore-cutover`` or ``--all``.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -293,8 +294,12 @@ async def _run_cutover_case(goal: str, tool_name: str, timeout: int) -> tuple[bo
             f"{generation_before} -> {generation_after}",
         )
     finally:
-        if agent_id:
+        # E2E_KEEP_AGENT=1 preserves the run so the trajectory stays viewable in
+        # the FE. Without it the agent is deleted here and its link 404s.
+        if agent_id and os.environ.get("E2E_KEEP_AGENT") != "1":
             await cleanup_agent(agent_id)
+        elif agent_id:
+            print(f"    [kept for inspection] agent_id={agent_id}")
 
 
 def _message_epoch(message: Dict[str, Any]) -> float:
