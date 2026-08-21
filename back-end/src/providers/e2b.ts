@@ -258,10 +258,10 @@ export const OPENROUTER_ANTHROPIC_COMPAT_BASE_URL = 'https://openrouter.ai/api';
  * When the host `ANTHROPIC_BASE_URL` points at OpenRouter, use `OPENROUTER_API_KEY`
  * if no dedicated Claude Code key is set (fleet guests already carry OpenRouter).
  *
- * `preferOpenRouterGateway` covers the fleet Fast Mode path: guests have
- * `OPENROUTER_API_KEY` in BACKEND_ENV but often lack `ANTHROPIC_BASE_URL` and may
- * not have the shared Anthropic key on cooldown, so the cooldown-only fallback
- * never fires — Fast Mode then tees to api.anthropic.com and 403s (2026-08-21).
+ * When no host Anthropic base is set, prefer `OPENROUTER_API_KEY` over the bare
+ * shared Anthropic key so Fast Mode cannot claim the session on fleet guests
+ * that lack `ANTHROPIC_BASE_URL` / cooldown (2026-08-21).
+ * `preferOpenRouterGateway` remains as an explicit signal from the Fast Mode path.
  */
 export function resolveClaudeCodeSandboxApiKey(
   claudeCodeAnthropicApiKey: string | undefined,
@@ -293,11 +293,12 @@ export function resolveClaudeCodeSandboxApiKey(
   if (hostBase) {
     return { apiKey: shared, baseUrl: hostBase };
   }
-  // Shared Anthropic org is on its out-of-credits cooldown, OR Fast Mode would
-  // otherwise claim the session: fall through to the funded OpenRouter
-  // Anthropic-compatible gateway so Claude Code stays runnable on fleet guests
-  // that already have OPENROUTER_API_KEY (no secret rotation).
-  if (openrouter && (options?.sharedKeyOnCooldown || options?.preferOpenRouterGateway)) {
+  // No explicit Anthropic base: prefer funded OpenRouter whenever configured.
+  // Fleet guests decode a staged BACKEND_ENV_B64 that usually has OPENROUTER_API_KEY
+  // but historically lacked ANTHROPIC_BASE_URL / cooldown — Fast Mode then claimed
+  // the session (403 / stale 0-interaction cache). Always preferring OpenRouter
+  // here keeps Claude Code off the tee-proxy without requiring secret refresh.
+  if (openrouter) {
     return { apiKey: openrouter, baseUrl: openrouterBase };
   }
   return { apiKey: shared, baseUrl: undefined };

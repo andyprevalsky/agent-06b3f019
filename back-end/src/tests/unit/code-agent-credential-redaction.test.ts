@@ -171,21 +171,20 @@ function main(): void {
     }),
     { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
   );
-  // Fleet Fast Mode path: OpenRouter present, no host base, shared key not on
-  // cooldown — still prefer OpenRouter so the tee-proxy cannot 403.
+  // Fleet Fast Mode path: OpenRouter present, no host base → always prefer
+  // OpenRouter (even without cooldown / preferOpenRouterGateway).
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      openrouterApiKey: 'sk-or-gateway',
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
   assert.deepEqual(
     resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
       openrouterApiKey: 'sk-or-gateway',
       preferOpenRouterGateway: true,
     }),
     { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
-  );
-  // Without prefer/cooldown, bare shared Anthropic remains (local non-Fast Mode).
-  assert.deepEqual(
-    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
-      openrouterApiKey: 'sk-or-gateway',
-    }),
-    { apiKey: 'sk-ant-shared', baseUrl: undefined }
   );
   // Dedicated OpenRouter key without ANTHROPIC_BASE_URL still gets OpenRouter base.
   assert.deepEqual(
