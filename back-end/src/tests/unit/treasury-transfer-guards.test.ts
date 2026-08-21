@@ -462,10 +462,162 @@ async function testCoinbaseGuards(): Promise<void> {
   });
 }
 
+/**
+ * Regressions for the money-safety defects found in code review.
+ *
+ * Each one is a path where the provider layer either loses the `possiblySent` contract (and so
+ * invites a double-send) or reports "not found" for a record that exists on a later page (and so
+ * spends real money against a healthy balance).
+ */
+async function testReviewRegressions(): Promise<void> {
+  console.log('\nReview regressions');
+
+  await check('a non-JSON Brex body still carries possiblySent on POST', async () => {
+    await withFetch(
+      (url, init) => {
+        if (url.includes('/v1/vendors')) return json(vendorsWith('DOMESTIC_WIRE'));
+        if ((init?.method ?? 'GET') === 'POST') {
+          // Gateway HTML, the classic 502/504 body. Previously threw a bare SyntaxError, which has
+          // no `possiblySent`, so the caller released the settlement window on a wire Brex may
+          // have accepted and the next tick could wire again on top of it.
+          return new Response('<html><body>502 Bad Gateway</body></html>', {
+            status: 502,
+            headers: { 'Content-Type': 'text/html' },
+          });
+        }
+        return json(CASH_ACCOUNTS);
+      },
+      async () => {
+        const brex = createBrexTreasury(BREX_CONFIG);
+        await assert.rejects(
+          () => brex.transferToCoinbase({ cents: 1000, idempotencyKey: 'k', description: 't' }),
+          (error: unknown) =>
+            error instanceof Error &&
+            (error as { possiblySent?: boolean }).possiblySent === true &&
+            (error as { code?: string }).code === 'brex_unparseable_response'
+        );
+      }
+    );
+  });
+
+  await check('a configured originating account must exist and be ACTIVE', async () => {
+    await withFetch(
+      (url) =>
+        url.includes('/v1/vendors') ? json(vendorsWith('DOMESTIC_WIRE')) : json(CASH_ACCOUNTS),
+      async () => {
+        const brex = createBrexTreasury({ ...BREX_CONFIG, originatingAccountId: 'dpacc_ghost' });
+        await assert.rejects(
+          () => brex.transferToCoinbase({ cents: 1000, idempotencyKey: 'k', description: 't' }),
+          (error: unknown) =>
+            error instanceof Error &&
+            (error as { code?: string }).code === 'brex_originating_account_not_found'
+        );
+      }
+    );
+  });
+
+  await check('a configured originating account is still funds-checked', async () => {
+    await withFetch(
+      (url) =>
+        url.includes('/v1/vendors') ? json(vendorsWith('DOMESTIC_WIRE')) : json(CASH_ACCOUNTS),
+      async () => {
+        // dpacc_idle is ACTIVE but holds $0 — an overdraft must fail here, not at Brex.
+        const brex = createBrexTreasury({ ...BREX_CONFIG, originatingAccountId: 'dpacc_idle' });
+        await assert.rejects(
+          () => brex.transferToCoinbase({ cents: 1000, idempotencyKey: 'k', description: 't' }),
+          (error: unknown) =>
+            error instanceof Error &&
+            (error as { code?: string }).code === 'brex_insufficient_funds'
+        );
+      }
+    );
+  });
+
+  await check('Brex follows the vendor cursor to an instrument on a later page', async () => {
+    let vendorCalls = 0;
+    await withFetch(
+      (url) => {
+        if (url.includes('/v1/vendors')) {
+          vendorCalls += 1;
+          // Page 1 holds an unrelated instrument; the configured one is only on page 2.
+          return url.includes('cursor=')
+            ? json({
+                items: [
+                  {
+                    payment_accounts: [
+                      { details: { type: 'DOMESTIC_WIRE', payment_instrument_id: 'bkcp_test' } },
+                    ],
+                  },
+                ],
+              })
+            : json({
+                items: [
+                  {
+                    payment_accounts: [
+                      { details: { type: 'ACH', payment_instrument_id: 'bkcp_other' } },
+                    ],
+                  },
+                ],
+                next_cursor: 'page2',
+              });
+        }
+        return json(CASH_ACCOUNTS);
+      },
+      async () => {
+        const brex = createBrexTreasury(BREX_CONFIG);
+        assert.strictEqual(await brex.getCounterpartyRail(), 'DOMESTIC_WIRE');
+        assert.strictEqual(vendorCalls, 2, 'must have followed the cursor to page 2');
+      }
+    );
+  });
+
+  await check('Coinbase follows next_uri to a USDC wallet on a later page', async () => {
+    let accountCalls = 0;
+    await withFetch(
+      (url) => {
+        accountCalls += 1;
+        // A USDC wallet missed on page 1 reads as $0, which drives a real fiat wire against a
+        // float that is actually healthy — the worst version of this bug.
+        return url.includes('page2')
+          ? json(USDC_ACCOUNTS)
+          : json({
+              data: [{ id: 'acct_btc', currency: { code: 'BTC' }, balance: { amount: '1.0' } }],
+              pagination: { next_uri: '/v2/accounts?limit=100&page2=1' },
+            });
+      },
+      async () => {
+        const treasury = createCoinbaseTreasury(COINBASE_CONFIG);
+        assert.strictEqual(await treasury.getUsdcBalanceCents(), 50_000);
+        assert.strictEqual(accountCalls, 2, 'must have followed next_uri to page 2');
+      }
+    );
+  });
+
+  await check('a repeated Coinbase cursor terminates instead of looping forever', async () => {
+    let calls = 0;
+    await withFetch(
+      () => {
+        calls += 1;
+        return json({
+          data: [],
+          // Same cursor every time: a buggy provider must not hang the rail.
+          pagination: { next_uri: '/v2/accounts?limit=100&same=1' },
+        });
+      },
+      async () => {
+        const treasury = createCoinbaseTreasury(COINBASE_CONFIG);
+        assert.strictEqual(await treasury.getUsdcBalanceCents(), 0);
+        assert.ok(calls <= 3, `expected the seen-set to stop the loop quickly, got ${calls} calls`);
+      }
+    );
+  });
+}
+
 async function main(): Promise<void> {
   console.log('Treasury transfer guards (Brex wire + Coinbase USDC send)');
   await testBrexRailGuards();
   await testCoinbaseGuards();
+  await testReviewRegressions();
   if (failures.length > 0) {
     console.error(`\n${failures.length} test(s) FAILED:\n  - ${failures.join('\n  - ')}`);
     process.exit(1);
