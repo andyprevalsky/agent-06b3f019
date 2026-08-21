@@ -19,7 +19,15 @@ const MAX_RATE_LIMIT_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 65_000;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
-const BENCHMARK_CARDHOLDER_EMAIL = 'agentcard-benchmark@roselabs.ai';
+/**
+ * Prefer the already-KYC'd Andy cardholder on the live org, then the dedicated
+ * sandbox benchmark cardholder (also verified). Never invent a new cardholder
+ * or fall into onboarding when either of these exists for the OAuth org.
+ */
+export const BENCHMARK_CARDHOLDER_EMAILS = [
+  'andy@roselabs.ai',
+  'agentcard-benchmark@roselabs.ai',
+] as const;
 
 export interface AgentCardSandboxFloat {
   balanceCents: number;
@@ -98,10 +106,12 @@ export async function resolveBenchmarkCardholderId(
     }
   }
 
-  const byEmail = cardholders.find(
-    (cardholder) => cardholder.email?.toLowerCase() === BENCHMARK_CARDHOLDER_EMAIL
-  );
-  if (byEmail !== undefined) return byEmail.id;
+  for (const email of BENCHMARK_CARDHOLDER_EMAILS) {
+    const byEmail = cardholders.find(
+      (cardholder) => cardholder.email?.toLowerCase() === email
+    );
+    if (byEmail !== undefined) return byEmail.id;
+  }
   return cardholders[0].id;
 }
 

@@ -1,6 +1,9 @@
 import { PrismaClient, IntegrationStatus, IntegrationType } from '@prisma/client';
 import dotenv from 'dotenv';
-import { resolveBenchmarkCardholderId } from '../src/providers/agentcard/benchmark-float';
+import {
+  ensureBenchmarkOrgCardholder,
+  resolveBenchmarkCardholderId,
+} from '../src/providers/agentcard/benchmark-float';
 
 dotenv.config();
 
@@ -131,7 +134,9 @@ async function apply(): Promise<Record<string, unknown>> {
 
   let agentcardOrgCardholderId: string | null = null;
   if (userId === ADMIN_SUBSCRIPTION_BYPASS_USER_ID) {
+    // Prefer andy@roselabs.ai (live KYC-verified) or agentcard-benchmark@ (sandbox KYC).
     agentcardOrgCardholderId = await resolveBenchmarkCardholderId();
+    await ensureBenchmarkOrgCardholder(agentcardOrgCardholderId);
     await seedOrgManagedAgentCardForUser(userId, agentcardOrgCardholderId);
   }
 

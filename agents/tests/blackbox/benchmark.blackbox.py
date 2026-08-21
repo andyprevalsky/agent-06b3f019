@@ -1250,23 +1250,26 @@ def test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard():
     Observed 2026-08-20: `gate-subscription-card-mint-admin-bypass` reached
     `issueAdminCompanyCard` (ADMIN_USER_IDS_EXTRA worked) then AgentCardRoutingProvider threw
     `cardholder_onboarding_required` because the gate fixture left zero integrations for the
-    synthetic admin. The fixture must re-seed an org-managed agentcard row after cleanup.
+    synthetic admin. The fixture must re-seed an org-managed agentcard row after cleanup,
+    using a KYC-ready cardholder (prefer andy@roselabs.ai, else agentcard-benchmark@).
     """
     from pathlib import Path
 
     from benchmarks.run_benchmark import ADMIN_SUBSCRIPTION_BYPASS_USER_ID
 
-    fixture = (
-        Path(__file__).resolve().parents[3]
-        / "back-end"
-        / "scripts"
-        / "gate-benchmark-fixture.ts"
+    root = Path(__file__).resolve().parents[3]
+    fixture = (root / "back-end" / "scripts" / "gate-benchmark-fixture.ts").read_text()
+    float_src = (
+        root / "back-end" / "src" / "providers" / "agentcard" / "benchmark-float.ts"
     ).read_text()
     assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID in fixture
     assert "seedOrgManagedAgentCardForUser" in fixture
     assert "resolveBenchmarkCardholderId" in fixture
+    assert "ensureBenchmarkOrgCardholder" in fixture
     assert "orgManaged: true" in fixture
     assert "agentcard_org_cardholder_id" in fixture
+    assert "andy@roselabs.ai" in float_src
+    assert "agentcard-benchmark@roselabs.ai" in float_src
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
