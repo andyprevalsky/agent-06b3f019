@@ -19,7 +19,7 @@ import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaid
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
-import { reconcileTerminalAgentBrowserSessions } from './providers/agentCleanup';
+import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
 
 function scheduleTerminalBrowserReleaseReconcile(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
@@ -36,8 +36,15 @@ function scheduleTerminalBrowserReleaseReconcile(isProduction: boolean): void {
       return;
     }
     running = true;
-    reconcileTerminalAgentBrowserSessions()
-      .then((summary) => {
+    runTerminalAgentBrowserReleaseReconcileWithLease({
+      batchSize: 100,
+      deadlineAtMs: Date.now() + 50_000,
+    })
+      .then(({ acquired, summary }) => {
+        if (!acquired) {
+          cronLog.info('Terminal browser release reconcile lease held by another replica');
+          return;
+        }
         if (summary.discovered > 0) {
           cronLog.info('Terminal browser release reconcile summary', { ...summary });
         }

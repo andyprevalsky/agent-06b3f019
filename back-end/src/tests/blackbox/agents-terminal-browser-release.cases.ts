@@ -13,8 +13,10 @@ import {
   randomUUID,
 } from './agents-blackbox-harness';
 import {
+  TERMINAL_BROWSER_RELEASE_LEASE_KEY,
   reconcileTerminalAgentBrowserSessions,
   releaseAgentBrowserSessions,
+  runTerminalAgentBrowserReleaseReconcileWithLease,
 } from '../../providers/agentCleanup';
 
 /**
@@ -110,6 +112,78 @@ test('terminal browser release reconciliation isolates provider failures', async
   assert(summary.discovered === 2, `expected two candidates, got ${summary.discovered}`);
   assert(summary.failed === 1, `expected one failed agent retry, got ${summary.failed}`);
   assert(summary.released === 2, `expected two released sessions, got ${summary.released}`);
+});
+
+test('terminal browser reconciliation forwards its batch bound and honors its deadline', async () => {
+  let requestedBatchSize = 0;
+  let attempted = 0;
+  const summary = await reconcileTerminalAgentBrowserSessions(
+    {
+      findTerminalAgentIds: async (batchSize) => {
+        requestedBatchSize = batchSize;
+        return ['deferred-terminal-agent'];
+      },
+      releaseBrowserSessions: async () => {
+        attempted += 1;
+        return 1;
+      },
+    },
+    { batchSize: 17, deadlineAtMs: Date.now() - 1 }
+  );
+  assert(requestedBatchSize === 17, `expected query batch size 17, got ${requestedBatchSize}`);
+  assert(attempted === 0, 'a passed deadline must stop new provider release work');
+  assert(summary.discovered === 1, 'deadline must preserve the discovered-candidate summary');
+});
+
+test('terminal browser reconciliation lease excludes replicas and releases ownership', async () => {
+  await prisma.toolSideEffect.deleteMany({
+    where: { operationKey: TERMINAL_BROWSER_RELEASE_LEASE_KEY },
+  });
+  let unblockFirst: (() => void) | undefined;
+  let markFirstStarted: (() => void) | undefined;
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
+  const firstCanFinish = new Promise<void>((resolve) => {
+    unblockFirst = resolve;
+  });
+  let firstRun: ReturnType<typeof runTerminalAgentBrowserReleaseReconcileWithLease> | undefined;
+  try {
+    firstRun = runTerminalAgentBrowserReleaseReconcileWithLease(
+      {},
+      {
+        reconcile: async () => {
+          markFirstStarted?.();
+          await firstCanFinish;
+          return { discovered: 0, released: 0, failed: 0 };
+        },
+      }
+    );
+    await firstStarted;
+    const competingRun = await runTerminalAgentBrowserReleaseReconcileWithLease(
+      {},
+      {
+        reconcile: async () => {
+          throw new Error('competing replica must not reconcile');
+        },
+      }
+    );
+    assert(!competingRun.acquired, 'a live lease must exclude a competing replica');
+    unblockFirst?.();
+    const completedRun = await firstRun;
+    assert(completedRun.acquired, 'the first replica should acquire the reconciliation lease');
+    const releasedLease = await prisma.toolSideEffect.findUnique({
+      where: { operationKey: TERMINAL_BROWSER_RELEASE_LEASE_KEY },
+      select: { status: true },
+    });
+    assert(releasedLease?.status === 'RELEASED', 'completed reconciliation must release its lease');
+  } finally {
+    unblockFirst?.();
+    await firstRun?.catch(() => undefined);
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: TERMINAL_BROWSER_RELEASE_LEASE_KEY },
+    });
+  }
 });
 
 test('browser release attempts every session and reports provider failures', async () => {
