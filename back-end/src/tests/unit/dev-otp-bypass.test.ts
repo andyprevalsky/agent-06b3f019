@@ -103,6 +103,17 @@ test('spaced formatting of the admin phone still bypasses', () => {
   );
 });
 
+test('non-string phone does not throw and does not bypass', () => {
+  assert.strictEqual(
+    devTestPhoneBypassApplies(null as unknown as string, {
+      isDev: true,
+      isBlackboxTest: true,
+      benchmarkAllowDevOtpLogin: false,
+    }),
+    false
+  );
+});
+
 test('non-test phones never bypass', () => {
   assert.strictEqual(
     devTestPhoneBypassApplies(NON_TEST_PHONE, {
