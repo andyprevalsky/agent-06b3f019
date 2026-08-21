@@ -96,7 +96,19 @@ export function ensureBenchmarkTasksSeeded(): Promise<{ inserted: number; total:
  *     GET /api/benchmarks keeps serving a stale seeded shape forever.
  */
 function stableJson(value: unknown): string {
-  return JSON.stringify(value ?? null);
+  // Canonicalize object key order so equivalent environments compare equal.
+  return JSON.stringify(value ?? null, (_key, nested: unknown) => {
+    if (Array.isArray(nested)) return nested;
+    if (nested !== null && typeof nested === 'object') {
+      const record = nested as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(record).sort()) {
+        out[key] = record[key];
+      }
+      return out;
+    }
+    return nested;
+  });
 }
 
 async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
