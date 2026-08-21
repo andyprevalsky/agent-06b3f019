@@ -1318,7 +1318,10 @@ if data.get("next_page_uri"):
     if not reserved_domains or not isinstance(reserved_domains[-1], dict) or not reserved_domains[-1].get("id"):
         print("malformed:missing before_id cursor", file=sys.stderr)
         sys.exit(2)
-    print(f"next:{reserved_domains[-1]['id']}")
+    # Use double-quoted dict keys only: this python -c body is wrapped in
+    # bash single quotes, so a single-quoted dict key would terminate the
+    # shell string early and become KeyError(id) at runtime.
+    print("next:" + reserved_domains[-1]["id"])
 else:
     print("done")
 ' "$domain") || {

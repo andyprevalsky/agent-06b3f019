@@ -102,12 +102,14 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'moonshotai/kimi-k2.5': openRouter(0.57, 2.85),
   'moonshotai/kimi-k2.7-code': openRouter(0.71, 3.5),
   'moonshotai/kimi-k3': openRouter(3, 15),
+  // Historical Cerebras chat primary (archived 2026-08-20). Keep for ledger rows.
   'zai-glm-4.7': uncached(2.25, 2.75),
-  // The chat/SMS primary path. Both were absent from this table, so the
-  // highest-volume route in the product reported $0 cost. `z-ai/glm-4.7` is
-  // provider-variable on OpenRouter ($0.40-$0.60 per M depending on which
-  // endpoint serves it); this uses the default/headline rate.
   'z-ai/glm-4.7': openRouter(0.4, 1.75),
+  // Current chat/SMS Cerebras primary + OpenRouter Cerebras spill (2026-08-20).
+  // Direct Cerebras list: $0.99/$1.49 per M. OpenRouter headline for the same
+  // weights is cheaper because OR can land on non-Cerebras hosts when unpinned.
+  'gemma-4-31b': uncached(0.99, 1.49),
+  'google/gemma-4-31b-it': openRouter(0.09, 0.34),
   'google/gemini-2.5-flash-lite': openRouter(0.1, 0.4),
   // Pool identifiers appear in some older usage rows before actual-model
   // provenance was recorded. Use the mean of their waterfall provider rates
