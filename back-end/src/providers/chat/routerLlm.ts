@@ -35,7 +35,13 @@ import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 import {
+  chatRouterCompletionTimeoutMs,
+  createRouterCompletionDeadline,
+  streamBeforeRouterCompletionDeadline,
+} from './routerCompletionDeadline';
+import {
   isValidRouterCacheJson,
+  parsePartialRouterDecisionJson,
   parseRouterDecisionJson,
   type RouterDecision,
 } from './routerDecision';
@@ -376,6 +382,8 @@ export async function callRouterLlm(params: {
     };
   }
 
+  const completionTimeoutMs = chatRouterCompletionTimeoutMs();
+  const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs);
   const createLiveStream = (abortSignal?: AbortSignal) =>
     createStreamingCompletion(
       buildRouterCompletionOptions({
@@ -383,7 +391,9 @@ export async function callRouterLlm(params: {
         messages: openaiMessages,
         providerRoute: params.providerRoute,
         providerFastMode,
-        abortSignal,
+        abortSignal: abortSignal
+          ? AbortSignal.any([abortSignal, completionDeadline.signal])
+          : completionDeadline.signal,
       })
     );
 
@@ -429,7 +439,10 @@ export async function callRouterLlm(params: {
     if (fcKey) {
       log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
     }
-    stream = await createLiveStream();
+    stream = await createLiveStream().catch((error: unknown) => {
+      completionDeadline.dispose();
+      throw error;
+    });
   }
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
@@ -465,9 +478,10 @@ export async function callRouterLlm(params: {
         finish_reason?: string;
       }
     | undefined;
+  let deadlineDecision: RouterDecision | null = null;
 
   // Process stream chunks - stream every delta immediately
-  for await (const chunk of stream) {
+  for await (const chunk of streamBeforeRouterCompletionDeadline(stream, completionDeadline)) {
     chunkCount++;
 
     // Detect user's Claude token usage from "-claude" suffix in actual_model
@@ -571,8 +585,22 @@ export async function callRouterLlm(params: {
     }
   }
 
+  if (completionDeadline.expired()) {
+    deadlineDecision = parsePartialRouterDecisionJson(accumulatedJson);
+    if (!deadlineDecision) {
+      throw completionDeadline.signal.reason ?? new Error('Chat router completion expired');
+    }
+    log.warn('[RouterLLM] Completion deadline recovered a closed decision', {
+      agentId: params.agentId,
+      action: deadlineDecision.action,
+      timeoutMs: completionTimeoutMs,
+      chunksReceived: chunkCount,
+      jsonLength: accumulatedJson.length,
+    });
+  }
+
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = structuredOutput.finalText();
+  const fullJson = deadlineDecision ? accumulatedJson : structuredOutput.finalText();
 
   // Broadcast final "done" signal for reasoning stream
   await broadcastAssistantStream(
@@ -629,20 +657,24 @@ export async function callRouterLlm(params: {
   }
 
   let decision: RouterDecision;
-  try {
-    decision = parseRouterDecisionJson(fullJson);
-  } catch (error) {
-    log.error('[RouterLLM] Failed to parse JSON response', {
-      agentId: params.agentId,
-      streamId,
-      error: error instanceof Error ? error.message : String(error),
-      jsonPreview: fullJson.substring(0, 500),
-    });
-    throw new Error(`Failed to parse router response as JSON: ${fullJson.substring(0, 200)}`);
+  if (deadlineDecision) {
+    decision = deadlineDecision;
+  } else {
+    try {
+      decision = parseRouterDecisionJson(fullJson);
+    } catch (error) {
+      log.error('[RouterLLM] Failed to parse JSON response', {
+        agentId: params.agentId,
+        streamId,
+        error: error instanceof Error ? error.message : String(error),
+        jsonPreview: fullJson.substring(0, 500),
+      });
+      throw new Error(`Failed to parse router response as JSON: ${fullJson.substring(0, 200)}`);
+    }
   }
 
   const cacheGoal = fastMode.goal;
-  if (fcKey && !fcCacheWon && cacheGoal !== null && fastModeWrite) {
+  if (fcKey && !fcCacheWon && !deadlineDecision && cacheGoal !== null && fastModeWrite) {
     runCacheWriteInBackground(
       () =>
         cacheSet({
