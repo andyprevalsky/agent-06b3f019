@@ -230,14 +230,13 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
     ),
     'email-credentials-only must not call full syncIntegrations (compute-token churn)'
   );
-  // @@unique([userId, name, accountId]) upserts require accountId on the select;
-  // omitting it fails email overlay with "Argument accountId is missing".
-  const columns = source.indexOf('const PROD_INTEGRATION_COLUMNS');
-  const columnsEnd = source.indexOf('} as const;', columns);
-  assert(columns > 0 && columnsEnd > columns, 'expected PROD_INTEGRATION_COLUMNS block');
+  // Multi-account upserts need accountId, but the stable pre-migration projection
+  // must not select it (prod may lack the columns). findProdIntegrations probes
+  // and defaults accountId/accountEmail when absent.
   assert(
-    /accountId:\s*true/.test(source.slice(columns, columnsEnd)),
-    'PROD_INTEGRATION_COLUMNS must select accountId for multi-account upserts'
+    source.includes('PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT') &&
+      source.includes("accountId: '', accountEmail: null"),
+    'email-credentials path must resolve accountId via findProdIntegrations defaults'
   );
 });
 
