@@ -303,10 +303,6 @@ done
 if [ -f "$CHILD_MARKER" ]; then
   kill -TERM "$term_pid" 2>/dev/null || true
   sleep 0.1
-  # INT during teardown must not release the lock early (regression covered by
-  # the lock assertion below). On some hosts INT is delivered/handled before
-  # TERM finishes recording its exit code, so accept either signal exit:
-  # 143 (TERM) or 130 (INT). Cleanup + lock retention are the real invariants.
   kill -INT "$term_pid" 2>/dev/null || true
   sleep 0.1
   [ -f "$TMP/locks/victoria-db-term-ws.lock" ] || fail \
@@ -315,10 +311,8 @@ if [ -f "$CHILD_MARKER" ]; then
   wait "$term_pid" 2>/dev/null
   term_status=$?
   set -e
-  case "$term_status" in
-    130|143) ;;
-    *) fail "case 6: signalled setup-db.sh exited rc=$term_status (expected 130 or 143)" ;;
-  esac
+  [ "$term_status" -eq 143 ] || fail \
+    "case 6: TERM'd setup-db.sh exited rc=$term_status instead of 143"
   rm -f "$CHILD_MARKER"
   sleep 0.3
   [ ! -f "$CHILD_MARKER" ] || fail \
