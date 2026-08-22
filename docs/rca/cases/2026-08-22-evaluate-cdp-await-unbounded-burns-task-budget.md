@@ -10,7 +10,6 @@ first_bad_boundary: agents/domains/spawn_browser_agent_v3/service_actions.py::_e
 symptoms:
   - "Browser action 'evaluate' timed out after 330s; hard renderer recovery ran after CDP classified renderer_main_thread_blocked."
   - "action_timeout_evaluate_330s"
-  - "supervisor_actions\": [\"bring_to_front\"]"
   - "Timeout after 900s (dynamic cap=900s)"
   - "Expected payment_approval attention request (to ignore) but none was triggered"
   - "Hard recovery after renderer-frozen action timeout"
