@@ -2141,7 +2141,9 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     task = get_task_by_name("agent-payment-test-shop")
 
     assert "visible Rose Labs Test Payment checkout" in task.prompt
-    assert "do not navigate to source files or API endpoints" in task.prompt
+    assert "do not navigate to source files or API endpoints" not in task.prompt
+    assert "request_payment_card" not in task.prompt
+    assert "card number" not in task.prompt.lower()
     assert "preserve the merchant" not in task.prompt.lower()
     assert task.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
     assert task.expected_payment_lifecycle["walletFunding"]["status"] == "CONSUMED"
@@ -5018,6 +5020,101 @@ def test_amazon_return_catalog_requires_single_clean_completed_return():
         assert approval_detail in semantic_criteria
 
 
+def test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user():
+    """The identity overlay must retarget the seed at the person the task runs as.
+
+    Regression: every prod->local sync mode resolved to the dev user, so a task
+    launched with another BENCHMARK_RUN_USER_ID ran against a DB with no row for
+    it and died at browser-session init on AgentIdentity_userId_fkey, before an
+    agent existed. Scoping the seed is what makes the identity exist locally.
+    """
+    import os
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.live_fixtures import TAMY_IDENTITY_COOKIE_DOMAINS, TAMY_IDENTITY_USER_ID
+
+    captured: dict = {}
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_sync = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_kwargs: True
+        bench._sync_email_credentials = lambda: True
+
+        def capture_browser_sync(domains=(), *, user_id=None):
+            captured.update(user_id=user_id, cookie_domains=domains)
+            return True
+
+        bench._sync_browser_credentials = capture_browser_sync
+        manifest = bench._apply_live_tamy_identity_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id=bench.USER_ID,
+                auth_realm="amazon.com.mx",
+            )
+        )
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_sync
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert captured.get("user_id") == TAMY_IDENTITY_USER_ID, (
+        "the identity fixture must seed the task's run identity, not the default "
+        f"benchmark user; got {captured.get('user_id')!r}"
+    )
+    assert tuple(captured.get("cookie_domains") or ()) == TAMY_IDENTITY_COOKIE_DOMAINS
+    assert manifest == {
+        "fixture": "live-tamy-identity",
+        "browser_auth": True,
+        "source": "prod_sync",
+        "user_id": TAMY_IDENTITY_USER_ID,
+    }
+
+
+def test_tamy_identity_fixture_declaration_drives_the_run_user():
+    """Declaring the fixture and running as that identity cannot drift apart.
+
+    Seeding her rows while still running as the dev user would exercise the
+    wrong account; running as her without the fixture is the FK crash the
+    fixture exists to prevent. One declaration must imply both.
+    """
+    import benchmarks.run_benchmark as bench
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+
+    class _Task:
+        def __init__(self, fixtures):
+            self.name = "browser-agent-amazon-mx-buy-under-5-usd"
+            self.environment = {"live_fixtures": list(fixtures)}
+
+    assert (
+        bench._live_fixture_run_user_id(_Task(["live-tamy-identity"]))
+        == TAMY_IDENTITY_USER_ID
+    )
+    assert bench._live_fixture_run_user_id(_Task(["live"])) is None
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    catalog_task = get_task_by_name("browser-agent-amazon-mx-buy-under-5-usd")
+    assert "live-tamy-identity" in catalog_task.environment["live_fixtures"], (
+        "the amazon.com.mx replay runs as the Mexico identity, so it must declare the "
+        "fixture that seeds her; without it the run dies before an agent exists"
+    )
+    assert bench._live_fixture_run_user_id(catalog_task) == TAMY_IDENTITY_USER_ID
+    assert catalog_task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES, (
+        "the fixture changes BENCHMARK_RUN_USER_ID process-wide and must not overlap siblings"
+    )
+    assert catalog_task.environment["required_injectable_cookie_domains"] == [
+        "amazon.com.mx",
+        "amazon.com",
+    ]
+
+
 def test_live_fixture_fails_when_live_auth_refresh_fails():
     """A live benchmark never starts with missing/stale browser auth."""
     import os
@@ -5248,7 +5345,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
     synced_domains: list[tuple[str, ...]] = []
     queried_domains: list[str] = []
 
-    def fake_sync_browser_credentials(domains: tuple[str, ...] = ()) -> bool:
+    def fake_sync_browser_credentials(domains: tuple[str, ...] = (), *, user_id=None) -> bool:
         synced_domains.append(domains)
         return True
 
@@ -6349,13 +6446,14 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     def blocking_applier(_ctx):
         setup_timeline.append("setup-start")
         setup_started.set()
-        assert setup_release.wait(timeout=2), "parallel heartbeat could not release fixture setup"
+        assert setup_release.wait(timeout=2), "event loop did not run while fixture setup blocked"
         setup_timeline.append("setup-end")
         return {"fixture": "live"}
 
     async def setup_probe():
         async def heartbeat():
-            await asyncio.to_thread(setup_started.wait, 2)
+            while not setup_started.is_set():
+                await asyncio.sleep(0)
             setup_timeline.append("parallel-tick")
             setup_release.set()
 
@@ -6384,7 +6482,7 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
         assert label == "fresh browser state"
         restore_timeline.append("restore-start")
         restore_started.set()
-        assert restore_release.wait(timeout=2), "parallel heartbeat could not release fixture restore"
+        assert restore_release.wait(timeout=2), "event loop did not run while fixture restore blocked"
         restore_timeline.append("restore-end")
 
     async def restore_probe():
@@ -6392,7 +6490,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
             await bench._restore_live_fixture_scenarios_async([manifest])
 
         async def heartbeat():
-            await asyncio.to_thread(restore_started.wait, 2)
+            while not restore_started.is_set():
+                await asyncio.sleep(0)
             restore_timeline.append("parallel-tick")
             restore_release.set()
 
@@ -12974,7 +13073,7 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live"}
+    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity"}
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -13032,7 +13131,7 @@ def test_amazon_passkey_scenario_is_exclusive_and_restorable():
 
 
 def test_live_fixture_is_single_and_explicit():
-    """Only credential-dependent tasks opt into the single live overlay."""
+    """Only credential-dependent tasks opt into a canonical live overlay."""
     from benchmarks.benchmark_tasks import all_tasks
     from benchmarks.live_fixtures import resolve_live_fixtures
 
@@ -13043,12 +13142,17 @@ def test_live_fixture_is_single_and_explicit():
     assert resolve_live_fixtures({"mode": "synthetic"}) == []
     assert resolve_live_fixtures({"mode": "live", "live_fixtures": []}) == []  # explicit wins
     assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["live"]}) == ["live"]
+    assert resolve_live_fixtures(
+        {"mode": "live", "live_fixtures": ["live-tamy-identity"]}
+    ) == ["live-tamy-identity"]
 
     # Loaded catalog: every task has effective live_fixtures matching its mode
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live"}, f"{t.name}: noncanonical live fixture"
+        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity"}, (
+            f"{t.name}: noncanonical live fixture"
+        )
         if env.get("mode") == "synthetic":
             assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
 
@@ -15064,6 +15168,14 @@ async def run_all_tests():
     r.record(
         "amazon_return_clean_completed_return",
         test_amazon_return_catalog_requires_single_clean_completed_return,
+    )
+    r.record(
+        "tamy_identity_fixture_seeds_the_run_identity",
+        test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user,
+    )
+    r.record(
+        "tamy_identity_fixture_declaration_drives_run_user",
+        test_tamy_identity_fixture_declaration_drives_the_run_user,
     )
     r.record(
         "live_fixture_auth_failure_is_fatal",
