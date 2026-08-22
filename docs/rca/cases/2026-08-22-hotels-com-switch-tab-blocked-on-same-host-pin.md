@@ -6,12 +6,13 @@ surface: agents
 component: spawn-browser-agent-v3
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: agents/domains/spawn_browser_agent_v3/service_actions.py::navigation_leaves_pinned_host — switch_tab treated like navback/close_tab and always blocked on pinned host
+first_bad_boundary: agents/domains/spawn_browser_agent_v3/service_actions.py — (1) navigation_leaves_pinned_host blocked all switch_tab on pinned host; (2) attempt_completion accepted at verifier 100% without request_payment_card when checkout card fields were visible
 symptoms:
   - Refusing to leave pinned page host 'www.hotels.com'
   - browser-hotel-booking timeout after 1128s (dynamic cap=1125s)
   - Expected payment_approval attention request (to ignore) but none was triggered
   - request_payment_card never called after Reserve on Hotel Kabuki checkout
+  - Payment card request required before completion
 tags:
   - browser-agent
   - hotels-com
@@ -21,7 +22,7 @@ tags:
   - ecommerce
 sources:
   - agent 7bdfd4bb-b069-4aa9-aafe-1455525480fa
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_execute_switch_tab_allows_same_host_while_pinned
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_execute_switch_tab_allows_same_host_while_pinned, test_attempt_completion_blocked_when_payment_fields_visible_without_card_request
 status: fixed
 ---
 
@@ -75,15 +76,20 @@ passes post-fix.
 
 ## Solution
 
-`service_actions.py`: removed `switch_tab` from the unconditional
-navback/close_tab block; added `_resolve_switch_tab_target_url()` and pass
-`target_url` into `_navigation_guard_error` for `switch_tab`. Cross-origin
-handoff safety preserved: switching to an off-pin tab (e.g. merchant tab while
-pinned on `checkout.stripe.com`) still errors; unknown target tab still blocks
-conservatively.
+1. **switch_tab pin guard** (`service_actions.py`): resolve target tab URL via
+   `session.get_tabs()` before the guard; block `switch_tab` only when focus
+   would leave the pinned host. Post-fix run `a5e573ae` showed multiple
+   successful same-host `switch_tab` actions (stall eliminated; 920s vs 1128s
+   timeout).
 
-10k-agent behavior: O(1) per action — one `get_tabs()` call already required
-for switch execution; no per-agent shared state.
+2. **attempt_completion guard** (`service_actions.py` +
+   `handler.py`): `attempt_completion_blocked_pending_payment_card_request`
+   rejects completion when semantic card inputs are visible and
+   `request_payment_card` was never called — steers the agent to the tool the
+   benchmark gates on (`payment_approval`).
+
+Cross-origin handoff safety preserved for both fixes. 10k-agent: O(1) per
+action; no shared mutable state.
 
 ## Human feedback
 
