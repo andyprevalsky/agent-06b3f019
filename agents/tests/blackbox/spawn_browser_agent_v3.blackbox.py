@@ -15245,6 +15245,7 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
             self.selector_map = {}
             self.disconnect = AsyncMock()
+            self._captcha_poll = None
             _FakeDomService.last_instance = self
 
         async def connect(self):
@@ -15252,6 +15253,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
 
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
+
+        def start_captcha_telemetry_indicator(self, poll_phase):
+            self._captcha_poll = poll_phase
 
     class _FakeHumanizer:
         last_instance = None

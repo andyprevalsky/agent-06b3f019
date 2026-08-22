@@ -1262,6 +1262,8 @@ async def _reconnect_browser_stack_after_rotation(
     old_driver_pid: Optional[int],
     fingerprint_injection: Optional[Any],
     agent_id: str,
+    config: Any = None,
+    task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
 
@@ -1293,6 +1295,17 @@ async def _reconnect_browser_stack_after_rotation(
     driver_pid = None
     try:
         await dom_service.connect()
+        if config is not None and task_id:
+            from browser_tools.captcha_solve_indicator import (
+                start_captcha_telemetry_indicator_for_task,
+            )
+
+            start_captcha_telemetry_indicator_for_task(
+                dom_service,
+                fetch_telemetry=fetch_browser_captcha_telemetry,
+                config=config,
+                task_id=task_id,
+            )
         dom_page = await dom_service.session.get_current_page()
 
         from playwright.async_api import async_playwright
@@ -5622,6 +5635,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             playwright_browser,
             playwright_instance,
         ) = browser_result
+        from browser_tools.captcha_solve_indicator import start_captcha_telemetry_indicator_for_task
+
+        start_captcha_telemetry_indicator_for_task(
+            dom_service,
+            fetch_telemetry=fetch_browser_captcha_telemetry,
+            config=config,
+            task_id=task_id,
+        )
         # Required session provenance is emitted only after both CDP clients
         # connect, but before any credential-use evidence can be published.
         # It is intentionally independent of optional browser recording.
@@ -6949,6 +6970,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             fingerprint_injection=replacement.get("fingerprint_injection")
                             or pending_fingerprint_injection,
                             agent_id=agent_id,
+                            config=config,
+                            task_id=task_id,
                         )
                         # Reconnect succeeded: the replacement session is real and
                         # attached, so the identifiers are now safe to publish.
@@ -7357,6 +7380,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 old_driver_pid=playwright_driver_pid,
                                 fingerprint_injection=fingerprint_injection,
                                 agent_id=agent_id,
+                                config=config,
+                                task_id=task_id,
                             )
                         except Exception:
                             # The reconnect helper disconnects the old stack before attaching to

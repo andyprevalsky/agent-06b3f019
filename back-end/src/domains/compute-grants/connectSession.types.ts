@@ -45,4 +45,10 @@ export interface PendingConnect {
   failed?: string;
   /** Successful sessions are held briefly so the frontend can observe completion. */
   finishedAt?: number;
+  /** Cross-tick memory for CAPTCHA chip solving→terminal transitions. */
+  captchaIndicatorMemory?: {
+    lastSolving: boolean;
+    lastShownOutcomeKey: string | null;
+    awaitTerminalUntil: number;
+  };
 }
