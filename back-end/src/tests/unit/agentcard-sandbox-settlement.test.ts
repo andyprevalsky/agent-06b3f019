@@ -70,7 +70,8 @@ async function main(): Promise<void> {
   assert.deepEqual(cleared, ['purchase-1']);
 
   // A purchase that loses the atomic claim (already reserved by a concurrent settlement) is skipped
-  // and never charged.
+  // and never charged. When nothing is CLEARED yet, settlement must 404 — not fall through to the
+  // real Prisma CLEARED lookup (which under parallel coverage can see another suite's purchases).
   const skippedCharges: Array<Record<string, unknown>> = [];
   await assert.rejects(
     () =>
@@ -90,6 +91,7 @@ async function main(): Promise<void> {
               stripePaymentIntentId: 'pi_hold_race',
             },
           ],
+          findClearedPurchasesByTotal: async () => [],
           getCardPan: async () => '4242424242420640',
           claimHeldPurchaseForCharge: async () => false,
           testCharge: async (input) => {

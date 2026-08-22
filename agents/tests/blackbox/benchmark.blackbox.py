@@ -6034,7 +6034,7 @@ def test_agent_sms_benchmark_prepares_phone_only_agentphone_sender():
 
 
 def test_minted_x_benchmark_uses_live_x_default_target():
-    """The X minted-account benchmark points at the real site, not the local Uber fixture."""
+    """The X Hello World benchmark points at live X with write-lock grading, not mint signup."""
     from benchmarks.benchmark_tasks import get_task_by_name
     import benchmarks.run_benchmark as bench
 
@@ -6043,22 +6043,125 @@ def test_minted_x_benchmark_uses_live_x_default_target():
     assert task.name in bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
     assert task.prompt == "Make a post on X.com that says, Hello World"
     assert bench.MINTED_AGENT_ACCOUNT_X_POST_GOAL == task.prompt
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_approval_count == 1
+    assert task.min_steps == {"browser": 5}
+    assert task.enforce_declared_evaluators is True
+    assert task.environment["live_fixtures"] == ["live"]
+    assert task.environment["live_cookie_domains"] == ["x.com"]
+    assert task.environment["required_injectable_cookie_domains"] == ["x.com"]
     assert bench._default_minted_target_url("http://localhost:56151", task.name) == "https://x.com"
     assert bench._auth_realm_from_target_url("https://x.com") == "x.com"
     assert bench._site_label_from_realm("x.com") == "X"
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {"approval_request_count", "approval_request_details"}
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Hello World", "Public", "x.com", "on X"]
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
 
 
-def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
-    """X benchmark must not treat a minted row alone as account-creation proof."""
+def test_minted_x_live_auth_write_lock_contract_ignores_mint_and_phone_blocker():
+    """Live X pass grading requires write-lock success + Hello World evidence, not MintedAccount."""
     import benchmarks.run_benchmark as bench
 
-    blocker = "X forced phone auth. Final DOM showed: An unexpected error occurred. Please try again."
-    success = "Account creation completed and the account is signed in on the home timeline."
+    success_with_instruction = (
+        bench._x_post_prompt()
+        + "\n\nStatus: posted. Exact text: Hello World. "
+        + "Post URL: https://x.com/rose_labs_/status/2090546285698801794. "
+        + "No blocker. The final X post page visibly shows the published post."
+    )
+    # Instruction text may still mention historical phone-auth wording in older dumps;
+    # the live-auth grader must not fail the run for MintedAccount / phone-blocker.
+    passed, failures = bench._grade_live_x_hello_world_post(
+        post_passed=True,
+        post_failure_reason=None,
+        post_status="COMPLETED",
+        post_text=success_with_instruction,
+    )
+    assert passed is True
+    assert failures == []
 
-    assert bench._x_signup_has_terminal_phone_blocker(blocker) is True
-    assert bench._x_signup_has_account_creation_evidence(blocker) is False
-    assert bench._x_signup_has_terminal_phone_blocker(success) is False
-    assert bench._x_signup_has_account_creation_evidence(success) is True
+    no_evidence_passed, no_evidence_failures = bench._grade_live_x_hello_world_post(
+        post_passed=True,
+        post_failure_reason=None,
+        post_status="COMPLETED",
+        post_text="Hello World drafted but never submitted",
+    )
+    assert no_evidence_passed is False
+    assert any("grounded evidence" in part for part in no_evidence_failures)
+
+    write_lock_failed, write_lock_failures = bench._grade_live_x_hello_world_post(
+        post_passed=False,
+        post_failure_reason="Expected approval requests but none were triggered",
+        post_status="FAILED",
+        post_text=success_with_instruction,
+    )
+    assert write_lock_failed is False
+    assert any("post failed" in part for part in write_lock_failures)
+
+
+def test_minted_x_write_lock_notification_requires_hello_world_public_destination():
+    """Static check rejects write locks that omit Hello World / Public / x.com / on X."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {"type": "approval_request_count", "value": 1},
+            {
+                "type": "approval_request_details",
+                "required_strings": ["Hello World", "Public", "x.com", "on X"],
+            },
+        ]
+    }
+    good = {
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "metadata": {
+                        "writePermission": True,
+                        "writeLockNotification": {
+                            "action": "post publicly",
+                            "service": {"url": "https://x.com/compose/post", "name": "X", "domain": "x.com"},
+                            "social_post": {
+                                "body": "Hello World",
+                                "audience": "Public",
+                                "destination": "@rose_labs_ on X",
+                            },
+                            "trigger_type": "social_post",
+                        },
+                    }
+                }
+            ],
+        }
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    missing_destination = {
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "metadata": {
+                        "writePermission": True,
+                        "writeLockNotification": {
+                            "social_post": {"body": "Hello World", "audience": "Public"},
+                            "service": {"name": "X", "domain": "x.com"},
+                        },
+                    }
+                }
+            ],
+        }
+    }
+    passed, reason = _run_declared_static_check(evaluator, missing_destination)
+    assert passed is False
+    assert "on X" in reason
 
 
 def test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile():
@@ -6418,17 +6521,45 @@ def test_anon_benchmark_mode_disables_saved_auth_material():
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_auth
 
 
-def test_x_post_prompt_keeps_goal_and_prefers_email_auth():
-    """Fresh X benchmark profiles need explicit guidance away from the fragile phone-first path."""
+def test_minted_x_reuses_live_auth_by_default():
+    """Live X Hello World keeps synced cookies unless BENCHMARK_MINTED_CLEAR_EXISTING_AUTH is set."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    previous = os.environ.get("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    try:
+        os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        assert bench._minted_x_clear_existing_auth_enabled() is False
+        # Non-X minted realms still clear by default.
+        assert bench._minted_clear_existing_auth_enabled() is True
+
+        os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "true"
+        assert bench._minted_x_clear_existing_auth_enabled() is True
+        assert bench._minted_clear_existing_auth_enabled() is True
+
+        os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "false"
+        assert bench._minted_x_clear_existing_auth_enabled() is False
+        assert bench._minted_clear_existing_auth_enabled() is False
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        else:
+            os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = previous
+
+
+def test_x_post_prompt_reuses_live_session_without_mint_signup():
+    """X Hello World prompt steers toward the synced session, not MintedAccount signup."""
     import benchmarks.run_benchmark as bench
 
     prompt = bench._x_post_prompt()
 
     assert prompt.startswith("Make a post on X.com that says, Hello World")
-    assert "minted email" in prompt
-    assert "Use email instead" in prompt
-    assert "Do not choose the initial 'Continue with phone'" in prompt
-    assert "terminal phone-auth blocker" in prompt
+    assert "already signed-in X session" in prompt
+    assert "Do not create a new X account" in prompt
+    assert "minted email" not in prompt
+    assert "terminal phone-auth blocker" not in prompt
+    assert "Continue with phone" not in prompt
 
 
 def test_browser_agent_cookie_bundle_bootstrap_is_local_only():
@@ -14128,8 +14259,12 @@ async def run_all_tests():
         test_minted_x_benchmark_uses_live_x_default_target,
     )
     r.record(
-        "minted_x_signup_evidence_terminal_blocker",
-        test_minted_x_signup_evidence_rejects_terminal_phone_blocker,
+        "minted_x_live_auth_write_lock_contract",
+        test_minted_x_live_auth_write_lock_contract_ignores_mint_and_phone_blocker,
+    )
+    r.record(
+        "minted_x_write_lock_notification_strings",
+        test_minted_x_write_lock_notification_requires_hello_world_public_destination,
     )
     r.record(
         "amazon_passkey_scenario_isolation",
@@ -15099,7 +15234,14 @@ async def run_all_tests():
         "benchmark_sms_source_override_updates_local_agent_source",
         test_benchmark_sms_source_override_updates_local_agent_source,
     )
-    r.record("x_post_prompt_keeps_goal_and_prefers_email_auth", test_x_post_prompt_keeps_goal_and_prefers_email_auth)
+    r.record(
+        "x_post_prompt_reuses_live_session_without_mint_signup",
+        test_x_post_prompt_reuses_live_session_without_mint_signup,
+    )
+    r.record(
+        "minted_x_reuses_live_auth_by_default",
+        test_minted_x_reuses_live_auth_by_default,
+    )
     r.record("prompt_user_denial_uses_rejection_sentinel", test_prompt_user_denial_uses_rejection_sentinel)
     r.record("keep_agents_env_preserves_successes_and_failures", test_keep_agents_env_preserves_successes_and_failures)
     r.record("local_services_manifest_reports_anon_capability", test_local_services_manifest_reports_anon_capability)
