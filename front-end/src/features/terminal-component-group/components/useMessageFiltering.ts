@@ -108,9 +108,18 @@ export function useFilteredStreaming({
   streamingTools,
 }: UseFilteredStreamingOptions): FilteredStreamingState {
   const target = subAgentId ?? null;
+  const exploreTaskIds = new Set(
+    persistedMessages
+      .map((message) => message.metadata?.taskId)
+      .filter((taskId): taskId is string => typeof taskId === 'string'),
+  );
   return useMemo(() => {
     const bubbles = new Map(
-      [...streamingBubbles].filter(([, b]) => (b.subAgentId ?? null) === target),
+      [...streamingBubbles].filter(
+        ([, b]) =>
+          (b.subAgentId ?? null) === target ||
+          (target === null && b.subAgentId != null && exploreTaskIds.has(b.subAgentId)),
+      ),
     );
     const tools = coalesceStreamingTools(streamingTools, persistedMessages, target);
     const plan =
@@ -125,7 +134,7 @@ export function useFilteredStreaming({
     let isClaude = false;
     let isGpt = false;
     bubbles.forEach((b) => {
-      charCount += b.text.length;
+      charCount += Math.max(b.charCount ?? 0, b.text.length);
       if (b.startedAtMs)
         streamStartedAtMs = Math.min(streamStartedAtMs ?? b.startedAtMs, b.startedAtMs);
       if (b.isClaude) isClaude = true;

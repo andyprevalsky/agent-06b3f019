@@ -95,6 +95,9 @@ export function validateAssistantStreamPayload(payload: unknown): string | null 
   if (p.subAgentId !== undefined && typeof p.subAgentId !== 'string') {
     return `Invalid 'subAgentId' type (got ${typeof p.subAgentId})`;
   }
+  if (p.char_count !== undefined && typeof p.char_count !== 'number') {
+    return `Invalid 'char_count' type (got ${typeof p.char_count})`;
+  }
   return null;
 }
 

@@ -2472,6 +2472,7 @@ async def call_llm_structured_streaming(
         using_claude_auth = False
         using_native_direct_tools = False
         text_buffer = ""
+        hidden_stream_bytes = 0
         tool_use_blocks: List[Dict[str, Any]] = []
 
         # Tool detection tracking (for early IN_PROGRESS messages)
@@ -2521,6 +2522,22 @@ async def call_llm_structured_streaming(
             if reasoning and text_buffer:
                 return reasoning + "\n\n" + text_buffer
             return reasoning or text_buffer
+
+        def _total_stream_bytes() -> int:
+            return (
+                len(accumulated_reasoning)
+                + len(accumulated_json)
+                + len(text_buffer)
+                + hidden_stream_bytes
+            )
+
+        async def _emit_raw_progress() -> None:
+            if not on_raw_progress:
+                return
+            _t = _safe_time()
+            await on_raw_progress(_total_stream_bytes())
+            _prof["raw_progress"] += _safe_time() - _t
+            _prof_calls["raw_progress"] += 1
 
         rose_kwargs: Dict[str, Any] = {}
         if deadline_s is not None:
@@ -2719,6 +2736,12 @@ async def call_llm_structured_streaming(
 
                 if kind == "codex_reasoning_item":
                     codex_reasoning_items.append(dict(chunk.data))
+                    encrypted = chunk.data.get("encrypted_content")
+                    if isinstance(encrypted, str) and encrypted:
+                        hidden_stream_bytes += len(encrypted)
+                    else:
+                        hidden_stream_bytes += 64
+                    await _emit_raw_progress()
                     continue
 
                 reasoning_delta = chunk.data.get("text", "") if kind == "reasoning" else ""
@@ -2868,11 +2891,7 @@ async def call_llm_structured_streaming(
                         f"j={len(accumulated_json)} t={len(text_buffer)}"
                     )
 
-                if on_raw_progress:
-                    _t = _safe_time()
-                    await on_raw_progress(len(accumulated_reasoning) + len(accumulated_json) + len(text_buffer))
-                    _prof["raw_progress"] += _safe_time() - _t
-                    _prof_calls["raw_progress"] += 1
+                await _emit_raw_progress()
         except asyncio.CancelledError:
             logger.info("⏹️ Rose streaming cancelled (asyncio.CancelledError)")
             raise
@@ -5646,6 +5665,7 @@ async def call_llm_activity(
         latest_raw_chars = [0]
         current_streaming_tool: List[Optional[str]] = [None, None]  # [tool_name, tool_call_id]
         last_tool_progress_chars = [0]
+        last_assistant_progress_chars = [0]
 
         async def on_tool_detected_callback(tool_name: str, tool_call_id: str):
             current_streaming_tool[0] = tool_name
@@ -5666,6 +5686,10 @@ async def call_llm_activity(
 
         async def on_raw_progress(total_chars: int):
             latest_raw_chars[0] = total_chars
+            if broadcaster is not None and total_chars - last_assistant_progress_chars[0] >= 50:
+                last_assistant_progress_chars[0] = total_chars
+                broadcaster.update_progress(total_chars, sequence[0])
+                sequence[0] += 1
             tool_name, tool_call_id = current_streaming_tool
             if not (agent_id and stream_id and tool_name and tool_call_id):
                 return

@@ -303,6 +303,50 @@ describe('realtimeHandlers', () => {
     expect(streamedTextsRef.current.has('Choosing a direct answer')).toBe(true);
   });
 
+  it('handleAssistantStream: tracks hidden char_count progress without visible delta', () => {
+    const s = mkSetters();
+    const ref = { current: new Set<string>() };
+
+    handleAssistantStream(
+      {
+        agentId: 'me',
+        stream_id: 'hidden-progress',
+        sequence: 0,
+        delta: '',
+        done: false,
+        char_count: 500,
+        llm_started_at_ms: 1700000000000,
+        is_gpt: true,
+        subAgentId: 'explore-task-1',
+      } as never,
+      'me',
+      ref,
+      s.setStreamingBubbles as never,
+    );
+    handleAssistantStream(
+      {
+        agentId: 'me',
+        stream_id: 'hidden-progress',
+        sequence: 1,
+        delta: '',
+        done: false,
+        char_count: 1200,
+        is_gpt: true,
+        subAgentId: 'explore-task-1',
+      } as never,
+      'me',
+      ref,
+      s.setStreamingBubbles as never,
+    );
+
+    expect(s.state.streamingBubbles.get('hidden-progress')).toMatchObject({
+      text: '',
+      charCount: 1200,
+      isGpt: true,
+      subAgentId: 'explore-task-1',
+    });
+  });
+
   it('handleAssistantStream: GPT reasoning stream stays ephemeral and tagged', () => {
     const s = mkSetters();
     const refSet = new Set<string>();
