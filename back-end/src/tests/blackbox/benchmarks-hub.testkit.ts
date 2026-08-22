@@ -39,13 +39,17 @@ export async function assertToastPromptMigration(
       .tasks;
     const toast = tasks.find((task) => task.name === taskName);
     if (toast?.prompt !== prompt) {
-      throw new Error(`Hub served stale DB prompt instead of tasks.json: ${toast?.prompt ?? 'missing'}`);
+      throw new Error(
+        `Hub served stale DB prompt instead of tasks.json: ${toast?.prompt ?? 'missing'}`
+      );
     }
 
     const publicRes = await fetch(`${baseUrl}/api/benchmarks`);
-    if (publicRes.status !== 200) throw new Error(`GET /api/benchmarks returned ${publicRes.status}`);
-    const publicTasks = ((await publicRes.json()) as { tasks: Array<{ name: string; prompt: string }> })
-      .tasks;
+    if (publicRes.status !== 200)
+      throw new Error(`GET /api/benchmarks returned ${publicRes.status}`);
+    const publicTasks = (
+      (await publicRes.json()) as { tasks: Array<{ name: string; prompt: string }> }
+    ).tasks;
     const publicToast = publicTasks.find((task) => task.name === taskName);
     if (publicToast?.prompt !== prompt) {
       throw new Error(
@@ -125,7 +129,10 @@ export function syntheticBenchmarkBundle(
 export async function assertEnvironmentReconcileFromFile(): Promise<void> {
   const prisma = new PrismaClient();
   try {
-    const fileTasks = readTasksJson() as Array<{ name: string; environment?: Record<string, unknown> }>;
+    const fileTasks = readTasksJson() as Array<{
+      name: string;
+      environment?: Record<string, unknown>;
+    }>;
     const fileTask = fileTasks.find((task) => task.name === 'wait-for-trigger');
     if (!fileTask?.environment) throw new Error('wait-for-trigger environment missing from file');
 

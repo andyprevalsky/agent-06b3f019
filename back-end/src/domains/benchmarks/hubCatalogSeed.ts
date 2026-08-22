@@ -3,7 +3,7 @@
  * plus the memoized ensure-seeded promise catalog routes await at request time.
  */
 
-import { readCatalogTasks } from './config';
+import { readCatalogTasks } from './catalog';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 

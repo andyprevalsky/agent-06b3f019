@@ -1,4 +1,7 @@
-import { benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig, readCatalogTasks } from './config';
+import {
+  benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig,
+} from './config';
+import { readCatalogTasks } from './catalog';
 import { createLogger } from '../../providers/logger';
 import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
 
@@ -15,9 +18,7 @@ export { TasksUnavailableError } from './types';
  * Throws TasksUnavailableError if tasks.json is missing or malformed.
  */
 export function getTasks(): unknown[] {
-  return readCatalogTasks().filter(
-    (task) => (task as { status?: unknown }).status !== 'retired'
-  );
+  return readCatalogTasks().filter((task) => (task as { status?: unknown }).status !== 'retired');
 }
 
 export interface TestPrompt {

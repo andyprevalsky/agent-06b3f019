@@ -618,10 +618,7 @@ async function runAll(): Promise<void> {
     ['catalog: tasks + stats shape', testCatalog_returnsTasksWithStatsShape],
     ['catalog: groups are label-driven', testCatalog_groupsAreLabelDriven],
     ['catalog: hub group matches tasks.json', testCatalog_hubMatchesTasksJsonGroup],
-    [
-      'catalog: hub serves tasks.json over stale DB rows',
-      testCatalog_fileWinsOverStaleDb,
-    ],
+    ['catalog: hub serves tasks.json over stale DB rows', testCatalog_fileWinsOverStaleDb],
     [
       'catalog: Toast prompt comes from tasks.json',
       testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub,

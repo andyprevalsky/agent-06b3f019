@@ -4,7 +4,8 @@
  */
 
 import { z } from 'zod';
-import { readTaskAttempts, readCatalogTasks, tasksFileUpdatedAtIso } from './config';
+import { readTaskAttempts, tasksFileUpdatedAtIso } from './config';
+import { readCatalogTasks } from './catalog';
 import * as hubStore from '../../providers/benchmarkHubStore';
 
 export { seedBenchmarkTasks, ensureBenchmarkTasksSeeded } from './hubCatalogSeed';
