@@ -11227,7 +11227,7 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -11274,7 +11274,7 @@ async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_in
         )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -11306,16 +11306,20 @@ def test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text():
 
 def test_write_lock_purchase_button_detects_order_controls():
     """Final transaction buttons are gated; cart, checkout, and return navigation are not."""
-    from browser_tools.write_lock import is_purchase_button
+    from browser_tools.write_lock import is_purchase_button, is_return_button
 
     assert is_purchase_button("Buy Now")
     assert is_purchase_button("Place your order")
-    assert is_purchase_button("Confirm your return")
-    assert is_purchase_button("Submit return request")
+    assert not is_purchase_button("Confirm your return")
+    assert not is_purchase_button("Submit return")
+    assert is_return_button("Confirm your return")
+    assert is_return_button("Submit return")
+    assert not is_return_button("Buy Now")
     assert not is_purchase_button("Add to Cart")
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
+    assert not is_return_button("Return to your orders")
 
 
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
@@ -11929,7 +11933,79 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
 
+async def test_execute_input_text_password_secret_ref_resolves_visible_password_coords():
+    """Password secret-ref typing must locate a visible password field when the index has no rect.
 
+    Regression for browser-amazon-return k=5 agent fbc36706: after Switch accounts →
+    account pick, indexed password coords were None and humanize refused TypeTextEvent,
+    posting toolStatus=ERROR that failed no_tool_failures even though the agent later
+    recovered to an unresolved write lock.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(return_value={})
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+    hu.input_page = None
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch.object(
+            service_actions,
+            "_resolve_password_field_coordinates",
+            AsyncMock(return_value=(44, 55)),
+        ) as resolve_password,
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=770,
+            coords=None,
+            params={"text": "pwd-ref-1"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={"pwd-ref-1": "secret-password"},
+            password_origins={"pwd-ref-1": "https://www.amazon.com"},
+            credential_refs_by_secret_ref={"pwd-ref-1": {"kind": "password", "id": "pwd-row"}},
+            current_url="https://www.amazon.com/ap/signin",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out.get("credential_ref") == {"kind": "password", "id": "pwd-row"}
+    resolve_password.assert_awaited()
+    hu.click_at_coords.assert_awaited_once_with(44, 55)
+    hu.type_text.assert_awaited_once_with("secret-password")
+    session.event_bus.dispatch.assert_not_called()
+
+async def test_resolve_password_field_coordinates_uses_visible_password_input():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        return_value={"x": 120, "y": 340, "selector": 'input[name="password"]'}
+    )
+    session = SimpleNamespace(get_current_page=AsyncMock(return_value=page))
+
+    coords = await service_actions._resolve_password_field_coordinates(session, input_page=None)
+    assert coords == (120, 340)
+    page.evaluate.assert_awaited()
+    script = page.evaluate.await_args.args[0]
+    assert 'input[type="password"]' in script
+    assert 'name="password"' in script
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -14104,6 +14180,115 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
     assert result["request_id"] == "req-pay-1"
     assert result["mode"] == "claudeAuth"
 
+
+async def test_generate_write_lock_notification_retries_once_on_schema_rejection():
+    """Return-shaped purchase-without-details must not abort the session on first try;
+    feed validation detail back and accept a corrected generic_write payload."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    try:
+        validate_browser_tool_args(
+            "generate_write_lock_notification",
+            {
+                "trigger_type": "purchase",
+                "action": "confirm return",
+                "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            },
+        )
+        raise AssertionError("expected schema rejection for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        first_error = err
+
+    fixed_action = {
+        "action": "generate_write_lock_notification",
+        "params": {
+            "trigger_type": "generic_write",
+            "action": "confirm Amazon return for Carhartt beanie",
+            "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                }
+            ],
+            "generic_write": {
+                "label": "Confirm return",
+                "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                "payload_summary": (
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                    "Return by Sep 19, 2026."
+                ),
+            },
+        },
+    }
+
+    fork_mock = AsyncMock(
+        side_effect=[
+            first_error,
+            {
+                "action": fixed_action,
+                "usage": {"input_tokens": 900, "output_tokens": 40},
+                "actual_model": "gpt-5.6-sol-gpt",
+                "request_id": "req-return-retry",
+                "mode": "gpt",
+            },
+        ]
+    )
+
+    with patch.object(handler, "_call_browser_use_with_rotation", new=fork_mock):
+        result = await _generate_write_lock_notification(
+            rose_client=SimpleNamespace(),
+            task_prompt="Return the beanie",
+            dynamic_system_context="dynamic-ctx",
+            browser_turn_messages=[{"role": "user", "content": "return"}],
+            browser_state={"url": return_url, "screenshot": None},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="user-return",
+            agent_id="agent-return",
+            iteration=14,
+            token_state=token_state,
+            gpt_token="gpt-token",
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="gpt",
+            approval_type="purchase",
+            current_url=return_url,
+            trusted_page_urls=[return_url],
+            pending_action={"action": "click", "params": {"index": 58768}},
+            write_lock_result={
+                "status": "needs_write_approval",
+                "approval_type": "purchase",
+                "element_text": "Confirm your return",
+            },
+            system_name="Rose",
+            fallback_question="Approve?",
+        )
+
+    assert fork_mock.await_count == 2
+    assert fork_mock.await_args_list[0].kwargs["call_site"] == "write_lock_notification_fork_14"
+    assert fork_mock.await_args_list[1].kwargs["call_site"] == "write_lock_notification_fork_14_retry1"
+    retry_messages = fork_mock.await_args_list[1].kwargs["extra_user_messages"]
+    assert len(retry_messages) == 2
+    assert "failed" in retry_messages[1]["content"].lower()
+    assert "trigger_type" in retry_messages[1]["content"]
+    assert result["notification"]["trigger_type"] == "generic_write"
+    assert "$10.84" in result["question"]
+    assert result["request_id"] == "req-return-retry"
+
+
 async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool():
     """If the forked model calls anything other than generate_write_lock_notification,
     the helper raises so the caller falls back to build_payment_question rather than
@@ -14270,28 +14455,141 @@ def test_write_lock_notification_prompt_includes_media_candidates():
 
     assert "media_candidates" in prompt
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
-    assert "use only those URLs for media and item image_url" in prompt
-    assert "description under 80 characters" in prompt
-    assert "must already exist in the browser trajectory" in prompt
+    assert "### Purchases" in prompt
+    assert "### Emails / outbound messages" in prompt
+    assert "### Social posts" in prompt
+    assert "### Returns / refund confirmations" in prompt
+    assert "### Payment field entry" in prompt
+    assert "**Approval Needed**" in prompt
+    assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in prompt
     assert "Visit the product page" not in prompt
 
-def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+
+def test_write_lock_notification_prompt_is_example_driven_for_all_gates():
+    """Fork prompt teaches via prescribed worked examples for every case."""
+    from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
+
+    return_prompt = _write_lock_notification_prompt(
+        approval_type="return",
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+        ),
+        pending_action={"action": "click", "params": {"index": 58768}},
+        write_lock_result={
+            "status": "needs_write_approval",
+            "approval_type": "return",
+            "element_text": "Confirm your return",
+        },
+        media_candidates=[
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+    )
+    purchase_prompt = _write_lock_notification_prompt(
+        approval_type="purchase",
+        current_url="https://www.amazon.com/checkout/spc",
+        pending_action={"action": "click", "params": {"index": 1}},
+        write_lock_result={"status": "needs_write_approval", "approval_type": "purchase"},
+    )
+
+    for needle in (
+        "### Purchases",
+        "### Emails / outbound messages",
+        "### Social posts",
+        "### Returns / refund confirmations",
+        "### Payment field entry",
+        "Notification format this produces:",
+        "Tool args example:",
+        "approval_type in Runtime evidence is a hint",
+        "Action: Confirm return",
+        "Payment secrets are not included in this message.",
+    ):
+        assert needle in return_prompt, needle
+        assert needle in purchase_prompt, needle
+    # Same example catalog; only runtime evidence differs.
+    assert return_prompt.split("Runtime evidence:")[0] == purchase_prompt.split("Runtime evidence:")[0]
+    assert "Confirm your return" in return_prompt
+    assert '"approval_type": "return"' in return_prompt or '"approval_type":"return"' in return_prompt.replace(
+        " ", ""
+    )
+
+
+def test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write():
+    """Owning-boundary red/green for the Amazon return notification schema failure."""
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _render_write_lock_notification_question
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    buggy_payload = {
+        "trigger_type": "purchase",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": [
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+        "generic_write": {
+            "label": "Confirm return",
+            "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            "payload_summary": (
+                "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                "Return by Sep 19, 2026."
+            ),
+        },
+    }
+    try:
+        validate_browser_tool_args("generate_write_lock_notification", buggy_payload)
+        raise AssertionError("expected BrowserToolArgsValidationError for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        assert "purchase details are required for a purchase approval" in err.detail
+
+    fixed_payload = {
+        "trigger_type": "generic_write",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": buggy_payload["media"],
+        "generic_write": buggy_payload["generic_write"],
+    }
+    validated = validate_browser_tool_args("generate_write_lock_notification", fixed_payload)
+    assert validated["trigger_type"] == "generic_write"
+    question = _render_write_lock_notification_question(
+        validated,
+        system_name="Rose",
+        fallback_question="Approve?",
+    )
+    assert "Confirm return" in question or "confirm Amazon return" in question
+    assert "$10.84" in question
+    assert "Whole Foods" in question
+    assert "original payment" in question
+
+
+def test_purchase_write_lock_notification_failure_falls_back_for_all_gates():
     from domains.spawn_browser_agent_v3.handler import (
         PurchaseApprovalContextError,
-        PurchaseApprovalNotificationRetryableError,
         _enforce_write_lock_notification_failure_policy,
     )
 
-    with pytest.raises(PurchaseApprovalContextError):
+    # Unified policy: every gate falls through to the deterministic fallback question.
+    assert (
         _enforce_write_lock_notification_failure_policy(
             "purchase",
             PurchaseApprovalContextError("missing reviews"),
         )
-
-    with pytest.raises(PurchaseApprovalNotificationRetryableError):
-        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
-
+        is None
+    )
+    assert _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout")) is None
+    assert _enforce_write_lock_notification_failure_policy("return", ValueError("metadata unavailable")) is None
     assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
+    assert _enforce_write_lock_notification_failure_policy("email_send", ValueError("metadata unavailable")) is None
+
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
     from domains.spawn_browser_agent_v3.handler import (
@@ -18017,6 +18315,14 @@ async def run_all_tests():
         test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback,
     )
     await r.record_async(
+        "execute_input_text_password_secret_ref_resolves_visible_password_coords",
+        test_execute_input_text_password_secret_ref_resolves_visible_password_coords,
+    )
+    await r.record_async(
+        "resolve_password_field_coordinates_uses_visible_password_input",
+        test_resolve_password_field_coordinates_uses_visible_password_input,
+    )
+    await r.record_async(
         "execute_input_text_payment_secret_ref_bypasses_warning",
         test_execute_input_text_payment_secret_ref_bypasses_payment_warning,
     )
@@ -18377,6 +18683,10 @@ async def run_all_tests():
         test_generate_write_lock_notification_payment_forks_and_renders_question,
     )
     await r.record_async(
+        "generate_write_lock_notification_schema_retry",
+        test_generate_write_lock_notification_retries_once_on_schema_rejection,
+    )
+    await r.record_async(
         "generate_write_lock_notification_wrong_tool_raises",
         test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool,
     )
@@ -18393,8 +18703,16 @@ async def run_all_tests():
         test_write_lock_notification_prompt_includes_media_candidates,
     )
     r.record(
-        "purchase_write_lock_notification_failure_blocks_fallback",
-        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
+        "write_lock_notification_prompt_example_driven",
+        test_write_lock_notification_prompt_is_example_driven_for_all_gates,
+    )
+    r.record(
+        "return_write_lock_notification_schema_red_green",
+        test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write,
+    )
+    r.record(
+        "purchase_write_lock_notification_failure_falls_back",
+        test_purchase_write_lock_notification_failure_falls_back_for_all_gates,
     )
     r.record(
         "normalize_write_lock_notification_media_candidate",

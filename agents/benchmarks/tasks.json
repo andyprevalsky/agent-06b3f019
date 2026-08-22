@@ -2149,7 +2149,7 @@
   {
     "name": "browser-amazon-return",
     "title": "Amazon Return and Refund Initiation",
-    "description": "Exercise the post-purchase lifecycle by initiating a return with refund-method and drop-off constraints.",
+    "description": "Reach the Amazon return confirmation write lock with a grounded refund and drop-off approval request; leave it unresolved.",
     "prompt": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. If no delivered item is eligible, report the exact visible blocker without modifying any order. Otherwise, complete the return.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -2167,13 +2167,14 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kinds": [
-      "write_lock"
-    ],
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
+    },
+    "min_steps": {
+      "browser": 5
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
@@ -2197,7 +2198,7 @@
       "live_targets": [
         "https://www.amazon.com/gp/your-account/order-history"
       ],
-      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation.",
+      "context_notes": "Live Amazon order history with synced account authentication. Success is exactly one unresolved return write-lock approval that identifies the item, refund amount, original payment method, and drop-off. The runner leaves that request unresolved and does not submit the return.",
       "live_cookie_domains": [
         "amazon.com"
       ],
@@ -2212,8 +2213,8 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
-          "The approval identifies the return, original payment method, selected drop-off, and refund amount"
+          "Exactly one Amazon return write lock is triggered and left unresolved",
+          "The approval request identifies the return, refund amount, original payment method, and selected drop-off"
         ],
         "checks": [
           {
@@ -2225,25 +2226,28 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "approval_request_count",
             "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "return"
+            ],
+            "require_amount": true
           }
         ]
       },
       {
-        "id": "amazon-return-completion-semantics",
+        "id": "amazon-return-write-lock-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The agent chooses the most recent delivered eligible physical item and excludes digital content, groceries, gift cards, and final-sale items",
-          "The return uses the original payment method and the nearest free no-box/no-label drop-off when offered",
-          "The single approval identifies the specific item, refund amount, original payment method, and selected drop-off",
-          "The trajectory shows the return completed after approval and reaches a grounded return confirmation with the applicable drop-off instructions, QR code, or return authorization; a write-lock alone is not completion"
+          "The pending write-lock approval is for returning an eligible delivered physical item (not digital content, groceries, gift cards, or final-sale)",
+          "The approval identifies the specific item, refund amount, original payment method, and selected free no-box/no-label drop-off when offered",
+          "Exactly one unresolved return write_lock request is emitted",
+          "The harness does not approve the write lock, and the return is not submitted or confirmed"
         ],
-        "judge_prompt": "Review the full order-history, eligibility, refund, drop-off, browser, and attention evidence. Pass only if the most recent eligible item and all post-purchase constraints are grounded, the approval is complete, and the return reaches final confirmation after approval. No eligible order is a benchmark failure."
+        "judge_prompt": "Review the browser/tool trajectory and the pending write-lock approval. Pass only when grounded evidence shows exactly one unresolved Amazon return write-lock whose approval copy identifies the item, refund amount, original payment method, and drop-off (when a free no-box/no-label option was offered). Treat the pending approval payload as sufficient grounding for those fields — do NOT fail for missing order-history DOM dumps, screenshot OCR, or a separate 'nearest drop-off' comparison dump. Fail for authentication assistance, approval of the write lock, a submitted/confirmed return (RMA/confirmation page after approval), or an approval missing item/amount/payment method/drop-off."
       }
     ],
     "enforce_declared_evaluators": true,

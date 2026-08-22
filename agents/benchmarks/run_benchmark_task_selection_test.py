@@ -38,6 +38,16 @@ def test_suite_label_for_repeated_task_args_is_readable():
     assert rb.suite_name_for_error(args) == "--task parallel-tool-calls,spawn-sub-agents"
 
 
+def test_local_validate_task_names_preserves_intentional_repeats():
+    """k=N trials pass the same task name N times; local must not silently dedupe."""
+    names = ["browser-amazon-return"] * 5
+    assert local_runner.validate_task_names(names) == names
+    args = local_runner.build_benchmark_args(names, port=3201, max_concurrency=5)
+    assert args.count("--task") == 5
+    assert "--parallel" in args
+    assert args[args.index("--max-concurrency") + 1] == "5"
+
+
 def test_agent_payment_tasks_use_the_admin_account_with_forced_customer_path():
     expected_user_id = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 

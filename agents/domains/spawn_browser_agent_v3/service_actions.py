@@ -1959,6 +1959,82 @@ async def _resolve_payment_ref_coordinates(
     return None
 
 
+_PASSWORD_FIELD_LOCATE_JS = """
+(hint) => {
+    const candidates = Array.from(document.querySelectorAll(
+        'input[type="password"], input[name="password"], input[autocomplete="current-password"], input[autocomplete="new-password"]'
+    ));
+    const matchesHint = (el) => {
+        if (!hint || typeof hint !== 'object') return false;
+        for (const attr of ['id', 'name', 'autocomplete']) {
+            const want = hint[attr];
+            if (want && el.getAttribute(attr) === want) return true;
+        }
+        return false;
+    };
+    const ordered = hint
+        ? [...candidates.filter(matchesHint), ...candidates.filter((el) => !matchesHint(el))]
+        : candidates;
+    for (const el of ordered) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            continue;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) continue;
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const after = el.getBoundingClientRect();
+        if (after.width < 2 || after.height < 2) continue;
+        return {
+            x: Math.round(after.left + after.width / 2),
+            y: Math.round(after.top + after.height / 2),
+            selector: el.id
+                ? ('#' + el.id)
+                : (el.getAttribute('name') ? ('input[name="' + el.getAttribute('name') + '"]') : 'input[type="password"]'),
+        };
+    }
+    return null;
+}
+"""
+
+
+async def _resolve_password_field_coordinates(
+    session: Any,
+    *,
+    input_page: Any = None,
+    field_hint: Optional[Dict[str, str]] = None,
+) -> Optional[tuple[int, int]]:
+    """Resolve coordinates for a visible password input when the indexed node has no rect.
+
+    Account-switch / sign-in transitions often leave the LLM's password index
+    without a bounding box even though a visible ``input[type=password]`` is on
+    the page. Mirror the payment semantic-locate path so humanized typing can
+    continue without falling back to TypeTextEvent.
+
+    When ``field_hint`` carries id/name/autocomplete from the indexed element,
+    prefer that match before the first visible password field so multi-password
+    pages (change-password, sign-in + register) do not type into the wrong input.
+    """
+    if not session:
+        return None
+    hint_payload = field_hint if isinstance(field_hint, dict) and field_hint else None
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(
+            target, _PASSWORD_FIELD_LOCATE_JS, hint_payload
+        )
+        if not result:
+            continue
+        if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
+            logger.debug(
+                "Resolved password field coordinates",
+                target=label,
+                selector=result.get("selector"),
+                matched_hint=bool(hint_payload),
+            )
+            return int(result["x"]), int(result["y"])
+    return None
+
+
 _PAYMENT_METHOD_EXPAND_JS = """
 (_unused) => {
     const pattern = /\\b(card|credit|debit|pay with card|card information|payment method)\\b/i;
@@ -2424,6 +2500,7 @@ async def _click_write_lock_result(
         is_click_write_lock_eligible_control,
         is_email_send_button,
         is_purchase_button,
+        is_return_button,
         is_social_domain,
         is_submit_button,
     )
@@ -2473,6 +2550,7 @@ async def _click_write_lock_result(
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
         ("email_send", is_email_send_button(element_text), "email send"),
+        ("return", is_return_button(element_text), "return confirmation"),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""
@@ -2809,6 +2887,21 @@ async def _execute_indexed_input_text(
             session,
             secret_ref_name or "",
             input_page=_humanizer_input_page(humanizer),
+        )
+    is_password_credential = bool(
+        credential_ref and str(credential_ref.get("kind") or "") == "password"
+    )
+    if humanizer and not coord_tuple and is_password_credential:
+        attrs = getattr(element, "attributes", None) or {}
+        field_hint = {
+            key: str(attrs[key])
+            for key in ("id", "name", "autocomplete")
+            if attrs.get(key)
+        }
+        coord_tuple = await _resolve_password_field_coordinates(
+            session,
+            input_page=_humanizer_input_page(humanizer),
+            field_hint=field_hint or None,
         )
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
     asyncio.create_task(session.highlight_interaction_element(element))

@@ -829,8 +829,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   "refresh-deps SSH sync must use cloudbench-fetch-ref.sh with a controller token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' \
-  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"
-require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
@@ -1591,7 +1590,6 @@ if elapsed > 8 or elapsed < 1.5:
     raise SystemExit(f"_with_timeout wall {elapsed:.1f}s not ~2s")
 print("ssh_exec controller-side timeout contract ok")
 PY
-
 # An unprovisioned worktree (plain `git worktree add`, no credentials copied)
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
