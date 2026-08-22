@@ -321,7 +321,9 @@ export function resolveCaptchaIndicatorPhase(
     const terminal = mapOutcomeStatusToPhase(outcome.status);
     if (terminal) {
       const ageMs =
-        outcome.timestampMicros != null ? now - outcome.timestampMicros / 1000 : Number.POSITIVE_INFINITY;
+        typeof outcome.timestampMicros === 'number'
+          ? now - outcome.timestampMicros / 1000
+          : Number.POSITIVE_INFINITY;
       const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs < FRESH_OUTCOME_MS;
       const awaited = now < awaitUntil;
       if (awaited || fresh) {

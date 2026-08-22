@@ -224,21 +224,27 @@ async function testScriptShowsPhaseTransitions(): Promise<void> {
     await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}[data-phase="solving"]`, {
       timeout: 3_000,
     });
-    let label = await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`).innerText();
+    let label = await page
+      .locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`)
+      .innerText();
     assert.match(label, /auto-solving captcha/i);
 
     await page.evaluate(captchaSolveIndicatorSetPhaseScript('succeeded'));
     await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}[data-phase="succeeded"]`, {
       timeout: 3_000,
     });
-    label = await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`).innerText();
+    label = await page
+      .locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`)
+      .innerText();
     assert.match(label, /captcha solved/i);
 
     await page.evaluate(captchaSolveIndicatorSetPhaseScript('failed'));
     await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}[data-phase="failed"]`, {
       timeout: 3_000,
     });
-    label = await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`).innerText();
+    label = await page
+      .locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`)
+      .innerText();
     assert.match(label, /captcha solve failed/i);
 
     // idle while holding terminal should not instantly clear
