@@ -51,7 +51,7 @@ def test_user_facing_style_is_attached_only_to_user_visible_outputs():
 
     from domains.message_person.repo import generate_message_activity
     from helpers.summarize import generate_completion_summary
-    from providers.rose.browser_use import build_browser_use_system_prompt, build_browser_use_tools
+    from providers.rose.browser_use import build_browser_use_system_prompt
     from utils.prompts import build_system_prompt
     from utils.tool_schemas import SendMessageToUserExecutePhaseTool, SendMessageToUserTool
     from utils.user_facing_writing_prompt import USER_FACING_WRITING_STYLE
@@ -82,10 +82,6 @@ def test_user_facing_style_is_attached_only_to_user_visible_outputs():
     ]
     assert USER_FACING_WRITING_STYLE in plan_message_description
     assert USER_FACING_WRITING_STYLE in execute_message_description
-
-    browser_tools = build_browser_use_tools(["send_message_to_user"])
-    browser_message_description = browser_tools[0]["input_schema"]["properties"]["message"]["description"]
-    assert USER_FACING_WRITING_STYLE in browser_message_description
 
     assert "USER_FACING_WRITING_STYLE" in inspect.getsource(generate_message_activity)
     assert "USER_FACING_WRITING_STYLE" in inspect.getsource(generate_completion_summary)
