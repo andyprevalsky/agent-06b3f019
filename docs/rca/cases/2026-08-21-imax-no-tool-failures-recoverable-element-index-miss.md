@@ -1,3 +1,26 @@
+---
+id: 2026-08-21-imax-no-tool-failures-recoverable-element-index-miss
+date: 2026-08-21
+title: no_tool_failures failed closed on a recovered stale-DOM element index miss
+surface: agents
+component: benchmark-static-checks
+classification: test-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: agents/benchmarks/run_benchmark.py _tool_runtime_failures / _run_declared_static_check (type=no_tool_failures) counted a recovered browser ERROR as terminal
+symptoms:
+  - "Observed tool failure: spawn_browser_agent"
+  - "Element with index 0 not found"
+  - "no_tool_failures"
+tags:
+  - benchmark-evaluator
+  - browser-agent
+  - recovery-noise
+sources:
+  - agent fdd449b5-2288-4890-b001-dfae973097a6
+repro: agents/benchmarks/run_benchmark.py --task browser-imax-group-tickets
+status: fixed
+---
+
 # RCA: `no_tool_failures` fails closed on recovered DOM index miss
 
 ## Symptom
@@ -59,3 +82,30 @@ observed payment_approval (~$95.94), then failed
 (`success_on_payment_card_request`, `approval_handling=ignore`) leaves the root
 ACTIVE; sibling `browser-event-ticket` omits `agent_status`. Remove COMPLETED
 check and align criteria/context_notes with unresolved payment-card stop.
+
+## Problem
+
+See `## Symptom`. Agent `fdd449b5-2288-4890-b001-dfae973097a6` reached grounded
+`payment_approval` (~$95.94) and failed only `no_tool_failures`, on a mid-run
+browser ERROR (`Element with index 0 not found`) that the agent recovered from.
+
+## Diagnosis
+
+See `## Classification`, `## First-bad boundary`, and `## Owning-boundary proof`.
+`_tool_runtime_failures` / `_run_declared_static_check` counted a recovered
+stale-DOM index miss as terminal, contradicting the payment-terminal task
+contract and the antibot recovery-noise exclusion already present in the same
+helper.
+
+## Solution
+
+See `## Fix`, `## Follow-up (H-03)`, and `## Follow-up (H-04)`.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+An evaluator that counts tool ERRORs must ignore errors the agent demonstrably
+recovered from, or it fails runs that met the task contract.

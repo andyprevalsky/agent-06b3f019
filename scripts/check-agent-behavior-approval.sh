@@ -83,7 +83,22 @@ FLAGGED="$(
               f == "agents/workflows/agent_workflow.py" ||
               f == "agents/tests/blackbox/workflow.blackbox.py" ||
               f == "agents/tests/blackbox/dag_executor.blackbox.py" ||
-              f == "agents/tests/blackbox/workflow_determinism.blackbox.py")
+              f == "agents/tests/blackbox/workflow_determinism.blackbox.py" ||
+              # The worker-write layer decides whether a failed lifecycle write
+              # is recoverable or terminal for the ACTIVITY. Turning a stale
+              # write from "200 + keep going" into "409 -> raise -> die" is the
+              # same class this guard exists to catch, but it lives here rather
+              # than in agents/loop. Without these entries a deploy that flips
+              # an orphaned activity from surviving to self-terminating passes
+              # the gate untouched (observed on
+              # andyprevalsky/deploy-migration-restarts-subagents).
+              f == "agents/helpers/workflow_generation.py" ||
+              f == "agents/helpers/messages.py" ||
+              f == "agents/domains/spawn_agent/service.py" ||
+              f == "agents/domains/spawn_agent/repo.py" ||
+              f == "agents/domains/spawn_browser_agent_v3/repo.py" ||
+              f == "agents/domains/spawn_claude_code_agent/repo.py" ||
+              f == "agents/domains/call_phone_number/repo.py")
     }
     function is_behavioral(line, fname,    code, sign) {
       sign=substr(line, 1, 1)
@@ -102,6 +117,15 @@ FLAGGED="$(
 
       # Terminal handoffs / recovery fall-through control.
       if (code ~ /(_handle_incomplete|_mark_failed|_mark_complete|continue_as_new)/) return 1
+
+      # Worker self-termination on a sealed generation. These decide whether an
+      # orphaned activity SURVIVES a deploy cutover or kills itself, which is a
+      # recovery-vs-terminal decision even though it lives outside agents/loop.
+      # A swallow (catching the signal, or downgrading it to a log/sentinel) is
+      # just as behavioral as the raise, so both directions must trip the guard.
+      if (code ~ /(WorkflowGenerationSealed|raise_if_generation_sealed)/) return 1
+      if (code ~ /status_code[[:space:]]*==[[:space:]]*409/) return 1
+      if (code ~ /return[[:space:]]*\{[[:space:]]*["'"'"']fenced["'"'"']/) return 1
       if (code ~ /(^|[^A-Za-z0-9_])run_agent[[:space:]]*\(/) return 1
 
       # Status/reason literals that gate terminal vs. recoverable outcomes.
