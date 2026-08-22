@@ -12384,10 +12384,31 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         )
         is True
     )
+    # Unknown switch target while pinned — conservative block (handoff safety).
     assert (
         navigation_leaves_pinned_host(
             current_url=current,
             target_url=None,
+            pin_host=pin,
+            action="switch_tab",
+        )
+        is True
+    )
+    # Same-host tab switch while pinned — allowed (hotels.com checkout ↔ property).
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://checkout.example.com/c/pay/other",
+            pin_host=pin,
+            action="switch_tab",
+        )
+        is False
+    )
+    # Off-pin tab while pinned — blocked.
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://www.merchant.com/cart",
             pin_host=pin,
             action="switch_tab",
         )
@@ -12590,6 +12611,59 @@ async def test_execute_close_tab_refuses_on_cross_origin_handoff():
     )
     assert out_switch["success"] is False
     assert "leave pinned page host" in out_switch["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_switch_tab_allows_same_host_while_pinned():
+    """RCA: hotels.com agent could not return to checkout tab after property-page evidence."""
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    checkout_url = (
+        "https://www.hotels.com/checkout/session/9ed6729d-7d82-4834-8c8e-d1d82f0ad1a7"
+    )
+    property_url = "https://www.hotels.com/ho129640/hotel-kabuki-part-of-jdv-by-hyatt"
+    off_pin_url = "https://www.google.com/search?q=hotels"
+    session = _fake_session_with_event_bus()
+    session.get_tabs = AsyncMock(
+        return_value=[
+            SimpleNamespace(target_id="aaaaaaaa1234", title="checkout", url=checkout_url),
+            SimpleNamespace(target_id="bbbbbbbb5678", title="property", url=property_url),
+            SimpleNamespace(target_id="cccccccc9abc", title="google", url=off_pin_url),
+        ]
+    )
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={
+            "action": "switch_tab",
+            "params": {"tab_id": "1234"},
+        },
+        current_url=property_url,
+        navigation_pin_host="www.hotels.com",
+    )
+    assert out["success"] is True
+    session.event_bus.dispatch.assert_called_once()
+
+    ah.record_action.reset_mock()
+    session.event_bus.dispatch.reset_mock()
+    out_blocked = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={
+            "action": "switch_tab",
+            "params": {"tab_id": "9abc"},
+        },
+        current_url=property_url,
+        navigation_pin_host="www.hotels.com",
+    )
+    assert out_blocked["success"] is False
+    assert "leave pinned page host" in out_blocked["error"]
     session.event_bus.dispatch.assert_not_called()
 
 
@@ -17366,6 +17440,10 @@ async def run_all_tests():
     await r.record_async(
         "close_tab_refuses_cross_origin_handoff",
         test_execute_close_tab_refuses_on_cross_origin_handoff,
+    )
+    await r.record_async(
+        "execute_switch_tab_allows_same_host_while_pinned",
+        test_execute_switch_tab_allows_same_host_while_pinned,
     )
     await r.record_async(
         "evaluate_refuses_nav_while_pinned",

@@ -191,8 +191,19 @@ def navigation_leaves_pinned_host(
     if not on_pin:
         # Clicks may have already moved us off the pin — do not trap elsewhere.
         return False
-    # Closing/switching tabs abandons the handoff surface the same way navback does.
-    if action in {"navback", "close_tab", "switch_tab"}:
+    # Closing/navback abandons the handoff surface.
+    if action in {"navback", "close_tab"}:
+        return True
+    # switch_tab: allow when the target tab stays on the pinned host (e.g. hotels.com
+    # checkout ↔ property page); block only when focus would move off-pin.
+    if action == "switch_tab":
+        if not target_url:
+            return True
+        target_host = (urlparse(target_url or "").hostname or "").lower()
+        if not target_host:
+            return True
+        if target_host == pin or target_host.endswith(f".{pin}"):
+            return False
         return True
     if action in {"goto", "open_new_tab"}:
         target_host = (urlparse(target_url or "").hostname or "").lower()
@@ -1064,7 +1075,15 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
         return {"success": True, "message": ""}
     if context.action_name == "switch_tab":
-        guard = _navigation_guard_error(context, action="switch_tab")
+        switch_target_url = await _resolve_switch_tab_target_url(
+            context.session,
+            context.params.get("tab_id"),
+        )
+        guard = _navigation_guard_error(
+            context,
+            action="switch_tab",
+            target_url=switch_target_url,
+        )
         if guard:
             return await _refuse_navigation(
                 context,
@@ -3317,6 +3336,20 @@ async def _execute_upload_file(
 
     logger.info(f"\U0001f4ce Uploaded file '{filename}' to element {index}")
     return {"success": True, "message": "", "uploaded": filename, "to_index": index}
+
+
+async def _resolve_switch_tab_target_url(session: Any, tab_id: Any) -> Optional[str]:
+    """Return the URL of the tab that switch_tab would focus, if resolvable."""
+    if not tab_id or session is None:
+        return None
+    try:
+        tabs = await session.get_tabs()
+    except Exception:
+        return None
+    target = next((t for t in tabs if t.target_id.endswith(str(tab_id))), None)
+    if not target:
+        return None
+    return str(getattr(target, "url", None) or "")
 
 
 async def _execute_switch_tab(
