@@ -32,7 +32,7 @@ sources:
   - agent 4161ece1-7b66-4d67-9faf-c03e4f097923
   - agent afe8a612-6f21-4eb2-af17-38bae6b5f1a9
 repro: agents/tests/e2e/alchemy_evaluate_stall_repro.py + /opt/cursor/artifacts/alchemy_click_timeout_gate_repro.py + click soft-vs-hard Playwright mechanism; live k=1 20260822_011105
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -129,6 +129,15 @@ Run: `agents/benchmarks/runs/20260822_013511_browser-alchemy-springs-sauna.json`
 Approved drop of literal `939 Post Street` grounding from selection criteria/judge
 (prompt still states the address as user intent). Re-run exact local bench for
 outcome proof.
+
+## Outcome proof 2026-08-22
+
+Exact `scripts/run-bench --local browser-alchemy-springs-sauna` **PASS** after:
+hard-recover any action timeout + drop street-address grounding + selection judge
+accepts validated payment-receipt line items / Momence product URLs.
+
+Agent `cb5e44ef-0d5c-4261-acbf-35d51913c714` — payment card observed; RESULTS 1/1.
+FE: https://roselabs.ai/?agent-id=cb5e44ef-0d5c-4261-acbf-35d51913c714
 
 ## Human feedback
 
