@@ -3307,6 +3307,63 @@ def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     ]
 
 
+def test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery():
+    """Stale selector-map index ERROR after hard recovery is retry noise.
+
+    Local repro: browser-alchemy-springs-sauna agent
+    186b9b29-456b-4544-91d4-042d0e6db5af reached grounded $50.65 payment_approval
+    after evaluate hard-recovery ERROR (already intermediate) plus
+    `Element with index 0 not found` on scroll_up, then failed only on
+    alchemy-sauna-runtime-contract / no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    evaluate_error = (
+        "Browser action 'evaluate' timed out after 330s; hard renderer recovery ran "
+        "after CDP classified renderer_main_thread_blocked."
+    )
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": evaluate_error,
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "toolu_01JGerJatmXL1hDcZmCbs1mY",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "Element with index 0 not found",
+                "metadata": {
+                    "error": True,
+                    "title": "Scrolled up 3000px",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_reB04pp6U951TkzvRjOUsS96",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_payment_ok",
+                    "title": "Payment card requested ($50.65)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -14560,6 +14617,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_stale_dom_node",
         test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
+    )
+    r.record(
+        "no_tool_failures_ignores_stale_element_index_after_evaluate_recovery",
+        test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery,
     )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",

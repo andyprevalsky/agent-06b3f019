@@ -10,8 +10,8 @@ first_bad_boundary: agents/benchmarks/run_benchmark.py::_is_intermediate_browser
 symptoms:
   - 'Declared evaluator alchemy-sauna-runtime-contract failed: Observed tool failure'
   - "Browser action 'evaluate' timed out after 330s; hard renderer recovery ran after CDP classified renderer_main_thread_blocked"
+  - 'Element with index 0 not found'
   - 'spawn_browser_agent call_… status=ERROR'
-  - 'action_type=error title=evaluate'
   - 'RESULTS: 0/5 passed'
 tags:
   - browser-agent
@@ -25,8 +25,9 @@ sources:
   - agent 1336b4b4-22e2-4212-923e-8cdfa002742b
   - agent 19a568fb-406c-45ff-bf22-fb0346a00b4b
   - agent b393b72c-e7d2-4055-b1d5-2ec245945596
+  - agent 186b9b29-456b-4544-91d4-042d0e6db5af
   - fleet run 713f68b9-7af0-402d-b930-1c969c47bf02
-repro: agents/tests/blackbox/benchmark.blackbox.py — test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors
+repro: agents/tests/blackbox/benchmark.blackbox.py — test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors, test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery
 status: fixed
 ---
 
@@ -98,6 +99,33 @@ remains to be re-observed.
 Do not relax selection/terminal judges or bump timeouts. Cohort B
 (auth_assistance before selection) remains a separate open thread.
 
+### Recurrence 2026-08-22 (agent 186b9b29, k=5 4/5 after prompt change)
+
+After task prompt `checkout as guest`, k=5 returned **4/5**. Sole fail:
+`186b9b29` reached grounded `$50.65` `request_payment_card` but
+`alchemy-sauna-runtime-contract` / `no_tool_failures` failed on
+`spawn_browser_agent call_reB04pp6U951TkzvRjOUsS96 status=ERROR`.
+
+Trajectory: evaluate hard-recovery ERROR (already intermediate) →
+`scroll_up` ERROR `Element with index 0 not found` (was **not** intermediate) →
+payment card FINISHED.
+
+**First-bad boundary (this recurrence):**
+`_is_intermediate_stale_dom_node_failure` — stale selector-map index misses
+`Element with index N not found` after hard recovery invalidates the map.
+
+**Pre-fix offline replay** (run `20260822_153436`, logs.messages):
+`_tool_runtime_failures` → `['spawn_browser_agent call_reB04pp6U951TkzvRjOUsS96 status=ERROR']`.
+
+**Fix:** classify `element with index` + `not found` as stale-DOM retry noise in
+`_is_intermediate_stale_dom_node_failure`. Cemented by
+`test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery`.
+
+**Post-fix offline replay:** `_tool_runtime_failures` → `[]`; static
+`no_tool_failures` passes.
+
+FE: `http://localhost:3202/?agent-id=186b9b29-456b-4544-91d4-042d0e6db5af`
+
 ## Human feedback
 
 User asked for `/rca` after k=1 PASS then k=5 0/5. Earlier: payment-card request
@@ -106,6 +134,7 @@ is the right terminal; `spawn_agent` expected-count was wrong (fixed to
 
 ## Reusable lesson
 
-Treat intentional browser-supervisor evaluate hard-recovery ERROR chips as
-intermediate retry noise in `no_tool_failures`, the same way challenge-recovery
-ERRORs are ignored when the agent later reaches a grounded payment boundary.
+Treat intentional browser-supervisor evaluate hard-recovery ERROR chips and
+post-recovery stale selector-map index ERRORs (`Element with index N not found`,
+`Cannot humanize … no coordinates available`) as intermediate retry noise in
+`no_tool_failures` when the agent later reaches a grounded payment boundary.

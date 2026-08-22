@@ -8196,6 +8196,8 @@ def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[d
     blob = _message_failure_text(message, candidate).lower()
     if "cannot humanize" in blob and "no coordinates available" in blob:
         return True
+    if "element with index" in blob and "not found" in blob:
+        return True
     return (
         "no node found for given backend id" in blob
         or "no node with given id found" in blob
