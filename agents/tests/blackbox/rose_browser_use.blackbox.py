@@ -222,7 +222,7 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "  - 5. SMS OTP" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
     assert "call request_user_assistance_for_authentication" in prompt
-    assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
+    assert "Do not call attempt_completion or report a status instead." in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
 

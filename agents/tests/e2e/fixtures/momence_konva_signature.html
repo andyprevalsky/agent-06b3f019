@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Momence-like Konva signature</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    #wrap {
+      max-width: 480px;
+      height: 150px;
+      background: #f0f0f0;
+      position: relative;
+      overflow: hidden;
+      touch-action: none;
+    }
+    #line {
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      bottom: 20px;
+      height: 1px;
+      background: #777;
+    }
+    button { margin: 12px; }
+  </style>
+</head>
+<body>
+  <!--
+    Faithful port of Momence checkout ks= signature Stage
+    (static.momence.com/.../main.c2165e2b.js): Stage mouse/touch handlers call
+    getStage().getPointerPosition() and append point arrays. Requires network
+    to load Konva from unpkg for manual probes; blackbox tests inline the same
+    behavior without a CDN.
+  -->
+  <div id="wrap"><div id="container"></div><div id="line"></div></div>
+  <button id="accept" disabled>Accept</button>
+  <pre id="log"></pre>
+  <script src="https://unpkg.com/konva@9/konva.min.js"></script>
+  <script>
+    const log = (m) => {
+      document.getElementById('log').textContent += m + '\n';
+      console.log(m);
+    };
+    let value = [];
+    let drawing = false;
+    const stage = new Konva.Stage({ container: 'container', width: 480, height: 150 });
+    const layer = new Konva.Layer();
+    stage.add(layer);
+
+    function clamp(x, y) { return [Math.max(0, x), Math.max(0, y)]; }
+    function redraw() {
+      layer.destroyChildren();
+      for (const pts of value) {
+        layer.add(new Konva.Line({
+          points: pts,
+          stroke: '#333',
+          strokeWidth: 2,
+          tension: 0.5,
+          lineCap: 'round',
+          lineJoin: 'round',
+          globalCompositeOperation: 'source-over',
+        }));
+      }
+      layer.draw();
+      document.getElementById('accept').disabled = !(value && value.length);
+    }
+    function onDown(e) {
+      drawing = true;
+      const r = e.target.getStage()?.getPointerPosition();
+      if (r) {
+        value = value.concat([clamp(r.x, r.y)]);
+        redraw();
+      }
+    }
+    function onMove(e) {
+      if (!drawing) return;
+      const stageNode = e.target.getStage();
+      if (!stageNode) return;
+      const r = stageNode.getPointerPosition();
+      if (!r) return;
+      const copy = value.slice();
+      let last = copy[copy.length - 1];
+      if (last) {
+        last = last.concat(clamp(r.x, r.y));
+        copy.splice(value.length - 1, 1, last);
+        value = copy.concat();
+        redraw();
+      }
+    }
+    function onUp() { drawing = false; }
+
+    stage.on('mousedown touchstart', onDown);
+    stage.on('mousemove touchmove', onMove);
+    stage.on('mouseup touchend', onUp);
+    log('konva signature ready');
+  </script>
+</body>
+</html>
