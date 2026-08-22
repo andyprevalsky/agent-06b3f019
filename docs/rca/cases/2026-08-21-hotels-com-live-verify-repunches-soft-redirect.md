@@ -69,3 +69,12 @@ cd agents && python tests/blackbox/challenge_recovery.blackbox.py
 # live_tab_verify_same_site_soft_redirect
 cd back-end && npx tsx src/tests/unit/browser-challenge-recovery.test.ts
 ```
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+After a soft-redirect probe clears clean, live verify must re-nav the settled
+same-site URL — never re-punch the original challenged deep link.

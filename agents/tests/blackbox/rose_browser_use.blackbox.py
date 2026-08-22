@@ -215,6 +215,34 @@ def test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state():
     assert out == actions
 
 
+def test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell():
+    """Hotels.com Bot or Not mounts indexed shell nodes with no slider index.
+
+    Stripping click_coordinates whenever any [index] exists leaves the model
+    with clickable shell div/a/span only — it then honestly reports
+    'no interactive solve control is available' and skips the visible slider.
+    """
+    actions = ["click", "click_coordinates", "screenshot", "wait", "recover_from_challenge"]
+    browser_state = {
+        "dom_tree": (
+            "[3545]<div id=app-captcha-pwa />\n"
+            "\t[3582]<a />\n"
+            "\tShow us your human side...\n"
+            "\tWe can't tell if you're a human or a bot.\n"
+            "\t[3594]<span />\n"
+            "\t6d75d0d4-6be2-4c72-aa2f-af218aad299f"
+        ),
+        "title": "Bot or Not?",
+        "url": "https://www.hotels.com/bot-or-not",
+    }
+
+    out = filter_browser_use_actions_for_state(actions, browser_state)
+
+    assert "click_coordinates" in out
+    assert "screenshot" in out
+    assert "recover_from_challenge" in out
+
+
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     prompt = build_browser_use_system_prompt([])
 
@@ -1773,6 +1801,10 @@ async def run_all_tests():
     r.record(
         "filter_actions_keeps_coordinates_when_unindexed",
         test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state,
+    )
+    r.record(
+        "filter_keeps_click_coordinates_on_bot_or_not_captcha_shell",
+        test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell,
     )
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
