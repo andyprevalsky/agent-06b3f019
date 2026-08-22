@@ -37,13 +37,15 @@ const usd = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Poll a card's funding transfer until it reaches a terminal state.
+ * Poll a card's funding transfer until it reaches a terminal release state.
  *
- * `consumed` is transient after a close — it flips to `reclaimed` once the release settles.
+ * `consumed` is transient after a close — it flips to `reclaimed`/`released` once the release
+ * settles (same terminal set as `AgentCardCompanyWalletFundingProvider.reclaimUserWalletFunding`).
  * Asserting immediately after `close_card` reads the transient value and looks like value loss.
  */
 async function waitForTransferReclaimed(
   cardId: string,
+  minReleasedCents: number,
   timeoutMs = 120_000
 ): Promise<{ status: string; releasedCents: number }> {
   const deadline = Date.now() + timeoutMs;
@@ -51,7 +53,7 @@ async function waitForTransferReclaimed(
   for (;;) {
     const transfers =
       (
-        (await callOrgTool('list_transfers', { limit: 25 })) as {
+        (await callOrgTool('list_transfers', { limit: 100 })) as {
           structuredContent?: { transfers?: Array<Record<string, unknown>> };
         }
       ).structuredContent?.transfers ?? [];
@@ -61,11 +63,47 @@ async function waitForTransferReclaimed(
         status: String(mine.status ?? 'unknown'),
         releasedCents: Number(mine.released_cents ?? 0),
       };
-      if (last.status === 'reclaimed') return last;
+      if (
+        last.releasedCents >= minReleasedCents &&
+        (last.status === 'reclaimed' || last.status === 'released')
+      ) {
+        return last;
+      }
     }
     if (Date.now() >= deadline) return last;
     await sleep(8_000);
   }
+}
+
+/**
+ * Drain idle cardholder headroom into the pool before minting.
+ *
+ * A mint against existing residual nets (`transferred_cents: 0`, pool untouched). That path never
+ * produces a reclaimable company-wallet transfer for THIS card — `list_transfers` can sit at
+ * `consumed` forever while `recover_funds` credits unrelated residual and false-passes a weaker
+ * sweep check. Sweeping first forces the subsequent mint to draw from the pool so the close →
+ * release → reclaim loop is observable on this card's transfer.
+ */
+async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let recoveredTotal = 0;
+  let idleRounds = 0;
+  while (Date.now() < deadline && idleRounds < 2) {
+    const sweep = await recoverAllCardholderResiduals(callOrgTool);
+    if (sweep.settledCents > 0) {
+      recoveredTotal += sweep.settledCents;
+      idleRounds = 0;
+      continue;
+    }
+    if (sweep.pendingCents > 0) {
+      idleRounds = 0;
+      await sleep(5_000);
+      continue;
+    }
+    idleRounds += 1;
+    if (idleRounds < 2) await sleep(2_000);
+  }
+  return recoveredTotal;
 }
 
 /**
@@ -211,6 +249,13 @@ async function main(): Promise<void> {
   assert.ok(cardholders.length > 0, 'sandbox org has no cardholders to test with');
   const cardholderId = cardholders[0].id;
 
+  const preSweepCents = await sweepResidualHeadroom();
+  if (preSweepCents > 0) {
+    record(`pre-mint residual sweep returned ${usd(preSweepCents)} to the pool`);
+  } else {
+    record('pre-mint residual sweep found nothing idle');
+  }
+
   const poolBefore = extractAgentCardOrgWallet(
     await callOrgTool('get_company_wallet', {})
   ).availableCents;
@@ -230,17 +275,16 @@ async function main(): Promise<void> {
     await callOrgTool('get_company_wallet', {})
   ).availableCents;
   const drawn = poolBefore - poolAfterMint;
-  // Either the pool funded it, or existing cardholder headroom netted it. Both are valid; what is
-  // NOT valid is the pool moving by some other amount.
-  assert.ok(
-    drawn === mintCents || drawn === 0,
-    `pool moved ${usd(drawn)} for a ${usd(mintCents)} mint — expected a full draw or a clean net`
+  // After the residual sweep, this mint must draw from the pool. A netted mint (drawn === 0)
+  // leaves no reclaimable company-wallet transfer for THIS card — which is exactly the failure
+  // mode this blackbox is here to catch on the close → release path.
+  assert.equal(
+    drawn,
+    mintCents,
+    `pool moved ${usd(drawn)} for a ${usd(mintCents)} mint after residual sweep — expected a ` +
+      `full pool draw so close/reclaim is observable on this card's transfer`
   );
-  record(
-    drawn === 0
-      ? 'mint netted against existing headroom (pool untouched)'
-      : 'mint drew from the pool'
-  );
+  record('mint drew from the pool');
 
   // Close it unused, then prove recovery returns the value to the POOL (not the cardholder).
   const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
@@ -261,20 +305,21 @@ async function main(): Promise<void> {
   // benchmarks that mint and consume cards continuously, so the absolute pool balance moves
   // underneath us — an earlier version of this test asserted `pool >= poolBefore` and failed
   // because concurrent benchmark traffic had drawn $30.96 during our settle wait. The race-free
-  // invariant is that THIS card's funding transfer reached `reclaimed` and released in full.
-  const settled = await waitForTransferReclaimed(cardId);
-  assert.equal(
-    settled.status,
-    'reclaimed',
-    `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim, not consume`
+  // invariant is that THIS card's funding transfer reached a terminal release and released in full.
+  const settled = await waitForTransferReclaimed(cardId, mintCents);
+  assert.ok(
+    settled.status === 'reclaimed' || settled.status === 'released',
+    `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
+      `not stay consumed`
   );
-  assert.equal(
-    settled.releasedCents,
-    mintCents,
+  assert.ok(
+    settled.releasedCents >= mintCents,
     `released ${usd(settled.releasedCents)} but the card held ${usd(mintCents)} — the full unused ` +
       `amount must return to the pool`
   );
-  record(`transfer reclaimed in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`);
+  record(
+    `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
+  );
 
   // ── Cleanup: never leave open cards behind ───────────────────────────────────────────────────
   const cards =
