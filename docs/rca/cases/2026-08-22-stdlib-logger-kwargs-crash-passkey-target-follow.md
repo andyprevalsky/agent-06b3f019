@@ -72,6 +72,12 @@ rest of the file). Cemented by
 `browser_agent_session_count`. 10k-agent behavior: O(1) string format per
 passkey target rebind; no new fan-in, queries, or broadcasts.
 
+Post-fix Alchemy k=5 (`hub 52d02893`, run `20260822_041522_…`): **4/5**.
+Worker logged successful `following focused browser target previous_target_id=…`
+lines; zero `Logger._log … previous_target_id` TypeErrors. Remaining fail
+(`9fb21e4f`) is a 900s timeout with no `payment_approval` — different class
+from this case.
+
 ## Human feedback
 
 Approved fix + k=5 Alchemy re-run (`rca-passkey-stdlib-logger-kwargs-20260822 approve`).
