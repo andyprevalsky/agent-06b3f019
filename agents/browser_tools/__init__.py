@@ -43,7 +43,7 @@ from .schemas import (
     # Completion
     DoneTool,
     AttemptCompletionBrowserTool,
-    SendMessageToUserBrowserTool,
+    RequestUserAssistanceForAuthenticationBrowserTool,
 )
 
 # V3 components (browser-use based)
@@ -87,7 +87,6 @@ __all__ = [
     # Completion
     "DoneTool",
     "AttemptCompletionBrowserTool",
-    "SendMessageToUserBrowserTool",
     # V3 components
     "DOMService",
     "ActionHistory",

@@ -7689,48 +7689,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
                 continue
 
-            if action_name == "send_message_to_user":
-                message = unified_action.get("params", {}).get("message", "")
-                reason = unified_action.get("params", {}).get("reason", "other")
-
-                logger.info("Browser agent requested user attention", reason=reason)
-                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                dom_service = None
-
-                await close_browser_session(config, session_id, pause=True, current_url=current_url)
-
-                await save_browser_action_message(
-                    agent_id=agent_id,
-                    title="Browser Session Paused",
-                    task_id=task_id,
-                    message=message,
-                    status=MessageStatus.FINISHED,
-                    browser_url=browser_url,
-                    action_type="session_paused",
-                )
-
-                execution_time_ms = (safe_time() - start_time) * 1000
-                usage_items = build_usage_items(
-                    total_input_tokens,
-                    total_output_tokens,
-                    model_pricing,
-                    execution_time_ms,
-                    usage_by_model,
-                )
-                await browser_stream.finish_tools(status="FINISHED")
-
-                return {
-                    "status": "needs_user_help",
-                    "message": message,
-                    "reason": reason,
-                    "task_id": task_id,
-                    "session_id": session_id,
-                    "browser_url": browser_url,
-                    "original_goal": goal,
-                    "execution_time_ms": execution_time_ms,
-                    "usage_items": usage_items,
-                }
-
             if action_name in ("attempt_completion", "done"):
                 close_reasoning = unified_action.get("params", {}).get("reasoning", "") or unified_action.get(
                     "params", {}

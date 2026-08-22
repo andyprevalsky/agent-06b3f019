@@ -4611,7 +4611,7 @@ def test_alchemy_k5_waiver_pause_terminal_fails_payment_contract():
     """k=5 agent 338aff82/e61ae529 paused at Momence waiver instead of payment_approval.
 
     Post-fix fleet run 20260822_160440: browser clicked showWaiverCheck once,
-    took a screenshot, then send_message_to_user → session_paused for handwritten
+    took a screenshot, then session_paused for handwritten
     signature. Passing agents double-clicked showWaiverCheck and clicked Accept
     before request_payment_card ($50.65).
     """

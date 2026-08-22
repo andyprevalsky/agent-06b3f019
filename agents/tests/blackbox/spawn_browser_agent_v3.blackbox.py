@@ -5683,7 +5683,7 @@ def test_recovery_requires_live_tab_verify_before_success():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     start = source.index('if action_name == "recover_from_challenge":')
-    end = source.index('if action_name == "send_message_to_user":', start)
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
     recovery_block = source[start:end]
 
     preloaded_guard = recovery_block.index('storage_state_preloaded')
@@ -5741,7 +5741,7 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     start = source.index('if action_name == "recover_from_challenge":')
-    end = source.index('if action_name == "send_message_to_user":', start)
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
     recovery_block = source[start:end]
 
     # Clean-page skip may finalize early; measure the full recovery try/except path
@@ -5768,7 +5768,7 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     recovery_block = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
-        'if action_name == "send_message_to_user":', 1
+        'if action_name in ("attempt_completion", "done"):', 1
     )[0]
     reconnect = recovery_block.index("reconnected = await _reconnect_browser_stack_after_rotation(")
     close_humanizer = recovery_block.index("await humanizer.close()", reconnect)
@@ -5830,7 +5830,7 @@ def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
     # 4. The rotation recovery path re-seeds the held passkeys AFTER restoring the
     #    cookie/localStorage state — parity with the storage restore.
     recovery_block = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
-        'if action_name == "send_message_to_user":', 1
+        'if action_name in ("attempt_completion", "done"):', 1
     )[0]
     restore_storage = recovery_block.index("await _restore_rotation_storage_state(")
     reseed_passkeys = recovery_block.index('sync_passkeys_onto_target(context="after proxy rotation")')
@@ -9338,26 +9338,6 @@ async def test_execute_action_attempt_completion():
     out = await execute_action(dom, ah, {"action": "attempt_completion"})
     assert out["success"] is True
     assert out["attempt_completion"] is True
-
-async def test_execute_action_send_message_to_user():
-    from domains.spawn_browser_agent_v3.service_actions import execute_action
-
-    dom = MagicMock()
-    dom.session = MagicMock()
-    dom.selector_map = {}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await execute_action(
-        dom,
-        ah,
-        {
-            "action": "send_message_to_user",
-            "params": {"message": "help", "reason": "captcha"},
-        },
-    )
-    assert out["success"] is True
-    assert out["message_to_user"] is True
-    assert out["reason"] == "captcha"
 
 async def test_execute_action_done():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -13380,7 +13360,7 @@ def test_recovery_skips_when_live_tab_already_clear():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     start = source.index('if action_name == "recover_from_challenge":')
-    end = source.index('if action_name == "send_message_to_user":', start)
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
     recovery_block = source[start:end]
 
     assert "live_tab_looks_challenged" in recovery_block
@@ -16662,7 +16642,7 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     # the exact tool call streamed by the browser-use model.
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     recovery_branch = activity_source.split('if action_name == "recover_from_challenge":', 1)[1].split(
-        'if action_name == "send_message_to_user":', 1
+        'if action_name in ("attempt_completion", "done"):', 1
     )[0]
     assert "recovery_call_id = _browser_action_tool_call_id(llm_result)" in recovery_branch
     assert "tool_call_id=recovery_call_id" in recovery_branch
@@ -17704,7 +17684,6 @@ async def run_all_tests():
     await r.record_async("execute_action_dropdown_options_no_el", test_execute_action_dropdown_options_missing_element)
     await r.record_async("execute_action_select_dropdown_no_el", test_execute_action_select_dropdown_missing_element)
     await r.record_async("execute_action_attempt_completion", test_execute_action_attempt_completion)
-    await r.record_async("execute_action_send_message", test_execute_action_send_message_to_user)
     await r.record_async("execute_action_done", test_execute_action_done)
     await r.record_async("execute_action_click_no_target", test_execute_action_click_no_element_no_coords)
     await r.record_async(
@@ -17727,6 +17706,18 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_scroll_humanizer_up",
         test_execute_action_scroll_with_humanizer_up,
+    )
+    await r.record_async(
+        "execute_action_scroll_humanizer_element_coords",
+        test_execute_action_scroll_with_humanizer_uses_element_coords,
+    )
+    await r.record_async(
+        "execute_action_scroll_index_zero_viewport",
+        test_execute_action_scroll_index_zero_scrolls_viewport,
+    )
+    await r.record_async(
+        "execute_action_scroll_missing_element_index_errors",
+        test_execute_action_scroll_missing_element_index_errors,
     )
     await r.record_async("execute_action_extract_disabled", test_execute_action_extract_disabled)
     await r.record_async("execute_action_goto_delegates", test_execute_action_goto_delegates)

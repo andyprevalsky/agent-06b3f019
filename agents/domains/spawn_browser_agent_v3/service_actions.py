@@ -596,7 +596,6 @@ _TERMINAL_ACTIONS = {
     "request_payment_card",
     "done",
     "attempt_completion",
-    "send_message_to_user",
     "generate_write_lock_notification",
 }
 
@@ -1151,17 +1150,6 @@ async def _execute_terminal_action(context: _ActionContext) -> Dict[str, Any]:
             result={"success": True},
         )
         return {"success": True, "attempt_completion": True}
-    if context.action_name == "send_message_to_user":
-        message = context.params.get("message", "")
-        reason = context.params.get("reason", "other")
-        await context.action_history.record_action(
-            dom_service=context.dom_service,
-            action="send_message_to_user",
-            thinking=context.thinking,
-            params={"message": message, "reason": reason},
-            result={"success": True},
-        )
-        return {"success": True, "message_to_user": True, "message": message, "reason": reason}
     return {
         "success": False,
         "error": (

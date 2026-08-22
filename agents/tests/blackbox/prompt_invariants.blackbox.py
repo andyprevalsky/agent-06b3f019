@@ -731,9 +731,6 @@ _BROWSER_CATALOG_ONLY = {
     # not implemented by the v3 executor. Add it to AVAILABLE_ACTIONS or
     # remove from BROWSER_USE_TOOLS to drop this exemption.
     "find_text",
-    # `send_message_to_user` exists in the catalog so the model can ask the
-    # user for help; v3 routes that through a different mechanism.
-    "send_message_to_user",
 }
 
 

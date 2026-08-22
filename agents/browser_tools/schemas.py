@@ -291,17 +291,6 @@ class AttemptCompletionBrowserTool(BaseModel):
     tool: Literal["attempt_completion"]
 
 
-class SendMessageToUserBrowserTool(BaseModel):
-    """Request the user to complete an action (login, payment, CAPTCHA, etc.)."""
-
-    tool: Literal["send_message_to_user"]
-    message: str = Field(
-        description=user_facing_text_description(
-            "The exact message shown to the user for an update or request for help."
-        )
-    )
-
-
 class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
     """Ask the user to sign in after all automated auth paths are exhausted."""
 
@@ -780,7 +769,6 @@ BROWSER_TOOL_MODELS = {
     # Completion
     # "done": DoneTool,  # Use attempt_completion instead - browser-use 'done' maps to attempt_completion
     "attempt_completion": AttemptCompletionBrowserTool,
-    "send_message_to_user": SendMessageToUserBrowserTool,
     "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
     "recover_from_challenge": RecoverFromChallengeBrowserTool,
     "request_payment_card": RequestPaymentCardBrowserTool,
@@ -922,7 +910,6 @@ __all__ = [
     # Completion
     "DoneTool",
     "AttemptCompletionBrowserTool",
-    "SendMessageToUserBrowserTool",
     "RequestUserAssistanceForAuthenticationBrowserTool",
     "RequestPaymentCardBrowserTool",
     "WriteLockService",
