@@ -3723,12 +3723,12 @@ def test_live_paid_bookings_stop_only_at_payment_approval():
     assert _attention_request_matches_task(event_ticket, auth) is False
 
     alchemy = get_task_by_name("browser-alchemy-springs-sauna")
-    assert not alchemy.expected_attention_kind
-    assert alchemy.expected_attention_kind_any_of == ["payment_approval", "auth_assistance"]
+    assert alchemy.expected_attention_kind == "payment_approval"
+    assert alchemy.expected_attention_kind_any_of == []
     assert alchemy.approval_handling == "ignore"
     assert alchemy.expected_approval_count == 1
     assert _attention_request_matches_task(alchemy, payment) is True
-    assert _attention_request_matches_task(alchemy, auth) is True
+    assert _attention_request_matches_task(alchemy, auth) is False
     assert _attention_request_matches_task(alchemy, write_lock) is False
 
 
@@ -4285,14 +4285,7 @@ async def test_live_paid_booking_poll_stops_without_approving_payment():
         assert failure is None
         assert (triggered, resolved) == (1, 0)
         assert responses == []
-        if task.expected_attention_kind_any_of:
-            assert data["_benchmark"]["attention_request_kind_seen"] == "payment_approval"
-            assert data["_benchmark"]["expected_attention_kind_any_of"] == [
-                "payment_approval",
-                "auth_assistance",
-            ]
-        else:
-            assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+        assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
         assert data["_benchmark"]["expected_payment_receipt_seen"] is True
 
         write_lock = {
@@ -4305,13 +4298,7 @@ async def test_live_paid_booking_poll_stops_without_approving_payment():
             [write_lock],
             messages=messages,
         )
-        if task.expected_attention_kind_any_of:
-            assert failure == (
-                "Expected exactly one attention request of kind one of "
-                "['payment_approval', 'auth_assistance'], observed ['write_lock']"
-            )
-        else:
-            assert failure == "Expected attention kind payment_approval, observed write_lock"
+        assert failure == "Expected attention kind payment_approval, observed write_lock"
         assert (triggered, resolved) == (0, 0)
         assert responses == []
 
@@ -4430,8 +4417,8 @@ async def test_toast_poll_stops_without_responding_to_payment_approval():
     assert data["_benchmark"].get("expected_payment_receipt_seen") is not True
 
 
-def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
-    """Alchemy may stop at payment approval or auth_assistance after correct selection."""
+def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
+    """Alchemy passes only at an unresolved Momence payment approval after correct selection."""
     from copy import deepcopy
 
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -4442,8 +4429,8 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
     assert task.prompt.endswith("Complete the booking.")
     assert task.approval_handling == "ignore"
     assert task.expected_attention_kinds == []
-    assert not task.expected_attention_kind
-    assert task.expected_attention_kind_any_of == ["payment_approval", "auth_assistance"]
+    assert task.expected_attention_kind_any_of == []
+    assert task.expected_attention_kind == "payment_approval"
     assert task.expected_approval_count == 1
     assert task.success_on_payment_card_request is True
     assert task.expected_payment_receipt["merchant"] == "Alchemy Springs (Momence - momence.com)"
@@ -4472,21 +4459,13 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
         "browser_agent_session_count",
         "expected_payment_receipt",
         "approval_request_count",
-        "approval_request_details_for_seen_kind",
+        "approval_request_details",
     }
-    receipt_check = next(check for check in static_evaluator["checks"] if check["type"] == "expected_payment_receipt")
-    assert receipt_check["required_when_attention_kinds"] == ["payment_approval"]
-    detail_check = next(
-        check for check in static_evaluator["checks"] if check["type"] == "approval_request_details_for_seen_kind"
-    )
-    assert detail_check["details_by_kind"]["payment_approval"]["required_strings"] == [
-        "Alchemy",
-        "Sauna Garden",
-    ]
-    assert detail_check["details_by_kind"]["payment_approval"]["require_date"] is True
-    assert detail_check["details_by_kind"]["payment_approval"]["require_time"] is True
-    assert detail_check["details_by_kind"]["payment_approval"]["require_amount"] is True
-    assert detail_check["details_by_kind"]["auth_assistance"]["required_strings"] == []
+    detail_check = next(check for check in static_evaluator["checks"] if check["type"] == "approval_request_details")
+    assert detail_check["required_strings"] == ["Alchemy", "Sauna Garden"]
+    assert detail_check["require_date"] is True
+    assert detail_check["require_time"] is True
+    assert detail_check["require_amount"] is True
 
     payment_good = {
         "agent": {"status": "ACTIVE"},
@@ -4504,6 +4483,7 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
         "_benchmark": {
             "approvals_triggered": 1,
             "attention_request_kind_seen": "payment_approval",
+            "expected_attention_kind_seen": "payment_approval",
             "expected_payment_receipt_seen": True,
             "attention_requests_seen": [
                 {
@@ -4527,12 +4507,13 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
     assert passed is False
     assert "date" in reason.lower()
 
-    auth_good = {
+    auth_only = {
         "agent": {"status": "ACTIVE"},
         "messages": payment_good["messages"],
         "_benchmark": {
             "approvals_triggered": 1,
             "attention_request_kind_seen": "auth_assistance",
+            "expected_attention_kind_seen": "auth_assistance",
             "attention_requests_seen": [
                 {
                     "kind": "auth_assistance",
@@ -4541,15 +4522,17 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
             ],
         },
     }
-    assert _run_declared_static_check(static_evaluator, auth_good)[0] is True
-    assert evaluate_task(task, auth_good, approvals_triggered=1)[0] is True
+    passed, reason = evaluate_task(task, auth_only, approvals_triggered=1)
+    assert passed is False
+    assert "payment_approval" in reason.lower()
 
-    write_lock = deepcopy(auth_good)
+    write_lock = deepcopy(payment_good)
     write_lock["_benchmark"]["attention_request_kind_seen"] = "write_lock"
+    write_lock["_benchmark"]["expected_attention_kind_seen"] = "write_lock"
     write_lock["_benchmark"]["attention_requests_seen"][0]["kind"] = "write_lock"
     passed, reason = evaluate_task(task, write_lock, approvals_triggered=1)
     assert passed is False
-    assert "auth_assistance" in reason and "payment_approval" in reason
+    assert "payment_approval" in reason.lower()
 
     selection_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
     for requirement in ("10:00 am", "2:00 pm", "sauna garden", "sunday"):
@@ -4562,7 +4545,6 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
     assert "payment_approval" in terminal_criteria
     assert "auth_assistance" in terminal_criteria
     assert "write-lock" in terminal_criteria
-
 
 
 def test_approval_request_details_support_multiple_dates_and_seat():
@@ -14544,7 +14526,7 @@ async def run_all_tests():
     )
     r.record(
         "alchemy_sauna_grounded_payment_approval",
-        test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance,
+        test_alchemy_sauna_catalog_stops_at_grounded_payment_approval,
     )
     r.record(
         "approval_details_multiple_dates_and_seat",

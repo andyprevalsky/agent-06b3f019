@@ -1709,10 +1709,7 @@
     "attachment": null,
     "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kind_any_of": [
-      "payment_approval",
-      "auth_assistance"
-    ],
+    "expected_attention_kind": "payment_approval",
     "expected_payment_receipt": {
       "merchant": "Alchemy Springs (Momence - momence.com)",
       "merchantBusinessAliases": [
@@ -1764,14 +1761,13 @@
       ],
       "services": [
         "alchemysprings.com",
-        "request_payment_card",
-        "auth_assistance"
+        "request_payment_card"
       ],
       "secrets": [],
       "live_targets": [
         "https://www.alchemysprings.com/visit"
       ],
-      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking for one person at 939 Post Street. Terminal success is exactly one ignored attention request: either unresolved payment-card approval on the grounded Momence checkout, or auth_assistance after a saved Momence login is rejected. The harness never approves payment or completes the charge. Semantic judges still require selecting a standard Sauna Garden Sunday session with a start between 10:00 AM and 2:00 PM (inclusive) before either terminal; they do not require grounded proof that the chosen start was the earliest available.",
+      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking for one person at 939 Post Street. Terminal success is exactly one ignored unresolved payment-card approval on the grounded Momence checkout. The harness never approves payment or completes the charge. Semantic judges still require selecting a standard Sauna Garden Sunday session with a start between 10:00 AM and 2:00 PM (inclusive); they do not require grounded proof that the chosen start was the earliest available.",
       "live_cookie_domains": [
         "alchemysprings.com"
       ]
@@ -1783,8 +1779,8 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The run stops after exactly one unresolved payment_approval or auth_assistance attention request",
-          "When the terminal is payment_approval, the approval identifies Alchemy Springs, the Sauna Garden service, the calendar date, start time, and payment amount"
+          "The run stops after exactly one unresolved payment_approval attention request",
+          "The payment approval identifies Alchemy Springs, the Sauna Garden service, the calendar date, start time, and payment amount"
         ],
         "checks": [
           {
@@ -1800,27 +1796,17 @@
             "value": 1
           },
           {
-            "type": "expected_payment_receipt",
-            "required_when_attention_kinds": [
-              "payment_approval"
-            ]
+            "type": "expected_payment_receipt"
           },
           {
-            "type": "approval_request_details_for_seen_kind",
-            "details_by_kind": {
-              "payment_approval": {
-                "required_strings": [
-                  "Alchemy",
-                  "Sauna Garden"
-                ],
-                "require_date": true,
-                "require_time": true,
-                "require_amount": true
-              },
-              "auth_assistance": {
-                "required_strings": []
-              }
-            }
+            "type": "approval_request_details",
+            "required_strings": [
+              "Alchemy",
+              "Sauna Garden"
+            ],
+            "require_date": true,
+            "require_time": true,
+            "require_amount": true
           }
         ]
       },
@@ -1839,17 +1825,18 @@
         "id": "alchemy-sauna-terminal-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The trajectory ends at exactly one unresolved attention request that is either payment_approval on the grounded Momence checkout for that selected session, or auth_assistance after saved-login failure while already on that selected Momence booking/sign-in surface",
-          "A generic write-lock is not success; an approved charge or completed booking is not required and must not be treated as required"
+          "The trajectory ends at exactly one unresolved payment_approval attention request on the grounded Momence checkout for that selected session",
+          "A generic write-lock or auth_assistance stop is not success; an approved charge or completed booking is not required and must not be treated as required"
         ],
-        "judge_prompt": "Given the already-selected Sauna Garden session evidence, pass only if the run stops at exactly one ignored terminal: (1) unresolved payment_approval grounded to that Alchemy/Momence checkout, or (2) auth_assistance / request_user_assistance_for_authentication after a failed saved login while on that Momence booking or sign-in flow. Fail write-lock-only stops, wrong-merchant payment approvals, auth_assistance with no grounded selection of the correct session, approved charges, or completed bookings treated as required."
+        "judge_prompt": "Given the already-selected Sauna Garden session evidence, pass only if the run stops at exactly one ignored unresolved payment_approval grounded to that Alchemy/Momence checkout. Fail write-lock-only stops, auth_assistance terminals, wrong-merchant payment approvals, approved charges, or completed bookings treated as required."
       }
     ],
     "enforce_declared_evaluators": true,
     "source": [
       "user:ecommerce-v1-2026-07-14",
       "user:alchemy-auth-assistance-any-of-2026-08-21",
-      "user:alchemy-drop-earliest-slot-grounding-2026-08-22"
+      "user:alchemy-drop-earliest-slot-grounding-2026-08-22",
+      "user:alchemy-payment-approval-only-2026-08-22"
     ]
   },
   {
