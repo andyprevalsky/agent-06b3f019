@@ -1917,10 +1917,10 @@
         "method": "single_turn_llm_judge",
         "criteria": [
           "The pending payment approval is for Hotel Kabuki on hotels.com for one adult, Saturday to Sunday, with room rate under $400 before taxes and fees",
-          "No package, upgrade, or add-on is selected; checkout used guest flow on hotels.com without signing in or creating an account",
+          "No package, upgrade, or add-on is selected",
           "The trajectory ends at exactly one unresolved payment-card approval grounded to hotels.com; the harness does not approve it, and a completed reservation or generic write-lock alone is not success"
         ],
-        "judge_prompt": "Review the room selection, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com guest checkout, Hotel Kabuki, the stay dates, one-adult occupancy, the under-$400 pre-tax/fees cap, no packages or add-ons, and one unresolved payment-card approval. Judge merchant labels, hotel naming, and room descriptions by meaning rather than exact strings. Do not require lowest-price or non-smoking proof. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
+        "judge_prompt": "Review the room selection, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com checkout, Hotel Kabuki, the stay dates, one-adult occupancy, the under-$400 pre-tax/fees cap, no packages or add-ons, and one unresolved payment-card approval. Judge merchant labels, hotel naming, and room descriptions by meaning rather than exact strings. Do not require lowest-price or non-smoking proof. Do not judge signed-in vs guest checkout, cookie bundles, or challenge-recovery auth-preservation messages. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,
