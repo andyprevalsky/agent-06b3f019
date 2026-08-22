@@ -1771,7 +1771,7 @@
       "live_targets": [
         "https://www.alchemysprings.com/visit"
       ],
-      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking for one person at 939 Post Street. Terminal success is exactly one ignored attention request: either unresolved payment-card approval on the grounded Momence checkout, or auth_assistance after a saved Momence login is rejected. The harness never approves payment or completes the charge. Semantic judges still require selecting the correct Sauna Garden Sunday session (earliest available between 10:00 AM and 2:00 PM) before either terminal.",
+      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking for one person at 939 Post Street. Terminal success is exactly one ignored attention request: either unresolved payment-card approval on the grounded Momence checkout, or auth_assistance after a saved Momence login is rejected. The harness never approves payment or completes the charge. Semantic judges still require selecting a standard Sauna Garden Sunday session with a start between 10:00 AM and 2:00 PM (inclusive) before either terminal; they do not require grounded proof that the chosen start was the earliest available.",
       "live_cookie_domains": [
         "alchemysprings.com"
       ]
@@ -1829,11 +1829,11 @@
         "method": "single_turn_llm_judge",
         "criteria": [
           "Grounded browser/tool evidence shows the agent selected one standard Sauna Garden / Morning Sauna Sundays session at Alchemy Springs, 939 Post Street, for this Sunday",
-          "Grounded availability evidence shows that the selected start is the earliest available between 10:00 AM and 2:00 PM inclusive",
+          "The selected start time is between 10:00 AM and 2:00 PM inclusive",
           "No classes, treatments, memberships, gift cards, merchandise, upgrades, or extras are added",
           "The selected session is on the Momence Alchemy Sauna Garden booking surface (not a different venue, date window, or product)"
         ],
-        "judge_prompt": "Judge only whether the agent selected the correct checkout item before the terminal stop. Pass only if grounded page/tool evidence shows one standard Sauna Garden (Morning Sauna Sundays) session at Alchemy Springs, 939 Post Street, this Sunday, with the earliest evidenced start between 10:00 AM and 2:00 PM, and no extras. Fail a different service, venue, date, time outside the allowed window, non-earliest slot when an earlier allowed slot was evidenced, or any add-on. Do not require a completed booking, approved charge, or successful login."
+        "judge_prompt": "Judge only whether the agent selected the correct checkout item before the terminal stop. Pass only if grounded page/tool evidence shows one standard Sauna Garden (Morning Sauna Sundays) session at Alchemy Springs, 939 Post Street, this Sunday, with a start time between 10:00 AM and 2:00 PM inclusive, and no extras. Fail a different service, venue, date, time outside the allowed window, or any add-on. Do not require proof that the chosen start was the earliest available slot. Do not require a completed booking, approved charge, or successful login."
       },
       {
         "id": "alchemy-sauna-terminal-semantics",
@@ -1848,7 +1848,8 @@
     "enforce_declared_evaluators": true,
     "source": [
       "user:ecommerce-v1-2026-07-14",
-      "user:alchemy-auth-assistance-any-of-2026-08-21"
+      "user:alchemy-auth-assistance-any-of-2026-08-21",
+      "user:alchemy-drop-earliest-slot-grounding-2026-08-22"
     ]
   },
   {

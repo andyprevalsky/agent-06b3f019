@@ -4552,8 +4552,10 @@ def test_alchemy_sauna_catalog_accepts_payment_or_auth_assistance():
     assert "auth_assistance" in reason and "payment_approval" in reason
 
     selection_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("earliest available", "10:00 am", "2:00 pm", "sauna garden", "sunday"):
+    for requirement in ("10:00 am", "2:00 pm", "sauna garden", "sunday"):
         assert requirement in selection_criteria
+    assert "earliest available" not in selection_criteria
+    assert "earliest" not in task.evaluators[1]["judge_prompt"].lower()
     terminal_criteria = " ".join(task.evaluators[2]["criteria"]).lower()
     assert "payment_approval" in terminal_criteria
     assert "auth_assistance" in terminal_criteria
