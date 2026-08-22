@@ -1039,7 +1039,8 @@ inject_secrets() {
 # it injects a controller-resolved token (gh auth / DISPATCH) into the sync
 # command — because Fly Status=Staged can persist on Machines-only apps even
 # after machine update, and a stale GITHUB_TOKEN secret may be empty or 401.
-REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"verify_app_environment() {
+REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
+verify_app_environment() {
     local listing missing
     listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
         echo "❌ Could not read app secrets for $APP (app missing or no access)." >&2
