@@ -1819,7 +1819,7 @@
           "No classes, treatments, memberships, gift cards, merchandise, upgrades, or extras are added",
           "The selected session is on the Momence Alchemy Sauna Garden booking surface (not a different venue, date window, or product)"
         ],
-        "judge_prompt": "Judge only whether the agent selected the correct checkout item before the terminal stop. Pass only if grounded page/tool evidence shows one standard Sauna Garden (Morning Sauna Sundays) session at Alchemy Springs / Momence Alchemy Sauna Garden, this Sunday, with a start time between 10:00 AM and 2:00 PM inclusive, and no extras. Fail a different service, venue, date, time outside the allowed window, or any add-on. Do not require proof that the chosen start was the earliest available slot. Do not require grounded proof of the street address (939 Post Street) in page/tool dumps — venue identity via Alchemy Springs / Alchemy Sauna Garden / Momence is sufficient. Do not require a completed booking, approved charge, or successful login."
+        "judge_prompt": "Judge only whether the agent selected the correct checkout item before the terminal stop. Pass only if grounded evidence shows one standard Sauna Garden (Morning Sauna Sundays) session at Alchemy Springs / Momence Alchemy Sauna Garden, this Sunday, with a start time between 10:00 AM and 2:00 PM inclusive, and no extras. Typed request_payment_card / payment-approval tool messages that include Momence product URLs (e.g. momence.com/Alchemy-Sauna-Garden/Morning-Sauna-Sundays/…) and line-item name/date/time/quantity ARE grounded checkout-item evidence — treat those validated receipt fields as proof of the selected session, not as empty attention-only gates. Browser click titles alone (e.g. Sun 23, Book now) are supporting context but not required if the receipt/product URL line items already name the session. Fail a different service, venue, date, time outside the allowed window, or any add-on. Do not require proof that the chosen start was the earliest available slot. Do not require grounded proof of the street address (939 Post Street) in page/tool dumps — venue identity via Alchemy Springs / Alchemy Sauna Garden / Momence is sufficient. Do not require a completed booking, approved charge, or successful login."
       },
       {
         "id": "alchemy-sauna-terminal-semantics",
@@ -1837,7 +1837,8 @@
       "user:alchemy-auth-assistance-any-of-2026-08-21",
       "user:alchemy-drop-earliest-slot-grounding-2026-08-22",
       "user:alchemy-payment-approval-only-2026-08-22",
-      "user:alchemy-drop-street-address-grounding-2026-08-22"
+      "user:alchemy-drop-street-address-grounding-2026-08-22",
+      "user:alchemy-selection-accepts-payment-receipt-line-items-2026-08-22"
     ]
   },
   {

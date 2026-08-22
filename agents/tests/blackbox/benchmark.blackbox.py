@@ -4542,6 +4542,7 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
     judge_prompt = task.evaluators[1]["judge_prompt"].lower()
     assert "do not require proof that the chosen start was the earliest" in judge_prompt
     assert "do not require grounded proof of the street address" in judge_prompt
+    assert "typed request_payment_card / payment-approval" in judge_prompt
     assert "non-earliest slot" not in judge_prompt
     terminal_criteria = " ".join(task.evaluators[2]["criteria"]).lower()
     assert "payment_approval" in terminal_criteria
