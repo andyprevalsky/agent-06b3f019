@@ -18,7 +18,7 @@ import {
   type SurgeDeliveryStatusEvent,
 } from './service.validation';
 import type { SurgeAttachment } from './types';
-import { getTemporalClient } from '../../providers/temporal';
+import { deleteAgentRecursive } from '../../providers/agentKill';
 import { sendSms } from '../../providers/smsQueue';
 import { createSignupBonusCredit } from '../../providers/credits';
 import {
@@ -106,26 +106,12 @@ export async function handleClearCommand(userId: string, fromPhone: string): Pro
       agentIds: activeAgents.map((a) => a.id),
     });
 
-    /* c8 ignore start -- Temporal termination requires live Temporal server */
-    const client = await getTemporalClient();
-
     for (const agent of activeAgents) {
-      // Terminate Temporal workflow
-      if (agent.temporalWorkflowId !== null && agent.temporalWorkflowId !== '') {
-        try {
-          const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-          await handle.terminate('Session cleared by user via /clear');
-        } catch (error) {
-          log.warn(`Failed to terminate workflow for agent ${agent.id}`, {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-
-      // Soft-delete the agent and all its children
-      await repo.softDeleteAgentAndChildren(agent.id);
+      // Same canonical kill as DELETE /api/agents/:id (UI Archive) / SMS kill_agent.
+      await deleteAgentRecursive(agent.id, {
+        terminateReason: 'Session cleared by user via /clear',
+      });
     }
-    /* c8 ignore stop */
   }
 
   await sendSms(fromPhone, 'Session cleared.');

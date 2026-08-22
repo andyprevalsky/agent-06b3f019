@@ -390,25 +390,16 @@ test('FastModeCacheEntry has no Agent relation or cascade', () => {
 });
 
 test('delete-agent paths do not purge Fast Mode cache entries', () => {
-  const lifecycle = readFileSync(
-    join(process.cwd(), 'src', 'domains', 'agents', 'agentLifecycleService.ts'),
-    'utf8'
-  );
-  const smsHelper = readFileSync(
-    join(process.cwd(), 'src', 'providers', 'smsSupervisor', 'supervisorTools.helpers.ts'),
-    'utf8'
-  );
-  const combinedDeletePaths = `${extractFunction(lifecycle, 'deleteAgentRecursive')}\n${extractFunction(
-    smsHelper,
-    'deleteAgentRecursive'
-  )}`;
+  const kill = readFileSync(join(process.cwd(), 'src', 'providers', 'agentKill.ts'), 'utf8');
+  const deletePath = extractFunction(kill, 'deleteAgentRecursive');
+  assert.ok(!/fastModeCacheEntry/i.test(deletePath), 'delete path must not touch cache table');
   assert.ok(
-    !/fastModeCacheEntry/i.test(combinedDeletePaths),
-    'delete path must not touch cache table'
-  );
-  assert.ok(
-    !/cachePurge|purgeByGoalHash|fast-cache\/purge/i.test(combinedDeletePaths),
+    !/cachePurge|purgeByGoalHash|fast-cache\/purge/i.test(deletePath),
     'delete path must not purge cache'
+  );
+  assert.ok(
+    /Fast Mode cache entries intentionally outlive/.test(kill),
+    'canonical kill must document that cache outlives deletion'
   );
 });
 

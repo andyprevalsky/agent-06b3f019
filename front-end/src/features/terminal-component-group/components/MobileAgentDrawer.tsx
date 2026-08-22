@@ -127,15 +127,16 @@ export default function MobileAgentDrawer({
   const [searchQuery, setSearchQuery] = useState('');
   const search = useSidebarSearch(agents, searchQuery);
   const loginAfterCloseRef = useRef(false);
-  const { handlers, renameDialog } = useAgentRowActions({
-    onRefresh: onRefreshAgents,
-    selectedAgentId,
-    onSelectAgent,
-  });
 
   // Shared app-wide subscription (see AttentionRequestsProvider) — the drawer
   // used to open its own channel + poll loop alongside the desktop bell's.
   const { requests, refetch } = useAttentionRequestsContext();
+  const { handlers, renameDialog } = useAgentRowActions({
+    onRefresh: onRefreshAgents,
+    onRefreshAttention: refetch,
+    selectedAgentId,
+    onSelectAgent,
+  });
   const notifCount = isSignedIn ? unansweredCount(requests) : 0;
   const attentionAgentIds = isSignedIn ? unansweredAgentIds(requests) : undefined;
 
