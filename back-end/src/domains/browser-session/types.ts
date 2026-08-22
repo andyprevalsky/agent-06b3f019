@@ -81,6 +81,19 @@ export const recoverChallengeSchema = z.object({
   preserve_auth: z.boolean().optional(),
 });
 
+/**
+ * Cookie-isolation probes on ephemeral Kernel/Steel sessions (never the live
+ * debug desktop). One storage variant per request; the agent parallelizes ≤5.
+ */
+export const probeCookieVariantSchema = z.object({
+  task_id: z.string().uuid(),
+  current_url: z.string().url().max(8192),
+  storage_state: storageStateSchema,
+  user_agent: z.string().max(2048).optional(),
+  recovery_reason: z.string().max(4000).optional(),
+  blocked_resource_url: z.string().url().max(8192).optional(),
+});
+
 export const injectLocalStorageSchema = z.object({
   origin: z.string().url(),
 });
@@ -98,6 +111,7 @@ export type CloseSessionInput = z.infer<typeof closeSessionSchema>;
 export type ResumeSessionInput = z.infer<typeof resumeSessionSchema>;
 export type RotateProxyInput = z.infer<typeof rotateProxySchema>;
 export type RecoverChallengeInput = z.infer<typeof recoverChallengeSchema>;
+export type ProbeCookieVariantInput = z.infer<typeof probeCookieVariantSchema>;
 export type InjectLocalStorageInput = z.infer<typeof injectLocalStorageSchema>;
 export type PrepareSessionCredentialsInput = z.infer<typeof prepareSessionCredentialsSchema>;
 

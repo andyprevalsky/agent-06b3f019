@@ -1,12 +1,12 @@
 """Auth-preserving recovery for persistent anti-bot challenges.
 
-After the provider solver, recovery may strip known anti-bot cookies (or, on
-explicit guest goals, all target-site cookies) on the **existing** live tab and
-single-nav verify. Opaque / auth-like cookies are never deleted on signed-in
-paths — those cases escalate to ephemeral provider/proxy config search
-(auth_kept / stripped lanes). Cookie isolation probes must **not** call
-``new_context`` on the live Kernel session (that paints stacked Chromium windows
-into the debug view).
+After the provider solver, cookie variants are probed in one parallel wave
+(≤5) on **ephemeral** provider sessions — never via ``new_context`` on the live
+Kernel desktop (that paints stacked Chromium windows into the debug view).
+Known anti-bot cookie strips that probe clean may be committed to the live
+context; guest / anonymous goals may also commit a clean ``all_target`` strip.
+Opaque / auth-like cookies are never deleted on signed-in paths — those cases
+escalate to ephemeral provider/proxy config search (auth_kept / stripped lanes).
 """
 
 from __future__ import annotations
@@ -864,6 +864,11 @@ async def minimize_passing_cookie_removal(
     return current
 
 
+# Max concurrent cookie-variant probes in one recover wave (settle + LLM overlap).
+# Probes MUST run on ephemeral provider sessions — never on the live Kernel desktop.
+_COOKIE_PROBE_WAVE_CAP = 5
+
+
 def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     """True when the browser task explicitly prefers guest / anonymous checkout.
 
@@ -900,19 +905,14 @@ async def recover_from_challenge(
     provider_exit_rejected: bool = False,
     allow_logged_out_cookie_commit: bool = False,
 ) -> ChallengeRecoveryResult:
-    """Run solver → live known-cookie strip (optional) → ephemeral config search.
+    """Run solver → ephemeral cookie-probe wave → live commit / config search.
 
-    Cookie variants are **not** probed via ``new_context`` on the live Kernel
-    session (that paints stacked Chromium windows into the debug view). Known
-    anti-bot cookies may be stripped on the existing live tab and single-nav
-    verified. Guest tasks may strip all target cookies the same way. All other
-    cookie × exit experiments run on ephemeral provider sessions inside
-    ``search_configs`` (auth_kept / stripped lanes).
-
-    ``probe`` is retained for call-site compatibility but is unused on the hot
-    path (ephemeral lane search owns isolation probes).
+    ``probe`` must hit ephemeral provider sessions (or a test double), **not**
+    ``new_context`` on the live Kernel browser — that paints stacked Chromium
+    windows into the debug view. Known anti-bot strips that probe clean may be
+    committed on the live tab; guest tasks may commit a clean ``all_target``
+    strip. Opaque cookie findings stay diagnostic and escalate to config search.
     """
-    del probe  # live-browser cookie probe wave retired; see docstring.
     original_digest = _state_digest(source_state)
 
     async def search_with_preserved_auth_state(
@@ -972,30 +972,86 @@ async def recover_from_challenge(
     known_safe = tuple(
         key for key in target_keys if is_known_challenge_cookie(cookies[key]) and not is_auth_cookie(cookies[key])
     )
+    diagnostic_keys = tuple(key for key in target_keys if not is_auth_cookie(cookies[key]))
 
-    # Known challenge cookies are safe to strip on the live tab without an
-    # isolation probe (no new_context → no extra desktop windows).
+    # One parallel wave: ≤5 distinct cookie variants on ephemeral sessions.
+    wave: List[Tuple[str, Tuple[CookieKey, ...], StorageState]] = []
     if known_safe:
+        wave.append(("known_challenge", known_safe, storage_without_cookies(source_state, known_safe)))
+    if target_keys and tuple(target_keys) != known_safe:
+        wave.append(("all_target", tuple(target_keys), storage_without_cookies(source_state, target_keys)))
+    if diagnostic_keys and diagnostic_keys != known_safe and diagnostic_keys != tuple(target_keys):
+        wave.append(
+            ("diagnostic", diagnostic_keys, storage_without_cookies(source_state, diagnostic_keys))
+        )
+    # Fill remaining slots with coarse halves of the largest removable set so the
+    # wave stays useful under the ≤5 parallel LLM budget without ddmin rounds.
+    base_for_halves = diagnostic_keys or tuple(target_keys)
+    if len(wave) < _COOKIE_PROBE_WAVE_CAP and len(base_for_halves) >= 4:
+        mid = len(base_for_halves) // 2
+        for label, keys in (
+            ("diagnostic_half_a", base_for_halves[:mid]),
+            ("diagnostic_half_b", base_for_halves[mid:]),
+        ):
+            if len(wave) >= _COOKIE_PROBE_WAVE_CAP or not keys:
+                break
+            if any(existing == keys for _label, existing, _state in wave):
+                continue
+            wave.append((label, keys, storage_without_cookies(source_state, keys)))
+    wave = wave[:_COOKIE_PROBE_WAVE_CAP]
+
+    clean_by_label: Dict[str, bool] = {}
+    if wave:
+        await progress(
+            "cookie_probe_wave",
+            f"Probing {len(wave)} cookie variant(s) in parallel on ephemeral browser "
+            "sessions (not the live debug desktop; known challenge strips may commit, "
+            "others are diagnostic).",
+        )
+        results = await asyncio.gather(*(probe(state) for _label, _keys, state in wave))
+        clean_by_label = {label: bool(clean) for (label, _keys, _state), clean in zip(wave, results)}
+
+    if _state_digest(source_state) != original_digest:
+        raise RuntimeError("Challenge recovery mutated its source browser state")
+
+    if known_safe and clean_by_label.get("known_challenge"):
         await progress(
             "apply_cookie_fix",
-            "Applying the known-challenge cookie strip on the live tab and requiring "
-            "one clean navigation.",
+            "Applying the proven known-challenge cookie strip on the live tab and "
+            "requiring one clean navigation.",
         )
         if await commit_cookie_removals(known_safe):
             return ChallengeRecoveryResult("cookies_sanitized", known_safe)
         return await search_with_preserved_auth_state(known_safe)
 
     all_target_keys = tuple(target_keys)
-    if allow_logged_out_cookie_commit and all_target_keys:
-        # Guest / anonymous checkout: strip every target cookie on the live tab.
-        # Config-search stripped lane remains the fallback if live commit fails.
+    if (
+        allow_logged_out_cookie_commit
+        and all_target_keys
+        and clean_by_label.get("all_target")
+    ):
         await progress(
             "apply_cookie_fix",
-            "Guest path: applying the all-target cookie strip on the live tab and "
-            "requiring one clean navigation.",
+            "Guest path: applying the proven all-target cookie strip on the live tab "
+            "and requiring one clean navigation.",
         )
         if await commit_cookie_removals(all_target_keys):
             return ChallengeRecoveryResult("cookies_sanitized", all_target_keys)
+        return await search_with_preserved_auth_state()
+
+    diagnostic_clean = any(
+        clean_by_label.get(label)
+        for label in ("all_target", "diagnostic", "diagnostic_half_a", "diagnostic_half_b")
+    )
+    if diagnostic_clean:
+        # Clean logged-out / stripped probes are diagnostic only — opaque cookies
+        # may be auth credentials, so never commit unclassified removals on
+        # signed-in / default paths.
+        await progress(
+            "preserve_auth_state",
+            "A cookie variant looked clean in isolation, but unknown cookies are preserved; "
+            "continuing with browser/IP search.",
+        )
         return await search_with_preserved_auth_state()
 
     return await search_with_preserved_auth_state()

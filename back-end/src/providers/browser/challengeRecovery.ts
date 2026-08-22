@@ -526,6 +526,112 @@ const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependen
   probe: probeCandidateBrowser,
 };
 
+/**
+ * Probe one cookie/storage variant on an ephemeral Kernel/Steel session.
+ *
+ * Used by the agent cookie-probe wave so isolation experiments never open
+ * ``new_context`` windows on the live debug desktop.
+ */
+export async function probeCookieVariant(
+  input: {
+    taskId: string;
+    userId?: string;
+    targetUrl: string;
+    storageState: Record<string, unknown>;
+    userAgent?: string;
+    blockedResourceUrl?: string;
+    recoveryReason?: string | null;
+  },
+  dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
+): Promise<{ clean: boolean; configKey: string; latencyMs: number }> {
+  const current = await prisma.browserSession.findFirst({
+    where: {
+      id: input.taskId,
+      ...(input.userId === undefined ? {} : { context: { userId: input.userId } }),
+    },
+    include: { context: true },
+  });
+  if (current === null) throw new Error(`Browser task not found: ${input.taskId}`);
+  const billing: ChallengeClassifierBilling = {
+    agentId: current.agentId,
+    userId: input.userId ?? current.context.userId,
+  };
+  const agent = await prisma.agent.findUnique({
+    where: { id: current.agentId },
+    select: { proxyCountry: true, proxyState: true, proxyCity: true },
+  });
+  const proxyLocation: ProxyGeoLocation = agent?.proxyCountry
+    ? {
+        country: agent.proxyCountry,
+        ...(agent.proxyState ? { state: agent.proxyState } : {}),
+        ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
+      }
+    : DEFAULT_GEOLOCATION;
+  const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
+    requirePaymentCdn: false,
+  });
+  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const config = configs[0];
+  if (!config) {
+    throw new Error('No ephemeral browser config available for cookie-variant probe');
+  }
+
+  let session: RecoveryCandidateSession | null = null;
+  try {
+    if (config.provider === 'kernel') {
+      const created = config.omitManagedProxy
+        ? await dependencies.createKernel(current.agentId, proxyLocation, {
+            omitManagedProxy: true,
+          })
+        : await dependencies.createKernel(current.agentId, proxyLocation, {
+            type: config.kernelProxyType ?? 'residential',
+            specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
+          });
+      session = { provider: 'kernel', ...created };
+    } else {
+      const created = await dependencies.createSteel({
+        proxyLocation,
+        proxyMode: config.steelProxyMode ?? 'managed',
+        userAgent: input.userAgent,
+      });
+      session = { provider: 'steel', ...created };
+    }
+    const probe = await dependencies.probe(
+      session,
+      input.targetUrl,
+      input.storageState,
+      {
+        configKey: config.key,
+        provider: config.provider,
+        proxyMode: config.proxyMode,
+        laneKey: 'cookie_probe',
+        blockedResourceUrl: input.blockedResourceUrl,
+        recoveryReason: input.recoveryReason,
+      },
+      billing
+    );
+    const clean = probe.stablePasses === probe.attempts && probe.attempts > 0;
+    log.info('Challenge recovery ephemeral cookie-variant probe', {
+      taskId: input.taskId,
+      configKey: config.key,
+      clean,
+      stablePasses: probe.stablePasses,
+      attempts: probe.attempts,
+      latencyMs: probe.latencyMs,
+      agent_id: billing.agentId,
+    });
+    return { clean, configKey: config.key, latencyMs: probe.latencyMs };
+  } finally {
+    if (session) {
+      if (session.provider === 'kernel') {
+        await dependencies.releaseKernel(session.sessionId).catch(() => {});
+      } else {
+        await dependencies.releaseSteel(session.sessionId).catch(() => {});
+      }
+    }
+  }
+}
+
 export async function searchAndPromoteBrowserConfig(
   input: {
     taskId: string;

@@ -112,6 +112,7 @@ from .repo import (
     mark_steel_session_auth_failed,
     prepare_browser_auth,
     propagate_browser_run_credentials,
+    probe_cookie_variant_ephemeral,
     recover_browser_challenge,
     report_claude_token_rate_limited,
     resume_browser_session,
@@ -7353,7 +7354,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
+                    "cookie_probe_wave": "Probing cookie variants",
                     "apply_cookie_fix": "Applying safe cookie recovery",
+                    "preserve_auth_state": "Preserving auth; searching configs",
                     "browser_config_search": "Searching browser configurations",
                     "live_verify": "Verifying live tab cleared challenge",
                 }
@@ -7435,12 +7438,27 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             cookie_recovery_successes=cookie_recovery_successes,
                             reason=recovery_reason,
                         )
-                    async def _live_cookie_probe_forbidden(_candidate: Dict[str, Any]) -> bool:
-                        # Cookie isolation probes must not open new_context on the
-                        # live Kernel session (stacked Chromium windows in debug view).
-                        raise RuntimeError(
-                            "Live-session cookie probes are retired; use ephemeral "
-                            "config-search lanes or known-challenge live-tab strips"
+                    async def probe_cookie_variant_remote(candidate: Dict[str, Any]) -> bool:
+                        # Ephemeral Kernel/Steel session — never new_context on live desktop.
+                        user_agent = ""
+                        with contextlib.suppress(Exception):
+                            user_agent = str(
+                                await asyncio.wait_for(
+                                    input_page.evaluate("() => navigator.userAgent"),
+                                    timeout=15,
+                                )
+                            )
+                        blocked_resource_url = str(
+                            unified_action.get("params", {}).get("blocked_resource_url") or ""
+                        ).strip()
+                        return await probe_cookie_variant_ephemeral(
+                            config,
+                            task_id,
+                            current_url,
+                            candidate,
+                            user_agent=user_agent,
+                            recovery_reason=str(recovery_reason or "") or "",
+                            blocked_resource_url=blocked_resource_url,
                         )
 
                     recovery = await recover_from_challenge(
@@ -7449,7 +7467,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         wait_for_solver=lambda: _wait_for_provider_captcha_solver(
                             config, task_id, page=input_page
                         ),
-                        probe=_live_cookie_probe_forbidden,
+                        probe=probe_cookie_variant_remote,
                         commit_cookie_removals=lambda keys: commit_cookie_removals(
                             input_page,
                             keys,

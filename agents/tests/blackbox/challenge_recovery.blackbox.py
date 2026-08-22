@@ -87,7 +87,7 @@ async def test_known_challenge_cookie_is_removed_without_touching_auth():
     before = copy.deepcopy(source)
 
     async def probe(candidate):
-        raise AssertionError("live cookie probes must not run; known strips apply on the live tab")
+        return "cf_clearance" not in {cookie["name"] for cookie in candidate["cookies"]}
 
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "cookies_sanitized"
@@ -95,7 +95,7 @@ async def test_known_challenge_cookie_is_removed_without_touching_auth():
     assert config_inputs == []
     assert source == before, "experimental probes must not mutate canonical state"
     assert {event[0] for event in events} == {"call-recovery-1"}
-    assert [event[1] for event in events][:2] == ["captcha_solver", "apply_cookie_fix"]
+    assert [event[1] for event in events][:2] == ["captcha_solver", "cookie_probe_wave"]
     assert all("authState" not in event[2] for event in events)
 
 
@@ -146,37 +146,45 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
     assert result.removed_cookie_keys == ()
 
 
-async def test_opaque_cookies_skip_live_probe_and_escalate_to_config_search():
-    """Opaque cookies are never isolation-probed on the live Kernel desktop."""
+async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
+    """One settle-window wave: parallel variants, no multi-round cookie ddmin."""
     source = _state(*(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"]))
     before = copy.deepcopy(source)
+    active = 0
+    max_active = 0
     probe_calls = 0
 
     async def probe(candidate):
-        nonlocal probe_calls
+        nonlocal active, max_active, probe_calls
         probe_calls += 1
-        raise AssertionError("live cookie isolation probes are retired")
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        clean = "poison" not in {cookie["name"] for cookie in candidate["cookies"]}
+        active -= 1
+        return clean
 
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
-    assert committed == [], "unclassified cookies are never deleted on signed-in paths"
+    assert committed == [], "unclassified cookies are diagnostic-only and never deleted"
     assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]], "config search must retain every opaque cookie"
     assert source == before
-    assert probe_calls == 0, "must not open new_context on the live Kernel session"
+    assert max_active >= 2, "cookie variants must probe concurrently in one wave"
+    assert probe_calls <= 5, "cookie wave must stay within the parallel LLM budget"
     assert "cookie_isolation" not in [event[1] for event in events], "ddmin rounds are retired"
-    assert "cookie_probe_wave" not in [event[1] for event in events]
-    assert [event[1] for event in events] == ["captcha_solver", "browser_config_search"]
+    assert "cookie_probe_wave" in [event[1] for event in events]
+    assert "preserve_auth_state" in [event[1] for event in events]
 
 
 async def test_guest_path_commits_clean_all_target_strip():
-    """Guest checkout: all_target strip applies on the live tab without isolation probes."""
+    """Guest checkout: a clean all_target probe is committed, not discarded for auth."""
     source = _state(
         *(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"])
     )
     before = copy.deepcopy(source)
 
     async def probe(candidate):
-        raise AssertionError("guest path strips on the live tab; probe() must not run")
+        return "poison" not in {cookie["name"] for cookie in candidate["cookies"]}
 
     result, events, committed, config_inputs = await _run(
         source, probe, allow_logged_out_cookie_commit=True
@@ -205,7 +213,10 @@ async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
     before = copy.deepcopy(source)
 
     async def probe(candidate):
-        raise AssertionError("opaque cookies must not be isolation-probed on the live session")
+        # This simulates the dangerous ambiguity: deleting the custom-named auth
+        # cookie redirects to a visually clean logged-out page. A challenge-only
+        # probe therefore reports success even though auth has been destroyed.
+        return "opaque_state" not in {cookie["name"] for cookie in candidate["cookies"]}
 
     result, events, committed, config_inputs = await _run(source, probe)
 
@@ -214,7 +225,7 @@ async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
     assert result.removed_cookie_keys == ()
     assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]]
     assert source == before
-    assert [event[1] for event in events] == ["captcha_solver", "browser_config_search"]
+    assert "preserve_auth_state" in [event[1] for event in events]
     assert all("opaque_state" not in event[2] for event in events)
 
 
@@ -223,7 +234,7 @@ async def test_auth_smelling_poison_is_preserved_and_silently_escalated():
     before = copy.deepcopy(source)
 
     async def probe(candidate):
-        raise AssertionError("auth-smelling cookies must not be isolation-probed")
+        return "authState" not in {cookie["name"] for cookie in candidate["cookies"]}
 
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
@@ -238,17 +249,17 @@ async def test_cookie_independent_challenge_goes_directly_to_config_search():
     source = _state(_cookie("prefs"), _cookie("cart"))
 
     async def probe(_candidate):
-        raise AssertionError("opaque cookies must not be isolation-probed on the live session")
+        return False
 
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == []
     assert config_inputs == [[{"key": "auth_kept", "storage_state": source}]]
     stages = [event[1] for event in events]
-    assert stages == ["captcha_solver", "browser_config_search"]
+    assert stages == ["captcha_solver", "cookie_probe_wave", "browser_config_search"]
 
 
-async def test_config_search_strips_challenge_cookies_even_when_live_strip_fails():
+async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail():
     """Fresh provider/IP probes must not inherit blocked-exit clearance cookies."""
     source = _state(
         _cookie("cf_clearance"),
@@ -258,20 +269,12 @@ async def test_config_search_strips_challenge_cookies_even_when_live_strip_fails
     )
 
     async def probe(_candidate):
-        raise AssertionError("known challenge cookies apply on the live tab, not via probe()")
+        return False
 
-    result, events, committed, config_inputs = await _run(
-        source, probe, live_commit_clean=False
-    )
+    result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
-    assert committed == [
-        cookie_key(_cookie("cf_clearance")),
-        cookie_key(_cookie("__cf_bm")),
-    ]
-    assert result.removed_cookie_keys == (
-        cookie_key(_cookie("cf_clearance")),
-        cookie_key(_cookie("__cf_bm")),
-    )
+    assert committed == []
+    assert result.removed_cookie_keys == ()
     assert config_inputs == [
         [{"key": "auth_kept", "storage_state": _state(_cookie("authState"), _cookie("cart"))}]
     ]
@@ -289,7 +292,7 @@ async def test_isolated_cookie_pass_must_still_pass_in_the_live_context():
     before = copy.deepcopy(source)
 
     async def probe(candidate):
-        raise AssertionError("known challenge cookies apply on the live tab, not via probe()")
+        return "cf_clearance" not in {cookie["name"] for cookie in candidate["cookies"]}
 
     result, events, committed, config_inputs = await _run(
         source,
@@ -311,7 +314,7 @@ async def test_other_site_cookies_are_never_candidates():
     source = _state(_cookie("poison", ".unrelated.example"), _cookie("prefs"))
 
     async def probe(candidate):
-        raise AssertionError("opaque cookies must not be isolation-probed on the live session")
+        return "poison" not in {cookie["name"] for cookie in candidate["cookies"]}
 
     result, _events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
@@ -974,8 +977,7 @@ async def run_all_tests():
         test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solver,
     )
     await result.record_async(
-        "opaque_cookies_skip_live_probe",
-        test_opaque_cookies_skip_live_probe_and_escalate_to_config_search,
+        "unknown_cookie_parallel_wave", test_unknown_cookie_wave_probes_in_parallel_without_ddmin,
     )
     await result.record_async(
         "guest_path_commits_clean_all_target",
@@ -995,7 +997,7 @@ async def run_all_tests():
     )
     await result.record_async(
         "config_search_strips_challenge_cookies",
-        test_config_search_strips_challenge_cookies_even_when_live_strip_fails,
+        test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail,
     )
     await result.record_async(
         "live_cookie_fix_stability",

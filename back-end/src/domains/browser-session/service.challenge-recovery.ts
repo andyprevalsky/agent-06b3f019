@@ -1,5 +1,8 @@
 import { getBrowserCaptchaTelemetry } from '../../providers/browser';
-import { searchAndPromoteBrowserConfig } from '../../providers/browser/challengeRecovery';
+import {
+  probeCookieVariant,
+  searchAndPromoteBrowserConfig,
+} from '../../providers/browser/challengeRecovery';
 import * as repo from './repo';
 import { SessionNotFoundError } from './service.local-storage';
 
@@ -14,6 +17,27 @@ async function requireOwnedTask(taskId: string, userId?: string) {
 export async function getChallengeSolverTelemetry(taskId: string, userId?: string) {
   await requireOwnedTask(taskId, userId);
   return getBrowserCaptchaTelemetry(taskId);
+}
+
+export async function probeBrowserCookieVariant(input: {
+  taskId: string;
+  userId?: string;
+  currentUrl: string;
+  storageState: Record<string, unknown>;
+  userAgent?: string;
+  blockedResourceUrl?: string;
+  recoveryReason?: string | null;
+}) {
+  await requireOwnedTask(input.taskId, input.userId);
+  return probeCookieVariant({
+    taskId: input.taskId,
+    userId: input.userId,
+    targetUrl: input.currentUrl,
+    storageState: input.storageState,
+    userAgent: input.userAgent,
+    blockedResourceUrl: input.blockedResourceUrl,
+    recoveryReason: input.recoveryReason,
+  });
 }
 
 export async function recoverBrowserChallenge(input: {

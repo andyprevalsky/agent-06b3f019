@@ -5758,8 +5758,10 @@ def test_recovery_requires_live_tab_verify_before_success():
         restore_offset,
     )
     assert skip_verify < verify_offset < success_offset
-    assert "Live-session cookie probes are retired" in recovery_block
+    assert "Live-session cookie probes are retired" not in recovery_block
+    assert "probe_cookie_variant_ephemeral" in recovery_block
     assert "probe_storage_state" not in recovery_block
+    assert "cookie_probe_wave" in recovery_block
 
 
 def test_recovery_restore_failure_is_not_suppressed():

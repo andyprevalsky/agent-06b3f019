@@ -27,7 +27,10 @@ import {
 } from '../../providers/browser';
 import { kernelCaptchaTelemetryConfig } from '../../providers/browser/captchaTelemetry';
 import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
-import { recoverChallengeSchema } from '../../domains/browser-session/types';
+import {
+  probeCookieVariantSchema,
+  recoverChallengeSchema,
+} from '../../domains/browser-session/types';
 
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
   return {
@@ -714,6 +717,25 @@ function testRecoveryRequestSchema(): void {
     }).success,
     false
   );
+  const cookieProbe = probeCookieVariantSchema.parse({
+    task_id: '00000000-0000-4000-8000-000000000001',
+    current_url: 'https://order.online/store/blue-bottle',
+    storage_state: { cookies: [{ name: 'cf_clearance', value: 'x' }], origins: [] },
+  });
+  assert.strictEqual(cookieProbe.storage_state.cookies.length, 1);
+  assert.strictEqual(
+    probeCookieVariantSchema.safeParse({
+      task_id: '00000000-0000-4000-8000-000000000001',
+      current_url: 'https://order.online/store/blue-bottle',
+    }).success,
+    false
+  );
+  const routeSource = readFileSync(
+    new URL('../../domains/browser-session/routes.challenge-recovery.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(routeSource, /\/probe-cookie-variant/);
+  assert.match(routeSource, /probeBrowserCookieVariant/);
 }
 
 function testSameSiteNavigationUrl(): void {
