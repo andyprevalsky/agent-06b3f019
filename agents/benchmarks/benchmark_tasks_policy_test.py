@@ -1,6 +1,139 @@
 from benchmarks.benchmark_tasks import get_task_by_name
 
 
+def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():
+    """AMC ticket runtime contract uses one browser session via spawn_browser_agent.
+
+    expected_tool_counts previously required spawn_agent:1 while the root agent
+    correctly calls spawn_browser_agent (same as browser-imax-group-tickets).
+    That mismatched the authoritative browser_agent_session_count evaluator and
+    failed a green AMC payment-approval run (descend H-02, 2026-08-22).
+    """
+    task = get_task_by_name("browser-event-ticket")
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+
+    # Owning-boundary shape from the post-H-01 local outcome run:
+    # payment reached AMC Theatres; only the spawn_agent count check failed.
+    actual = {"agent_init": 1, "spawn_browser_agent": 1, "request_payment_card": 1}
+    for tool_name, expected_count in task.expected_tool_counts.items():
+        assert actual.get(tool_name, 0) == expected_count, (
+            f"{tool_name}: expected {expected_count}, got {actual.get(tool_name, 0)}; "
+            f"full={actual}"
+        )
+
+    sibling = get_task_by_name("browser-imax-group-tickets")
+    assert sibling.expected_tool_counts.get("spawn_browser_agent") == 1
+
+
+def test_browser_event_ticket_omits_standard_format_from_prompt_and_judge():
+    """H-03 edit: do not require standard-format / reject LASER-at-AMC labels.
+
+    Andy: remove standard-format from task.prompt and movie-ticket-seat-selection-
+    semantics so projection-format labels are not a pass/fail axis.
+    """
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    prompt = task["prompt"]
+    assert "standard-format" not in prompt
+    assert "standard format" not in prompt.lower()
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"])
+    assert "standard-format" not in criteria_blob
+    assert "standard format" not in criteria_blob.lower()
+    assert "specific projection format" in semantics["judge_prompt"]
+
+
+def test_browser_event_ticket_omits_genre_earliest_and_seat_center():
+    """H-04 edit: drop genre, earliest-show, and seat-map center proof.
+
+    Andy: remove non-horror / earliest / horizontal-vertical-center from
+    prompt + movie-ticket-seat-selection-semantics. Keep venue, Friday,
+    7–9pm window, price cap, no-add-ons, unresolved AMC payment.
+    """
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    prompt = task["prompt"].lower()
+    notes = task["environment"]["context_notes"].lower()
+    for forbidden in (
+        "non-horror",
+        "horror",
+        "earliest",
+        "horizontal and vertical center",
+        "genre exclusion",
+        "seating heuristic",
+    ):
+        assert forbidden not in prompt, f"prompt still has {forbidden!r}"
+        assert forbidden not in notes, f"context_notes still has {forbidden!r}"
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"]).lower()
+    judge = semantics["judge_prompt"].lower()
+    for forbidden in ("non-horror", "horror", "earliest", "horizontal and vertical center"):
+        assert forbidden not in criteria_blob, f"criteria still has {forbidden!r}"
+    assert "genre/non-horror" in judge or "genre" in judge
+    assert "earliest-showtime" in judge or "earliest" in judge
+    assert "seat-map center" in judge
+    assert "7:00 pm" in prompt and "9:00 pm" in prompt
+    assert "under $30" in prompt
+
+
+def test_browser_event_ticket_accepts_url_grounded_metreon_venue():
+    """H-05/H-06: soft Metreon venue; do not require Metreon in approval or hard URL proof.
+
+    Andy: relax semantic rubric so AMC Theatres / amctheatres.com consistent with
+    the Metreon goal passes; do not force theatre URL / page chrome.
+    """
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    assert "AMC Metreon 16" in task["prompt"]
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"])
+    judge = semantics["judge_prompt"]
+    assert "Do not force hard Metreon theatre proof" in judge
+    assert "without the Metreon substring" in judge or "without Metreon" in judge
+    assert "grounded by theatre URL" not in criteria_blob
+    assert "approval identifies the movie, venue, date" not in criteria_blob
+    assert "one adult at AMC Metreon 16 this Friday" not in criteria_blob
+
+
+def test_browser_event_ticket_uses_next_week_friday():
+    """Andy edit: prompt + semantics use next week's Friday (not this Friday)."""
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    assert "next week's Friday" in task["prompt"]
+    assert "this Friday" not in task["prompt"]
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"]).lower()
+    judge = semantics["judge_prompt"].lower()
+    assert "next week's friday" in criteria_blob
+    assert "this friday" not in criteria_blob
+    assert "next week's friday" in judge
+
+
 def test_no_anthropic_smoke_price_limit_is_route_aware(monkeypatch):
     task = get_task_by_name("spawn-sub-agents")
 

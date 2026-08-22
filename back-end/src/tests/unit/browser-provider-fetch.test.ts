@@ -2,7 +2,12 @@
 /* eslint-disable no-console */
 
 import assert from 'node:assert';
-import { captureScreenshot, readSessionFile } from '../../providers/browser';
+import {
+  captureScreenshot,
+  pressSessionKeys,
+  pressSessionKeysUsingDependencies,
+  readSessionFile,
+} from '../../providers/browser';
 import { prisma } from '../../providers/database';
 
 const PROVIDER_TIMEOUT_MS = 15_000;
@@ -44,6 +49,22 @@ async function main(): Promise<void> {
   }) as typeof fetch;
 
   try {
+    const kernelCalls: Array<{ sessionId: string; keys: string[] }> = [];
+    assert.deepStrictEqual(
+      await pressSessionKeysUsingDependencies('kernel-session', ['Escape'], {
+        providerForSession: async () => 'kernel',
+        pressKernelKeys: async (sessionId, keys) => {
+          kernelCalls.push({ sessionId, keys });
+        },
+      }),
+      { provider: 'kernel', supported: true, pressed: true }
+    );
+    assert.deepStrictEqual(kernelCalls, [{ sessionId: 'kernel-session', keys: ['Escape'] }]);
+    assert.deepStrictEqual(await pressSessionKeys('steel-session', ['Escape']), {
+      provider: 'steel',
+      supported: false,
+      pressed: false,
+    });
     const operations: Array<() => Promise<unknown>> = [
       () => readSessionFile('steel-session', '/files/stalled.txt'),
       () => captureScreenshot('steel-session'),

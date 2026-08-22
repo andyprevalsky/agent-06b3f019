@@ -1,3 +1,26 @@
+---
+id: 2026-08-21-imax-earliest-showtime-without-filtered-option-set
+date: 2026-08-21
+title: Browser agent claimed the earliest IMAX showtime without capturing the filtered option set
+surface: agents
+component: browser-use-system-prompt
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: agents/providers/rose/browser_use.py build_browser_use_system_prompt `# Browser Rules` never required capturing the filtered option set before an ordered (earliest/latest/cheapest) selection
+symptoms:
+  - "imax-group-ticket-adjacency-semantics"
+  - "does not expose the complete filtered showtime list"
+  - "browser-imax-group-tickets"
+tags:
+  - browser-agent
+  - benchmark-evaluator
+  - grounding
+sources:
+  - agent 2982550e-0c34-42c3-a217-de16abd6885c
+repro: agents/benchmarks/run_benchmark.py --task browser-imax-group-tickets
+status: open
+---
+
 # RCA: IMAX earliest showtime selected without grounded filtered option set
 
 ## Symptom
@@ -63,3 +86,34 @@ Task becomes static_check-only, matching sibling `browser-event-ticket`.
 Exact local `scripts/run-bench --local browser-imax-group-tickets` after Andy
 approves the evaluator-removal snapshot. Owning-boundary green does not
 complete the benchmark RCA.
+
+## Problem
+
+See `## Symptom`. `browser-imax-group-tickets` agent
+`2982550e-0c34-42c3-a217-de16abd6885c` passed the runtime contract
+(payment_approval ~$95.94, seats A1/A2/A3) then scored 0.0 on
+`imax-group-ticket-adjacency-semantics`: it clicked the 10:00 PM IMAX 70MM
+showing and asserted it was the earliest qualifying premium-format showtime,
+without ever capturing the filtered showtime list that would ground the claim.
+
+## Diagnosis
+
+See `## Classification`, `## First-bad boundary`, and `## Owning-boundary proof`.
+The prompt at `agents/providers/rose/browser_use.py`
+`build_browser_use_system_prompt` (`# Browser Rules`) never required capturing
+the filtered option set before an ordered (earliest / latest / cheapest)
+selection, so a single click plus thinking text satisfied the agent while
+leaving the judge no grounded evidence.
+
+## Solution
+
+See `## Fix (superseded by Andy edit)` and `## Outcome proof (pending)`.
+
+## Human feedback
+
+Andy superseded the original fix; see `## Fix (superseded by Andy edit)`.
+
+## Reusable lesson
+
+When an agent must justify a superlative ("earliest", "cheapest"), require it to
+capture the full option set it chose from — a click plus prose is not grounding.

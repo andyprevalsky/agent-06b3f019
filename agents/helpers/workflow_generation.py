@@ -31,3 +31,23 @@ def stamp_tool_workflow_generation(
     if generation:
         stamped["workflowGeneration"] = generation
     return stamped
+
+
+class WorkflowGenerationSealed(Exception):
+    """This worker's generation was replaced by a deploy; it must stop now.
+
+    Raised when the backend answers a lifecycle write with 409. Temporal
+    `terminate()` closes a workflow WITHOUT cancelling its in-flight activities,
+    and the browser/explore activities have no cancellation poll — so a 409 is
+    the only signal an orphaned activity ever receives that it is dead. It must
+    propagate, not be swallowed: swallowing it is what let a replaced generation
+    keep stepping and clobber its own chips.
+    """
+
+
+def raise_if_generation_sealed(status_code: int, context: str) -> None:
+    """Abort the activity when the backend fenced this write as stale."""
+    if status_code == 409:
+        raise WorkflowGenerationSealed(
+            f"{context}: workflow generation was replaced by a deploy; stopping"
+        )

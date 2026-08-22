@@ -16,6 +16,7 @@ import {
   readSessionFile,
   resizeSessionViewport,
   captureScreenshot,
+  pressSessionKeys,
   type BrowserViewport,
   getFingerprintInjectionData,
 } from '../../providers/browser';
@@ -27,6 +28,7 @@ import {
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
+import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
 import { findRequiredSteelProfileForStart } from './service.profile-binding';
 import {
@@ -365,5 +367,11 @@ export async function downloadFile(sessionId: string, filePath: string, userId?:
 export async function takeScreenshot(sessionId: string, userId?: string) {
   await requireSessionOwner(sessionId, userId);
   return captureScreenshot(sessionId);
+}
+
+export async function pressKeys(sessionId: string, keys: string[], userId: string) {
+  await requireSessionOwner(sessionId, userId);
+  validateBrowserKeySymbols(keys);
+  return pressSessionKeys(sessionId, keys);
 }
 /* c8 ignore stop */

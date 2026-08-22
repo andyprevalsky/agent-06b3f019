@@ -58,8 +58,37 @@ const STRIPE_METRICS_ACCOUNT_ID = process.env.ADMIN_HEALTH_STRIPE_ACCOUNT_ID?.tr
 
 const log = createLogger('Stripe');
 
-export const stripe = new Stripe(STRIPE_SECRET_KEY, {
-  apiVersion: STRIPE_API_VERSION,
+/**
+ * Lazily-constructed default client.
+ *
+ * This used to be `new Stripe(...)` at module scope, which threw
+ * `Neither apiKey nor config.authenticator provided` during MODULE IMPORT
+ * whenever STRIPE_SECRET_KEY was absent. That made the crash a property of the
+ * import graph rather than of Stripe usage: any script transitively reaching
+ * this file died before running a line of its own logic. It took down the
+ * production deploy cutover (`migrate-open-agent-workflows.ts`) the moment
+ * `agentRestartService` began importing `agentCleanup` -> `purchaseCleanup` ->
+ * here, even though the cutover never touches Stripe.
+ *
+ * Deferring construction keeps the failure where it belongs: at the first
+ * actual Stripe call, still loud, still unmasked.
+ */
+let stripeClient: Stripe | null = null;
+
+function stripeInstance(): Stripe {
+  if (stripeClient === null) {
+    stripeClient = new Stripe(STRIPE_SECRET_KEY, { apiVersion: STRIPE_API_VERSION });
+  }
+  return stripeClient;
+}
+
+export const stripe = new Proxy({} as Stripe, {
+  get(_target, property, receiver) {
+    return Reflect.get(stripeInstance(), property, receiver);
+  },
+  has(_target, property) {
+    return Reflect.has(stripeInstance(), property);
+  },
 });
 
 /** One Stripe client per distinct secret key (subscription checkout + livemode webhooks). */

@@ -491,6 +491,92 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS > BROWSER_STATE_REQUEST_TIMEOUT_SECONDS
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
+
+def test_browser_use_upstream_still_hardcodes_page_navigate_20s():
+    """Canary: browser-use still hardcodes Page.navigate wait at 20s.
+
+    When upstream honors TIMEOUT_NavigateToUrlEvent, delete
+    ``browser_use_patches.apply_browser_use_navigate_timeout_patch``.
+    """
+    import browser_use.browser.session as browser_session_mod
+
+    source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    assert "nav_timeout = 20.0" in source, (
+        "browser-use no longer hardcodes nav_timeout=20.0; remove the Rose "
+        "navigate-timeout patch if TIMEOUT_NavigateToUrlEvent is honored"
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config():
+    """Owning boundary for browser-event-ticket AMC start_url tool ERROR.
+
+    browser-use ``_navigate_and_wait`` passes ``timeout=20.0`` to
+    ``asyncio.wait_for`` around CDP ``Page.navigate``. Our config sets
+    ``TIMEOUT_NavigateToUrlEvent=300``, but that env never reaches this wait.
+    Without the Rose patch the wait budget stays 20.0s — heavy AMC showtimes
+    pages time out, spawn_browser returns tool ERROR, and the root agent
+    re-spawns on Fandango (merchant mismatch).
+    """
+    from browser_use.browser.session import BrowserSession
+
+    from domains.spawn_browser_agent_v3 import browser_use_patches as patches
+    from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+    assert NAVIGATE_TO_URL_TIMEOUT_SECONDS > patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS
+    assert patches.page_navigate_timeout_seconds() == float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)
+
+    seen_timeouts: list[float | None] = []
+    true_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout=None, **kwargs):
+        seen_timeouts.append(timeout)
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        return {"ok": True}
+
+    async def upstream_like_navigate(self, *args, **kwargs):
+        async def page_navigate_rpc():
+            return {"frameId": "1"}
+
+        # Exact upstream hardcode shape (session.py: nav_timeout = 20.0).
+        return await asyncio.wait_for(
+            page_navigate_rpc(),
+            timeout=patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS,
+        )
+
+    previous_navigate = BrowserSession._navigate_and_wait
+    previous_patched = getattr(BrowserSession, patches._PATCHED_ATTR, False)
+    setattr(BrowserSession, patches._PATCHED_ATTR, False)
+    BrowserSession._navigate_and_wait = upstream_like_navigate
+
+    # Pre-fix (unpatched): wait_for must still see the hardcoded 20.0s budget.
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        await upstream_like_navigate(MagicMock())
+        assert seen_timeouts == [patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS], (
+            "unpatched Page.navigate wait_for budget must be upstream 20.0s; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+
+    seen_timeouts.clear()
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        assert patches.apply_browser_use_navigate_timeout_patch() is True
+        await BrowserSession._navigate_and_wait(MagicMock())
+        assert seen_timeouts == [float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)], (
+            "patched Page.navigate wait_for budget must equal "
+            f"NAVIGATE_TO_URL_TIMEOUT_SECONDS={NAVIGATE_TO_URL_TIMEOUT_SECONDS}; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+        BrowserSession._navigate_and_wait = previous_navigate
+        setattr(BrowserSession, patches._PATCHED_ATTR, previous_patched)
+
+
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
         append_completion_evidence,
@@ -7789,6 +7875,7 @@ async def test_execute_action_element_not_found():
     dom = MagicMock()
     dom.session = MagicMock()
     dom.selector_map = {}
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
     out = await execute_action(dom, ah, {"action": "click", "index": 5})
@@ -9375,6 +9462,7 @@ async def test_execute_action_click_no_element_no_coords():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9414,6 +9502,7 @@ async def test_execute_action_switch_tab_missing_id():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9425,6 +9514,7 @@ async def test_execute_action_press_key_with_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9440,6 +9530,213 @@ async def test_execute_action_press_key_with_humanizer():
     assert out == {"success": True, "message": ""}
     hu.press_key.assert_awaited_once_with("Enter")
     ah.record_action.assert_awaited()
+
+
+async def test_execute_action_press_key_prefers_provider_computer_input():
+    """Kernel-level input can dismiss browser chrome that CDP cannot reach."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(return_value=True)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Control+Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out == {"success": True, "message": ""}
+        repo.press_browser_computer_key.assert_awaited_once_with(
+            config,
+            "kernel-session",
+            "owner-user",
+            "Ctrl+Return",
+        )
+        hu.press_key.assert_not_awaited()
+    finally:
+        repo.press_browser_computer_key = original
+
+
+def test_kernel_computer_key_maps_playwright_names_to_x11_keysyms():
+    from domains.spawn_browser_agent_v3.service_actions import _kernel_computer_key
+
+    assert _kernel_computer_key("Backspace") == "BackSpace"
+    assert _kernel_computer_key("Del") == "Delete"
+    assert _kernel_computer_key("PageUp") == "Prior"
+    assert _kernel_computer_key("PageDown") == "Next"
+    assert _kernel_computer_key("Control+Shift+PageUp") == "Ctrl+Shift+Prior"
+    assert _kernel_computer_key("Shift+Alt+tab") == "Shift+Alt+Tab"
+
+
+async def test_execute_action_press_key_without_user_skips_provider_input():
+    """Provider input requires the owner identity used by the backend route."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock()
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+        )
+
+        assert out == {"success": True, "message": ""}
+        repo.press_browser_computer_key.assert_not_awaited()
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_pre_execution_rejection_falls_back():
+    """An explicit backend rejection proves the provider did not press the key."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    rejection = httpx.HTTPStatusError(
+        "invalid key",
+        request=request,
+        response=httpx.Response(400, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=rejection)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out == {"success": True, "message": ""}
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_provider_server_error_does_not_replay():
+    """A provider 5xx is ambiguous and must not be replayed through CDP."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    failure = httpx.HTTPStatusError(
+        "provider failure",
+        request=request,
+        response=httpx.Response(500, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=failure)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out["success"] is False
+        assert "provider failure" in out["error"]
+        hu.press_key.assert_not_awaited()
+        ah.record_action.assert_awaited_once()
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_ambiguous_provider_failure_does_not_replay():
+    """A lost provider response cannot safely fall back and send Enter twice."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=TimeoutError("response lost"))
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out["success"] is False
+        assert "response lost" in out["error"]
+        hu.press_key.assert_not_awaited()
+        ah.record_action.assert_awaited_once()
+    finally:
+        repo.press_browser_computer_key = original
 
 async def test_execute_action_scroll_with_humanizer_down():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -9496,6 +9793,7 @@ async def test_execute_action_goto_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9512,6 +9810,7 @@ async def test_execute_action_click_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {3: MagicMock()}
     ah = MagicMock()
@@ -9528,6 +9827,7 @@ async def test_execute_action_input_text_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {1: MagicMock()}
     ah = MagicMock()
@@ -9562,6 +9862,7 @@ async def test_execute_action_exception_catches():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {2: MagicMock()}
     ah = MagicMock()
@@ -9615,6 +9916,7 @@ async def test_execute_action_press_key_no_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9643,6 +9945,7 @@ async def test_execute_action_navback():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9746,6 +10049,7 @@ async def test_execute_action_open_new_tab():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_focused_target = MagicMock(return_value=SimpleNamespace(target_id="abcd1234"))
     dom.session = session
@@ -9823,6 +10127,7 @@ async def test_execute_action_switch_tab_found():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_tabs = AsyncMock(
         return_value=[
@@ -9841,6 +10146,7 @@ async def test_execute_action_switch_tab_not_found():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="xxxxxxxxAAAA", title="t", url="u")])
     dom.session = session
@@ -10480,7 +10786,7 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     dom = DOMService(cdp_url="")
     dom._session = _FakeSession()
 
-    await dom._suppress_browser_overlays()
+    await dom.ensure_browser_overlays_suppressed()
     await dom.inject_passkeys(
         [
             {
@@ -10493,11 +10799,10 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
         ]
     )
 
-    assert webauthn.enable.await_count == 2
-    assert webauthn.enable.await_args_list == [
-        call(params={"enableUI": False}, session_id="cdp-session"),
-        call(params={"enableUI": False}, session_id="cdp-session"),
-    ]
+    assert webauthn.enable.await_count == 1
+    webauthn.enable.assert_awaited_once_with(
+        params={"enableUI": False}, session_id="cdp-session"
+    )
     webauthn.addVirtualAuthenticator.assert_awaited_once()
     webauthn.addCredential.assert_awaited_once()
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
@@ -10577,7 +10882,7 @@ async def test_dom_service_passkeys_follow_focus_target_for_sso_transition():
 
     dom = DOMService(cdp_url="")
     dom._session = _FakeSession()
-    await dom._suppress_browser_overlays()
+    await dom.ensure_browser_overlays_suppressed()
     assert await dom.inject_passkeys([amazon]) == 1
 
     dom._session.agent_focus_target_id = "google-target"
@@ -11476,6 +11781,7 @@ async def test_execute_press_key_send_shortcut_does_not_trigger_email_approval()
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -12862,6 +13168,7 @@ def test_url_looks_like_api_surface_guard():
     assert url_looks_like_api_surface("https://r.example.com/") is False
 
     ctx = _ActionContext(
+        user_id="user-1",
         dom_service=None,  # type: ignore[arg-type]
         action_history=None,  # type: ignore[arg-type]
         session=None,
@@ -12899,6 +13206,26 @@ def test_url_looks_like_api_surface_guard():
     assert _navigation_guard_error(ctx, action="navback") is None
     assert _navigation_guard_error(ctx, action="close_tab") is None
     assert _navigation_guard_error(ctx, action="open_new_tab", target_url="https://order.online/") is None
+    assert _navigation_guard_error(ctx, action="open_new_tab", target_url="about:blank") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="https://1.1.1.1/") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="order.online/menu") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="example.com:8443/cart") is None
+    for unsafe_url in (
+        "file:///etc/passwd",
+        "data:text/html,hello",
+        "javascript:alert(1)",
+        "http://localhost/",
+        "http://127.1/",
+        "http://2130706433/",
+        "http://0x7f000001/",
+        "http://10.0.0.1/",
+        "http://169.254.169.254/",
+        "http://192.0.2.1/",
+        "http://[::1]/",
+        "http://[fe80::1]/",
+        "http://[fc00::1]/",
+    ):
+        assert _navigation_guard_error(ctx, action="goto", target_url=unsafe_url) is not None
     # API surfaces still refused.
     assert (
         _navigation_guard_error(
@@ -12914,6 +13241,7 @@ async def test_execute_goto_refuses_api_surface_urls():
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -12935,6 +13263,7 @@ async def test_execute_allows_cross_origin_navigation():
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -12952,6 +13281,7 @@ async def test_execute_allows_cross_origin_navigation():
 
     # Guard-level cement for merchant → order.online (the Blue Bottle failure).
     ctx = service_actions._ActionContext(
+        user_id="user-1",
         dom_service=dom,
         action_history=ah,
         session=session,
@@ -13009,6 +13339,7 @@ async def test_execute_click_and_evaluate_allow_leave_hosts():
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -15298,6 +15629,7 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
             self.selector_map = {}
             self.disconnect = AsyncMock()
+            self._captcha_poll = None
             _FakeDomService.last_instance = self
 
         async def connect(self):
@@ -15305,6 +15637,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
 
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
+
+        def start_captcha_telemetry_indicator(self, poll_phase):
+            self._captcha_poll = poll_phase
 
     class _FakeHumanizer:
         last_instance = None
@@ -17098,6 +17433,14 @@ async def run_all_tests():
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
     )
     r.record(
+        "browser_use_upstream_still_hardcodes_page_navigate_20s",
+        test_browser_use_upstream_still_hardcodes_page_navigate_20s,
+    )
+    await r.record_async(
+        "browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config",
+        test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config,
+    )
+    r.record(
         "browser_task_prompt_no_system_duplication",
         test_browser_task_prompt_does_not_duplicate_system_prompt,
     )
@@ -17739,6 +18082,30 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_press_key_humanizer",
         test_execute_action_press_key_with_humanizer,
+    )
+    await r.record_async(
+        "execute_action_press_key_provider_computer",
+        test_execute_action_press_key_prefers_provider_computer_input,
+    )
+    r.record(
+        "kernel_computer_key_maps_playwright_names_to_x11_keysyms",
+        test_kernel_computer_key_maps_playwright_names_to_x11_keysyms,
+    )
+    await r.record_async(
+        "execute_action_press_key_without_user_skips_provider_input",
+        test_execute_action_press_key_without_user_skips_provider_input,
+    )
+    await r.record_async(
+        "execute_action_press_key_pre_execution_rejection_falls_back",
+        test_execute_action_press_key_pre_execution_rejection_falls_back,
+    )
+    await r.record_async(
+        "execute_action_press_key_provider_server_error_does_not_replay",
+        test_execute_action_press_key_provider_server_error_does_not_replay,
+    )
+    await r.record_async(
+        "execute_action_press_key_ambiguous_provider_failure",
+        test_execute_action_press_key_ambiguous_provider_failure_does_not_replay,
     )
     await r.record_async(
         "execute_action_scroll_humanizer_down",

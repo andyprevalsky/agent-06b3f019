@@ -19,7 +19,12 @@ from domains.spawn_agent.config import (
 )
 from helpers.attachments import FilePointer, resolve_attachments_for_llm
 from helpers.http_client import get_http_client
-from helpers.workflow_generation import stamp_tool_workflow_generation
+from helpers.workflow_generation import (
+    WorkflowGenerationSealed,
+    raise_if_generation_sealed,
+    stamp_tool_workflow_generation,
+    workflow_generation_headers,
+)
 from tools.base import MessageStatus
 
 logger = structlog.get_logger()
@@ -67,12 +72,19 @@ async def save_explore_message(
             metadata["error"] = True
         metadata = stamp_tool_workflow_generation(metadata) or metadata
 
-        await get_http_client().post(
+        response = await get_http_client().post(
             f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"message": message, "role": "TOOL", "metadata": metadata},
             timeout=SAVE_MESSAGE_TIMEOUT,
         )
+        raise_if_generation_sealed(response.status_code, "spawn_agent")
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save explore message", error=str(e))
 
@@ -148,6 +160,8 @@ async def fetch_full_network_metadata(user_id: str) -> str:
         }
 
         return metadata
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to fetch network metadata", user_id=user_id[:8], error=str(e))
         return ""
