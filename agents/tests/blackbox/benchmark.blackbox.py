@@ -3865,87 +3865,61 @@ def test_completion_summary_and_sms_static_checks_are_fail_closed():
     assert passed is False
     assert "exactly 1" in reason
 
-def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
-    """The incident benchmark owns deterministic summary and SMS regressions."""
+def test_blue_bottle_catalog_stops_at_unresolved_place_pickup_write_lock():
+    """Blue Bottle stages pickup checkout then stops at an unresolved Place Pickup Order write lock."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-blue-bottle-challenge-recovery")
-    evaluator = next(item for item in task.evaluators if item["id"] == "blue_bottle_completion_delivery")
-    checks = {check["type"]: check for check in evaluator["checks"]}
-
-    assert evaluator["method"] == "static_check"
-    assert checks["completion_summary_length"]["min_chars"] == 81
-    assert checks["completion_sms_event"] == {
-        "type": "completion_sms_event",
-        "expected_count": 1,
-        "allow_skipped_reasons": ["benchmark_agent"],
-        "require_output_payload": True,
-        "require_rendered_message": True,
-        "max_lines": 8,
-    }
-
-
-async def test_declared_evaluator_hydrates_completion_sms_receipt():
-    """The benchmark boundary reads the provider receipt before static grading."""
-    from dataclasses import replace
-
-    import benchmarks.run_benchmark as bench
-    from benchmarks.benchmark_tasks import get_task_by_name
-
-    summary = "Blue Bottle pickup was prepared through checkout without placing the order." + ("!" * 20)
-    outputs = [{"key": "pickup_time", "label": "Pickup Time", "value": "7:41 AM"}]
-    static_evaluator = next(
-        item
-        for item in get_task_by_name("browser-blue-bottle-challenge-recovery").evaluators
-        if item["id"] == "blue_bottle_completion_delivery"
+    assert task.prompt == (
+        "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee "
+        "at the Ferry Building in San Francisco. Use saved payment and place the order immediately. "
+        "Confirm order total and pickup time."
     )
-    task = replace(
-        get_task_by_name("browser-blue-bottle-challenge-recovery"),
-        evaluators=[static_evaluator],
-    )
-    data = {
-        "agent": {"agent_id": "root-blue-bottle", "status": "COMPLETED"},
-        "messages": [
-            {
-                "role": "TOOL",
-                "metadata": {
-                    "toolName": "completion_summary",
-                    "toolStatus": "FINISHED",
-                    "completionSummary": {"summary": summary, "outputs": outputs},
-                },
-            }
-        ],
+    assert task.group == "daily"
+    assert "ecommerce" in task.tags
+    assert "antibot" in task.tags
+    assert task.approval_handling == "ignore"
+    assert task.expected_approval_count == 1
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert task.environment["services"] == ["order.online", "write_lock"]
+    assert task.environment["live_fixtures"] == ["live"]
+    assert "write lock unresolved" in task.environment["context_notes"].lower()
+    assert "completion sms" in task.environment["context_notes"].lower()
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "approval_request_count",
+        "approval_request_details",
     }
-    path = "provider/sms/notify/completion-root-blue-bottle.json.gz.enc"
-    original_paths = bench.archive_artifact_paths
-    original_read = bench.read_archive_json
-    try:
-        bench.archive_artifact_paths = lambda agent_id: [path]
-        bench.read_archive_json = lambda agent_id, artifact_path: {
-            "status_code": 200,
-            "request": {
-                "event_type": "completion",
-                "agent_id": "root-blue-bottle",
-                "payload": {"summary": summary, "outputs": outputs},
-            },
-            "response": {
-                "success": True,
-                "skipped": True,
-                "reason": "benchmark_agent",
-                "messagePreview": (
-                    f"Done: {summary}\nPickup Time: 7:41 AM\nView agent: https://roselabs.ai/?agent-id=root-blue-bottle"
-                ),
-            },
-        }
-        passed, reason, results = await bench._run_declared_evaluators(task, data)
-    finally:
-        bench.archive_artifact_paths = original_paths
-        bench.read_archive_json = original_read
-
-    assert passed is True
-    assert reason is None
-    assert results[0]["passed"] is True
-    assert data["_benchmark"]["completion_sms_events"][0]["path"] == path
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Blue Bottle"]
+    assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "write lock" in runtime_criteria
+    assert "unresolved" in runtime_criteria
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in (
+        "vanilla bean",
+        "oat milk",
+        "ferry building",
+        "write_lock",
+        "not placed",
+        "completion sms",
+    ):
+        assert requirement in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("approval of the write lock", "order confirmation", "completion sms"):
+        assert failure in judge_prompt
+    assert "write-lock attention request itself is valid grounding" in judge_prompt
 
 def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
     """DoorDash stages checkout then stops at an unresolved place-order write lock."""
@@ -12848,12 +12822,13 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
         "browser-imax-group-tickets",
         "browser-amazon-return",
         "browser-1015-eventim-request-card",
+        "browser-blue-bottle-challenge-recovery",
     }
     tasks = validate_catalog()
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 12
+    assert len(ecommerce) == 13
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -13772,6 +13747,7 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         "browser-1015-eventim-request-card",
     }
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
+    assert "ecommerce" in by_name["browser-blue-bottle-challenge-recovery"].tags
     assert "ticketing" in by_name["browser-1015-eventim-request-card"].tags
     assert all(task.tags.count("antibot") == 1 for task in tasks)
     all_tags = {tag for task in all_tasks() for tag in task.tags}
@@ -15583,12 +15559,8 @@ async def run_all_tests():
         test_completion_summary_and_sms_static_checks_are_fail_closed,
     )
     r.record(
-        "blue_bottle_completion_delivery_contract",
-        test_blue_bottle_catalog_enforces_summary_and_completion_sms,
-    )
-    await r.record_async(
-        "blue_bottle_completion_sms_receipt_hydration",
-        test_declared_evaluator_hydrates_completion_sms_receipt,
+        "blue_bottle_place_pickup_write_lock_contract",
+        test_blue_bottle_catalog_stops_at_unresolved_place_pickup_write_lock,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
