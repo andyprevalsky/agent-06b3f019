@@ -1,4 +1,6 @@
 from benchmarks.benchmark_tasks import get_task_by_name
+from benchmarks.run_benchmark import _benchmark_goal_for_task
+from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
 
 
 def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():
@@ -24,6 +26,14 @@ def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():
 
     sibling = get_task_by_name("browser-imax-group-tickets")
     assert sibling.expected_tool_counts.get("spawn_browser_agent") == 1
+
+
+def test_browser_hotel_booking_prompt_requires_single_browser_agent():
+    """Hotel bench must name one browser session in the catalog prompt (H-02 pattern)."""
+    task = get_task_by_name("browser-hotel-booking")
+    assert task.prompt.startswith("Use exactly one browser agent")
+    goal = _benchmark_goal_for_task(task, "http://localhost:3201")
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in goal
 
 
 def test_browser_event_ticket_omits_standard_format_from_prompt_and_judge():

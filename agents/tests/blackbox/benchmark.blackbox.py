@@ -4959,6 +4959,7 @@ def test_hotel_catalog_stops_at_grounded_payment_approval():
     assert "stop at the payment/write-lock" not in task.prompt.lower()
     assert "lowest-priced" not in task.prompt.lower()
     assert "non-smoking" not in task.prompt.lower()
+    assert task.prompt.startswith("Use exactly one browser agent to book")
     assert task.prompt.endswith("Use guest checkout — do not sign in or create an account.")
     assert task.approval_handling == "ignore"
     assert task.expected_attention_kinds == []
@@ -4990,6 +4991,43 @@ def test_hotel_catalog_stops_at_grounded_payment_approval():
         assert requirement in semantic_criteria or requirement in judge
     for forbidden in ("lowest-priced", "non-smoking", "lowest-price"):
         assert forbidden not in semantic_criteria
+
+
+def test_benchmark_goal_injects_payment_boundary_operational_suffix():
+    """Payment-boundary benches steer the root away from completion schemas and retries."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
+
+    task = get_task_by_name("browser-hotel-booking")
+    goal = bench._benchmark_goal_for_task(task, "http://localhost:3201")
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in goal
+    assert "exactly one browser agent" in goal.lower()
+    assert "do not spawn a second browser agent" in goal.lower()
+    assert "do not instruct the browser to submit payment" in goal.lower()
+
+
+def test_hotel_double_spawn_run_artifact_fails_exact_tool_count():
+    """Replay aba4c297: second spawn_browser_agent must fail the static contract."""
+    import json
+    from pathlib import Path
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    run_path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "runs"
+        / "20260822_182420_browser-hotel-booking.json"
+    )
+    payload = json.loads(run_path.read_text())
+    task_result = payload["tasks"][0]
+    task = get_task_by_name("browser-hotel-booking")
+    reason = bench._root_exact_tool_count_exceeded(task, task_result["logs"]["messages"])
+    assert reason is not None
+    assert "spawn_browser_agent" in reason
+    assert "expected 1, got 2" in reason
 
 
 def test_event_ticket_catalog_stops_at_grounded_payment_approval():
@@ -15228,6 +15266,14 @@ async def run_all_tests():
     r.record(
         "hotel_clean_completed_reservation",
         test_hotel_catalog_stops_at_grounded_payment_approval,
+    )
+    r.record(
+        "hotel_payment_boundary_goal_suffix",
+        test_benchmark_goal_injects_payment_boundary_operational_suffix,
+    )
+    r.record(
+        "hotel_double_spawn_run_artifact_tool_count",
+        test_hotel_double_spawn_run_artifact_fails_exact_tool_count,
     )
     r.record(
         "event_ticket_grounded_payment_approval",

@@ -697,6 +697,10 @@ def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool
 
 def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure goal-critical fields are present when the model under-specifies a schema."""
+    from utils.payment_boundary_goal import goal_has_payment_boundary_operational_constraints
+
+    if goal_has_payment_boundary_operational_constraints(goal):
+        return schema
     if not _is_purchase_goal(goal) or _schema_has_purchase_confirmation_identifier(schema):
         return schema
 

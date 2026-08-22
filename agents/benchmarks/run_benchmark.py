@@ -113,6 +113,7 @@ from domains.set_plan.config import (
 from tests.e2e.test_helpers import (
     authenticate,
 )
+from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
 
 # Defaults — benchmarks run against PROD by default (no local services needed)
 DEFAULT_BASE_URL = os.environ.get("BENCHMARK_BASE_URL", "https://navi-j9a9.onrender.com")
@@ -1913,6 +1914,18 @@ def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
     return f"navi-agent-tasks-{workspace}"
 
 
+def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
+    """Resolve the root-agent goal sent to POST /api/agents for a benchmark task."""
+    from utils.payment_boundary_goal import payment_boundary_operational_suffix
+
+    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
+    goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
+    goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
+    if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
+        goal += payment_boundary_operational_suffix()
+    return goal
+
+
 def _prod_user_data_prompt_override(task: BenchmarkTask) -> str | None:
     if task.name != USER_DATA_PROD_GREP_TASK_NAME:
         return None
@@ -1947,9 +1960,7 @@ async def create_agent(
     headers = {**(await _api_headers())}
     if API_KEY:
         headers["X-Benchmark-Run"] = API_KEY
-    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
-    goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
-    goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
+    goal = _benchmark_goal_for_task(task, base_url)
     source_override = _benchmark_agent_source_override()
     request_source = source_override if source_override in {"WEB", "MAC_APP"} else "WEB"
 

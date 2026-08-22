@@ -1834,7 +1834,7 @@
     "name": "browser-hotel-booking",
     "title": "Hotel Kabuki One-Night Booking",
     "description": "Reserve a one-night hotel stay on hotels.com via guest checkout.",
-    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
+    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
     "timeout_seconds": 1125,
     "is_chat_mode": false,
     "expected_tools": [
