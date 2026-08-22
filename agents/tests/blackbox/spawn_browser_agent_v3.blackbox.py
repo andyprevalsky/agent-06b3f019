@@ -9480,6 +9480,69 @@ async def test_execute_action_scroll_with_humanizer_up():
     assert out["success"] is True
     hu.scroll.assert_awaited_once_with(-250)
 
+async def test_execute_action_scroll_with_humanizer_uses_element_coords():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {34: MagicMock()}
+    dom.get_element_coordinates = AsyncMock(return_value=(120, 340))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.scroll = AsyncMock()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "scroll", "index": 34, "params": {"direction": "up", "amount": 500}},
+        humanizer=hu,
+    )
+    assert out == {"success": True, "message": ""}
+    dom.get_element_coordinates.assert_awaited_once_with(34)
+    hu.scroll.assert_awaited_once_with(-500, at_coords=(120, 340))
+
+async def test_execute_action_scroll_index_zero_scrolls_viewport():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_element_coordinates = AsyncMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.scroll = AsyncMock()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "scroll", "index": 0, "params": {"direction": "up", "amount": 3000}},
+        humanizer=hu,
+    )
+    assert out == {"success": True, "message": ""}
+    dom.get_element_coordinates.assert_not_awaited()
+    hu.scroll.assert_awaited_once_with(-3000)
+
+async def test_execute_action_scroll_missing_element_index_errors():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.scroll = AsyncMock()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "scroll", "index": 34, "params": {"direction": "down", "amount": 200}},
+        humanizer=hu,
+    )
+    assert out["success"] is False
+    assert out["error"] == "Element with index 34 not found"
+    hu.scroll.assert_not_awaited()
+
 async def test_execute_action_extract_disabled():
     from domains.spawn_browser_agent_v3 import service_actions
 

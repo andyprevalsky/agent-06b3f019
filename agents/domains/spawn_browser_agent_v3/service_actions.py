@@ -574,6 +574,13 @@ def _navigation_guard_error(
     return None
 
 
+def _normalize_scroll_index(index: Optional[int]) -> Optional[int]:
+    """Treat index 0 as viewport scroll — models often use it as a page sentinel."""
+    if index == 0:
+        return None
+    return index
+
+
 _INTERACTION_ACTIONS = {
     "click",
     "input_text",
@@ -752,7 +759,15 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         amount = context.params.get("amount", 300)
         delta_y = amount if direction == "down" else -amount
         if context.humanizer:
-            await context.humanizer.scroll(delta_y)
+            at_coords = None
+            if context.index is not None:
+                at_coords = await context.dom_service.get_element_coordinates(context.index)
+                if at_coords is None:
+                    return {
+                        "success": False,
+                        "error": f"Element with index {context.index} not found",
+                    }
+            await context.humanizer.scroll(delta_y, at_coords=at_coords)
         else:
             logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use ScrollEvent")
             event = context.session.event_bus.dispatch(
@@ -1196,6 +1211,11 @@ async def execute_action(
     params = action.get("params", {})
     thinking = action.get("thinking")
     coords = action.get("coordinates")
+
+    if action_name == "scroll":
+        if index is None:
+            index = params.get("index")
+        index = _normalize_scroll_index(index)
 
     try:
         element = None

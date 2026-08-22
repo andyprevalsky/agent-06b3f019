@@ -210,7 +210,8 @@ class ScrollTool(BaseModel):
     direction: Literal["up", "down"] = Field(description="Direction to scroll")
     amount: int = Field(default=300, description="Number of pixels to scroll (default: 300)")
     index: Optional[int] = Field(
-        default=None, description="Optional: element index to scroll within (for scrollable containers)"
+        default=None,
+        description="Optional scroll-container index; omit or use 0 for viewport scroll",
     )
 
 

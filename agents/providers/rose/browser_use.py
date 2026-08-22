@@ -98,7 +98,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 "type": "integer",
                 "description": "Number of pixels to scroll (default: 300)",
             },
-            "index": {"type": "integer", "description": "Optional element index to scroll within specific container"},
+            "index": {
+                "type": "integer",
+                "description": "Optional scroll-container index from browser_state; omit or use 0 for viewport scroll",
+            },
         },
     },
     "find_text": {

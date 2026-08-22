@@ -554,6 +554,8 @@ async def _execute_scroll(dom_service: DOMService, args: Dict[str, Any]) -> Dict
     direction = args.get("direction", "down")
     amount = args.get("amount", 300)
     index = args.get("index")  # Optional: scroll within element
+    if index == 0:
+        index = None
     
     session = dom_service.session
     
