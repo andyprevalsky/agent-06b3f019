@@ -21,6 +21,9 @@ tags:
   - ecommerce
 sources:
   - agent 7bdfd4bb-b069-4aa9-aafe-1455525480fa
+  - agent b6b2b6d6-a68b-4372-8352-46555ab27c34
+  - agent 6ae1f2c1-bb3c-4b6e-8451-5c03f0adbab0
+  - agent a5e573ae-4c05-444e-ba5f-d5bef55f7915
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_execute_allows_cross_origin_navigation
 status: fixed
 ---
@@ -51,6 +54,23 @@ no longer pin-blocked.
 
 A branch-local `attempt_completion` guard was proposed and **reverted** — not
 allowed; benchmark success must not be manufactured by blocking completion.
+
+## Post-sync verification (2026-08-22)
+
+After merging `origin/main` (`277cef9fa`), post-sync runs confirm pin removal:
+
+| Run | Agent | Pin errors | switch_tab FINISHED | Recording |
+|-----|-------|------------|---------------------|-----------|
+| pre-sync | `7bdfd4bb` | 4 | blocked | yes |
+| post-sync | `b6b2b6d6` | 0 | 5 | no (timeout) |
+| post-sync rerun | `6ae1f2c1` | 0 | 1 | no (timeout) |
+| branch pin-fix | `a5e573ae` | 0 | yes | yes (checkout reached) |
+
+Both post-sync reruns timed out at 1125s without `payment_approval` — separate
+failure mode (CAPTCHA auto-solver / challenge recovery loops), not pin blocking.
+
+Branch-local `attempt_completion` guard was reverted (`6e5cdd6fa`); benchmark
+pass must not be manufactured by blocking completion.
 
 ## Solution
 
