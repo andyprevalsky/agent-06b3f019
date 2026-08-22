@@ -124,6 +124,12 @@ Exact local k=1 `ecec4c65-9512-431c-9e1c-e8a26e5c1060`:
 FE: https://roselabs.ai/?agent-id=ecec4c65-9512-431c-9e1c-e8a26e5c1060
 Run: `agents/benchmarks/runs/20260822_013511_browser-alchemy-springs-sauna.json`
 
+## Follow-on (street-address grounding)
+
+Approved drop of literal `939 Post Street` grounding from selection criteria/judge
+(prompt still states the address as user intent). Re-run exact local bench for
+outcome proof.
+
 ## Human feedback
 
 User: evaluate is fine; dig into stall; clean local repro. Then: determine if
