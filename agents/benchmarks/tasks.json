@@ -4274,7 +4274,7 @@
     "name": "browser-blue-bottle-challenge-recovery",
     "title": "Blue Bottle Ferry Building Pickup Order",
     "description": "Guest-checkout Blue Bottle pickup order that stops at a single unresolved payment-card request.",
-    "prompt": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
+    "prompt": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": [
@@ -4364,19 +4364,19 @@
         "id": "blue_bottle_pickup_order_semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The configured item is one 16oz iced vanilla bean shakerato with oat milk for Blue Bottle Ferry Building pickup",
+          "The configured item is one 16oz iced vanilla bean shakerato with almond or oat milk for Blue Bottle Ferry Building pickup",
           "Grounded evidence reports the order total and pickup time or pickup window",
           "Guest checkout is used and the run stops at exactly one unresolved payment-card request",
           "The order is not placed and no order confirmation or completion SMS delivery is produced"
         ],
-        "judge_prompt": "Pass only when grounded browser and payment-request evidence show one 16oz iced vanilla bean shakerato with oat milk for Blue Bottle Coffee pickup at the Ferry Building via guest checkout, report a grounded order total and pickup time or window, and stop at exactly one unresolved payment-card approval. The pending payment approval itself is valid grounding for item, total, and pickup facts. Allow live-menu naming such as KSE Shakerato when the configuration semantically matches vanilla bean and oat milk. Fail for authentication assistance, approval of the payment request, entered card details, a completed order, order confirmation, completion SMS delivery, saved-payment shortcuts that skip guest checkout, fabricated checkout facts, or DOM-patched option labels that do not reflect a real provider-side selection."
+        "judge_prompt": "Pass only when grounded browser and payment-request evidence show one 16oz iced vanilla bean shakerato with almond or oat milk for Blue Bottle Coffee pickup at the Ferry Building via guest checkout, report a grounded order total and pickup time or window, and stop at exactly one unresolved payment-card approval. The pending payment approval itself is valid grounding for item, total, and pickup facts. Allow live-menu naming such as KSE Shakerato when the configuration semantically matches vanilla bean and almond or oat milk. Fail for authentication assistance, approval of the payment request, entered card details, a completed order, order confirmation, completion SMS delivery, saved-payment shortcuts that skip guest checkout, fabricated checkout facts, DOM-patched option labels that do not reflect a real provider-side selection, or a milk choice other than almond or oat."
       }
     ],
     "enforce_declared_evaluators": true,
     "world_surface": "live",
     "fast_cache": "off",
     "anti_bot": "yes",
-    "label_eval": "Single unresolved payment-card request for one 16oz iced vanilla bean shakerato with oat milk; guest checkout; no order placed.",
+    "label_eval": "Single unresolved payment-card request for one 16oz iced vanilla bean shakerato with almond or oat milk; guest checkout; no order placed.",
     "source": [
       "feature:auth-preserving-challenge-recovery",
       ".context/blue-bottle-bench-findings.md",

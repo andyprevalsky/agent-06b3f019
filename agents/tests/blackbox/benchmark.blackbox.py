@@ -3871,7 +3871,7 @@ def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
 
     task = get_task_by_name("browser-blue-bottle-challenge-recovery")
     assert task.prompt == (
-        "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee "
+        "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee "
         "at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. "
         "Confirm order total and pickup time."
     )
@@ -3913,7 +3913,7 @@ def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
     for requirement in (
         "vanilla bean",
-        "oat milk",
+        "almond or oat milk",
         "ferry building",
         "guest checkout",
         "payment-card",
