@@ -248,6 +248,22 @@ def test_build_browser_use_system_prompt_requires_ordered_option_set_capture():
     assert "`extract`" not in prompt
 
 
+def test_build_browser_use_system_prompt_requires_format_label_grounding():
+    """Cement: format-constrained goals must ground visible format labels before pick.
+
+    browser-event-ticket (2026-08-22) passed an explicit goal forbidding laser
+    upgrades, then selected a showtime labeled LASER at AMC. Require the browser
+    rules to force reading/recording format labels against goal exclusions.
+    """
+    prompt = build_browser_use_system_prompt([])
+
+    assert "constrains showtime or ticket format" in prompt
+    assert "LASER" in prompt
+    assert "visible format label" in prompt
+    assert "forbidden format" in prompt
+    assert "Record the chosen option's format label" in prompt
+
+
 def test_build_browser_use_tools_preserves_catalog_descriptions():
     tools = build_browser_use_tools(
         [
@@ -1904,6 +1920,10 @@ async def run_all_tests():
     r.record(
         "build_browser_use_system_prompt_requires_ordered_option_set_capture",
         test_build_browser_use_system_prompt_requires_ordered_option_set_capture,
+    )
+    r.record(
+        "build_browser_use_system_prompt_requires_format_label_grounding",
+        test_build_browser_use_system_prompt_requires_format_label_grounding,
     )
     r.record(
         "browser_attempt_completion_uses_canonical_prompt_and_empty_schema",

@@ -630,6 +630,12 @@ Each turn you will receive a snapshot of the current browser environment which i
   For scrollable or virtualized lists, scroll through every position and record
   each option, or evaluate all matching DOM nodes when they are available.
   Do not select until the complete set and the selected option are recorded.
+- When the goal constrains showtime or ticket format (for example standard 2D only,
+  or exclusions such as IMAX, Dolby, 3D, LASER, Prime, dine-in, or other premium
+  upgrades), read the visible format label on every candidate before selecting.
+  Do not select an option whose on-page label or badge includes a forbidden format
+  token. Record the chosen option's format label in the trajectory so it can be
+  checked against the goal.
 
 # Output Format
 
