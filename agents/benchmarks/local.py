@@ -902,6 +902,17 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
     if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
         os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
+    browser_max_steps = 0
+    for task in all_tasks():
+        if task.name not in selected:
+            continue
+        browser_limit = task.max_steps.get("browser")
+        if isinstance(browser_limit, int) and browser_limit > browser_max_steps:
+            browser_max_steps = browser_limit
+    if browser_max_steps > 0:
+        os.environ["BROWSER_MAX_ITERATIONS"] = str(browser_max_steps)
+    else:
+        os.environ.pop("BROWSER_MAX_ITERATIONS", None)
 
 
 def seed_payment_fixture(manifest: dict) -> None:

@@ -3884,6 +3884,7 @@ def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
     assert task.success_on_payment_card_request is True
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
+    assert task.max_steps == {"browser": 100}
     assert task.environment["services"] == ["order.online", "payment_approval"]
     assert task.environment.get("live_fixtures", []) == []
     assert "guest checkout" in task.environment["context_notes"].lower()

@@ -17,7 +17,20 @@ STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
 # checkout and then enter a card (prod agent
 # 7f354640-ffab-4098-b7ae-041ddf246c6f died at "Max iterations reached: 50"
 # mid card entry after resuming at step 32).
-MAX_ITERATIONS = 60
+DEFAULT_MAX_ITERATIONS = 60
+
+
+def get_max_iterations() -> int:
+    """Resolve the browser-agent step budget for this worker process."""
+    raw = os.environ.get("BROWSER_MAX_ITERATIONS", "").strip()
+    if raw.isdigit():
+        value = int(raw)
+        if value > 0:
+            return value
+    return DEFAULT_MAX_ITERATIONS
+
+
+MAX_ITERATIONS = get_max_iterations()
 MAX_CONSECUTIVE_API_FAILURES = 5
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 30
 HEARTBEAT_TIMEOUT_SECONDS = 120

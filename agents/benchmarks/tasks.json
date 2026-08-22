@@ -4303,6 +4303,9 @@
     "min_steps": {
       "browser": 1
     },
+    "max_steps": {
+      "browser": 100
+    },
     "status": "ready",
     "runner": "agent",
     "bench": "pipeline-e2e",
