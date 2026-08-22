@@ -174,7 +174,7 @@ export function sanitizeSmsText(value: string): string {
   // alex@example.com into alex@Example and break approval copy.
   // U+0001 cannot appear in notification payloads, so page content cannot forge
   // a placeholder and hijack restore (unlike a textual `__EMAIL_n__` token).
-  const emailSentinel = '\u0001';
+  const emailSentinel = String.fromCharCode(1);
   const emails: string[] = [];
   const withEmailPlaceholders = value.replace(
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
@@ -194,8 +194,17 @@ export function sanitizeSmsText(value: string): string {
     .replace(/\s+([.,;:])/g, '$1')
     .trim();
 
+  // Restore by position (split keeps empty segments when the sentinel is adjacent).
   let cursor = 0;
-  return cleaned.replace(/\u0001/g, () => emails[cursor++] ?? '');
+  return cleaned
+    .split(emailSentinel)
+    .map((part, index) => {
+      if (index === 0) {
+        return part;
+      }
+      return `${emails[cursor++] ?? ''}${part}`;
+    })
+    .join('');
 }
 
 export function getWriteLockNotification(metadata: unknown): WriteLockNotification | null {
