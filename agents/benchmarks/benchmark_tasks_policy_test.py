@@ -90,10 +90,10 @@ def test_browser_event_ticket_omits_genre_earliest_and_seat_center():
 
 
 def test_browser_event_ticket_accepts_url_grounded_metreon_venue():
-    """H-05: venue via amc-metreon-16 URL; do not require Metreon in approval text.
+    """H-05/H-06: soft Metreon venue; do not require Metreon in approval or hard URL proof.
 
-    Andy: relax semantic rubric so merchant 'AMC Theatres' + Metreon theatre URL
-    passes; approval need not contain the Metreon substring.
+    Andy: relax semantic rubric so AMC Theatres / amctheatres.com consistent with
+    the Metreon goal passes; do not force theatre URL / page chrome.
     """
     import json
     from pathlib import Path
@@ -107,12 +107,31 @@ def test_browser_event_ticket_accepts_url_grounded_metreon_venue():
     )
     criteria_blob = " ".join(semantics["criteria"])
     judge = semantics["judge_prompt"]
-    assert "amc-metreon-16" in criteria_blob.lower() or "theatre url" in criteria_blob.lower()
-    assert "without the Metreon substring" in criteria_blob or "without the Metreon substring" in judge
-    assert "Do not fail solely because the approval merchant" in judge
-    # Must not require approval text itself to name Metreon as the only venue proof.
+    assert "Do not force hard Metreon theatre proof" in judge
+    assert "without the Metreon substring" in judge or "without Metreon" in judge
+    assert "grounded by theatre URL" not in criteria_blob
     assert "approval identifies the movie, venue, date" not in criteria_blob
     assert "one adult at AMC Metreon 16 this Friday" not in criteria_blob
+
+
+def test_browser_event_ticket_uses_next_week_friday():
+    """Andy edit: prompt + semantics use next week's Friday (not this Friday)."""
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    assert "next week's Friday" in task["prompt"]
+    assert "this Friday" not in task["prompt"]
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"]).lower()
+    judge = semantics["judge_prompt"].lower()
+    assert "next week's friday" in criteria_blob
+    assert "this friday" not in criteria_blob
+    assert "next week's friday" in judge
 
 
 def test_no_anthropic_smoke_price_limit_is_route_aware(monkeypatch):

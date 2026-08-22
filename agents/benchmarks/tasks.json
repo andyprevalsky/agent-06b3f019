@@ -1935,7 +1935,7 @@
     "name": "browser-event-ticket",
     "title": "AMC Movie Ticket with Seat Selection",
     "description": "Buy a time-slotted entertainment ticket that requires seat selection.",
-    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose a movie starting between 7:00 PM and 9:00 PM, select an available seat, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
+    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for next week's Friday. Choose a movie starting between 7:00 PM and 9:00 PM, select an available seat, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -2008,7 +2008,7 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, price cap, and no-add-on constraints. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue (AMC Metreon 16), next week's Friday, time window, price cap, and no-add-on constraints. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge. Semantic venue proof is soft: AMC Theatres checkout consistent with the Metreon goal is enough.",
       "live_cookie_domains": [
         "amctheatres.com"
       ]
@@ -2045,13 +2045,13 @@
         "id": "movie-ticket-seat-selection-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The pending payment approval is for one adult AMC ticket this Friday for a show starting between 7:00 PM and 9:00 PM on amctheatres.com",
-          "Venue is AMC Metreon 16, grounded by theatre URL / showtimes path / page evidence (for example amc-metreon-16); merchant text may say AMC Theatres without the Metreon substring",
+          "The pending payment approval is for one adult AMC ticket on next week's Friday for a show starting between 7:00 PM and 9:00 PM on amctheatres.com",
+          "Venue is satisfied by an AMC Theatres / amctheatres.com checkout consistent with the Metreon goal (spawn start_url, goal text, theatre URL, or page chrome may name Metreon; none of these is required if the approval is clearly AMC on amctheatres.com for that goal)",
           "The selected seat is available and the ticket price is under $30 before fees",
           "No concessions, memberships, donations, or upgrades are added, and the single approval identifies the movie, date, showtime, seat, and total amount",
           "The trajectory ends at exactly one unresolved payment approval grounded to amctheatres.com; the harness does not approve it, and a generic write-lock is not success"
         ],
-        "judge_prompt": "Review the showtime, cart, browser, and pending payment evidence. Pass only if the show is in the 7:00 PM–9:00 PM window, the seat is available, the ticket is under $30 before fees, no add-ons were added, venue is grounded as AMC Metreon 16 via theatre URL or page evidence (e.g. amc-metreon-16), and one unresolved payment approval is tied to the AMC Theatres checkout. Do not fail solely because the approval merchant/question says AMC Theatres without the Metreon substring. Do not require genre/non-horror filtering, earliest-showtime ranking, seat-map center geometry, or a specific projection format (standard/IMAX/Dolby/LASER/etc.). Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
+        "judge_prompt": "Review the showtime, cart, browser, and pending payment evidence. Pass only if the show is on next week's Friday in the 7:00 PM–9:00 PM window, the seat is available, the ticket is under $30 before fees, no add-ons were added, and one unresolved payment approval is tied to an AMC Theatres / amctheatres.com checkout. Do not force hard Metreon theatre proof: do not fail solely because browser page text lacks Metreon, because the approval merchant says AMC Theatres without Metreon, or because start_url/theatre URL evidence is missing when the run is otherwise a grounded AMC Metreon ticket purchase. Accept spawn start_url, goal text, or amc-metreon-16 URLs as optional supporting venue evidence when present. Do not require genre/non-horror filtering, earliest-showtime ranking, seat-map center geometry, or a specific projection format (standard/IMAX/Dolby/LASER/etc.). Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,
