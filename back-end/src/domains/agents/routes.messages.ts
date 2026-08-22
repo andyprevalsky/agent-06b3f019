@@ -64,10 +64,14 @@ router.post(
         return;
       }
       const body = postMessageSchema.parse(req.body);
+      // Do NOT default a missing generation header to the agent id. Generation
+      // 1's Temporal workflow id IS the agent id, so that default fabricated a
+      // real-but-wrong generation: after any replacement, every write from a
+      // writer that forgot the header looked stale and was rewritten into the
+      // terminal "Tool interrupted by deployment" error. Leave it undefined and
+      // let the service attribute the write to the agent's live generation.
       const generation =
-        req.isInternal === true
-          ? (req.header('x-agent-workflow-generation') ?? req.params.id)
-          : undefined;
+        req.isInternal === true ? req.header('x-agent-workflow-generation') : undefined;
       const result = await messageService.postMessage(
         req.params.id,
         body,

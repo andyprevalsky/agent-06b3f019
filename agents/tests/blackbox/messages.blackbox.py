@@ -155,7 +155,18 @@ async def test_post_tool_message_stamps_metadata_generation():
 
 
 async def test_post_message_treats_stale_generation_as_terminal_fence():
-    """A 409 cutover fence completes the old activity instead of retrying forever."""
+    """A 409 cutover fence must KILL the old activity, not let it keep going.
+
+    This previously asserted `result == {"fenced": True}` -- a sentinel that
+    nothing ever read. Returning it meant an activity whose generation a deploy
+    had replaced kept running and kept emitting tool events, each of which the
+    backend fenced into a red "Tool interrupted by deployment" chip: 32-54
+    accepted writes over 13s locally, 105 over 90 minutes in prod.
+
+    Temporal terminate() does not cancel in-flight activities and the activity
+    has no cancellation poll, so this 409 is the ONLY signal it ever receives
+    that it is dead. It must raise.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(409, json={"error": "Workflow generation is no longer current"})
@@ -163,14 +174,20 @@ async def test_post_message_treats_stale_generation_as_terminal_fence():
     setup_mock_fn(handler)
     with patch("temporalio.activity.heartbeat"):
         from helpers.messages import post_agent_message
+        from helpers.workflow_generation import WorkflowGenerationSealed
 
-        result = await post_agent_message(
-            agent_id="agent-stale-message",
-            text="late response",
-            role="ASSISTANT",
-        )
+        raised = None
+        try:
+            await post_agent_message(
+                agent_id="agent-stale-message",
+                text="late response",
+                role="ASSISTANT",
+            )
+        except WorkflowGenerationSealed as exc:
+            raised = exc
 
-    assert result == {"fenced": True}
+    assert raised is not None, "a sealed generation must abort the activity, not return a sentinel"
+    assert "agent-stale-message" in str(raised)
 
 
 async def test_post_message_with_file_pointer():

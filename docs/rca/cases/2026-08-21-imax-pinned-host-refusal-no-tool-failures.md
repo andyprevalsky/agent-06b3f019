@@ -1,3 +1,26 @@
+---
+id: 2026-08-21-imax-pinned-host-refusal-no-tool-failures
+date: 2026-08-21
+title: no_tool_failures failed closed on recovered antibot pinned-host refusals
+surface: agents
+component: benchmark-static-checks
+classification: test-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: agents/benchmarks/run_benchmark.py _tool_runtime_failures / _browser_agent_session_counts_and_failures had no ignore for recoverable pinned-host refusals
+symptoms:
+  - "Refusing to leave pinned page host"
+  - "Observed tool failure: spawn_browser_agent"
+  - "no_tool_failures"
+tags:
+  - benchmark-evaluator
+  - browser-agent
+  - antibot
+sources:
+  - agent cf706f38-081a-4210-81a7-0894433babcb
+repro: agents/benchmarks/run_benchmark.py --task browser-imax-group-tickets
+status: fixed
+---
+
 # RCA: `no_tool_failures` fails closed on recovered antibot pinned-host refusals
 
 ## Symptom
@@ -50,3 +73,30 @@ Directive text is implicit harness-fix approval — do not re-ask after
 approved under that rule; this H-06 evaluator fix continues the same
 payment-terminal descent without a second ceremony stop for the identical
 Faulty Evaluator class already approved on H-02/H-03.
+
+## Problem
+
+See `## Symptom`. Agent `cf706f38-081a-4210-81a7-0894433babcb` observed
+`request_payment_card` FINISHED (~$95.94) and failed only `no_tool_failures`,
+on `Refusing to leave pinned page host 'www.google.com'` refusals emitted while
+the antibot challenge pin was active.
+
+## Diagnosis
+
+See `## Classification`, `## First-bad boundary`, and `## Owning-boundary proof`.
+`_tool_runtime_failures` / `_browser_agent_session_counts_and_failures` had no
+ignore for recoverable pinned-host refusals, so expected escape noise during
+challenge pin was scored as a terminal tool failure.
+
+## Solution
+
+See `## Fix`.
+
+## Human feedback
+
+See `## Andy note`.
+
+## Reusable lesson
+
+Guard-rail refusals are expected control-flow noise, not tool failures — an
+evaluator must distinguish "the harness said no" from "the tool broke".

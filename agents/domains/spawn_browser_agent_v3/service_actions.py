@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import ipaddress
 import json
 import re
+import socket
 import time as time_module
 from contextlib import suppress
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
+import httpx
 import structlog
 from PIL import Image
 
@@ -39,6 +42,14 @@ logger = structlog.get_logger()
 
 STEEL_COMPUTER_SCREENSHOT_WIDTH = 1288
 STEEL_COMPUTER_SCREENSHOT_HEIGHT = 891
+# Actions after which a page can start a WebAuthn ceremony: focusing or typing
+# into an account field triggers conditional UI, clicking activates a
+# "sign in with a passkey" control, and a navigation can land straight on a
+# sign-in page that invokes WebAuthn on load.
+_CEREMONY_CAPABLE_ACTIONS = frozenset(
+    {"click", "input_text", "press_key", "goto", "navback", "switch_tab", "open_new_tab"}
+)
+
 STEEL_VIEWPORT_CROP_X = 4
 STEEL_VIEWPORT_CROP_Y = 87
 STEEL_VIEWPORT_CROP_WIDTH = 1283
@@ -67,6 +78,11 @@ _API_SURFACE_PATHS = frozenset(
         "/ping",
     }
 )
+_NUMERIC_IPV4_HOST_RE = re.compile(
+    r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
+    re.IGNORECASE,
+)
+_PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES = frozenset({400, 401, 403, 404})
 
 
 def url_looks_like_api_surface(url: str) -> bool:
@@ -89,6 +105,30 @@ def url_looks_like_api_surface(url: str) -> bool:
     if path in {"/v1", "/v2", "/v3", "/v4"}:
         return True
     return False
+
+
+def _kernel_computer_key(key: str) -> str:
+    """Translate Playwright-style key names to Kernel/xdotool key symbols."""
+    aliases = {
+        "control": "Ctrl",
+        "ctrl": "Ctrl",
+        "meta": "Super",
+        "command": "Super",
+        "cmd": "Super",
+        "enter": "Return",
+        "arrowup": "Up",
+        "arrowdown": "Down",
+        "arrowleft": "Left",
+        "arrowright": "Right",
+        "backspace": "BackSpace",
+        "del": "Delete",
+        "pageup": "Prior",
+        "pagedown": "Next",
+        "tab": "Tab",
+        "escape": "Escape",
+        "esc": "Escape",
+    }
+    return "+".join(aliases.get(part.strip().lower(), part.strip()) for part in key.split("+"))
 
 
 # ========================================
@@ -602,6 +642,7 @@ class _ActionContext:
     element: Any
     available_file_paths: Optional[Dict[str, str]]
     session_id: Optional[str]
+    user_id: str
     config: Any
     humanizer: Optional[BrowserHumanizer]
     secret_refs: Optional[Dict[str, str]]
@@ -635,26 +676,80 @@ async def _refuse_navigation(
     return result
 
 
+def _non_public_navigation_reason(url: str) -> Optional[str]:
+    """Explain why a URL is not safe for browser navigation, if applicable."""
+    if url == "about:blank":
+        return None
+
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return "the URL is malformed"
+
+    if parsed.scheme not in {"http", "https"}:
+        return "only public HTTP(S) pages may be opened"
+    if not host:
+        return "the URL has no hostname"
+
+    normalized_host = host.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        return "localhost pages are not allowed"
+
+    address = None
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        # inet_aton recognizes legacy numeric IPv4 forms such as 127.1,
+        # 2130706433, and 0x7f000001 that urlparse leaves looking like names.
+        if _NUMERIC_IPV4_HOST_RE.fullmatch(normalized_host):
+            try:
+                address = ipaddress.ip_address(socket.inet_aton(normalized_host))
+            except (OSError, ValueError):
+                return "the numeric hostname is malformed"
+
+    if address is not None and not address.is_global:
+        return f"the destination address {address} is not public"
+    return None
+
+
 def _navigation_guard_error(
     context: _ActionContext,
     *,
     action: str,
     target_url: Optional[str] = None,
 ) -> Optional[str]:
-    """Refuse navigation to API/non-document URL shapes only.
+    """Refuse non-public destinations and API/non-document URL shapes.
 
     Host pinning (recovery / cross-origin handoff) was removed: it trapped
     legitimate merchant → third-party order flows (e.g. bluebottlecoffee.com →
     order.online) after challenge recovery on the merchant host.
     """
-    del action  # kept for call-site stability
-    if target_url and url_looks_like_api_surface(target_url):
+    navigation_url = _normalize_goto_url(target_url) if action == "goto" else target_url
+    if target_url:
+        unsafe_reason = _non_public_navigation_reason(navigation_url or target_url)
+        if unsafe_reason:
+            return f"Refusing unsafe navigation to {target_url!r}: {unsafe_reason}."
+    if navigation_url and url_looks_like_api_surface(navigation_url):
         return (
             f"Refusing navigation to API/non-document URL {target_url!r}. "
             "Network request hosts are not pages — stay on the current document "
             f"({context.current_url or 'current page'}) and continue the task there."
         )
     return None
+
+
+_EXPLICIT_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_BARE_HOST_PORT_RE = re.compile(r"^(?:\[[^\]]+\]|[A-Za-z0-9.-]+):[0-9]+(?:[/?#]|$)")
+
+
+def _normalize_goto_url(url: Optional[str]) -> Optional[str]:
+    """Add HTTPS to bare hosts while preserving explicit schemes for rejection."""
+    if not url or url.startswith(("http://", "https://", "about:", "file:")):
+        return url
+    if _EXPLICIT_URL_SCHEME_RE.match(url) and not _BARE_HOST_PORT_RE.match(url):
+        return url
+    return f"https://{url}"
 
 
 _INTERACTION_ACTIONS = {
@@ -815,7 +910,35 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
-        if context.humanizer:
+        provider_pressed = False
+        if context.config is not None and context.session_id and context.user_id.strip():
+            from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
+
+            # Fall back only when the provider reports unsupported input or the
+            # backend explicitly rejects the request before provider execution.
+            # A timeout, transport error, or 5xx is ambiguous: the key may already
+            # have executed, and replaying Enter through CDP could submit twice.
+            try:
+                provider_pressed = await press_browser_computer_key(
+                    context.config,
+                    context.session_id,
+                    context.user_id,
+                    _kernel_computer_key(str(key)),
+                )
+            except httpx.HTTPStatusError as error:
+                if (
+                    error.response.status_code
+                    not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES
+                ):
+                    raise
+                logger.info(
+                    "Provider computer input rejected before execution; falling back",
+                    key=key,
+                    status=error.response.status_code,
+                )
+        if provider_pressed:
+            logger.info("Pressed key through provider computer input", key=key)
+        elif context.humanizer:
             await context.humanizer.press_key(key)
         else:
             logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
@@ -1142,6 +1265,16 @@ async def execute_action(
     thinking = action.get("thinking")
     coords = action.get("coordinates")
 
+    # Anything that can make a relying party call navigator.credentials.get must
+    # run against a target whose native WebAuthn UI is suppressed and whose
+    # virtual authenticator holds our passkeys. Chrome scopes both per target, so
+    # arming at connect (or at step start) strands them the moment the agent
+    # follows a link into a new tab — which is how a real run ended up wedged
+    # behind Chrome's own "No passkeys available" modal, a surface no CDP input
+    # can reach. Arming here is idempotent and costs one round trip.
+    if action_name in _CEREMONY_CAPABLE_ACTIONS:
+        await dom_service.ensure_browser_overlays_suppressed()
+
     try:
         element = None
         if index is not None:
@@ -1161,6 +1294,7 @@ async def execute_action(
             element=element,
             available_file_paths=available_file_paths,
             session_id=session_id,
+            user_id=user_id,
             config=config,
             humanizer=humanizer,
             secret_refs=secret_refs,
@@ -2946,9 +3080,9 @@ async def _execute_goto(
     """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
 
-    url = params.get("url", "")
-    if url and not url.startswith(("http://", "https://", "about:", "file:")):
-        url = f"https://{url}"
+    original_url = params.get("url", "")
+    url = _normalize_goto_url(original_url) or ""
+    if url != original_url:
         logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
     credential_summary = None
     target_auth_realm = auth_realm_from_url(url)

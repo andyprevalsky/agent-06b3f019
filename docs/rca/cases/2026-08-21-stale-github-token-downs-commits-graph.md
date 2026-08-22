@@ -18,8 +18,8 @@ tags:
   - velocity
   - commits-graph
 sources:
-  - curl Render GITHUB_TOKEN vs GITHUB_DISPATCH_TOKEN against commits API
-  - local repro scripts/repro with stale token → status error
+  - memory: curl Render GITHUB_TOKEN vs GITHUB_DISPATCH_TOKEN against commits API
+  - memory: local repro scripts/repro with stale token → status error
 repro: local
 status: fixed
 ---

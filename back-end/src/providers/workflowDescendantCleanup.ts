@@ -13,6 +13,10 @@ import {
 import { resolveTemporalWorkflowExecutionRef, type TemporalWorkflowExecutionRef } from './temporal';
 import { terminateStaleTemporalWorkflow } from './workflowReplacement';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
+import { releaseAgentBrowserSessions } from './agentCleanup';
+import { createLogger } from './logger';
+
+const log = createLogger('WorkflowDescendantCleanup');
 
 interface DescendantRow {
   id: string;
@@ -287,6 +291,20 @@ async function cleanupSnapshot(
   );
   assertBeforeDeadline(deadlineAtMs, `descendant ${snapshot.agentId} completion`);
   await completeDescendantCleanup(snapshot);
+  // `completeDescendantCleanup` marks the child FAILED with a raw
+  // `tx.agent.updateMany`, which bypasses `updateAgentStatus` and therefore its
+  // terminal hook `releaseTerminalBrowserSessions`. Without this compensation a
+  // descendant that rented a browser is marked dead while its browser keeps
+  // running and billing. `workflowLivenessReconciler` carries the same
+  // compensation for the same bypass hazard.
+  try {
+    await releaseAgentBrowserSessions(snapshot.agentId);
+  } catch (error) {
+    log.warn('Descendant browser release unavailable', {
+      agent_id: snapshot.agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   return {
     sealed: true,
     terminated: snapshot.execution !== null,

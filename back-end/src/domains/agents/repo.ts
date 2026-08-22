@@ -308,3 +308,19 @@ export async function findAgentWithFullRelations(agentId: string) {
     },
   });
 }
+
+/**
+ * The generation an unattributed internal write should join.
+ *
+ * Returns the agent's live `temporalWorkflowId`, or null when it owns no
+ * workflow yet. Callers must NOT substitute the agent id on a miss: the agent
+ * id is generation 1's workflow id, so fabricating it makes an unattributed
+ * write look like a stale first-generation worker.
+ */
+export async function currentAgentWorkflowGeneration(agentId: string): Promise<string | null> {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { temporalWorkflowId: true },
+  });
+  return agent?.temporalWorkflowId ?? null;
+}

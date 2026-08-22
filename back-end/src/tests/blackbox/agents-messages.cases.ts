@@ -77,8 +77,14 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
   assertStatus(progress.status, 201, progress.data);
   assertStatus(earlySuccess.status, 201, earlySuccess.data);
   assertStatus(success.status, 201, success.data);
-  assertStatus(staleProgress.status, 201, staleProgress.data);
-  assertStatus(brandNewStale.status, 201, brandNewStale.data);
+  // CONTRACT CHANGE: a stale TOOL write now returns 409 instead of 200 + the
+  // fenced row. The writer is an orphaned activity of a terminated workflow,
+  // not the LLM — Temporal terminate() does not cancel in-flight activities,
+  // so a success response was the reason a replaced generation kept stepping
+  // and clobbering its own chips (15 in one local cutover, 105 in prod).
+  // The fenced row is still written; only the dead worker's status changes.
+  assertStatus(staleProgress.status, 409, staleProgress.data);
+  assertStatus(brandNewStale.status, 409, brandNewStale.data);
   assertStatus(replacementProgress.status, 201, replacementProgress.data);
   assertStatus(replacementSuccess.status, 201, replacementSuccess.data);
   const successBody = assertSchema(PostMessageResponse, success.data, 'sticky TOOL success');
@@ -87,23 +93,9 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
     earlySuccess.data,
     'early TOOL success'
   );
-  const staleProgressBody = assertSchema(
-    PostMessageResponse,
-    staleProgress.data,
-    'sticky TOOL progress'
-  );
   assert(
     earlySuccessBody.message_id !== successBody.message_id,
     'ordinary terminal updates must retain their existing multi-event behavior'
-  );
-  assert(
-    staleProgressBody.message_id === successBody.message_id,
-    'late stale progress must resolve to the fenced terminal result'
-  );
-  const brandNewStaleBody = assertSchema(
-    PostMessageResponse,
-    brandNewStale.data,
-    'brand-new stale TOOL progress'
   );
   const replacementSuccessBody = assertSchema(
     PostMessageResponse,
@@ -130,8 +122,14 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
       JSON.stringify(['FINISHED', 'FINISHED', 'FINISHED']),
     `Expected old and replacement successes without a contradictory error, got ${JSON.stringify(terminalStatuses)}`
   );
-  const brandNewStaleRow = await prisma.message.findUniqueOrThrow({
-    where: { id: brandNewStaleBody.message_id },
+  // Rejecting the dead worker must NOT stop the fence from recording the
+  // interruption — the replacement LLM still needs to see it in history.
+  const brandNewStaleRow = await prisma.message.findFirstOrThrow({
+    where: {
+      agentId,
+      role: 'TOOL',
+      metadata: { path: ['toolCallId'], equals: brandNewStaleCallId },
+    },
   });
   assert(
     brandNewStaleRow.text === 'new code version deployed, retry this tool',
@@ -145,6 +143,88 @@ test('POST /:id/messages — deployment fence preserves success and blocks stale
     (brandNewStaleRow.metadata as { error?: unknown } | null)?.error === true,
     'brand-new stale progress must be visible to the agent as an error'
   );
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+test('POST /:id/messages — a header-less descendant TOOL write is never fenced as a stale deployment', async () => {
+  // Prod agent 219dd80e-c2ed-4dc1-a40e-b2b9ea7e0a87 accumulated 105 red
+  // "Tool interrupted by deployment" chips while its browser sub-agent was
+  // running fine and ultimately succeeded. Descendant writers
+  // (spawn_browser_agent_v3 / spawn_agent / spawn_claude_code_agent /
+  // call_phone_number repo.py) POST TOOL rows WITHOUT the
+  // X-Agent-Workflow-Generation header. The route defaults a missing header to
+  // the agent id — i.e. generation 1 — so after any workflow replacement every
+  // one of those live writes is rewritten into the terminal deployment error.
+  //
+  // The invariant: "no generation supplied" means UNKNOWN. It must never be
+  // silently promoted to generation 1 and converted into a fabricated terminal
+  // error for a tool call that is alive in the current generation.
+  const session = await createAnonymousSession('msg-headerless-descendant');
+  const agentId = await createTestAgent(session.user.id, 'Header-less descendant write test');
+  const replacementGeneration = `${agentId}:replacement:${randomUUID()}`;
+  // The agent has already been replaced once, exactly as in the prod trace.
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { temporalWorkflowId: replacementGeneration },
+  });
+
+  // The root workflow registers the browser tool call in the CURRENT generation,
+  // keyed by the provider tool-call id the browser loop streams back.
+  const toolCallId = `call_${randomUUID().replace(/-/g, '').slice(0, 24)}`;
+  const rootRegistration = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(), 'X-Agent-Workflow-Generation': replacementGeneration },
+    body: JSON.stringify({
+      message: '',
+      role: 'TOOL',
+      metadata: { toolCallId, toolName: 'spawn_browser_agent', toolStatus: 'IN_PROGRESS' },
+    }),
+  });
+  assertStatus(rootRegistration.status, 201, rootRegistration.data);
+
+  // The live browser descendant reports progress for that same call — with NO
+  // generation header, which is exactly what save_browser_action_message sends.
+  const descendantProgress = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      message: 'Clicked "Place order"',
+      role: 'TOOL',
+      metadata: {
+        toolCallId,
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        subAgentId: randomUUID(),
+      },
+    }),
+  });
+
+  // Either the backend rejects an unattributed internal write outright, or it
+  // stores it verbatim. Fabricating a terminal deployment error for a live tool
+  // call is the one outcome that is always wrong.
+  if (descendantProgress.status === 201) {
+    const body = assertSchema(
+      PostMessageResponse,
+      descendantProgress.data,
+      'header-less descendant TOOL write'
+    );
+    const row = await prisma.message.findUniqueOrThrow({ where: { id: body.message_id } });
+    const metadata = row.metadata as { errorCode?: unknown; error?: unknown } | null;
+    assert(
+      row.text !== 'new code version deployed, retry this tool',
+      `a live descendant write with no generation header must not be converted into the deployment error (got text ${JSON.stringify(row.text)})`
+    );
+    assert(
+      metadata?.errorCode !== 'DEPLOY_INTERRUPTED',
+      'a live descendant write with no generation header must not be marked DEPLOY_INTERRUPTED'
+    );
+  } else {
+    assert(
+      descendantProgress.status >= 400,
+      `an unattributed internal TOOL write must be either stored or rejected, got ${descendantProgress.status}`
+    );
+  }
 
   await deleteTestAgent(agentId, session.user.id);
 });
