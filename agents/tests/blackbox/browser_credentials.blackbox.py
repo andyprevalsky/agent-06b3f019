@@ -529,6 +529,71 @@ async def test_passkey_injection_recovers_after_virtual_environment_loss() -> No
     assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
 
 
+async def test_passkey_focus_follow_logging_tolerates_stdlib_logger() -> None:
+    """Target rebind must not TypeError on stdlib logging.Logger under INFO.
+
+    Regression for agent 676d6ed9: `_follow_focused_passkey_target` passed
+    structlog-style kwargs into `logging.getLogger`, killing switch_tab.
+    """
+    import logging
+
+    from browser_tools.dom_service import DOMService
+
+    async def send(method: str, params: dict):
+        if method == "WebAuthn.enable":
+            return {}
+        if method == "WebAuthn.addVirtualAuthenticator":
+            return {"authenticatorId": "authenticator-focus"}
+        if method == "WebAuthn.addCredential":
+            return {}
+        if method == "WebAuthn.getCredentials":
+            return {
+                "credentials": [
+                    {"credentialId": "credential-focus", "signCount": 0},
+                ]
+            }
+        raise AssertionError(method)
+
+    new_cdp = SimpleNamespace(send=send, target_id="target-new")
+
+    class FakeSession:
+        agent_focus_target_id = "target-new"
+
+        async def get_or_create_cdp_session(self, target_id: str, focus: bool = False):
+            assert target_id == "target-new"
+            assert focus is False
+            return new_cdp
+
+    dom = DOMService(cdp_url="")
+    dom._session = FakeSession()
+    dom._webauthn_cdp = SimpleNamespace(send=send, target_id="target-old")
+    dom._passkey_target_id = "target-old"
+    dom._passkey_authenticator_id = "stale-authenticator"
+    dom._passkey_seed_counts = {"stale": 0}
+
+    module_logger = logging.getLogger("browser_tools.dom_service")
+    previous_level = module_logger.level
+    module_logger.setLevel(logging.INFO)
+    try:
+        seeded = await dom.inject_passkeys(
+            [
+                {
+                    "credentialId": "credential-focus",
+                    "privateKey": "private-focus",
+                    "rpId": "example.com",
+                    "signCount": 0,
+                }
+            ]
+        )
+    finally:
+        module_logger.setLevel(previous_level)
+
+    assert seeded == 1
+    assert dom._passkey_target_id == "target-new"
+    assert dom._webauthn_cdp is new_cdp
+    assert dom._passkey_authenticator_id == "authenticator-focus"
+
+
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
@@ -575,5 +640,9 @@ async def run_all_tests():
     await runner.record_async(
         "passkey_injection_recovers_after_virtual_environment_loss",
         test_passkey_injection_recovers_after_virtual_environment_loss,
+    )
+    await runner.record_async(
+        "passkey_focus_follow_logging_tolerates_stdlib_logger",
+        test_passkey_focus_follow_logging_tolerates_stdlib_logger,
     )
     return runner.all_passed

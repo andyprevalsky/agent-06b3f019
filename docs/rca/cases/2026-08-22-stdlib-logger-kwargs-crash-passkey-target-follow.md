@@ -24,8 +24,8 @@ sources:
   - agent 676d6ed9-c8ec-4700-9fe8-dc64419ebb96
   - commit 4af8a910b2b92a8ede78953d0ad082c56a0372bc
   - fleet run 20260822_022651_browser-alchemy-springs-sauna
-repro: none-recorded
-status: open
+repro: agents/tests/blackbox/browser_credentials.blackbox.py::test_passkey_focus_follow_logging_tolerates_stdlib_logger
+status: fixed
 ---
 
 ## Problem
@@ -55,39 +55,26 @@ Critical path:
    `logging.getLogger(__name__)` logger introduced in
    `4af8a910b` ("durable multi-account compute connections").
 4. With INFO enabled, `Logger._log()` raises TypeError on `previous_target_id`.
-5. Browser agent fails → classifier + explore + second browser → tool-count fail.
+5. Browser agent fails → classifier + explore → second browser → tool-count fail.
 
-Local owning-boundary repro (same TypeError string as prod):
+Owning-boundary blackbox
+`test_passkey_focus_follow_logging_tolerates_stdlib_logger`:
 
-```bash
-python3 - <<'PY'
-import logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("browser_tools.dom_service")
-logger.setLevel(logging.INFO)
-logger.info(
-    "🔑 [passkey] following focused browser target",
-    previous_target_id="OLD",
-    target_id="NEW",
-)
-PY
-```
-
-Measured failure: `TypeError: Logger._log() got an unexpected keyword argument 'previous_target_id'` (wall ~0.07s).
+- Pre-fix: `TypeError: Logger._log() got an unexpected keyword argument 'previous_target_id'`
+- Post-fix: PASS (`cd agents && python scripts/run_blackbox_tests.py browser-credentials`)
 
 ## Solution
 
-Pending approval. Proposed generalizable fix: format the stdlib log line with an
-f-string / `%s` args (matching the rest of `dom_service.py`), and cement a
-blackbox that enables INFO and asserts `_follow_focused_passkey_target` /
-target-rebind logging does not raise. Do not relax
-`browser_agent_session_count` or tolerate the second spawn — fix the crash that
-forces the cascade. 10k-agent behavior: O(1) per passkey target rebind (string
-format only); no new fan-in, queries, or broadcasts.
+Format the stdlib log as an f-string in
+`agents/browser_tools/dom_service.py::_follow_focused_passkey_target` (match the
+rest of the file). Cemented by
+`test_passkey_focus_follow_logging_tolerates_stdlib_logger`. Does not relax
+`browser_agent_session_count`. 10k-agent behavior: O(1) string format per
+passkey target rebind; no new fan-in, queries, or broadcasts.
 
 ## Human feedback
 
-None recorded.
+Approved fix + k=5 Alchemy re-run (`rca-passkey-stdlib-logger-kwargs-20260822 approve`).
 
 ## Reusable lesson
 

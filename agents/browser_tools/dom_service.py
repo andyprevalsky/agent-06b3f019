@@ -986,10 +986,10 @@ class DOMService:
         self._passkey_target_id = target_id
         self._passkey_authenticator_id = None
         self._passkey_seed_counts.clear()
+        # stdlib logging.Logger — never pass structlog-style kwargs (TypeError under INFO).
         logger.info(
-            "🔑 [passkey] following focused browser target",
-            previous_target_id=previous_target_id,
-            target_id=target_id,
+            f"🔑 [passkey] following focused browser target "
+            f"previous_target_id={previous_target_id} target_id={target_id}"
         )
 
     async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> int:
