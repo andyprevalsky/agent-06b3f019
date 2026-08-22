@@ -4275,7 +4275,7 @@
     "title": "Blue Bottle Ferry Building Pickup Order",
     "description": "Guest-checkout Blue Bottle pickup order that stops at a single unresolved payment-card request.",
     "prompt": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
-    "timeout_seconds": 2100,
+    "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent"
