@@ -45,7 +45,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       // Wait for the boot seed so early requests can't read a partial catalog;
-      // a failed seed still serves the file-backed cache (error already logged).
+      // a failed seed still serves tasks.json directly (error already logged).
       await service.ensureBenchmarkTasksSeeded().catch(() => undefined);
       const tasks = service.getTasks();
       res.json({ tasks });

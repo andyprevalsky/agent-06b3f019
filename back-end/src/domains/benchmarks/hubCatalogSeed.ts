@@ -1,12 +1,11 @@
 /**
  * Benchmark Hub catalog seeding: tasks.json → BenchmarkTask rows (file wins)
  * plus the memoized ensure-seeded promise catalog routes await at request time.
- * The in-memory public cache always reflects tasks.json, never hub-edited DB rows.
  */
 
+import { readCatalogTasks } from './config';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
-import { getCachedTasks, reloadTasksFromFile } from './catalogCache';
 
 const log = createLogger('BenchmarkHub');
 
@@ -42,16 +41,15 @@ function taskColumns(task: RawTask) {
 
 /**
  * Sync the BenchmarkTask table from tasks.json: insert missing names and
- * overwrite existing rows so the DB mirrors git. Public routes still serve
- * tasks.json directly via the in-memory cache.
+ * overwrite existing rows so the DB mirrors git. Public routes read tasks.json
+ * directly on each request.
  */
 export async function seedBenchmarkTasks(): Promise<{
   inserted: number;
   updated: number;
   total: number;
 }> {
-  reloadTasksFromFile();
-  const tasks = (getCachedTasks() ?? []) as RawTask[];
+  const tasks = readCatalogTasks() as RawTask[];
   if (tasks.length === 0) return { inserted: 0, updated: 0, total: 0 };
   const known = new Set(await repo.findExistingTaskNames());
   let inserted = 0;
@@ -88,9 +86,4 @@ export function ensureBenchmarkTasksSeeded(): Promise<{
     throw err;
   });
   return seedPromise;
-}
-
-/** @deprecated Public catalog serves tasks.json; kept for callers that reload the file cache. */
-export function refreshTasksFromDb(): void {
-  reloadTasksFromFile();
 }

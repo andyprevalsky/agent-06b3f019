@@ -1,5 +1,9 @@
 import fs from 'fs';
 import path from 'path';
+import { createLogger } from '../../providers/logger';
+import { TasksUnavailableError } from './types';
+
+const log = createLogger('Benchmarks');
 
 /** Absolute path to the benchmark task definitions JSON file. */
 export const TASKS_PATH = path.join(
@@ -20,6 +24,42 @@ export const TASKS_PATH = path.join(
  */
 export function readTasksFile(): unknown {
   return JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
+}
+
+function isValidCatalogTaskShape(task: unknown): boolean {
+  return (
+    typeof task === 'object' &&
+    task !== null &&
+    'name' in task &&
+    'prompt' in task &&
+    typeof (task as Record<string, unknown>).name === 'string' &&
+    typeof (task as Record<string, unknown>).prompt === 'string'
+  );
+}
+
+/**
+ * Reads and validates the benchmark catalog from tasks.json on every call.
+ * No in-memory cache — git file is the sole source of truth.
+ */
+export function readCatalogTasks(): unknown[] {
+  let parsed: unknown;
+  try {
+    parsed = readTasksFile();
+  } catch (err) {
+    log.error('Failed to load benchmark tasks from file', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw new TasksUnavailableError();
+  }
+  if (!Array.isArray(parsed)) {
+    log.error('Benchmark tasks file is not an array');
+    throw new TasksUnavailableError();
+  }
+  if (!parsed.every(isValidCatalogTaskShape)) {
+    log.error('Benchmark tasks file contains malformed entries');
+    throw new TasksUnavailableError();
+  }
+  return parsed;
 }
 
 /** ISO timestamp of the last tasks.json modification (for hub catalog metadata). */

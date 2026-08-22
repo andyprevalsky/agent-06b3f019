@@ -4,16 +4,10 @@
  */
 
 import { z } from 'zod';
-import { readTaskAttempts, tasksFileUpdatedAtIso } from './config';
+import { readTaskAttempts, readCatalogTasks, tasksFileUpdatedAtIso } from './config';
 import * as hubStore from '../../providers/benchmarkHubStore';
-import { getCachedTasks } from './catalogCache';
-import { TasksUnavailableError } from './types';
 
-export {
-  seedBenchmarkTasks,
-  ensureBenchmarkTasksSeeded,
-  refreshTasksFromDb,
-} from './hubCatalogSeed';
+export { seedBenchmarkTasks, ensureBenchmarkTasksSeeded } from './hubCatalogSeed';
 
 export interface TaskStats {
   attempts: number;
@@ -202,11 +196,9 @@ function toCatalogTask(task: Record<string, unknown>, stats: Map<string, TaskSta
   };
 }
 
-/** Visible benchmark tasks from the file-backed cache (retired entries excluded). */
+/** Visible benchmark tasks from tasks.json (retired entries excluded). */
 function getVisibleFileTasks(): Record<string, unknown>[] {
-  const cached = getCachedTasks();
-  if (!cached) throw new TasksUnavailableError();
-  return cached
+  return readCatalogTasks()
     .filter((task) => (task as { status?: unknown }).status !== 'retired')
     .map((task) => task as Record<string, unknown>);
 }
