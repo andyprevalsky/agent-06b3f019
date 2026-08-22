@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * Capture a real-browser screenshot of the CAPTCHA auto-solve telemetry banner.
+ * Capture a real-browser screenshot of the CAPTCHA auto-solve telemetry chip.
  */
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright';
@@ -52,12 +52,12 @@ async function main(): Promise<void> {
 </html>`)
     );
     await page.evaluate(captchaSolveIndicatorSetSolvingScript(true));
-    await page.waitForSelector('#rose-captcha-auto-solve-banner');
+    await page.waitForSelector('#rose-captcha-auto-solve-chip');
     await page.screenshot({
-      path: '/opt/cursor/artifacts/captcha_auto_solve_banner.png',
+      path: '/opt/cursor/artifacts/captcha_auto_solve_chip.png',
       fullPage: true,
     });
-    process.stdout.write('Wrote /opt/cursor/artifacts/captcha_auto_solve_banner.png\n');
+    process.stdout.write('Wrote /opt/cursor/artifacts/captcha_auto_solve_chip.png\n');
   } finally {
     await browser.close();
   }

@@ -1,11 +1,11 @@
 #!/usr/bin/env tsx
 /**
- * Permanent coverage for the telemetry-driven CAPTCHA auto-solve live-view banner.
+ * Permanent coverage for the telemetry-driven CAPTCHA auto-solve live-view chip.
  *
  *   Provider CAPTCHA telemetry ──► resolveCaptchaAutoSolveActive
  *              │
  *              ▼
- *   CDP setSolving(true|false) ──► in-page banner show/hide
+ *   CDP setSolving(true|false) ──► in-page chip show/hide
  *
  * Steel uses real isSolving; Kernel synthesizes via live challenge-widget probe
  * because Kernel only emits terminal captcha_solve_result events.
@@ -53,6 +53,8 @@ function testScriptIsTelemetryDrivenNotDomOnly(): void {
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /__ROSE_CAPTCHA_AUTO_SOLVE__/);
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /setSolving/);
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /pointer-events:none/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /border-radius:9999px/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /bottom:40px/);
   assert.doesNotMatch(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /hcaptcha\.com/);
   assert.doesNotMatch(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /captchaVisible/);
 }
@@ -138,10 +140,10 @@ async function testScriptShowsOnlyWhenTelemetrySetsSolving(): Promise<void> {
 
     await page.evaluate(captchaSolveIndicatorSetSolvingScript(true));
     await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}`, { timeout: 3_000 });
-    const title = await page
-      .locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-title`)
+    const label = await page
+      .locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`)
       .innerText();
-    assert.match(title, /auto-solving captcha/i);
+    assert.match(label, /auto-solving captcha/i);
 
     await page.evaluate(captchaSolveIndicatorSetSolvingScript(false));
     await page.waitForFunction(

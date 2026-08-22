@@ -1,22 +1,22 @@
 """In-page CAPTCHA auto-solve indicator for Kernel/Steel live views.
 
-Banner is driven by provider CAPTCHA telemetry (pushed via CDP), not by
+Chip is driven by provider CAPTCHA telemetry (pushed via CDP), not by
 captcha DOM presence alone. Keep the install script body byte-identical to
 ``back-end/src/providers/browser/captchaSolveIndicator.ts``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
-CAPTCHA_SOLVE_INDICATOR_DOM_ID = "rose-captcha-auto-solve-banner"
+CAPTCHA_SOLVE_INDICATOR_DOM_ID = "rose-captcha-auto-solve-chip"
 CAPTCHA_SOLVE_INDICATOR_FLAG = "__ROSE_CAPTCHA_AUTO_SOLVE__"
 
 # Keep in sync with back-end captchaSolveIndicator.ts CAPTCHA_SOLVE_INDICATOR_SCRIPT.
 CAPTCHA_SOLVE_INDICATOR_SCRIPT = r"""(() => {
   if (window.__ROSE_CAPTCHA_AUTO_SOLVE__ && window.__ROSE_CAPTCHA_AUTO_SOLVE__.__roseInstalled) return;
-  const BANNER_ID = 'rose-captcha-auto-solve-banner';
-  const STYLE_ID = 'rose-captcha-auto-solve-banner-style';
+  const CHIP_ID = 'rose-captcha-auto-solve-chip';
+  const STYLE_ID = 'rose-captcha-auto-solve-chip-style';
   const state = (window.__ROSE_CAPTCHA_AUTO_SOLVE__ = window.__ROSE_CAPTCHA_AUTO_SOLVE__ || {
     solving: false,
   });
@@ -27,63 +27,55 @@ CAPTCHA_SOLVE_INDICATOR_SCRIPT = r"""(() => {
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = [
-      '#' + BANNER_ID + '{',
-      '  position:fixed!important;top:0!important;left:0!important;right:0!important;',
+      '#' + CHIP_ID + '{',
+      '  position:fixed!important;left:50%!important;bottom:40px!important;right:auto!important;top:auto!important;',
+      '  transform:translateX(-50%)!important;',
       '  z-index:2147483647!important;pointer-events:none!important;',
-      '  display:flex!important;align-items:center!important;justify-content:center!important;gap:12px!important;',
-      '  padding:14px 18px!important;margin:0!important;box-sizing:border-box!important;',
-      '  background:linear-gradient(90deg,#111827 0%,#1f2937 50%,#111827 100%)!important;',
-      '  color:#fde68a!important;font:700 16px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;',
-      '  letter-spacing:0.02em!important;text-align:center!important;',
-      '  border-bottom:3px solid #f59e0b!important;',
-      '  box-shadow:0 8px 24px rgba(0,0,0,0.45)!important;',
+      '  display:flex!important;align-items:center!important;justify-content:center!important;gap:8px!important;',
+      '  padding:8px 16px!important;margin:0!important;box-sizing:border-box!important;',
+      '  max-width:calc(100vw - 24px)!important;',
+      '  border-radius:9999px!important;border:1px solid rgba(255,255,255,0.10)!important;',
+      '  background:#272725!important;color:#ffffff!important;',
+      '  font:500 14px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;',
+      '  box-shadow:0 25px 50px -12px rgba(0,0,0,0.55)!important;',
+      '  white-space:nowrap!important;',
       '}',
-      '#' + BANNER_ID + ' .rose-captcha-spinner{',
-      '  width:16px!important;height:16px!important;border-radius:50%!important;flex:0 0 auto!important;',
-      '  border:2px solid rgba(253,230,138,0.35)!important;border-top-color:#fbbf24!important;',
-      '  animation:rose-captcha-spin 0.8s linear infinite!important;',
+      '#' + CHIP_ID + ' .rose-captcha-spinner{',
+      '  width:14px!important;height:14px!important;border-radius:50%!important;flex:0 0 auto!important;',
+      '  border:2px solid rgba(255,255,255,0.25)!important;border-top-color:#60a5fa!important;',
+      '  animation:rose-captcha-spin 0.75s linear infinite!important;',
       '}',
       '@keyframes rose-captcha-spin{to{transform:rotate(360deg)}}',
-      '#' + BANNER_ID + ' .rose-captcha-copy{',
-      '  display:flex!important;flex-direction:column!important;align-items:center!important;gap:2px!important;',
-      '}',
-      '#' + BANNER_ID + ' .rose-captcha-title{',
-      '  font-size:16px!important;font-weight:800!important;color:#fde68a!important;',
-      '  text-transform:uppercase!important;',
-      '}',
-      '#' + BANNER_ID + ' .rose-captcha-sub{',
-      '  font-size:12px!important;font-weight:600!important;color:#fef3c7!important;opacity:0.95!important;',
+      '#' + CHIP_ID + ' .rose-captcha-label{',
+      '  font-size:14px!important;font-weight:500!important;color:#ffffff!important;',
       '}',
     ].join('');
     (document.head || document.documentElement).appendChild(style);
   }
 
-  function showBanner() {
+  function showChip() {
     ensureStyle();
-    let el = document.getElementById(BANNER_ID);
+    let el = document.getElementById(CHIP_ID);
     if (el) return;
     el = document.createElement('div');
-    el.id = BANNER_ID;
+    el.id = CHIP_ID;
     el.setAttribute('role', 'status');
     el.setAttribute('aria-live', 'polite');
     el.setAttribute('data-rose-captcha-auto-solve', '1');
     el.innerHTML =
       '<div class="rose-captcha-spinner" aria-hidden="true"></div>' +
-      '<div class="rose-captcha-copy">' +
-      '<div class="rose-captcha-title">Auto-solving CAPTCHA</div>' +
-      '<div class="rose-captcha-sub">Please wait — do not click the challenge</div>' +
-      '</div>';
+      '<span class="rose-captcha-label">Auto-solving CAPTCHA</span>';
     (document.body || document.documentElement).appendChild(el);
   }
 
-  function hideBanner() {
-    const el = document.getElementById(BANNER_ID);
+  function hideChip() {
+    const el = document.getElementById(CHIP_ID);
     if (el) el.remove();
   }
 
   function sync() {
-    if (state.solving === true) showBanner();
-    else hideBanner();
+    if (state.solving === true) showChip();
+    else hideChip();
   }
 
   state.setSolving = function setSolving(next) {
@@ -161,7 +153,7 @@ async def poll_captcha_auto_solve_active(
     config: Any,
     task_id: str,
 ) -> bool:
-    """Fetch provider CAPTCHA telemetry and resolve banner on/off."""
+    """Fetch provider CAPTCHA telemetry and resolve chip on/off."""
     telemetry = await fetch_telemetry(config, task_id)
     widgets = False
     if telemetry.get("isSolving") is None and telemetry.get("provider") == "kernel":
@@ -179,7 +171,7 @@ def start_captcha_telemetry_indicator_for_task(
     config: Any,
     task_id: str,
 ) -> None:
-    """Background-poll CAPTCHA telemetry into the live-view banner."""
+    """Background-poll CAPTCHA telemetry into the live-view chip."""
 
     async def _poll() -> bool:
         return await poll_captcha_auto_solve_active(
