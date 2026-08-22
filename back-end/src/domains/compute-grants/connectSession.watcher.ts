@@ -11,8 +11,9 @@ import { getKernelCaptchaTelemetry } from '../../providers/browser/kernel';
 import { getSteelCaptchaTelemetry } from '../../providers/steel/sessionInspect';
 import {
   CAPTCHA_WIDGET_PRESENT_SCRIPT,
-  captchaSolveIndicatorSetSolvingScript,
-  resolveCaptchaAutoSolveActive,
+  captchaSolveIndicatorSetPhaseScript,
+  emptyCaptchaIndicatorMemory,
+  resolveCaptchaIndicatorPhase,
 } from '../../providers/browser/captchaSolveIndicator';
 import { computeGrantBrowserProvider } from './config';
 import { persistFirstGrant } from './connectSession.grant';
@@ -33,10 +34,14 @@ async function syncCaptchaSolveIndicator(entry: PendingConnect): Promise<void> {
   if (telemetry.isSolving === null && telemetry.provider === 'kernel') {
     kernelWidgets = (await entry.cdp.evaluate<boolean>(CAPTCHA_WIDGET_PRESENT_SCRIPT)) === true;
   }
-  const solving = resolveCaptchaAutoSolveActive(telemetry, {
-    kernelChallengeWidgetsPresent: kernelWidgets,
-  });
-  await entry.cdp.evaluate(captchaSolveIndicatorSetSolvingScript(solving));
+  const memory = entry.captchaIndicatorMemory ?? emptyCaptchaIndicatorMemory();
+  const resolved = resolveCaptchaIndicatorPhase(
+    telemetry,
+    { kernelChallengeWidgetsPresent: kernelWidgets },
+    memory
+  );
+  entry.captchaIndicatorMemory = resolved.memory;
+  await entry.cdp.evaluate(captchaSolveIndicatorSetPhaseScript(resolved.phase));
 }
 interface MintedCredentials {
   accessToken: string;

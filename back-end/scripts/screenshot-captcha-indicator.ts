@@ -1,23 +1,16 @@
 #!/usr/bin/env tsx
 /**
- * Capture a real-browser screenshot of the CAPTCHA auto-solve telemetry chip.
+ * Capture real-browser screenshots of the CAPTCHA auto-solve chip phases.
  */
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright';
 import {
   CAPTCHA_SOLVE_INDICATOR_SCRIPT,
-  captchaSolveIndicatorSetSolvingScript,
+  captchaSolveIndicatorSetPhaseScript,
+  type CaptchaIndicatorPhase,
 } from '../src/providers/browser/captchaSolveIndicator';
 
-async function main(): Promise<void> {
-  mkdirSync('/opt/cursor/artifacts', { recursive: true });
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage({ viewport: { width: 1100, height: 720 } });
-    await page.addInitScript(CAPTCHA_SOLVE_INDICATOR_SCRIPT);
-    await page.goto(
-      'data:text/html,' +
-        encodeURIComponent(`<!doctype html>
+const HTML = `<!doctype html>
 <html>
 <head>
   <style>
@@ -49,18 +42,32 @@ async function main(): Promise<void> {
     </div>
   </div>
 </body>
-</html>`)
-    );
-    await page.evaluate(captchaSolveIndicatorSetSolvingScript(true));
-    await page.waitForSelector('#rose-captcha-auto-solve-chip');
-    await page.screenshot({
-      path: '/opt/cursor/artifacts/captcha_auto_solve_chip.png',
-      fullPage: true,
-    });
-    process.stdout.write('Wrote /opt/cursor/artifacts/captcha_auto_solve_chip.png\n');
+</html>`;
+
+async function shot(
+  phase: Exclude<CaptchaIndicatorPhase, 'idle'>,
+  filename: string
+): Promise<void> {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1100, height: 720 } });
+    await page.addInitScript(CAPTCHA_SOLVE_INDICATOR_SCRIPT);
+    await page.goto('data:text/html,' + encodeURIComponent(HTML));
+    await page.evaluate(captchaSolveIndicatorSetPhaseScript(phase));
+    await page.waitForSelector(`#rose-captcha-auto-solve-chip[data-phase="${phase}"]`);
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: `/opt/cursor/artifacts/${filename}`, fullPage: true });
+    process.stdout.write(`Wrote /opt/cursor/artifacts/${filename}\n`);
   } finally {
     await browser.close();
   }
+}
+
+async function main(): Promise<void> {
+  mkdirSync('/opt/cursor/artifacts', { recursive: true });
+  await shot('solving', 'captcha_auto_solve_chip_solving.png');
+  await shot('succeeded', 'captcha_auto_solve_chip_succeeded.png');
+  await shot('failed', 'captcha_auto_solve_chip_failed.png');
 }
 
 main().catch((error) => {

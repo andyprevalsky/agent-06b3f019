@@ -45,7 +45,7 @@ function testSteelInFlightSolverStateIsNormalized(): void {
     {
       isSolvingCaptcha: true,
       pageId: 'page-1',
-      tasks: [{ id: 'captcha-task-1' }],
+      tasks: [{ id: 'captcha-task-1', status: 'solving', type: 'turnstile' }],
       url: 'https://example.com/challenge?session_secret=must-not-leak',
       created: 100,
       lastUpdated: 200,
@@ -59,9 +59,45 @@ function testSteelInFlightSolverStateIsNormalized(): void {
   assert.strictEqual(telemetry.pages[0]?.hostname, 'example.com');
   assert.strictEqual('pageId' in (telemetry.pages[0] ?? {}), false);
   assert.strictEqual(JSON.stringify(telemetry).includes('must-not-leak'), false);
+  assert.strictEqual(telemetry.latestOutcome, null);
+}
+
+function testSteelTerminalTaskOutcomesAreNormalized(): void {
+  const telemetry = summarizeSteelCaptchaStatus([
+    {
+      isSolvingCaptcha: false,
+      pageId: 'page-1',
+      tasks: [
+        {
+          id: 'older',
+          status: 'failed_to_solve',
+          type: 'recaptchaV2',
+          failureTime: 1_000,
+          totalDuration: 900,
+        },
+        {
+          id: 'newer',
+          status: 'solved',
+          type: 'turnstile',
+          solveTime: 2_000,
+          totalDuration: 1_500,
+        },
+      ],
+      url: 'https://login.example.com/start',
+      lastUpdated: 2_000,
+    },
+  ]);
+
+  assert.strictEqual(telemetry.isSolving, false);
+  assert.strictEqual(telemetry.latestOutcome?.status, 'success');
+  assert.strictEqual(telemetry.latestOutcome?.captchaType, 'turnstile');
+  assert.strictEqual(telemetry.latestOutcome?.durationMs, 1_500);
+  assert.strictEqual(telemetry.latestOutcome?.websiteHost, 'login.example.com');
+  assert.strictEqual(telemetry.latestOutcome?.timestampMicros, 2_000_000);
 }
 
 testKernelTelemetryIsExplicitlyEnabled();
 testKernelTerminalOutcomesAreNormalized();
 testSteelInFlightSolverStateIsNormalized();
+testSteelTerminalTaskOutcomesAreNormalized();
 process.stdout.write('PASS browser CAPTCHA telemetry normalization\n');

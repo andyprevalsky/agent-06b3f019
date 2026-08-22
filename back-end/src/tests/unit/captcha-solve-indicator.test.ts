@@ -2,13 +2,12 @@
 /**
  * Permanent coverage for the telemetry-driven CAPTCHA auto-solve live-view chip.
  *
- *   Provider CAPTCHA telemetry ──► resolveCaptchaAutoSolveActive
+ *   Provider CAPTCHA telemetry ──► resolveCaptchaIndicatorPhase
  *              │
  *              ▼
- *   CDP setSolving(true|false) ──► in-page chip show/hide
+ *   CDP setPhase(idle|solving|succeeded|failed) ──► animated chip
  *
- * Steel uses real isSolving; Kernel synthesizes via live challenge-widget probe
- * because Kernel only emits terminal captcha_solve_result events.
+ * Steel: isSolving + terminal task status. Kernel: widget probe + captcha_solve_result.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -17,9 +16,11 @@ import { fileURLToPath } from 'node:url';
 import {
   CAPTCHA_SOLVE_INDICATOR_DOM_ID,
   CAPTCHA_SOLVE_INDICATOR_SCRIPT,
-  captchaSolveIndicatorSetSolvingScript,
+  captchaSolveIndicatorSetPhaseScript,
+  emptyCaptchaIndicatorMemory,
   installCaptchaSolveIndicator,
   resolveCaptchaAutoSolveActive,
+  resolveCaptchaIndicatorPhase,
 } from '../../providers/browser/captchaSolveIndicator';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -45,16 +46,19 @@ function testTsAndPythonScriptsStayInSync(): void {
     'TS and Python CAPTCHA indicator scripts drifted — update both'
   );
   assert.ok(pySource.includes(CAPTCHA_SOLVE_INDICATOR_DOM_ID));
-  assert.ok(pySource.includes('resolve_captcha_auto_solve_active'));
+  assert.ok(pySource.includes('resolve_captcha_indicator_phase'));
 }
 
 function testScriptIsTelemetryDrivenNotDomOnly(): void {
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /Auto-solving CAPTCHA/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /CAPTCHA solved/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /CAPTCHA solve failed/);
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /__ROSE_CAPTCHA_AUTO_SOLVE__/);
-  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /setSolving/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /setPhase/);
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /pointer-events:none/);
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /border-radius:9999px/);
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /bottom:40px/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /transition:opacity/);
   assert.doesNotMatch(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /hcaptcha\.com/);
   assert.doesNotMatch(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /captchaVisible/);
 }
@@ -83,6 +87,85 @@ function testResolveCaptchaAutoSolveActive(): void {
     ),
     false
   );
+}
+
+function testResolveCaptchaIndicatorPhaseTransitions(): void {
+  let memory = emptyCaptchaIndicatorMemory();
+
+  let resolved = resolveCaptchaIndicatorPhase(
+    { provider: 'steel', isSolving: true, latestOutcome: null },
+    {},
+    memory
+  );
+  assert.equal(resolved.phase, 'solving');
+  memory = resolved.memory;
+
+  const nowMicros = Date.now() * 1000;
+  resolved = resolveCaptchaIndicatorPhase(
+    {
+      provider: 'steel',
+      isSolving: false,
+      latestOutcome: {
+        status: 'success',
+        captchaType: 'turnstile',
+        durationMs: 1200,
+        errorCode: null,
+        websiteHost: 'example.com',
+        timestampMicros: nowMicros,
+      },
+    },
+    {},
+    memory
+  );
+  assert.equal(resolved.phase, 'succeeded');
+  memory = resolved.memory;
+
+  // Same outcome must not re-fire forever.
+  resolved = resolveCaptchaIndicatorPhase(
+    {
+      provider: 'steel',
+      isSolving: false,
+      latestOutcome: {
+        status: 'success',
+        captchaType: 'turnstile',
+        durationMs: 1200,
+        errorCode: null,
+        websiteHost: 'example.com',
+        timestampMicros: nowMicros,
+      },
+    },
+    {},
+    memory
+  );
+  assert.equal(resolved.phase, 'idle');
+
+  // Kernel failure after solving episode.
+  memory = emptyCaptchaIndicatorMemory();
+  resolved = resolveCaptchaIndicatorPhase(
+    { provider: 'kernel', isSolving: null, latestOutcome: null },
+    { kernelChallengeWidgetsPresent: true },
+    memory
+  );
+  assert.equal(resolved.phase, 'solving');
+  memory = resolved.memory;
+
+  resolved = resolveCaptchaIndicatorPhase(
+    {
+      provider: 'kernel',
+      isSolving: null,
+      latestOutcome: {
+        status: 'failure',
+        captchaType: 'hcaptcha',
+        durationMs: 800,
+        errorCode: 'ERROR_CAPTCHA_UNSOLVABLE',
+        websiteHost: 'claude.ai',
+        timestampMicros: Date.now() * 1000,
+      },
+    },
+    { kernelChallengeWidgetsPresent: false },
+    memory
+  );
+  assert.equal(resolved.phase, 'failed');
 }
 
 async function testInstallRegistersInitScriptOnAllContexts(): Promise<void> {
@@ -117,7 +200,7 @@ async function testInstallRegistersInitScriptOnAllContexts(): Promise<void> {
   assert.equal(evaluates.length, 1);
 }
 
-async function testScriptShowsOnlyWhenTelemetrySetsSolving(): Promise<void> {
+async function testScriptShowsPhaseTransitions(): Promise<void> {
   const { chromium } = await import('playwright');
   const browser = await chromium.launch({ headless: true });
   try {
@@ -135,22 +218,32 @@ async function testScriptShowsOnlyWhenTelemetrySetsSolving(): Promise<void> {
         )
     );
     await page.waitForTimeout(200);
-    // Captcha iframe is visible but telemetry has not said solving yet.
     assert.equal(await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}`).count(), 0);
 
-    await page.evaluate(captchaSolveIndicatorSetSolvingScript(true));
-    await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}`, { timeout: 3_000 });
-    const label = await page
-      .locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`)
-      .innerText();
+    await page.evaluate(captchaSolveIndicatorSetPhaseScript('solving'));
+    await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}[data-phase="solving"]`, {
+      timeout: 3_000,
+    });
+    let label = await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`).innerText();
     assert.match(label, /auto-solving captcha/i);
 
-    await page.evaluate(captchaSolveIndicatorSetSolvingScript(false));
-    await page.waitForFunction(
-      (id) => document.getElementById(id) === null,
-      CAPTCHA_SOLVE_INDICATOR_DOM_ID,
-      { timeout: 3_000 }
-    );
+    await page.evaluate(captchaSolveIndicatorSetPhaseScript('succeeded'));
+    await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}[data-phase="succeeded"]`, {
+      timeout: 3_000,
+    });
+    label = await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`).innerText();
+    assert.match(label, /captcha solved/i);
+
+    await page.evaluate(captchaSolveIndicatorSetPhaseScript('failed'));
+    await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}[data-phase="failed"]`, {
+      timeout: 3_000,
+    });
+    label = await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-label`).innerText();
+    assert.match(label, /captcha solve failed/i);
+
+    // idle while holding terminal should not instantly clear
+    await page.evaluate(captchaSolveIndicatorSetPhaseScript('idle'));
+    assert.equal(await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}`).count(), 1);
   } finally {
     await browser.close();
   }
@@ -176,20 +269,22 @@ function testInstallSitesAreWired(): void {
   assert.match(kernel, /installCaptchaSolveIndicator/);
   assert.match(steel, /installCaptchaSolveIndicator/);
   assert.match(recovery, /installCaptchaSolveIndicator/);
-  assert.match(watcher, /resolveCaptchaAutoSolveActive/);
-  assert.match(watcher, /captchaSolveIndicatorSetSolvingScript/);
+  assert.match(watcher, /resolveCaptchaIndicatorPhase/);
+  assert.match(watcher, /captchaSolveIndicatorSetPhaseScript/);
   assert.match(agent, /start_captcha_telemetry_indicator/);
+  assert.match(agent, /set_captcha_indicator_phase/);
   assert.match(handler, /start_captcha_telemetry_indicator_for_task/);
 }
 
 testTsAndPythonScriptsStayInSync();
 testScriptIsTelemetryDrivenNotDomOnly();
 testResolveCaptchaAutoSolveActive();
+testResolveCaptchaIndicatorPhaseTransitions();
 testInstallSitesAreWired();
 
 async function main(): Promise<void> {
   await testInstallRegistersInitScriptOnAllContexts();
-  await testScriptShowsOnlyWhenTelemetrySetsSolving();
+  await testScriptShowsPhaseTransitions();
   process.stdout.write('PASS captcha solve indicator\n');
 }
 

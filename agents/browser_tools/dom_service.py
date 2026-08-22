@@ -635,11 +635,11 @@ class DOMService:
         except Exception as e:
             logger.warning(f"⚠️ Failed to inject CAPTCHA auto-solve indicator: {e}")
 
-    async def set_captcha_auto_solve_active(self, solving: bool) -> None:
-        """Push provider CAPTCHA telemetry into the live-view banner."""
+    async def set_captcha_indicator_phase(self, phase: str) -> None:
+        """Push provider CAPTCHA phase (idle|solving|succeeded|failed) into the live-view chip."""
         try:
             from browser_tools.captcha_solve_indicator import (
-                captcha_solve_indicator_set_solving_script,
+                captcha_solve_indicator_set_phase_script,
             )
 
             target_id = self._session.agent_focus_target_id if self._session else None
@@ -648,13 +648,17 @@ class DOMService:
             cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
             await cdp_session.cdp_client.send.Runtime.evaluate(
                 params={
-                    "expression": captcha_solve_indicator_set_solving_script(solving),
+                    "expression": captcha_solve_indicator_set_phase_script(phase),
                     "returnByValue": True,
                 },
                 session_id=cdp_session.session_id,
             )
         except Exception as e:
             logger.debug(f"CAPTCHA indicator telemetry push failed: {e}")
+
+    async def set_captcha_auto_solve_active(self, solving: bool) -> None:
+        """Back-compat: map boolean solving onto chip phase."""
+        await self.set_captcha_indicator_phase("solving" if solving else "idle")
 
     async def probe_captcha_widgets_present(self) -> bool:
         """Kernel has no in-flight solver flag — probe challenge widgets via CDP."""
@@ -676,17 +680,17 @@ class DOMService:
 
     def start_captcha_telemetry_indicator(
         self,
-        poll_solving,
+        poll_phase,
     ) -> None:
-        """Poll provider CAPTCHA telemetry and mirror it into the live-view banner."""
+        """Poll provider CAPTCHA telemetry and mirror phase into the live-view chip."""
         if self._captcha_indicator_task is not None and not self._captcha_indicator_task.done():
             return
 
         async def _loop() -> None:
             while self._session is not None:
                 try:
-                    solving = bool(await poll_solving())
-                    await self.set_captcha_auto_solve_active(solving)
+                    phase = str(await poll_phase() or "idle")
+                    await self.set_captcha_indicator_phase(phase)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
