@@ -2026,6 +2026,46 @@ async def wait_for_payment_ref_fields(
         await asyncio.sleep(poll_interval_seconds)
 
 
+def _request_payment_card_already_called(action_history: ActionHistory) -> bool:
+    for entry in action_history.get_entries():
+        if entry.get("action") != "request_payment_card":
+            continue
+        result = entry.get("result") or {}
+        if result.get("status") == "awaiting_payment_card_approval" or result.get("success"):
+            return True
+    return False
+
+
+async def attempt_completion_blocked_pending_payment_card_request(
+    *,
+    session: Any,
+    secret_refs: Optional[Dict[str, str]],
+    action_history: ActionHistory,
+    humanizer: Optional[BrowserHumanizer],
+    current_url: str,
+) -> Optional[str]:
+    """Block attempt_completion when checkout shows card fields but no card was requested."""
+    if has_payment_card_secret_refs(secret_refs):
+        return None
+    if _request_payment_card_already_called(action_history):
+        return None
+    input_page = _humanizer_input_page(humanizer)
+    fields_ready = await wait_for_payment_ref_fields(
+        session,
+        ref_names=["card_number"],
+        input_page=input_page,
+        timeout_seconds=2.0,
+    )
+    if not fields_ready:
+        return None
+    return (
+        "Checkout payment fields are visible but request_payment_card was not called. "
+        "Read the itemized receipt from the page, call request_payment_card with every "
+        "required line item (including product URL, rating, and review count), then "
+        "continue after approval."
+    )
+
+
 async def _fill_payment_ref_via_playwright_locator(
     *,
     input_page: Any,

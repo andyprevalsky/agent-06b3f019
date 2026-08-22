@@ -12667,6 +12667,51 @@ async def test_execute_switch_tab_allows_same_host_while_pinned():
     session.event_bus.dispatch.assert_not_called()
 
 
+async def test_attempt_completion_blocked_when_payment_fields_visible_without_card_request():
+    """RCA: hotels.com agent completed via attempt_completion without request_payment_card."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    ah = MagicMock()
+    ah.get_entries = MagicMock(return_value=[])
+    session = MagicMock()
+    with patch.object(
+        service_actions,
+        "wait_for_payment_ref_fields",
+        new=AsyncMock(return_value=True),
+    ):
+        msg = await service_actions.attempt_completion_blocked_pending_payment_card_request(
+            session=session,
+            secret_refs={},
+            action_history=ah,
+            humanizer=None,
+            current_url="https://www.hotels.com/checkout/session/abc",
+        )
+    assert msg is not None
+    assert "request_payment_card" in msg
+
+    ah.get_entries.return_value = [
+        {
+            "action": "request_payment_card",
+            "result": {"status": "awaiting_payment_card_approval"},
+        }
+    ]
+    with patch.object(
+        service_actions,
+        "wait_for_payment_ref_fields",
+        new=AsyncMock(return_value=True),
+    ):
+        allowed = await service_actions.attempt_completion_blocked_pending_payment_card_request(
+            session=session,
+            secret_refs={},
+            action_history=ah,
+            humanizer=None,
+            current_url="https://www.hotels.com/checkout/session/abc",
+        )
+    assert allowed is None
+
+
 async def test_execute_evaluate_refuses_navigation_while_pinned():
     """Fleet 0b3b582b: evaluate location/href escapes the handoff pin."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -17444,6 +17489,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_switch_tab_allows_same_host_while_pinned",
         test_execute_switch_tab_allows_same_host_while_pinned,
+    )
+    await r.record_async(
+        "attempt_completion_blocked_pending_payment_card",
+        test_attempt_completion_blocked_when_payment_fields_visible_without_card_request,
     )
     await r.record_async(
         "evaluate_refuses_nav_while_pinned",
