@@ -1,21 +1,22 @@
 ---
 id: 2026-08-21-evaluate-timeout-poisons-js-thread-blocks-recovery
 date: 2026-08-21
-title: Renderer CDP freeze during evaluate burns soft recovery and the remaining browser budget
+title: Renderer CDP freeze during browser actions burns soft recovery and the remaining browser budget
 surface: agents
-component: spawn-browser-agent-v3-evaluate
+component: spawn-browser-agent-v3-action-timeout
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py — asyncio.wait_for around execute_action(evaluate) times out; soft recovery only bring_to_front; Escape/JS paths time out; next get_browser_state burns another ~330s
+first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py:8131-8159 — TimeoutError after execute_action only runs classify_evaluate_cdp_stall + _hard_recover_frozen_renderer_page when action_name == "evaluate"; click (and other) timeouts only soft bring_to_front while the Konva renderer stays frozen
 symptoms:
-  - action_timeout_evaluate_330s
-  - Browser evaluate timed out; CDP stall classification verdict=renderer_main_thread_blocked
-  - Browser action 'evaluate' timed out after 330s
-  - Expected one of ['payment_approval', 'auth_assistance'] attention requests (to ignore) but none was triggered
+  - action_timeout_click_330s
+  - Browser action 'click' timed out after 330s; generic browser supervisor recovery ran.
+  - Recovery actions: bring_to_front
+  - Expected payment_approval attention request (to ignore) but none was triggered
   - Timeout after 903s (dynamic cap=900s)
 tags:
   - browser
   - evaluate
+  - click
   - cdp
   - konva
   - supervisor-recovery
@@ -29,20 +30,24 @@ sources:
   - agent f666bc05-27bb-4c77-81bf-8048a232741a
   - agent 958687b8-a755-4ae6-bdbf-39e28c3b9eb5
   - agent 4161ece1-7b66-4d67-9faf-c03e4f097923
-repro: agents/tests/e2e/alchemy_evaluate_stall_repro.py + blackbox tests; live k=1 reruns 20260821_215746 / 221618 / 223059 all hit the stall
+  - agent afe8a612-6f21-4eb2-af17-38bae6b5f1a9
+repro: agents/tests/e2e/alchemy_evaluate_stall_repro.py + /opt/cursor/artifacts/alchemy_click_timeout_gate_repro.py + click soft-vs-hard Playwright mechanism; live k=1 20260822_011105
 status: open
 ---
 
 ## Problem
 
-`scripts/run-bench --local browser-alchemy-springs-sauna` hangs on Momence waiver
-`evaluate` (`renderer_main_thread_blocked`). Pre-fix: burns ~900s with no
-attention. Post hard-recover: unblocks, then fails a different static tool-count
-check (`spawn_agent` expected 1, got 0) after `request_payment_card`.
+`scripts/run-bench --local browser-alchemy-springs-sauna` hangs on the Momence
+waiver / signature surface when the Chromium **renderer main thread** freezes
+(react-konva). Soft supervisor recovery (`bring_to_front` only) cannot reclaim
+the page; the run burns the ~900s task budget with no `payment_approval`.
+
+Originally observed on `evaluate` timeouts. Recurrence on 2026-08-22 k=1
+(`afe8a612`) hung on **`click`** instead: same soft-only recovery, same burn.
 
 ## Reproduction (not transient)
 
-Four independent local Kernel runs — stall is **reliable**, not flaky:
+Four independent local Kernel runs (2026-08-21) — evaluate stall **reliable**:
 
 | Run | Agent | Hung payload | Outcome |
 | --- | --- | --- | --- |
@@ -51,47 +56,52 @@ Four independent local Kernel runs — stall is **reliable**, not flaky:
 | 3 | `958687b8` | evaluate hang + hard recover | FAIL `spawn_agent` count (got past hang) |
 | 4 | `4161ece1` | sha `4ec95bc7122d` + hard recover | **same stall again**; FAIL `spawn_agent` count |
 
-Rerun 4 timeline (fresh 2026-08-21 ~22:18 local bench):
+**Recurrence 2026-08-22 k=1** (`afe8a612-6f21-4eb2-af17-38bae6b5f1a9`):
 
-- 22:22:46 — `Browser evaluate starting` (code_len=440, sha `4ec95bc7122d`) on Momence skipPreview URL
-- 22:28:19 — timeout + classification (`renderer_ms=2034`, `browser_ms=57`, `verdict=renderer_main_thread_blocked`)
-- 22:28:51 — soft recovery `actions=["bring_to_front"]`
-- 22:28:55 — hard recovery `new_context_page`, `goto_resume_url`, `close_target`, `close_playwright_page` (`recycled=true`)
-- Loop resumed (typing / checkout); harness FAIL: `spawn_agent` expected 1 got 0; counts include `request_payment_card: 1`
+- 00:58:30 — `Clicked <input name="showWaiverCheck">` OK
+- 00:58:34 — `Clicking <div>` (coords 644,484) on Momence skipPreview URL
+- 01:04:27 — `action_timeout_click_330s`; recovery actions **`["bring_to_front"]` only**; ERROR text `generic browser supervisor recovery ran.`
+- No further TOOL progress until harness timeout 903s — `Expected payment_approval … none was triggered`
+- FE: https://roselabs.ai/?agent-id=afe8a612-6f21-4eb2-af17-38bae6b5f1a9
+- Run JSON: `agents/benchmarks/runs/20260822_011105_browser-alchemy-springs-sauna.json`
+- Last LLM call: `browser_use_step_21` → `click` index 5868
 
-FE (rerun 4): `http://localhost:3202/?agent-id=4161ece1-7b66-4d67-9faf-c03e4f097923`
-Run JSON: `agents/benchmarks/runs/20260821_223059_browser-alchemy-springs-sauna.json`
+Owning-boundary repros (both executed this RCA):
 
-Different JS across runs ⇒ not a single bad evaluate program. Momence waiver
-signature surface (react-konva) leaves the **renderer main thread** unresponsive
-to page-target CDP while the browser process stays healthy.
+1. **Handler gate** (`alchemy_click_timeout_gate_repro.py`, ~0.5s): TimeoutError
+   block after `BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS` still contains
+   `if action_name == "evaluate":` around `classify_evaluate_cdp_stall` → **exit 1**.
+2. **Click soft-vs-hard** (~7.4s): frozen renderer → click TimeoutError → soft
+   `bring_to_front` → click still TimeoutError → `_hard_recover_frozen_renderer_page`
+   → click OK.
 
 ## Diagnosis
 
-Owned defect: evaluate-timeout recovery assumed the page target remained
-interactive. Soft bring_to_front cannot reclaim a frozen renderer; Escape/dismiss
-(JS) time out; budget burns twice.
+Owned defect (refined): hard recovery was wired only for **evaluate** timeouts.
+Any other action (`click`, …) that hangs on the same frozen renderer takes the
+generic soft path, leaves the frozen target in place, and burns the remaining
+budget. Soft bring_to_front cannot reclaim `renderer_main_thread_blocked`.
 
-Local mechanism repro (A healthy JS OK; B preblocked renderer matches live
-recovery; C awaitPromise-cancel does not poison) remains in
-`agents/tests/e2e/alchemy_evaluate_stall_repro.py`.
+Critical path: Momence waiver surface freezes renderer → `click` waits 330s →
+TimeoutError → skip CDP classify (evaluate-only gate) → soft bring_to_front →
+page still frozen → no payment_approval → task timeout.
+
+Archive: recurrence of this case (prior evaluate-only fix did not hold for click).
+Relative harness case `2026-08-21-alchemy-evaluate-recovery-error-fails-no-tool-failures`
+is separate (false `no_tool_failures` after successful hard recovery).
 
 ## Solution
 
-Implemented:
+Proposed (awaiting approval — not implemented in this pass):
 
-1. Evaluate start/complete fingerprints + dual CDP classification on timeout.
-2. On `verdict=renderer_main_thread_blocked`: soft recovery with `reload_page=True`,
-   then `_hard_recover_frozen_renderer_page` — close hung page target(s) via
-   **browser-process** `Target.closeTarget`, open a new Playwright page, goto
-   resume URL, nudge browser-use via `NavigateToUrlEvent`, rebind humanizer.
-3. Blackbox: healthy evaluate JS, recovery signature, hard-recover restores
-   evaluate.
-
-Hard-recovery outcome proof: runs 3–4 both log hard recovery and continue past
-the evaluate hang (`request_payment_card: 1`). Case stays `open` because the
-task still fails the static `spawn_agent` expectation (separate from the stall);
-need a clean pass or ignore-mode attention terminal under hard recovery.
+1. On **every** `execute_action` TimeoutError (not only `evaluate`), run
+   `classify_evaluate_cdp_stall` (rename later if needed) and, when
+   `verdict=renderer_main_thread_blocked`, soft-recover with `reload_page=True`
+   then `_hard_recover_frozen_renderer_page` (same as evaluate path).
+2. Cement blackbox: frozen-renderer click timeout hard-recovers; gate repro flips
+   to green; keep existing evaluate hard-recover tests.
+3. Outcome proof: exact `scripts/run-bench --local browser-alchemy-springs-sauna`
+   must fail on buggy revision (already: afe8a612) and pass after the fix.
 
 Do not raise task/action timeouts to "pass" this.
 
@@ -102,9 +112,12 @@ Do not raise task/action timeouts to "pass" this.
 User: evaluate is fine; dig into stall; clean local repro. Then: determine if
 transient; rerun bench to reproduce. Rerun proved **not transient**.
 
+User (2026-08-22): Alchemy terminal is payment_approval only (not auth_assistance);
+LGTM otherwise. Then run k=1 → k=5 if pass. k=1 failed → `/rca`.
+
 ## Reusable lesson
 
-When page-target `Runtime.evaluate` hangs, classify with browser-process CDP
-before soft recovery. Soft bring_to_front is insufficient for
-`renderer_main_thread_blocked` — close the target from the browser process and
-recreate the page.
+When page-target CDP hangs on a frozen renderer, classify with browser-process CDP
+on **any** action timeout — not only `evaluate`. Soft bring_to_front is
+insufficient for `renderer_main_thread_blocked`; close the target from the
+browser process and recreate the page.
