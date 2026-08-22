@@ -1921,7 +1921,11 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
-    if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
+    if (
+        task.success_on_payment_card_request
+        and PAYMENT_BOUNDARY_GOAL_MARKER not in goal
+        and task.name != "browser-hotel-booking"
+    ):
         goal += payment_boundary_operational_suffix()
     return goal
 

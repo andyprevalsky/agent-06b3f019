@@ -33,7 +33,7 @@ def test_browser_hotel_booking_prompt_requires_single_browser_agent():
     task = get_task_by_name("browser-hotel-booking")
     assert task.prompt.startswith("Use exactly one browser agent")
     goal = _benchmark_goal_for_task(task, "http://localhost:3201")
-    assert PAYMENT_BOUNDARY_GOAL_MARKER in goal
+    assert goal == task.prompt
 
 
 def test_browser_event_ticket_omits_standard_format_from_prompt_and_judge():

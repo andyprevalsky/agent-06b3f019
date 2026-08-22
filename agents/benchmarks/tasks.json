@@ -1834,7 +1834,7 @@
     "name": "browser-hotel-booking",
     "title": "Hotel Kabuki One-Night Booking",
     "description": "Reserve a one-night hotel stay on hotels.com for the next Saturday-to-Sunday weekend.",
-    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from next Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead.",
+    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from next Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
     "timeout_seconds": 1125,
     "is_chat_mode": false,
     "expected_tools": [
