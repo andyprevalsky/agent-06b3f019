@@ -72,9 +72,11 @@ Owning-boundary blackbox: hanging CDP evaluate under
 LLM-settable `timeout` on `EvaluateTool` (seconds, max 60). Default **15s** when
 omitted. `service_actions` wraps `Runtime.evaluate` in `asyncio.wait_for` with
 `normalize_evaluate_timeout_seconds` (clamps >60 at runtime; schema `le=60`
-rejects invalid model output). On timeout, re-raise `TimeoutError` so the
-existing outer classify + hard-recover path runs immediately — without burning
-the full 330s action budget. Do **not** raise the 330s action or 900s task caps.
+rejects invalid model output). On timeout, re-raise `TimeoutError` from both
+`_execute_inspection_action` and `execute_action` (which otherwise swallows
+exceptions as soft errors) so the outer classify + hard-recover path runs
+immediately — without burning the full 330s action budget. Do **not** raise the
+330s action or 900s task caps.
 
 10k-agent: O(1) timer per evaluate; no new fan-in.
 

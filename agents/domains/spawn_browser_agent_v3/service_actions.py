@@ -1239,6 +1239,11 @@ async def execute_action(
         if action_name in _TERMINAL_ACTIONS:
             return await _execute_terminal_action(context)
         return {"success": False, "error": f"Unknown action: {action_name}"}
+    except asyncio.TimeoutError:
+        # Propagate so the browser supervisor can classify CDP stall and
+        # hard-recover a frozen renderer instead of treating this as a soft
+        # action error (which leaves the page wedged).
+        raise
     except Exception as error:
         logger.error(f"Action {action_name} failed: {error}")
         await action_history.record_action(
