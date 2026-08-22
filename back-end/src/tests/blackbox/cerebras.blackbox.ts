@@ -134,7 +134,6 @@ async function run(): Promise<void> {
       stream: false,
     };
     delete (probeBody as { stream_options?: unknown }).stream_options;
-    let elapsedMs = 0;
     const probe = await retryWithBackoff(
       async () => {
         const started = Date.now();
@@ -146,42 +145,41 @@ async function run(): Promise<void> {
           },
           body: JSON.stringify(probeBody),
         });
-        elapsedMs = Date.now() - started;
-        const liveText = await live.text();
-        return { ok: live.ok, status: live.status, text: liveText };
+        return {
+          ok: live.ok,
+          status: live.status,
+          text: await live.text(),
+          elapsedMs: Date.now() - started,
+        };
       },
       {
         maxRetries: 5,
-        // Preserve the prior quadratic schedule: 1s, 4s, 9s, 16s between attempts.
-        fixedDelays: [1_000, 4_000, 9_000, 16_000],
+        getBackoffDelayMs: (_error, attempt) => 1_000 * attempt * attempt,
         shouldRetryResult: (result) => {
-          if (result.ok || result.status === 404) return false;
-          return (
+          const queueExceeded =
             result.status === 429 ||
-            /too_many_requests|queue_exceeded|high traffic/i.test(result.text)
-          );
+            /too_many_requests|queue_exceeded|high traffic/i.test(result.text);
+          return !result.ok && result.status !== 404 && queueExceeded;
         },
         component: 'cerebras-chat-probe',
       }
     );
-    const liveStatus = probe.status;
-    const liveText = probe.text;
     assert.notEqual(
-      liveStatus,
+      probe.status,
       404,
-      `chat model must not be archived: HTTP ${liveStatus} ${liveText.slice(0, 200)}`
+      `chat model must not be archived: HTTP ${probe.status} ${probe.text.slice(0, 200)}`
     );
     assert.equal(
-      liveStatus >= 200 && liveStatus < 300,
+      probe.status >= 200 && probe.status < 300,
       true,
-      `chat model probe must succeed: HTTP ${liveStatus} ${liveText.slice(0, 200)}`
+      `chat model probe must succeed: HTTP ${probe.status} ${probe.text.slice(0, 200)}`
     );
     assert.ok(
-      elapsedMs < 5_000,
-      `chat model probe must stay under the lifecycle ratchet (${elapsedMs}ms)`
+      probe.elapsedMs < 5_000,
+      `chat model probe must stay under the lifecycle ratchet (${probe.elapsedMs}ms)`
     );
     process.stdout.write(
-      `PASS live Cerebras chat model ${CEREBRAS_CHAT_MODEL} responds in ${elapsedMs}ms\n`
+      `PASS live Cerebras chat model ${CEREBRAS_CHAT_MODEL} responds in ${probe.elapsedMs}ms\n`
     );
   } else {
     process.stdout.write('SKIP live Cerebras inventory probe (no real CEREBRAS_API_KEY)\n');

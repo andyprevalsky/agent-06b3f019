@@ -28,6 +28,7 @@ import {
   findSurgeCallForReply,
   fixtureSmsReply,
   provisionUserWithPhone,
+  readCapturesForToken,
   request,
   runTest,
   setFixtureOverride,
@@ -196,54 +197,24 @@ async function testBoundary_inboundCapturesSurgeCall() {
   }
 }
 
-const SMS_SUPERVISOR_INFRA_HOSTS = [
-  'api.github.com',
-  'openrouter.ai',
-  'anthropic.com',
-  'openai.com',
-  'ip-api.com',
-  'supabase.co',
-  'surge.app',
-  'verify.twilio.com',
-  'e2b.app',
-  'stripe.com',
-  'parallel.ai',
-  'connect.steelbrowser.com',
-  'connect.steel.dev',
-  'api.steel.dev',
-  'perplexity.ai',
-  'exa.ai',
-  'vapi.ai',
-  'googleapis.com',
-];
-
 async function testBoundary_invalidPayloadZeroCaptures() {
-  // Let any in-flight async work from prior tests settle before reading
-  // our cursor (mirrors the sms-webhook test's defensive wait).
-  await new Promise<void>((r) => setTimeout(r, 500));
-  const cursorRes = await request(`${BASE_URL}/api/test/captures`);
-  if (cursorRes.status !== 200) {
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) {
     console.warn('  ⚠ capture harness not active — skipping');
     return;
   }
-  const cursor = (cursorRes.data as { nextId: number }).nextId - 1;
+  const token = captureToken('sms-supervisor-invalid-payload');
 
   await request(`${BASE_URL}/api/sms/inbound`, {
     method: 'POST',
+    headers: { 'X-Capture-Token': token },
     body: JSON.stringify({}),
   });
 
-  const capturesRes = await request(`${BASE_URL}/api/test/captures?after=${cursor}`);
-  assertStatus(capturesRes.status, 200, capturesRes.data);
-  const body = capturesRes.data as { captures: { url: string }[] };
-  // Cross-test pollution: prior tests' fire-and-forget LLM/realtime calls can
-  // drift in after our cursor read. Filter to non-infra captures only.
-  const domainCaptures = body.captures.filter(
-    (c) => !SMS_SUPERVISOR_INFRA_HOSTS.some((host) => c.url.includes(host))
-  );
-  if (domainCaptures.length > 0) {
+  const captures = await readCapturesForToken(token);
+  if (captures.length > 0) {
     throw new Error(
-      `Expected 0 domain-side captures on invalid payload, got ${domainCaptures.length}: ${JSON.stringify(domainCaptures.map((c) => c.url))}`
+      `Expected 0 captures on invalid payload, got ${captures.length}: ${JSON.stringify(captures.map((c) => c.url))}`
     );
   }
 }

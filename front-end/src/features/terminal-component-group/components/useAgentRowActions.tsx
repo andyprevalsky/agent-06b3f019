@@ -8,7 +8,10 @@
  *   [IDLE] --onRenameAgent(agent)--> [DIALOG OPEN] --submit--> PATCH --> [IDLE] + refresh
  *                                                  --cancel--> [IDLE]
  * PIN:      [IDLE] --onToggleAgentPin--> PATCH { pinned } --> refresh
- * ARCHIVE:  [IDLE] --onArchiveAgent----> DELETE (soft delete) --> refresh
+ * ARCHIVE:  [IDLE] --onArchiveAgent----> DELETE (soft delete) --> refresh agents
+ *                   + refresh attention (inbox must drop this agent's requests
+ *                     immediately; backend already deletes them, but realtime
+ *                     DELETE is not broadcast so poll alone would lag ~10s)
  *                   (if the archived agent was selected, selection clears)
  * RESTORE:  [IDLE] --onRestoreAgent----> POST /unarchive --> refresh
  * COPYLINK: [IDLE] --onCopyAgentLink---> clipboard.writeText, no network
@@ -29,6 +32,11 @@ import { archiveAgent, unarchiveAgent, updateAgent, type Agent } from '../hooks'
 interface UseAgentRowActionsOptions {
   /** Reload the agent list after a mutation. */
   onRefresh: () => void | Promise<void>;
+  /**
+   * Reload attention requests after archive. Optional so bare AppSidebar
+   * blackbox mounts stay props-driven without an attention provider.
+   */
+  onRefreshAttention?: () => void | Promise<void>;
   selectedAgentId: string | null;
   onSelectAgent: (agentId: string | null) => void;
 }
@@ -46,6 +54,7 @@ export function agentShareUrl(agentId: string): string {
 
 export function useAgentRowActions({
   onRefresh,
+  onRefreshAttention,
   selectedAgentId,
   onSelectAgent,
 }: UseAgentRowActionsOptions): AgentRowActionsController {
@@ -107,12 +116,13 @@ export function useAgentRowActions({
           if (selectedAgentId === agent.agent_id) onSelectAgent(null);
           toast({ title: `Archived "${agentDisplayName(agent)}"` });
           refresh();
+          if (onRefreshAttention !== undefined) void onRefreshAttention();
         })
         .catch(() =>
           toast({ title: 'Error', description: 'Failed to archive agent', variant: 'destructive' }),
         );
     },
-    [onSelectAgent, refresh, selectedAgentId, toast],
+    [onRefreshAttention, onSelectAgent, refresh, selectedAgentId, toast],
   );
 
   const onRestoreAgent = useCallback(
