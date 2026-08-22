@@ -4967,6 +4967,7 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
 
     task = get_task_by_name("browser-event-ticket")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert "next week's friday" in task.prompt.lower()
     assert task.prompt.endswith("Complete the ticket purchase.")
     assert task.approval_handling == "ignore"
     assert task.expected_attention_kinds == []
@@ -4975,7 +4976,8 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
     assert task.expected_approval_count == 1
     assert task.success_on_payment_card_request is True
     assert task.expected_payment_receipt["merchant"] == "AMC Theatres (direct - amctheatres.com)"
-    assert task.expected_tool_counts == {"spawn_agent": 1}
+    # H-02: count the browser session tool, not the parent spawn_agent wrapper.
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
@@ -4984,13 +4986,22 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
     static_types = {check["type"] for check in task.evaluators[0]["checks"]}
     assert "expected_payment_receipt" in static_types
     assert "agent_status" not in static_types
-    # The approval must still identify venue, date, showtime, seat and amount —
-    # asserted by the judge, not by substring/regex matching over the payload.
+    # Approval contents are judged semantically, not substring-matched.
     assert "approval_request_details" not in static_types
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("earliest", "center", "payment approval", "unresolved"):
+    # H-04: no earliest-show / seat-center criteria; date window + soft venue.
+    for requirement in (
+        "payment approval",
+        "unresolved",
+        "next week's friday",
+        "7:00 pm",
+        "9:00 pm",
+        "amctheatres.com",
+    ):
         assert requirement in semantic_criteria
-    for approval_detail in ("venue", "date", "showtime", "seat", "total amount"):
+    for forbidden in ("earliest", "center"):
+        assert forbidden not in semantic_criteria
+    for approval_detail in ("date", "showtime", "seat", "total amount"):
         assert approval_detail in semantic_criteria
 
 
