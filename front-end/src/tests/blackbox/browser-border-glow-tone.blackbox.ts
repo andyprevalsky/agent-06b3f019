@@ -12,10 +12,10 @@ function msg(
   overrides: Record<string, unknown> = {},
 ): Message {
   return {
-    id: `m-${Math.random()}`,
+    message_id: `m-${Math.random()}`,
     role: 'TOOL',
     text: 'recovering',
-    createdAt: new Date().toISOString(),
+    timestamp: new Date().toISOString(),
     metadata: {
       task_id: taskId,
       action_type: 'browser_challenge_recovery',
@@ -23,7 +23,7 @@ function msg(
       recoveryStage: 'captcha_solver',
       ...overrides,
     },
-  } as Message;
+  };
 }
 
 describe('browser border glow challenge-recovery tone', () => {

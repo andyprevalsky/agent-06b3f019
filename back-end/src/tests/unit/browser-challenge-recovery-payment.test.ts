@@ -238,6 +238,7 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
       originAuthVisible = false;
       return { status: () => 200 };
     },
+    url: () => 'https://order.online/store/blue-bottle',
     waitForTimeout: async () => undefined,
     evaluate: async (pageFunction: unknown, arg?: { url: string; hostKey: string; loadAsScript: boolean }) => {
       if (arg?.url) {
@@ -350,6 +351,7 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     paymentCdnOk: true,
     paymentCdnHosts: {},
     classifierLlmUsage: [],
+    settledUrl: 'https://order.online/store/blue-bottle',
   });
 }
 

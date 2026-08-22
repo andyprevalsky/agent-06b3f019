@@ -488,10 +488,10 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
     ):
         clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
         assert await verify_live_page_cleared_challenge(
-            clean, "https://wl.eventim.us/event/lyny/1", attempts=2, solver_timeout_seconds=0
+            clean, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
         )
         # Must navigation-probe — static preloaded content is not enough.
-        assert clean.goto_count == 2
+        assert clean.goto_count == 1
 
         denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
         assert not await verify_live_page_cleared_challenge(
@@ -886,7 +886,7 @@ def test_challenge_page_classifier_ignores_incidental_captcha_prose():
     )
 
 
-async def test_live_cookie_commit_requires_two_clean_loads():
+async def test_live_cookie_commit_requires_one_clean_load():
     from unittest.mock import AsyncMock, patch
 
     class FakeContext:
@@ -950,7 +950,7 @@ async def test_live_cookie_commit_requires_two_clean_loads():
             "https://order.online/store/blue-bottle",
             solver_timeout_seconds=0,
         )
-        assert clean_page.goto_count == 2
+        assert clean_page.goto_count == 1
         assert clean_page.context.cleared == [
             {"name": "cf_clearance", "domain": ".order.online", "path": "/"}
         ]
@@ -1054,8 +1054,8 @@ async def run_all_tests():
         test_live_blocked_resource_verify_is_failure_driven,
     )
     await result.record_async(
-        "live_cookie_commit_two_passes",
-        test_live_cookie_commit_requires_two_clean_loads,
+        "live_cookie_commit_one_pass",
+        test_live_cookie_commit_requires_one_clean_load,
     )
     return result.all_passed
 

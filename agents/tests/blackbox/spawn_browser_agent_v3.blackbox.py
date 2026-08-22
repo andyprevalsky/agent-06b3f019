@@ -5752,7 +5752,12 @@ def test_recovery_requires_live_tab_verify_before_success():
     assert "live_verify_url" in recovery_block
     # Non-preloaded promote path: single live navigation-probe.
     assert "attempts=1" in recovery_block[verify_offset : verify_offset + 400]
-    assert "storage_state_preloaded" in recovery_block[verify_offset - 400 : verify_offset + 200]
+    # Live verify is nested under the preloaded skip guard (not a second LLM).
+    skip_verify = recovery_block.index(
+        'if not bool(config_result.get("storage_state_preloaded")):',
+        restore_offset,
+    )
+    assert skip_verify < verify_offset < success_offset
     assert "Live-session cookie probes are retired" in recovery_block
     assert "probe_storage_state" not in recovery_block
 

@@ -200,6 +200,7 @@ async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
       gotoCount += 1;
       return { status: () => 200 };
     },
+    url: () => 'https://shop.example.com/item/1',
     waitForTimeout: async () => undefined,
     evaluate: async () => {
       evaluateCalls += 1;
