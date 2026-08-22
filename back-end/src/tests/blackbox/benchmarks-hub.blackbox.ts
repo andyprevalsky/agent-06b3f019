@@ -3,8 +3,8 @@
  * Black-box tests for the Benchmark Hub endpoints (/api/benchmarks/*)
  *
  * Domain surface:
- *   GET    /api/benchmarks/tasks                    — team-gated catalog (DB) + per-task stats
- *   PATCH  /api/benchmarks/tasks/:name              — team-gated validated metadata edit
+ *   GET    /api/benchmarks/tasks                    — team-gated catalog (tasks.json) + per-task stats
+ *   PATCH  /api/benchmarks/tasks/:name              — disabled (405; edit tasks.json)
  *   POST   /api/benchmarks/run-requests             — team-gated run dispatch
  *   GET    /api/benchmarks/run-requests             — team-gated queue view
  *   PATCH  /api/benchmarks/run-requests/:id         — internal poller claim/progress/complete
@@ -20,11 +20,9 @@
  *   - read-after-write: upload → list → detail → agent transcript round-trip
  *   - state transition: run-request queued → running → completed; double-claim
  *     rejected; cancel only from queued
- *   - validation: task edits reject unknown fields/bad types/unknown tasks;
- *     run requests reject unknown task names
+ *   - validation: run requests reject unknown task names
  *   - idempotency: re-uploading a bundle upserts (single index entry)
- *   - cleanup: every uploaded test run is deleted in finally; task edits are
- *     reverted to their original values
+ *   - catalog: hub + public routes serve tasks.json even when DB rows are stale
  */
 
 import { readFileSync } from 'fs';
@@ -32,7 +30,17 @@ import { resolve } from 'path';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
 import { z } from 'zod';
-import { assertToastPromptMigration, syntheticBenchmarkBundle } from './benchmarks-hub.testkit';
+import {
+  assertEnvironmentReconcileFromFile,
+  assertToastPromptMigration,
+  syntheticBenchmarkBundle,
+} from './benchmarks-hub.testkit';
+
+const REPO_ROOT = resolve(__dirname, '../../../../');
+
+function readTasksJson(): unknown {
+  return JSON.parse(readFileSync(resolve(REPO_ROOT, 'agents/benchmarks/tasks.json'), 'utf8'));
+}
 
 config();
 
@@ -176,55 +184,78 @@ async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   );
 }
 
-async function testCatalog_dailyMigrationUpgradesLegacyMessagePerson(): Promise<void> {
+async function testCatalog_hubMatchesTasksJsonGroup(): Promise<void> {
+  const fileTasks = readTasksJson() as Array<{ name: string; group?: string }>;
+  const fileTask = fileTasks.find((task) => task.name === 'message-person');
+  assert(fileTask !== undefined, 'message-person missing from tasks.json');
+  const res = await request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders });
+  assertStatus(res.status, 200, res.data);
+  const tasks = (res.data as { tasks: Array<{ name: string; group: string }> }).tasks;
+  const messagePerson = tasks.find((task) => task.name === 'message-person');
+  assert(messagePerson, 'message-person missing from benchmark catalog');
+  const expectedGroup = (fileTask.group ?? 'daily').toLowerCase().replace(/[\s_]+/g, '-');
+  assert(
+    messagePerson.group === expectedGroup,
+    `message-person group ${messagePerson.group} != tasks.json group ${expectedGroup}`
+  );
+}
+
+async function testCatalog_fileWinsOverStaleDb(): Promise<void> {
+  const fileTasks = readTasksJson() as Array<{ name: string; prompt: string }>;
+  const fileTask = fileTasks.find((task) => task.name === 'chat-mode');
+  assert(fileTask !== undefined, 'chat-mode missing from tasks.json');
   const prisma = new PrismaClient();
   try {
-    const current = await prisma.benchmarkTask.findUnique({ where: { name: 'message-person' } });
-    assert(current, 'message-person missing before migration test');
-    const definition = current.definition as Record<string, unknown>;
-    const legacyDefinition = { ...definition, tags: ['smoke', 'approval'] };
-    delete legacyDefinition.group;
+    const current = await prisma.benchmarkTask.findUnique({ where: { name: 'chat-mode' } });
+    assert(current, 'chat-mode missing from DB');
+    const stalePrompt = `stale-db-prompt-${Date.now()}`;
+    const staleDefinition = {
+      ...(current.definition as Record<string, unknown>),
+      prompt: stalePrompt,
+    };
     await prisma.benchmarkTask.update({
-      where: { name: 'message-person' },
+      where: { name: 'chat-mode' },
       data: {
-        tags: ['smoke', 'approval'],
-        definition: legacyDefinition as Prisma.InputJsonObject,
+        prompt: stalePrompt,
+        definition: staleDefinition as Prisma.InputJsonObject,
       },
     });
 
-    const migration = readFileSync(
-      resolve('prisma/migrations/20260712011500_move_message_person_to_daily/migration.sql'),
-      'utf8'
-    );
-    await prisma.$executeRawUnsafe(migration);
+    const [publicRes, hubRes, pickerRes] = await Promise.all([
+      request(`${BASE_URL}/api/benchmarks`),
+      request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders }),
+      request(`${BASE_URL}/api/benchmarks/test-prompts`),
+    ]);
+    assertStatus(publicRes.status, 200, publicRes.data);
+    assertStatus(hubRes.status, 200, hubRes.data);
+    assertStatus(pickerRes.status, 200, pickerRes.data);
 
-    const migrated = await prisma.benchmarkTask.findUnique({
-      where: { name: 'message-person' },
-    });
-    assert(migrated, 'message-person missing after migration');
-    assert(!migrated.tags.includes('smoke'), 'migration left message-person in smoke tags');
-    assert(migrated.tags.includes('approval'), 'migration removed the approval tag');
-    const migratedDefinition = migrated.definition as Record<string, unknown>;
-    assert(migratedDefinition.group === 'Daily', 'migration did not persist group=Daily');
-    assert(
-      JSON.stringify(migratedDefinition.tags) === JSON.stringify(['approval']),
-      `migration definition tags are incorrect: ${JSON.stringify(migratedDefinition.tags)}`
+    const publicTask = (
+      publicRes.data as { tasks: Array<{ name: string; prompt: string }> }
+    ).tasks.find((task) => task.name === 'chat-mode');
+    const hubTask = (hubRes.data as { tasks: Array<{ name: string; prompt: string }> }).tasks.find(
+      (task) => task.name === 'chat-mode'
     );
+    const pickerPrompt = (
+      pickerRes.data as { prompts: Array<{ title: string; prompt: string }> }
+    ).prompts.find((prompt) => prompt.title === 'Basic Chat Response');
 
-    const response = await request(`${BASE_URL}/api/benchmarks/tasks`, {
-      headers: internalHeaders,
-    });
-    assertStatus(response.status, 200, response.data);
-    const tasks = (response.data as { tasks: Array<{ name: string; group: string }> }).tasks;
-    const messagePerson = tasks.find((task) => task.name === 'message-person');
-    assert(messagePerson?.group === 'daily', 'migrated message-person is not daily in the Hub');
+    assert(publicTask?.prompt === fileTask.prompt, 'public catalog served stale DB prompt');
+    assert(hubTask?.prompt === fileTask.prompt, 'hub catalog served stale DB prompt');
+    assert(pickerPrompt?.prompt === fileTask.prompt, 'test-prompts served stale DB prompt');
   } finally {
+    const { seedBenchmarkTasks } = await import('../../domains/benchmarks/hubCatalogSeed');
+    await seedBenchmarkTasks();
     await prisma.$disconnect();
   }
 }
 
 async function testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub(): Promise<void> {
   await assertToastPromptMigration(BASE_URL, internalHeaders);
+}
+
+async function testCatalog_seedReconcilesEnvironmentFromFile(): Promise<void> {
+  await assertEnvironmentReconcileFromFile();
 }
 
 async function testCatalog_statsPresentForTasksWithHistory(): Promise<void> {
@@ -252,65 +283,18 @@ async function testCatalog_retiredTasksInvisible(): Promise<void> {
   );
 }
 
-async function testPatch_editAndRevertDescription(): Promise<void> {
-  const list = await request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders });
-  assertStatus(list.status, 200, list.data);
-  const tasks = (list.data as { tasks: Array<{ name: string; description: string | null }> }).tasks;
-  const target = tasks.find((t) => t.name === 'chat-mode');
-  assert(target !== undefined, 'chat-mode task missing from catalog');
-  const original = target!.description;
-  const marker = `blackbox-edit-${Date.now()}`;
-  try {
-    const patch = await request(`${BASE_URL}/api/benchmarks/tasks/chat-mode`, {
-      method: 'PATCH',
-      headers: internalHeaders,
-      body: JSON.stringify({ description: marker }),
-    });
-    assertStatus(patch.status, 200, patch.data);
-    const updated = (patch.data as { task: { description: string | null } }).task;
-    assert(updated.description === marker, 'patched description not reflected');
-    const reread = await request(`${BASE_URL}/api/benchmarks/tasks`, {
-      headers: internalHeaders,
-    });
-    const rereadTask = (
-      reread.data as { tasks: Array<{ name: string; description: string | null }> }
-    ).tasks.find((t) => t.name === 'chat-mode');
-    assert(rereadTask?.description === marker, 'patched description not persisted');
-  } finally {
-    // Revert (empty-string description means "restore original or clear")
-    await request(`${BASE_URL}/api/benchmarks/tasks/chat-mode`, {
-      method: 'PATCH',
-      headers: internalHeaders,
-      body: JSON.stringify({ description: original ?? '' }),
-    });
-  }
-}
-
-async function testPatch_rejectsUnknownField(): Promise<void> {
+async function testPatch_rejectsEdits(): Promise<void> {
   const res = await request(`${BASE_URL}/api/benchmarks/tasks/chat-mode`, {
     method: 'PATCH',
     headers: internalHeaders,
-    body: JSON.stringify({ nonsense_field: true }),
+    body: JSON.stringify({ description: 'blocked-edit' }),
   });
-  assertStatus(res.status, 400, res.data);
-}
-
-async function testPatch_rejectsBadType(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/benchmarks/tasks/chat-mode`, {
-    method: 'PATCH',
-    headers: internalHeaders,
-    body: JSON.stringify({ timeout_seconds: 'ten minutes' }),
-  });
-  assertStatus(res.status, 400, res.data);
-}
-
-async function testPatch_unknownTask404(): Promise<void> {
-  const res = await request(`${BASE_URL}/api/benchmarks/tasks/definitely-not-a-task`, {
-    method: 'PATCH',
-    headers: internalHeaders,
-    body: JSON.stringify({ description: 'x' }),
-  });
-  assertStatus(res.status, 404, res.data);
+  assertStatus(res.status, 405, res.data);
+  const body = res.data as { error?: string };
+  assert(
+    typeof body.error === 'string' && body.error.includes('read-only'),
+    'PATCH should explain tasks.json is the source of truth'
+  );
 }
 
 async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
@@ -633,20 +617,19 @@ async function runAll(): Promise<void> {
     ['auth: POST /runs rejects unauthenticated', testAuth_uploadRejectsUnauthenticated],
     ['catalog: tasks + stats shape', testCatalog_returnsTasksWithStatsShape],
     ['catalog: groups are label-driven', testCatalog_groupsAreLabelDriven],
+    ['catalog: hub group matches tasks.json', testCatalog_hubMatchesTasksJsonGroup],
+    ['catalog: hub serves tasks.json over stale DB rows', testCatalog_fileWinsOverStaleDb],
     [
-      'catalog: Daily migration upgrades legacy message-person',
-      testCatalog_dailyMigrationUpgradesLegacyMessagePerson,
+      'catalog: Toast prompt comes from tasks.json',
+      testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub,
     ],
     [
-      'catalog: Toast prompt migration updates DB truth',
-      testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub,
+      'catalog: seed syncs environment from tasks.json into DB',
+      testCatalog_seedReconcilesEnvironmentFromFile,
     ],
     ['catalog: stats present from history ledger', testCatalog_statsPresentForTasksWithHistory],
     ['catalog: retired tasks invisible everywhere', testCatalog_retiredTasksInvisible],
-    ['patch: edit + revert description', testPatch_editAndRevertDescription],
-    ['patch: rejects unknown field', testPatch_rejectsUnknownField],
-    ['patch: rejects bad type', testPatch_rejectsBadType],
-    ['patch: unknown task 404', testPatch_unknownTask404],
+    ['patch: task edits rejected (read-only catalog)', testPatch_rejectsEdits],
     ['runs: upload→list→detail→agents round-trip', testRuns_uploadListDetailAgentRoundTrip],
     ['runs: blank agent ids normalize to null', testRuns_blankAgentIdNormalizesToNull],
     ['runs: upload requires run_id', testRuns_uploadRequiresRunId],

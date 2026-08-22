@@ -51,7 +51,7 @@ async function main(): Promise<void> {
     );
     assert.equal(connected.status, 'connected');
     const row = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
+      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     });
     const config = row?.config as { orgManaged?: boolean; cardholderId?: string };
     assert.equal(config?.orgManaged, true);
@@ -59,7 +59,7 @@ async function main(): Promise<void> {
     const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
     assert.equal(reset.status, 'connect_required');
     const resetRow = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
+      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     });
     const resetConfig = resetRow?.config as {
       onboardingSessionId?: string;
@@ -82,7 +82,7 @@ async function main(): Promise<void> {
       );
       assert.equal(connected.status, 'connected');
       const row = await prisma.integration.findUnique({
-        where: { userId_name: { userId, name: 'agentcard' } },
+        where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
       });
       const config = row?.config as { cardholderId?: string };
       assert.equal(config?.cardholderId, 'cardholder-from-list');

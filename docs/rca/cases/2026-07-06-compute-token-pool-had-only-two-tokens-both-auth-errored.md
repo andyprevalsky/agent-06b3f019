@@ -9,8 +9,9 @@ problem_class: fixture-environment-data-mismatch
 first_bad_boundary: prod Integration rows — only 2 claude_code tokens have poolingEnabled=true and both carry failureReason=auth_error
 symptoms:
   - "GET /api/integrations/compute-code/credentials/token returns 404 NO_TOKENS_AVAILABLE"
-  - costs skyrocketing / "compute tokens not being used"
-  - agents fall through to the paid OpenRouter waterfall despite healthy code
+  - "No usable claude_code integrations after sync"
+  - "Refresh token not found or invalid"
+  - "invalid_grant"
 tags:
   - compute-token
   - claude-auth
@@ -20,6 +21,8 @@ tags:
 sources:
   - memory:project_compute_token_tables_missing_prod
   - agent 8e0c9c2e-1e95-4135-8dd4-43469b961c4f
+  - agent descend-files-in-sub-agents-20260820T202532Z-11bd4757de0e
+  - commit 20bc52f71
 repro: none-recorded
 status: open
 ---
@@ -72,3 +75,30 @@ lease columns as implying per-tree lease sharing was wrong and was corrected.
 When compute-token cost spikes persist after the code path is proven healthy,
 query the pool itself — count `poolingEnabled` tokens and read their
 `failureReason`, because `auth_error` tokens never recover by waiting.
+
+## Recurrence — 2026-08-20 (`/descend files-in-sub-agents`)
+
+Runtime evidence from local `scripts/run-bench --local files-in-sub-agents`:
+
+- Preflight aborted with `No usable claude_code integrations after sync` (5/5 attempts in `seed-local.ts --compute-tokens-only`).
+- Prod probe: **2** `claude_code` rows total; **0** `CONNECTED`; both `EXPIRED` with `failureReason=auth_error` (`6e9c2ac5…` andy, `a84c1d39…` other).
+- OAuth refresh against `https://platform.claude.com/v1/oauth/token` with Claude Code client id returned HTTP 400 `invalid_grant` / `Refresh token not found or invalid`.
+- Task contract requires Claude Code (`requires_claude_code: true`); Anthropic API-key fallback is intentionally refused for this class of task.
+
+Why the earlier remediation did not hold: the 2026-07-06 record left the case **open** with "re-auth or add fresh pool tokens" as the next step; supply was never replenished, so any `requires_claude_code` benchmark still fails closed at the same credential boundary.
+## Recurrence — 2026-08-20T22:54Z (credentials restored; Fast Mode loopback)
+
+After claude_code OAuth was restored (`CONNECTED`, poolingEnabled, encryptedCredentials),
+local `scripts/run-bench --local files-in-sub-agents` progressed past compute-token
+preflight and spawned 4 GP → Claude Code children, then timed out at 900s.
+
+Owning boundary: `run.sh` + `BENCHMARK_SKIP_PUBLIC_TUNNEL=1` set
+`PUBLIC_BASE_URL=http://localhost:<frontend>` and exported
+`FAST_MODE_ANTHROPIC_PROXY_URL=$PUBLIC_BASE_URL/anthropic-proxy`. E2B then logged
+`Fast Mode: routing sandbox Anthropic calls via http://localhost:56201/anthropic-proxy/...`
+and Claude Code failed with `Unable to connect to API (ConnectionRefused)` after
+10 `api_retry` attempts (0 interactions).
+
+Fix: refuse loopback Fast Mode proxy bases in `buildFastModeAnthropicEnv` /
+`buildFastModeCodexEnv`, and clear Fast Mode proxy exports in `run.sh` when the
+public URL is not E2B-reachable. Cemented in `fast-cache-flag.test.ts`.

@@ -21,6 +21,11 @@ from domains.spawn_browser_agent_v3.config import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from helpers.workflow_generation import (
+    WorkflowGenerationSealed,
+    raise_if_generation_sealed,
+    workflow_generation_headers,
+)
 
 logger = structlog.get_logger()
 
@@ -65,6 +70,8 @@ async def fetch_claude_token(
                 logger.info(f"[ClaudeAuth] Token fetch returned {resp.status_code}", user_id=user_id)
                 return None
             return resp.json()
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"[ClaudeAuth] Token fetch failed: {e}", user_id=user_id)
         return None
@@ -110,6 +117,8 @@ async def report_claude_token_rate_limited(
                 pool_token_id=pool_token_id,
                 rate_limited_until=rate_limited_until,
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"[ClaudeAuth] Failed to report token rate limit: {e}")
 
@@ -196,9 +205,14 @@ async def save_browser_action_message(
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"message": message, "role": "TOOL", "metadata": metadata},
             )
+            raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
             if not response.is_success:
                 logger.error(
                     "Failed to save browser action message",
@@ -206,6 +220,8 @@ async def save_browser_action_message(
                 )
                 return False
         return True
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save browser action message", error=extract_error_message(e))
         return False
@@ -230,9 +246,15 @@ async def save_browser_assistant_message(
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"message": message, "role": "ASSISTANT", "metadata": metadata},
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save browser assistant message", error=extract_error_message(e))
 
@@ -286,9 +308,14 @@ async def save_browser_credential_ref_message(
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"message": message, "role": role, "metadata": metadata},
             )
+            raise_if_generation_sealed(response.status_code, "spawn_browser_agent_v3")
             if response.is_error:
                 logger.error(
                     "Failed to save credential ref message",
@@ -296,6 +323,8 @@ async def save_browser_credential_ref_message(
                 )
                 return False
         return True
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error("Failed to save credential ref message", error=extract_error_message(e))
         return False
@@ -347,6 +376,8 @@ async def list_session_files(config: Any, session_id: str) -> List[Dict[str, Any
                 return files if isinstance(files, list) else []
             logger.warning("Failed to list browser session files", session_id=session_id, status=response.status_code)
             return []
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Error listing browser session files", session_id=session_id, error=extract_error_message(e))
         return []
@@ -387,6 +418,8 @@ async def download_session_file(config: Any, session_id: str, file_path: str) ->
                     response=response.text[:200],
                 )
                 return None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(
             "[Browser] Error downloading file",
@@ -448,7 +481,11 @@ async def init_browser_session(
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/init",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"user_id": user_id, "agent_id": agent_id, "start_url": start_url},
         )
     if response.status_code in [200, 201]:
@@ -474,7 +511,11 @@ async def resume_browser_session(
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
         )
     if response.status_code in [200, 201]:
@@ -531,7 +572,11 @@ async def recover_browser_challenge(
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/recover-challenge",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json=payload,
         )
     if response.status_code in [200, 201]:
@@ -728,7 +773,11 @@ async def acknowledge_browser_user_control(config: Any, task_id: str) -> str:
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
             json={"mode": "acknowledge"},
         )
     if response.status_code == 200:
@@ -748,6 +797,8 @@ async def close_browser_session(config: Any, session_id: str, pause: bool = Fals
                 headers={"x-api-key": config.backend.api_key or ""},
                 json=payload,
             )
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(f"Failed to close/pause session: {e}")
 
@@ -758,7 +809,11 @@ async def inject_local_storage(config: Any, session_id: str, origin: str) -> Opt
         async with httpx.AsyncClient(timeout=5.0) as client:
             inject_response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/{session_id}/inject-localStorage",
-                headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={"origin": origin},
             )
             if inject_response.status_code == 200:
@@ -766,6 +821,8 @@ async def inject_local_storage(config: Any, session_id: str, origin: str) -> Opt
             else:
                 logger.warning(f"Failed to inject localStorage: HTTP {inject_response.status_code}")
                 return None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning(f"Failed to inject localStorage: {e}")
         return None
@@ -777,20 +834,26 @@ async def upload_file_to_session(
     filename: str,
     file_content: bytes,
     mime_type: str = "application/octet-stream",
+    *,
+    directory: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Upload a file to a Steel browser session."""
+    """Upload a file into a browser session (uploads or downloads root)."""
     try:
+        data = {"directory": directory} if directory else None
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/{session_id}/files",
                 headers={"x-api-key": config.backend.api_key or ""},
                 files={"file": (filename, file_content, mime_type)},
+                data=data,
             )
             if response.status_code in [200, 201]:
                 return response.json()
             else:
                 logger.error(f"Failed to upload {filename}: HTTP {response.status_code} - {response.text[:200]}")
                 return None
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"Failed to upload file {filename}: {e}")
         return None
@@ -801,7 +864,11 @@ async def take_browser_computer_screenshot(config: Any, session_id: str) -> Dict
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/{session_id}/screenshot",
-            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
         )
         response.raise_for_status()
         result = response.json()
@@ -811,6 +878,33 @@ async def take_browser_computer_screenshot(config: Any, session_id: str) -> Dict
         details = result.get("error") or result.get("output") or result.get("system") or "missing base64_image"
         raise RuntimeError(f"Browser screenshot did not return an image: {details}")
     return result
+
+
+async def press_browser_computer_key(
+    config: Any,
+    session_id: str,
+    user_id: str,
+    key: str,
+) -> bool:
+    """Press a key at the browser-window layer when the provider supports it.
+
+    CDP keyboard events stop at the renderer and cannot reach Chrome's own
+    passkey chooser. Kernel's computer API operates on the browser window, so
+    Escape/Tab/Enter can act on browser-process UI as well as the page.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/{session_id}/computer/press-key",
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "x-user-id": user_id,
+                "Content-Type": "application/json",
+            },
+            json={"keys": [key]},
+        )
+        response.raise_for_status()
+        result = response.json()
+    return bool(result.get("supported") and result.get("pressed"))
 
 
 # ========================================
@@ -877,6 +971,8 @@ Extract the requested information from the page content above."""
             content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             return content or "No content extracted"
 
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.error(f"Extract LLM call failed: {e}")
         return f"Extraction failed: {e!s}"
@@ -909,6 +1005,8 @@ async def fetch_recent_emails(user_id: str, api_url: str, api_key: str, since: s
 
             data = response.json()
             return data.get("emails", [])
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Failed to fetch emails", error=str(e))
         return []
@@ -938,6 +1036,8 @@ async def fetch_recent_sms_messages(
 
             data = response.json()
             return data.get("messages", [])
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Failed to fetch SMS messages", error=str(e))
         return []
@@ -969,6 +1069,8 @@ async def fetch_recent_imessages(user_id: str, api_url: str, api_key: str, since
 
             data = response.json()
             return data.get("messages", [])
+    except WorkflowGenerationSealed:
+        raise  # a replaced generation must stop, never be swallowed
     except Exception as e:
         logger.warning("Failed to fetch iMessages", error=str(e))
         return []

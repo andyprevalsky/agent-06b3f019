@@ -8,10 +8,9 @@
 #   HUB_URL=http://localhost:3901 scripts/run-bench-hub-poller --local --once
 #
 # Loop: claim a queued run-request (atomic PATCH; double-claim loses) →
-# export the DB catalog to agents/benchmarks/tasks.json (so hub edits are what
-# the runner executes) → launch scripts/run-bench → stream live report-card
-# snapshots to POST /api/benchmarks/runs?live=1 → upload the final run bundle →
-# mark the request completed/failed with the linked run_id.
+# launch scripts/run-bench using the repository tasks.json catalog → stream live
+# report-card snapshots to POST /api/benchmarks/runs?live=1 → upload the final
+# run bundle → mark the request completed/failed with the linked run_id.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -73,66 +72,6 @@ hub() {  # hub <method> <path> [json-body]
     fi
 }
 
-export_catalog() {
-    # DB → tasks.json so hub edits are real for the runner. Postgres jsonb does
-    # NOT preserve key order, so a raw dump would churn the whole file; instead
-    # MERGE each DB definition onto the existing file entry (file key order is
-    # kept, DB values win, DB-only keys append, new tasks append at the end).
-    python3 - "$HUB_URL" <<'PY'
-import json, sys, urllib.request
-url = sys.argv[1].rstrip("/") + "/api/benchmarks"
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(url, timeout=20) as r:
-    db_tasks = json.load(r).get("tasks") or []
-if len(db_tasks) < 1:
-    print("catalog export: EMPTY response, keeping existing tasks.json", file=sys.stderr)
-    sys.exit(0)
-path = "agents/benchmarks/tasks.json"
-try:
-    file_tasks = json.load(open(path))
-except Exception:
-    file_tasks = []
-by_name = {t.get("name"): t for t in db_tasks if isinstance(t, dict)}
-
-def merge_value(file_v, db_v):
-    # Postgres jsonb sorts object keys at EVERY depth; recursively re-impose
-    # the file's key order (incl. dicts inside lists) so unchanged values
-    # round-trip byte-identical.
-    if isinstance(file_v, dict) and isinstance(db_v, dict):
-        out = {}
-        for k in file_v:
-            out[k] = merge_value(file_v[k], db_v[k]) if k in db_v else file_v[k]
-        for k, v in db_v.items():
-            if k not in out:
-                out[k] = v
-        return out
-    if isinstance(file_v, list) and isinstance(db_v, list) and len(file_v) == len(db_v):
-        return [merge_value(f, d) for f, d in zip(file_v, db_v)]
-    return db_v
-
-merged, seen, changed = [], set(), 0
-for entry in file_tasks:
-    name = entry.get("name")
-    db = by_name.get(name)
-    if db is None:
-        merged.append(entry)  # file-only task (DB unseeded?) — keep untouched
-        continue
-    seen.add(name)
-    out = merge_value(entry, db)
-    if out != entry:
-        changed += 1
-    merged.append(out)
-for name, db in by_name.items():  # brand-new tasks created in the DB
-    if name not in seen:
-        merged.append(db)
-        changed += 1
-with open(path, "w") as f:
-    json.dump(merged, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-print(f"catalog export: {len(merged)} tasks, {changed} updated from DB → {path}")
-PY
-}
-
 snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch> <artifact_root> <local_artifact_root> <task_names>
     local req_id="$1" hub_run_id="$2" start_epoch="$3" artifact_root="$4" local_artifact_root="$5" task_names="$6"
     # This function is launched in the background. exec makes SNAP_PID the
@@ -155,8 +94,10 @@ def post(path, body, method="POST"):
         method=method)
     opener.open(req, timeout=20).read()
 
+# Poll first, then sleep. Sleeping before the first inspect lost the live
+# snapshot under coverage load: the stub can finish and reap this loop during
+# the initial interval wait, so POST /runs?live=1 never reaches the hub.
 while True:
-    time.sleep(snapshot_interval)
     try:
         # Only inspect this request's output root. Mtime alone is not ownership:
         # another benchmark producer can write a newer canonical artifact while
@@ -165,38 +106,37 @@ while True:
                  glob.glob(os.path.join(local_artifact_root, "report-card.json")) +
                  glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "report-card.json"))
                  if os.path.getmtime(p) > start]
-        if not cards:
-            continue
-        card = json.load(open(max(cards, key=os.path.getmtime)))
-        actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
-        if actual != expected:
-            continue
-        tasks = []
-        for row in card.get("per_task") or []:
-            url = row.get("agent_url") or ""
-            agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
-            dur = row.get("duration_s")
-            cost = row.get("cost_usd")
-            tasks.append({
-                "name": row.get("name"), "status": row.get("status") or "running",
-                "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
-                "agent_id": agent_id, "duration_seconds": dur,
-                "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
-                "world_model_mode": row.get("world_model_mode"),
-                "fast_mode": bool(row.get("fast_mode")),
-            })
-        bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
-                  "source": "hub-poller", "tasks": tasks,
-                  "code": os.environ.get("HUB_CODE_SUMMARY") or None,
-                  "elapsed_s": card.get("elapsed_s"),
-                  "cost": card.get("cost"), "metadata": card.get("metadata")}
-        post("/api/benchmarks/runs?live=1", bundle)
-        # the run-request update route is PATCH-only (urllib defaults data= to POST)
-        post(f"/api/benchmarks/run-requests/{req_id}",
-             {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
+        if cards:
+            card = json.load(open(max(cards, key=os.path.getmtime)))
+            actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
+            if actual == expected:
+                tasks = []
+                for row in card.get("per_task") or []:
+                    url = row.get("agent_url") or ""
+                    agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
+                    dur = row.get("duration_s")
+                    cost = row.get("cost_usd")
+                    tasks.append({
+                        "name": row.get("name"), "status": row.get("status") or "running",
+                        "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
+                        "agent_id": agent_id, "duration_seconds": dur,
+                        "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+                        "world_model_mode": row.get("world_model_mode"),
+                        "fast_mode": bool(row.get("fast_mode")),
+                    })
+                bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
+                          "source": "hub-poller", "tasks": tasks,
+                          "code": os.environ.get("HUB_CODE_SUMMARY") or None,
+                          "elapsed_s": card.get("elapsed_s"),
+                          "cost": card.get("cost"), "metadata": card.get("metadata")}
+                post("/api/benchmarks/runs?live=1", bundle)
+                # the run-request update route is PATCH-only (urllib defaults data= to POST)
+                post(f"/api/benchmarks/run-requests/{req_id}",
+                     {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
     except Exception as error:
         # Snapshot upload is best-effort; the terminal result remains authoritative.
         print(f"snapshot upload failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+    time.sleep(snapshot_interval)
 PY
 }
 
@@ -247,11 +187,7 @@ process_request() {  # process_request <request_json>
         return 0
     fi
 
-    if [ "${HUB_SKIP_CATALOG_EXPORT:-0}" = "1" ]; then
-        echo "   catalog export skipped by HUB_SKIP_CATALOG_EXPORT=1 — using repository tasks.json unchanged"
-    else
-        export_catalog || echo "   ⚠ catalog export failed — running with existing tasks.json"
-    fi
+    echo "   using repository tasks.json (catalog edits are git-only)"
 
     local hub_run_id="hub-$req_id"
     # Sub-second precision is required here. With integer seconds, a request

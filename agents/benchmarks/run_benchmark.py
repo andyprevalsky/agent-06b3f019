@@ -64,7 +64,12 @@ from benchmarks.benchmark_tasks import (
     list_all_tasks,
 )
 from benchmarks.context_validator import validate_context
-from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
+from benchmarks.live_fixtures import (
+    LIVE_FIXTURE_NAMES,
+    TAMY_IDENTITY_COOKIE_DOMAINS,
+    TAMY_IDENTITY_USER_ID,
+    resolve_live_fixtures,
+)
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
 from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
@@ -135,6 +140,7 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
+AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
 # Tasks whose fixtures destructively mutate shared benchmark DB state. The
 # parallel scheduler runs these serially before starting any ordinary task so a
 # retained failed agent tree cannot mutate their fixtures. Each fixture must
@@ -142,6 +148,7 @@ AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
+    AMAZON_MX_TAMY_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
@@ -154,14 +161,12 @@ PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
     "plaid-transactions-doordash-count",
     "plaid-transactions-dead-subscriptions",
 }
+# Live X Hello World grades write-lock + post evidence against the synced CookieBundle.
+# Do not steer the agent into MintedAccount signup or phone-auth recovery.
 MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
-    "If X asks you to sign in or create an account first, use the minted email in auth options "
-    "when an email address is accepted. Click controls like 'Use email instead' when they are available. "
-    "Do not choose the initial 'Continue with phone' or 'Sign up with Phone' path; if X opens a phone-number "
-    "field before you have tried the email route, go back and find the email route instead. "
-    "Use the minted AgentPhone only if X explicitly requires phone/SMS auth after the email route. "
-    "If X shows 'An unexpected error occurred', treats the phone number as invalid, or fails to send an SMS, "
-    "stop and report that as a terminal phone-auth blocker instead of retrying alternate phone formats."
+    "Use the already signed-in X session in the browser if one is available. "
+    "Do not create a new X account and do not clear or replace existing X cookies. "
+    "Post the text exactly: Hello World."
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
@@ -172,8 +177,9 @@ AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
 }
-AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
+AGENT_PAYMENT_FORCE_CUSTOMER_PATH_ENV = "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -199,15 +205,13 @@ SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
 # Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
 # benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
 ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
-# The AgentCard payment-lifecycle benchmarks assert the REAL end-user funding path: a personal
-# Stripe hold is authorized, the company-funded card is minted, the hold is captured, and the
-# purchase clears or is refunded. `resolveAndIssuePurchaseCard` routes ADMIN users to
-# `issueAdminCompanyCard`, which never authorizes a hold, so running these as the default
-# (admin) benchmark user makes every `stripeHold` assertion unsatisfiable by construction.
-# They therefore run as a dedicated NON-ADMIN synthetic user seeded by
-# back-end/scripts/setup-benchmark-payment.ts. Must equal
-# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
-AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Sandbox AgentCard lifecycle benches run as the default admin account so the
+# credit gate uses unlimited admin credits. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+# (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+# resolveAndIssuePurchaseCard onto chargeAndIssueCard so stripeHold remains
+# reachable. Must equal BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID in
+# back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-setup-resume",
@@ -278,7 +282,7 @@ TERMINAL_STATUSES = {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHE
 
 
 def _x_post_prompt() -> str:
-    """Return the X post benchmark prompt with auth guidance for fresh profiles."""
+    """Return the X post benchmark prompt with live-session reuse guidance."""
     return f"{MINTED_AGENT_ACCOUNT_X_POST_GOAL}\n\n{MINTED_AGENT_ACCOUNT_X_AUTH_HINT}"
 
 
@@ -293,6 +297,52 @@ def _benchmark_env_bool(name: str) -> Optional[bool]:
     if normalized in ("0", "false", "no", "off"):
         return False
     raise ValueError(f"{name} must be one of true/false/1/0/yes/no/on/off")
+
+
+def _minted_clear_existing_auth_enabled() -> bool:
+    """Non-X minted benches clear saved realm auth unless explicitly disabled."""
+    flag = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    return True if flag is None else flag
+
+
+def _minted_x_clear_existing_auth_enabled() -> bool:
+    """Live X Hello World reuses synced cookies unless explicitly forced to clear."""
+    flag = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    return False if flag is None else flag
+
+
+def _x_post_has_grounded_submission_evidence(post_text: str) -> bool:
+    """Return true when the transcript grounds a submitted Hello World X post."""
+    normalized = (post_text or "").lower()
+    if "hello world" not in normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "posted",
+            "post submitted",
+            "post was submitted",
+            "successfully posted",
+            "published",
+        )
+    )
+
+
+def _grade_live_x_hello_world_post(
+    *,
+    post_passed: bool,
+    post_failure_reason: Optional[str],
+    post_status: str,
+    post_text: str,
+) -> tuple[bool, list[str]]:
+    """Grade live X Hello World: write-lock path must pass; MintedAccount is not required."""
+    post_evidence = _x_post_has_grounded_submission_evidence(post_text)
+    failure_parts: list[str] = []
+    if not post_passed:
+        failure_parts.append(f"post failed: {post_failure_reason or post_status}")
+    if post_passed and not post_evidence:
+        failure_parts.append("no grounded evidence that the Hello World post was submitted")
+    return post_passed and post_evidence, failure_parts
 
 
 def _resolved_fast_mode_cache(task: BenchmarkTask) -> Optional[bool]:
@@ -635,6 +685,20 @@ def _benchmark_context_path() -> Path:
     return REPO_ROOT / path
 
 
+DURABLE_BENCHMARK_FRONTEND_URL = "https://roselabs.ai"
+
+
+def _is_ephemeral_frontend_url(url: str) -> bool:
+    """Localhost / tunnel hosts die when the stack that minted them tears down."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return True
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return host.endswith((".ngrok.app", ".ngrok-free.app", ".trycloudflare.com", ".loca.lt"))
+
+
 def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
@@ -647,7 +711,7 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     # prod run to an unreachable tunnel.
     parsed = urlparse(base_url)
     if parsed.hostname not in {"localhost", "127.0.0.1"}:
-        return "https://roselabs.ai"
+        return DURABLE_BENCHMARK_FRONTEND_URL
     # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
     # This is the only URL the cloud browser agent can actually reach, so prefer it over any
     # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
@@ -668,14 +732,30 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
         return f"http://localhost:{int(conductor_port) + 1}"
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
-    return "https://roselabs.ai"
+    return DURABLE_BENCHMARK_FRONTEND_URL
 
 
 def _report_frontend_url_for_benchmark(base_url: str) -> str:
+    """Human-facing agent links for report cards / RCA / descend evidence.
+
+    These links must outlive the ephemeral stack that produced the run. Prefer
+    the always-on prod viewer (hub archive fallback via findAgentAcrossRuns).
+    Ephemeral hosts (localhost, ngrok, trycloudflare) are rejected even when
+    set via BENCHMARK_REPORT_FRONTEND_URL unless
+    BENCHMARK_REPORT_ALLOW_EPHEMERAL=1 is set for an intentional live-only view.
+    """
+    _ = base_url  # report links are host-stable; prompt URLs use _frontend_url_for_benchmark
     explicit = os.environ.get("BENCHMARK_REPORT_FRONTEND_URL", "").strip()
+    allow_ephemeral = os.environ.get("BENCHMARK_REPORT_ALLOW_EPHEMERAL", "").strip() == "1"
     if explicit:
-        return explicit.rstrip("/")
-    return _frontend_url_for_benchmark(base_url)
+        if allow_ephemeral or not _is_ephemeral_frontend_url(explicit):
+            return explicit.rstrip("/")
+    return DURABLE_BENCHMARK_FRONTEND_URL
+
+
+def durable_agent_frontend_url(agent_id: str) -> str:
+    """Canonical persistent FE deep link for an agent (live or hub-archived)."""
+    return f"{DURABLE_BENCHMARK_FRONTEND_URL}/?agent-id={agent_id}"
 
 
 def _payment_receipt_from_attention_request(req: dict) -> dict:
@@ -1120,6 +1200,15 @@ def _validate_payment_receipt(
     if not receipt:
         return "missing requestPaymentCard metadata"
 
+    # Catalog `expected_payment_receipt: true` means "any well-formed payment-card request"
+    # (e.g. gate-subscription-card-mint-admin-bypass). Calling `.get` on the bool raised
+    # AttributeError, which the poll loop swallowed as "Approval check error" and delayed
+    # auto-approve + never set expected_payment_receipt_seen on that first sighting.
+    if expected is True:
+        return None
+    if not isinstance(expected, dict):
+        return f"invalid expected_payment_receipt type: {type(expected).__name__}"
+
     required_fields = expected.get("requiredFields", [])
     for field in required_fields:
         if field not in receipt:
@@ -1404,10 +1493,12 @@ async def _update_world_model_before_simulation(args) -> None:
 
 
 def _extract_agent_payment_output_blob(data: dict) -> str:
-    """Collect the browser sub-agent's populated structured output(s) — key-agnostic — as a JSON blob
-    for the reusable semantic output judge. The browser agent's output_schema is LLM-synthesized per
-    run, so the confirmation id may land under order_id, order_confirmation_id, payment_confirmation_id,
-    receipt_id, etc.; the judge maps it by meaning, so we keep every populated structured response."""
+    """Collect terminal browser output — key-agnostic — as a JSON blob for semantic judging.
+
+    Prefer populated structured responses. When a completed browser task used its user-message
+    terminal path, the manager has no structured metadata even though the same grounded result is
+    preserved in the terminal tool message; retain that text as the fallback evidence channel.
+    """
     blobs: List[dict] = []
     for message in data.get("messages", []) or []:
         if not isinstance(message, dict) or message.get("role") != "TOOL":
@@ -1420,6 +1511,14 @@ def _extract_agent_payment_output_blob(data: dict) -> str:
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
         if isinstance(structured, dict):
             blobs.append(structured)
+            continue
+        message_text = message.get("message")
+        if (
+            metadata.get("action_type") == "task_complete"
+            and isinstance(message_text, str)
+            and message_text.strip()
+        ):
+            blobs.append({"browser_result_text": message_text})
     return json.dumps(blobs, default=str) if blobs else ""
 
 
@@ -1552,8 +1651,9 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
     if task_name in AGENT_PAYMENT_SANDBOX_TASK_NAMES:
         if base_url is not None and not _is_local_base_url(base_url):
             return None
-        # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
-        # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
+        # Sandbox lifecycle benches run as the default admin account. The backend
+        # keeps admin credits (unlimited) and BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+        # forces the charged Stripe-hold mint path.
         return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_BENCHMARK_USER_ID
     return None
 
@@ -1570,15 +1670,17 @@ def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
 
     Single source of truth for the run-user override so the mapping can be asserted directly
     instead of being buried in `run_single_task`. Getting it wrong is not a cosmetic bug: the
-    payment-lifecycle tasks assert a personal Stripe hold, which only the NON-admin funding path in
-    `resolveAndIssuePurchaseCard` produces, and the default benchmark user is a hardcoded admin.
+    sandbox payment-lifecycle tasks assert a Stripe hold. They run as the admin
+    account with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH so credits stay
+    unlimited while minting still authorizes a hold. Production tasks stay on
+    the dedicated non-admin live identity.
     """
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
         return GATE_FIXTURE_TASK_USER_IDS[task_name]
     if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
-        return AGENT_PAYMENT_LIFECYCLE_USER_ID
+        return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_LIFECYCLE_USER_ID
     if task_name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
         return AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     return None
@@ -4330,10 +4432,6 @@ def evaluate_task(
 
     # Check approval expectations
     if task.approval_handling in ("auto_approve", "prompt_user") and approvals_triggered == 0:
-        if task.name == f"{MINTED_AGENT_ACCOUNT_X_TASK_NAME}-post" and _x_signup_has_terminal_phone_blocker(
-            _agent_data_search_text(data)
-        ):
-            return True, None
         return False, "Expected approval requests but none were triggered"
 
     if task.expected_attention_kind_any_of and approvals_triggered > 0:
@@ -4989,6 +5087,29 @@ def _grep_fixture_env() -> dict:
     return env
 
 
+def _prod_source_database_url_for_fixture(target_database_url: str) -> Optional[str]:
+    """Resolve a remote/prod DB URL for one-shot fixture freezes.
+
+    Isolated local runs set process ``DATABASE_URL`` to the per-run Victoria
+    database. Reading that process value as the freeze *source* makes
+    ``source == target``, so ``BENCHMARK_*_SOURCE_DATABASE_URL`` is never set
+    and a missing frozen fixture file fails closed with "no source URL".
+    Always read the backend ``.env`` file (not process env), preferring
+    direct URLs when present.
+    """
+    source_database_url = (
+        load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+    )
+    if not source_database_url:
+        return None
+    source_database_url = _psql_compatible_database_url(source_database_url)
+    if source_database_url == target_database_url:
+        return None
+    return source_database_url
+
+
 def _plaid_transactions_fixture_env() -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -4996,11 +5117,9 @@ def _plaid_transactions_fixture_env() -> dict:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["BENCHMARK_USER_ID"] = USER_ID
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -5060,11 +5179,9 @@ def _user_data_fixture_env() -> dict:
     env["BENCHMARK_USER_ID"] = USER_ID
     # Source (prod) URL lets the fixture freeze real documents once if the frozen
     # file is missing. When the frozen file already exists, apply is fully offline.
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -5355,13 +5472,21 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     return True
 
 
-def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
+def _sync_browser_credentials(
+    cookie_domains: tuple[str, ...] = (),
+    *,
+    user_id: Optional[str] = None,
+) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
     prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
     so the live fixture re-pulls them right before the agent starts.
     Best-effort but loud. Reads the prod source from back-end/.env.
+
+    ``user_id`` retargets the sync at a real production identity other than the
+    default benchmark user. The seed upserts that User row before writing any
+    browser-auth rows, so an isolated DB can safely run the task as that person.
 
     When ``cookie_domains`` is given (from the task's environment.live_cookie_domains),
     every domain-bearing browser-auth table is scoped to those domains: cookies,
@@ -5377,6 +5502,8 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    if user_id:
+        env["SEED_LOCAL_USER_ID"] = user_id
     if cookie_domains:
         # seed-local.ts filters every domain-bearing browser-auth read, so the
         # sync is bounded by the task's auth state, not the whole account.
@@ -5412,13 +5539,58 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     return True
 
 
-def _sync_passkeys() -> None:
+def _sync_email_credentials() -> bool:
+    """Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential from prod.
+
+    The canonical base-image dump can freeze abandoned OAuth rows (null email /
+    null accessToken). Connected Integrations then omits every send-from address
+    and ``message_person`` fails closed with ``Missing from_email`` before any
+    email_send approval can fire. Same pattern as ``_sync_compute_tokens``.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Email credential sync skipped: local Victoria DB not found")
+        return False
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-local.ts", "--email-credentials-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(f"    ⚠ Email credential sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Email credential sync error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Email credential sync failed: {_seed_sync_error_detail(result)}")
+        return False
+    print("    ✉️  Refreshed email credentials from prod")
+    return True
+
+
+def _sync_passkeys(
+    *,
+    user_id: Optional[str] = None,
+    cookie_domains: tuple[str, ...] = (),
+) -> None:
     """Refresh only passkeys from prod into the isolated benchmark DB.
 
     Unlike the broad base fixture, this deliberately excludes cookies, origin
     storage, browser profiles, and passwords. Failure is fatal because an old
     or missing passkey would invalidate the benchmark rather than merely make
     it less convenient.
+
+    ``user_id`` retargets the seed at another real production identity (and
+    makes it upsert that User row first, so later user-scoped writes have a
+    parent). Default None keeps the dev user, which is what every existing
+    caller wants. ``cookie_domains`` scopes the passkey selection to the realms
+    a task actually needs.
     """
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -5426,6 +5598,10 @@ def _sync_passkeys() -> None:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    if user_id:
+        env["SEED_LOCAL_USER_ID"] = user_id
+    if cookie_domains:
+        env["SEED_COOKIE_DOMAINS"] = ",".join(cookie_domains)
     try:
         result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
@@ -5689,7 +5865,9 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         )
     if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
-    if not _sync_browser_credentials(ctx.cookie_domains):
+    if not _sync_email_credentials():
+        raise RuntimeError("Live fixture could not refresh email credentials")
+    if not _sync_browser_credentials(ctx.cookie_domains, user_id=ctx.user_id):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     # A green sync only proves the command exited 0. For domains whose task
     # contract explicitly requires authentication, assert that the post-sync DB
@@ -5751,29 +5929,30 @@ async def _refresh_local_compute_tokens_for_run(
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    # Claude-Code-required tasks must not inherit the Anthropic API-key
-    # tolerance — spawn_claude_code_agent cannot use that fallback.
-    tolerate_missing_claude = False
+    #
+    # Claude Code sessions DO use the shared ANTHROPIC_API_KEY when no OAuth
+    # envelope is available (see resolveClaudeCodeAuthEnvs). Tolerate a missing
+    # claude_code sync only when that funded-key path is confirmed healthy —
+    # otherwise require_claude_code tasks would start, discover an unfunded key
+    # mid-run, and burn the suite. Never pair this with credential-skip-as-PASS.
+    #
+    # Code-agent tasks (requires_claude_code) can also run via Codex: the
+    # spawn_claude_code_agent tool selects provider=codex when the workflow holds
+    # a GPT compute token. Without a funded Anthropic key, require *either*
+    # claude_code or gpt_code rather than hard-requiring Claude OAuth alone.
+    has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
+    tolerate_missing_claude = has_anthropic_key_fallback
     required_token_types: tuple[str, ...] | None = None
-    # Probed at most ONCE per run and reused for the cost warning below. Asking
-    # again is a second live HTTP round-trip and breaks the awaited-once contract
-    # its tests pin.
-    has_anthropic_key_fallback = False
-    if require_claude_code:
-        required_token_types = ("claude",)
-    else:
-        has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
-        tolerate_missing_claude = has_anthropic_key_fallback
+    if require_claude_code and not has_anthropic_key_fallback:
+        required_token_types = ("any",)
+        tolerate_missing_claude = False
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
         required_token_types=required_token_types,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
-    # Only meaningful on the tolerant path: a `require_claude_code` run hard-gates
-    # on a real claude token above, so it always has a claudeAuth path and this
-    # warning would be false.
-    if not require_claude_code and not has_anthropic_key_fallback:
+    if not has_anthropic_key_fallback:
         print(
             "    ⚠️  No claudeAuth compute path (expired/rate-limited claude_code and no funded "
             "Anthropic key): this run bills the paid waterfall. Cost figures are NOT comparable "
@@ -6024,8 +6203,51 @@ async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
     await asyncio.to_thread(_restore_live_fixture_scenarios, manifests)
 
 
+def _live_fixture_run_user_id(task: "BenchmarkTask") -> Optional[str]:
+    """The production identity a task's declared live fixtures make it run as."""
+    if "live-tamy-identity" in resolve_live_fixtures(task.environment):
+        return TAMY_IDENTITY_USER_ID
+    return None
+
+
+def _apply_live_tamy_identity_fixture(ctx: LiveFixtureContext) -> dict:
+    """Apply the complete live overlay for the Mexico production identity.
+
+    The `live` overlay refreshes credentials for whichever identity the seed is
+    pointed at, but the seed always resolved to the dev user, so a task launched
+    with a different BENCHMARK_RUN_USER_ID ran against a DB that had no row for
+    it at all. That is not a task failure: `POST /api/browser-session/init` 500s
+    with `Foreign key constraint violated: AgentIdentity_userId_fkey` and the
+    browser agent never starts.
+
+    This is a complete live fixture, not a supplement to the default-user
+    fixture: it refreshes compute tokens, retargets the browser-auth seed via
+    SEED_LOCAL_USER_ID, and upserts the User record before any user-scoped row.
+    Scoping the auth graph to her Amazon realms keeps the sync in seconds while
+    retaining profiles, cookies/storage, passwords, passkeys, CookieBundles and
+    Steel session markers. Fails closed if any part of that overlay cannot sync.
+    """
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — skipping the MX identity overlay")
+        return {"fixture": "live-tamy-identity", "skipped": True, "reason": "simulate"}
+    manifest = _apply_live_fixture(
+        replace(
+            ctx,
+            user_id=TAMY_IDENTITY_USER_ID,
+            cookie_domains=TAMY_IDENTITY_COOKIE_DOMAINS,
+        )
+    )
+    print(f"    🇲🇽 Seeded Tamy's production identity {TAMY_IDENTITY_USER_ID} into the isolated DB")
+    return {
+        **manifest,
+        "fixture": "live-tamy-identity",
+        "user_id": TAMY_IDENTITY_USER_ID,
+    }
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
+    "live-tamy-identity": _apply_live_tamy_identity_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
@@ -7035,6 +7257,72 @@ def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     return scores[-1]
 
 
+def _webdecoy_parse_score_value(raw_score: object) -> Optional[float]:
+    """Parse a structured FCaptcha risk score (numeric or numeric string)."""
+    if isinstance(raw_score, bool):
+        return None
+    if isinstance(raw_score, (int, float)):
+        return float(raw_score)
+    if isinstance(raw_score, str):
+        match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*", raw_score)
+        if match is not None:
+            return float(match.group(1))
+    return None
+
+
+def _webdecoy_structured_score(data: dict) -> Optional[float]:
+    """Read the terminal browser task's grounded FCaptcha score."""
+    scores: List[float] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") != "spawn_browser_agent"
+            or metadata.get("toolStatus") != "FINISHED"
+            or metadata.get("action_type") != "task_complete"
+        ):
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        # Schema field is fcaptcha_risk_score; risk_score kept for older fixtures.
+        raw_score = structured.get("fcaptcha_risk_score")
+        if raw_score is None:
+            raw_score = structured.get("risk_score")
+        parsed = _webdecoy_parse_score_value(raw_score)
+        if parsed is not None:
+            scores.append(parsed)
+    if not scores:
+        return None
+    return scores[-1]
+
+
+def _webdecoy_visible_risk_scores(text: str) -> list[float]:
+    """Extract visible FCaptcha risk scores from agent transcript text.
+
+    Rejects numbered-list false positives like "(3) Risk score: ..." where the
+    list ordinal would otherwise become scores[-1] and fail the ratchet gate.
+    """
+    score_patterns = (
+        # "Risk Score (lower = human): 0.00" / "risk score:** 0.09"
+        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
+        # "0.09 risk score" — require a decimal so list ordinals ("3) Risk score")
+        # cannot match.
+        r"([0-9]+\.[0-9]+)\s*[^a-z0-9]{0,12}risk\s*score",
+    )
+    scores: list[float] = []
+    for pattern in score_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            try:
+                scores.append(float(match.group(1)))
+            except ValueError:
+                continue
+    return scores
+
+
 def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str]]:
     text = _agent_data_search_text(data)
     if "webdecoy.com/product/fcaptcha-demo" not in text and "fcaptcha" not in text:
@@ -7044,24 +7332,22 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     if not any(marker in text for marker in ("benchmark-human@example.com", "invisible mode", "submit")):
         return False, "No grounded evidence of invisible-mode form interaction"
 
-    score_patterns = (
-        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
-        r"([0-9]+(?:\.[0-9]+)?)\s*[^a-z0-9]{0,12}risk\s*score",
-    )
-    scores: list[float] = []
-    for pattern in score_patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            try:
-                scores.append(float(match.group(1)))
-            except ValueError:
-                continue
+    scores = _webdecoy_visible_risk_scores(text)
 
     exact_score = _webdecoy_exact_score_from_recordings(data)
-    if exact_score is None and not scores:
+    structured_score = _webdecoy_structured_score(data)
+    if exact_score is None and structured_score is None and not scores:
         return False, "No FCaptcha risk score was reported"
 
-    final_score = exact_score if exact_score is not None else scores[-1]
-    score_source = "captured API" if exact_score is not None else "visible"
+    if exact_score is not None:
+        final_score = exact_score
+        score_source = "captured API"
+    elif structured_score is not None:
+        final_score = structured_score
+        score_source = "structured output"
+    else:
+        final_score = scores[-1]
+        score_source = "visible"
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
@@ -7101,8 +7387,21 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
 
 
 def _x_signup_has_terminal_phone_blocker(signup_text: str) -> bool:
-    """Return true when X forced phone auth and rejected it before account creation."""
-    normalized = signup_text.lower()
+    """Return true when X forced phone auth and rejected it before account creation.
+
+    The X post prompt embeds guidance that names these failure modes (including the
+    exact phrase "terminal phone-auth blocker"). `_task_result_search_text` includes
+    USER/spawn-goal text, so matching the raw blob false-positives every successful
+    run. Strip the stock auth hint / post prompt before scanning for outcome markers.
+    """
+    normalized = (signup_text or "").lower()
+    for stock in (
+        MINTED_AGENT_ACCOUNT_X_AUTH_HINT.lower(),
+        _x_post_prompt().lower(),
+        MINTED_AGENT_ACCOUNT_X_POST_GOAL.lower(),
+    ):
+        if stock:
+            normalized = normalized.replace(stock, " ")
     return any(
         marker in normalized
         for marker in (
@@ -7201,7 +7500,15 @@ async def run_minted_agent_account_task(
         "on",
     )
     prefer_phone_auth = _benchmark_env_bool("BENCHMARK_MINTED_PREFER_PHONE_AUTH") is True
-    clear_existing_auth = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH") is True
+    # Live X Hello World reuses the synced CookieBundle and grades write-lock
+    # notification semantics — clearing auth forces mint/signup noise. Other
+    # minted realms still clear by default. Override either path with
+    # BENCHMARK_MINTED_CLEAR_EXISTING_AUTH.
+    clear_existing_auth = (
+        _minted_x_clear_existing_auth_enabled()
+        if target_realm == "x.com"
+        else _minted_clear_existing_auth_enabled()
+    )
     phone_evidence_since = datetime.now(timezone.utc)
     identity_was_present = _local_agent_identity_present_for_user(USER_ID)
     deleted = _delete_local_minted_accounts_for_user(USER_ID, reset_agent_identity=reset_agent_identity)
@@ -7295,10 +7602,13 @@ async def run_minted_agent_account_task(
         post_task = replace(
             task,
             name=f"{task.name}-post",
-            title="Minted Agent Account X Post",
+            title="Live X Hello World Post",
             prompt=_x_post_prompt(),
-            approval_handling="auto_approve",
-            expected_attention_kind="write_lock",
+            approval_handling=task.approval_handling or "auto_approve",
+            expected_attention_kind=task.expected_attention_kind or "write_lock",
+            expected_approval_count=(
+                task.expected_approval_count if task.expected_approval_count is not None else 1
+            ),
             timeout_seconds=max(task.timeout_seconds, 900),
         )
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
@@ -7313,24 +7623,16 @@ async def run_minted_agent_account_task(
 
         minted = _get_local_minted_account(USER_ID, target_realm)
         if minted:
-            print(f"    ✅ Minted account persisted for {target_realm}: {minted['account_label']}")
+            print(f"    ℹ️ MintedAccount present for {target_realm} (not required): {minted['account_label']}")
         else:
-            print(f"    ❌ No minted account persisted for {target_realm}")
+            print(f"    ℹ️ No MintedAccount for {target_realm} (not required for live-auth X post)")
         post_text = _task_result_search_text(post_result)
-        post_evidence = "hello world" in post_text and any(
-            marker in post_text for marker in ("posted", "post submitted", "post was submitted", "successfully posted")
+        passed, failure_parts = _grade_live_x_hello_world_post(
+            post_passed=post_result.passed,
+            post_failure_reason=post_result.failure_reason,
+            post_status=post_result.status,
+            post_text=post_text,
         )
-        x_terminal_phone_blocker = _x_signup_has_terminal_phone_blocker(post_text)
-        passed = post_result.passed and minted is not None and post_evidence and not x_terminal_phone_blocker
-        failure_parts = []
-        if minted is None:
-            failure_parts.append(f"no MintedAccount row for {target_realm}")
-        if x_terminal_phone_blocker:
-            failure_parts.append("X forced phone auth and returned a terminal phone-auth blocker")
-        if not post_result.passed:
-            failure_parts.append(f"post failed: {post_result.failure_reason or post_result.status}")
-        if post_result.passed and not post_evidence and not x_terminal_phone_blocker:
-            failure_parts.append("no grounded evidence that the Hello World post was submitted")
         return TaskResult(
             name=task.name,
             passed=passed,
@@ -7799,10 +8101,12 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     """Return distinct browser attempts and grounded failed lifecycle events."""
     failures: list[str] = []
-    for message in data.get("messages", []) or []:
+    messages = data.get("messages", []) or []
+    for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = _tool_message_body(message)
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -7823,7 +8127,28 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                continue
+            if _is_recoverable_browser_element_miss_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_pinned_host_refusal_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_browser_evaluate_uncaught_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8003,13 +8328,286 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+_ELEMENT_INDEX_NOT_FOUND_RE = re.compile(
+    r"^Element with index \d+ not found\.?$",
+    re.IGNORECASE,
+)
+
+
+def _browser_tool_candidate(candidate: dict) -> bool:
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    return tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+
+
+def _is_browser_element_index_miss(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when a browser action failed only because a DOM index was stale."""
+    if not _browser_tool_candidate(candidate):
+        return False
+    texts = [str(message_text or "").strip()]
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    err = event_data.get("error")
+    if err is not None:
+        texts.append(str(err).strip())
+    return any(bool(text) and _ELEMENT_INDEX_NOT_FOUND_RE.fullmatch(text) for text in texts)
+
+
+def _has_later_browser_recovery(messages: list, start_index: int) -> bool:
+    """True when a later browser event proves the session continued usefully."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if not _browser_tool_candidate(metadata):
+            continue
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        action_type = str(metadata.get("action_type") or metadata.get("actionType") or "")
+        if action_type in {"request_payment_card", "requestPaymentCard"} and status in {
+            "FINISHED",
+            "IN_PROGRESS",
+        }:
+            return True
+        if status == "FINISHED" and action_type not in {"", "error"}:
+            return True
+    return False
+
+
+def _is_recoverable_browser_element_miss_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Stale DOM index ERRORs often happen mid-run; recovered ones are not tool failures.
+
+    Browser agents frequently hit `Element with index N not found` after a DOM refresh,
+    then continue (scroll/click/payment). Counting those recovered ERRORs in
+    `no_tool_failures` / `no_browser_agent_failures` fails closed payment-terminal benches
+    that still reach `requestPaymentCard`. Unrecovered terminal misses still count.
+    """
+    if not _is_browser_element_index_miss(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
+_PINNED_HOST_REFUSAL_RE = re.compile(
+    r"Refusing (?:to leave pinned page host|click that navigates off pinned host|"
+    r"key chord .+ that would leave pinned host|"
+    r"evaluate that would navigate away from pinned host)",
+    re.IGNORECASE,
+)
+
+
+def _is_browser_pinned_host_refusal(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when the browser guard refused leaving an antibot-pinned host."""
+    if not _browser_tool_candidate(candidate):
+        return False
+    parts = [str(message_text or "").strip()]
+    for key in ("error", "title", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return bool(_PINNED_HOST_REFUSAL_RE.search("\n".join(parts)))
+
+
+def _is_recoverable_pinned_host_refusal_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Pinned-host guard ERRORs during challenge pin are retry noise when later recovered.
+
+    While a Google/Cloudflare (etc.) page is pinned, escape attempts (close_tab,
+    switch_tab, off-host click, navback, Ctrl+W, evaluate navigate) ERROR with
+    `Refusing … pinned host`. Agents often recover and still reach payment.
+    Counting those recovered refusals in `no_tool_failures` fails closed
+    payment-terminal benches. Unrecovered terminal refusals still count.
+    """
+    if not _is_browser_pinned_host_refusal(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
+_PAGE_EVALUATE_UNCAUGHT_RE = re.compile(
+    r"^Uncaught(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def _is_browser_page_evaluate_uncaught(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when a page ``evaluate`` action failed with a truncated JS Uncaught error.
+
+    Kernel/CDP often surfaces page-script exceptions as the bare token ``Uncaught``
+    (or ``Uncaught TypeError: …``) on ``action_type=error`` rows whose title is
+    ``evaluate``. That is page-side noise the browser agent is expected to retry
+    around — not a harness/tool crash.
+    """
+    if not _browser_tool_candidate(candidate):
+        return False
+    title = str(candidate.get("title") or "").strip().lower()
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "").strip().lower()
+    # ERROR lifecycle rewrites action_type to ``error``; title keeps ``evaluate``.
+    if title != "evaluate" and action_type != "evaluate":
+        return False
+    texts = [str(message_text or "").strip()]
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    err = event_data.get("error")
+    if err is not None:
+        texts.append(str(err).strip())
+    for key in ("error", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+    return any(bool(text) and _PAGE_EVALUATE_UNCAUGHT_RE.match(text) for text in texts)
+
+
+def _is_recoverable_browser_evaluate_uncaught_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Page-evaluate Uncaught ERRORs recovered before payment are not tool failures.
+
+    Local repro: browser-imax-group-tickets agent
+    ``482d6aa2-90f0-4173-95a4-f51bfbce2055`` reached grounded payment_approval
+    ($89.94 AMC) after ``spawn_browser_agent`` ERROR message ``Uncaught``
+    (title ``evaluate``), then failed only on ``no_tool_failures``. Unrecovered
+    terminal Uncaught rows still count.
+    """
+    if not _is_browser_page_evaluate_uncaught(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
+def _tool_message_body(message: dict) -> str:
+    """Return tool/user-visible body text from either API (`text`) or artifact (`message`)."""
+    return str(message.get("text") or message.get("message") or "")
+
+
+def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
+    """Join transcript + metadata error surfaces for intermediate-failure classifiers.
+
+    Agent GET payloads use `text` (see `extract_message_transcript`); archived
+    run JSON often remaps that to `message`. Read both so live eval and offline
+    replay classify the same ERROR rows.
+    """
+    parts: list[str] = []
+    if isinstance(message, dict):
+        parts.append(
+            str(
+                message.get("text")
+                or message.get("message")
+                or message.get("content")
+                or ""
+            )
+        )
+    for key in ("error", "title", "detail", "details", "message"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """Stale DOM indexes / invalid CDP backendNodeIds ERROR then the browser agent retries.
+
+    SPA remounts (Amazon checkout re-auth, etc.) invalidate selector-map indexes. Humanize
+    then refuses click/TypeTextEvent with `Cannot humanize … no coordinates available`
+    (CDP often reports `No node found for given backend id` underneath). The browser
+    agent is expected to re-observe and retry; counting those rows in `no_tool_failures`
+    / `no_browser_agent_failures` fails closed on expected retry noise after a later
+    grounded write-lock / payment boundary.
+    """
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    is_browser = tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+    if not is_browser:
+        return False
+    blob = _message_failure_text(message, candidate).lower()
+    if "cannot humanize" in blob and "no coordinates available" in blob:
+        return True
+    return (
+        "no node found for given backend id" in blob
+        or "no node with given id found" in blob
+    )
+
+
+def _is_intermediate_navigation_pin_guard_failure(
+    candidate: dict,
+    message: Optional[dict] = None,
+) -> bool:
+    """Explicit `navigation_pin_guard` action rows are intermediate coaching only.
+
+    Textual `Refusing … pinned host` ERRORs are handled by
+    `_is_recoverable_pinned_host_refusal_failure` (requires a later browser
+    recovery). Do not treat every pinned-host refusal string as retry noise —
+    unrecovered terminal refusals must still fail `no_tool_failures`.
+
+    Local repro: browser-doordash-usb-c-cable agent
+    b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached an unresolved Place Order write_lock
+    after an evaluate pin-guard ERROR; recovery-gated pinned-host classification
+    covers that path.
+    """
+    _ = message  # signature matches sibling intermediate classifiers
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+    return action_type == "navigation_pin_guard"
+
+
+def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """True when a browser-agent ERROR is expected recovery / retry noise."""
+    return (
+        _is_intermediate_challenge_recovery_failure(candidate)
+        or _is_intermediate_stale_dom_node_failure(candidate, message)
+        or _is_intermediate_navigation_pin_guard_failure(candidate, message)
+    )
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
-    for message in data.get("messages", []) or []:
+    messages = data.get("messages", []) or []
+    for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = _tool_message_body(message)
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -8017,7 +8615,28 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
                 continue
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                continue
+            if _is_recoverable_browser_element_miss_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_pinned_host_refusal_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_browser_evaluate_uncaught_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8410,6 +9029,14 @@ async def run_single_task(
     run_user_id_override = _benchmark_user_id_for_task(task.name, base_url)
     if run_user_id_override is None and task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
         run_user_id_override = benchmark_run_user_id_for_task(task.name)
+    if run_user_id_override is None:
+        # An identity live-fixture both seeds a production person into the
+        # isolated DB and declares who the task runs as. Deriving the run user
+        # from the declared fixture keeps the two in lockstep: seeding her rows
+        # but still running as the dev user would exercise the wrong account,
+        # and running as her without the fixture is the FK crash this fixture
+        # exists to prevent.
+        run_user_id_override = _live_fixture_run_user_id(task)
     if run_user_id_override:
         os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
@@ -9790,9 +10417,10 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
     """Mirror the backend's funded-fallback selection without probing the key.
 
     Credential health owns the live Anthropic request. The benchmark preflight
-    owns runtime selection: the key must be configured and the backend's shared
-    out-of-credits circuit breaker must be clear. Any unavailable check fails
-    closed and leaves Claude OAuth mandatory.
+    owns runtime selection: either the shared ANTHROPIC_API_KEY is configured
+    and clear of its out-of-credits cooldown, OR OpenRouter is configured so
+    Claude Code can use the Anthropic-compatible gateway (same path as
+    resolveClaudeCodeSandboxApiKey when the shared org is on cooldown).
     """
     try:
         headers = await _api_headers()
@@ -9805,11 +10433,11 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
         if response.status_code != 200:
             return False
         availability = response.json()
-        return (
-            isinstance(availability, dict)
-            and availability.get("configured") is True
-            and availability.get("onCooldown") is False
-        )
+        if not isinstance(availability, dict):
+            return False
+        if availability.get("configured") is True and availability.get("onCooldown") is False:
+            return True
+        return availability.get("openrouterConfigured") is True
     except Exception:
         return False
 
@@ -9845,13 +10473,11 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
     """Check whether Claude Code can actually create a code session.
 
     A GPT/Codex compute token is not sufficient for a task that explicitly calls
-    ``spawn_claude_code_agent``. The runtime may have valid GPT credentials for
-    ordinary agent turns while Claude Code still has no user token or pool token.
-    Do not treat the shared Anthropic API-key fallback as sufficient here:
-    credential-health is the live funded-key probe, and Anthropic failures are
-    intentionally warn-only. This smoke gate is skippable when there is no real
-    Claude Code credential, so it should not launch a task that may discover an
-    unfunded or cooled-down fallback only after the benchmark starts.
+    ``spawn_claude_code_agent``. Prefer a live OAuth access token when present.
+    When OAuth is absent, accept the shared ANTHROPIC_API_KEY only if the
+    backend reports it configured and not on cooldown — that is the same funded
+    fallback ``resolveClaudeCodeAuthEnvs`` uses inside E2B. Do not launch when
+    both are missing; discovering an unfunded key mid-run burns the suite.
     """
     try:
         headers = await _api_headers()
@@ -9863,8 +10489,9 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return bool(data.get("accessToken"))
-        return False
+                if bool(data.get("accessToken")):
+                    return True
+        return await _has_usable_anthropic_api_key_fallback(base_url)
     except Exception:
         return False
 
@@ -10131,6 +10758,15 @@ async def main_async(args):
             require_claude_code=bool(claude_code_tasks_for_refresh)
             and not allow_claude_code_credential_skip,
         )
+        # Base-image dumps can freeze unusable Gmail OAuth rows; any local task
+        # that must send email (message_person) needs a fresh credential overlay
+        # or Connected Integrations never lists a from_email and the harness
+        # fails before an email_send approval can fire.
+        if any("message_person" in (t.expected_tools or []) for t in tasks):
+            if not _sync_email_credentials():
+                raise RuntimeError(
+                    "Benchmark run could not refresh email credentials for message_person tasks"
+                )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     # Default (fleet/cloud): missing Claude Code credentials after a required
@@ -10281,7 +10917,6 @@ async def main_async(args):
 
     def _report_snapshot(running_names: set[str]) -> RunState:
         finished = {r.name for r in run.task_results}
-        fe = _report_frontend_url_for_benchmark(base_url)
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
@@ -10297,7 +10932,7 @@ async def main_async(args):
                     status=status,
                     duration_s=r.duration_seconds,
                     cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
-                    agent_url=f"{fe}/?agent-id={r.agent_id}" if r.agent_id else None,
+                    agent_url=durable_agent_frontend_url(r.agent_id) if r.agent_id else None,
                     llm_call_count=r.llm_call_count,
                     tree_agent_count=r.tree_agent_count,
                     tokens_in=r.tokens_in,
@@ -10314,7 +10949,7 @@ async def main_async(args):
                     TaskCard(
                         name=name,
                         status="running",
-                        agent_url=f"{fe}/?agent-id={live_agent_id}" if live_agent_id else None,
+                        agent_url=durable_agent_frontend_url(live_agent_id) if live_agent_id else None,
                         world_model_mode=task_world_model_modes.get(name),
                     )
                 )

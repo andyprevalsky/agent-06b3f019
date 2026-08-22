@@ -240,13 +240,15 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     },
     url: () => 'https://order.online/store/blue-bottle',
     waitForTimeout: async () => undefined,
-    evaluate: async (pageFunction: unknown, arg?: { url: string; hostKey: string; loadAsScript: boolean }) => {
+    evaluate: async (
+      pageFunction: unknown,
+      arg?: { url: string; hostKey: string; loadAsScript: boolean }
+    ) => {
       if (arg?.url) {
         const hosts: Record<string, boolean> = { [arg.hostKey]: true };
         if (arg.loadAsScript) hosts['script.load'] = true;
         return hosts;
       }
-      const source = Function.prototype.toString.call(pageFunction);
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
       assert.strictEqual(
         typeof pageFunction,

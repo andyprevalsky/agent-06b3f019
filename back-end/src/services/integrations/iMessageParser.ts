@@ -114,7 +114,7 @@ export async function parseIMessageData(
   }
 
   const integration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'imessage' } },
+    where: { userId_name_accountId: { userId, name: 'imessage', accountId: '' } },
   });
 
   if (!integration) {

@@ -449,9 +449,7 @@ function testChallengeDetection(): void {
 }
 
 function testSteelPreferredWhenCdnHardFilterActive(): void {
-  assert.ok(
-    !shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x')
-  );
+  assert.ok(!shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x'));
   assert.ok(
     shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x', {
       requirePaymentCdn: true,
@@ -470,7 +468,6 @@ function testSteelPreferredWhenCdnHardFilterActive(): void {
   );
   assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }
-
 
 function testPreferredConfigCompatibility(): void {
   const preferred = {
@@ -694,8 +691,6 @@ async function testUnavailableLearnedConfigFallsBackToDeploymentDefault(): Promi
   assert.strictEqual(kernelCalls, 1);
   assert.deepStrictEqual(steelOptions, [{ proxyMode: 'fixed' }]);
 }
-
-
 
 function testRecoveryRequestSchema(): void {
   const parsed = recoverChallengeSchema.parse({

@@ -33,11 +33,6 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
-from utils.payment_card import (
-    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-    build_payment_question,
-    normalize_payment_payload,
-)
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -55,6 +50,11 @@ from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import build_browser_state_message_content
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
+from utils.payment_card import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    build_payment_question,
+    normalize_payment_payload,
+)
 from utils.prompts import build_verifier_prompt
 
 from .cdp_urls import steel_cdp_connection_url
@@ -67,6 +67,7 @@ from .challenge_recovery import (
     verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
 )
+from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -82,6 +83,7 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
+    NAVIGATE_TO_URL_TIMEOUT_SECONDS,
     SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
     SESSION_INIT_TRANSIENT_RETRY_SECONDS,
     SESSION_MAX_WAIT_SECONDS,
@@ -90,12 +92,13 @@ from .config import (
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
 from .credential_runtime import build_realm_credential_state
+from .download_persist import BrowserDownloadPersister
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
-    blocked_resource_url_for_recovery,
     blocked_resource_requires_payment_cdn,
+    blocked_resource_url_for_recovery,
     browser_recording_output_dir,
     normalize_simulated_browser_frame,
 )
@@ -1262,6 +1265,8 @@ async def _reconnect_browser_stack_after_rotation(
     old_driver_pid: Optional[int],
     fingerprint_injection: Optional[Any],
     agent_id: str,
+    config: Any = None,
+    task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
 
@@ -1293,6 +1298,17 @@ async def _reconnect_browser_stack_after_rotation(
     driver_pid = None
     try:
         await dom_service.connect()
+        if config is not None and task_id:
+            from browser_tools.captcha_solve_indicator import (
+                start_captcha_telemetry_indicator_for_task,
+            )
+
+            start_captcha_telemetry_indicator_for_task(
+                dom_service,
+                fetch_telemetry=fetch_browser_captcha_telemetry,
+                config=config,
+                task_id=task_id,
+            )
         dom_page = await dom_service.session.get_current_page()
 
         from playwright.async_api import async_playwright
@@ -2434,6 +2450,189 @@ async def _run_browser_supervisor_recovery(
     return recovery
 
 
+# Max fork attempts including the first call. Every gate retries with the
+# validation/tool error in context before falling back to the deterministic question.
+_WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS = 3
+
+# Worked examples for the notification fork — payloads mirror the fields our
+# renderer (_render_write_lock_notification_question / _append_*_notification)
+# and schema already prescribe. Shown to the model as format targets, not as
+# hardcoded gate→trigger routing.
+_WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] = (
+    (
+        "Purchases (buying / placing an order)",
+        {
+            "trigger_type": "purchase",
+            "action": "buy one black Carhartt beanie",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "url": "https://www.amazon.com/checkout/spc",
+            },
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                    "alt": "Carhartt beanie",
+                    "kind": "product",
+                }
+            ],
+            "purchase": {
+                "items": [
+                    {
+                        "title": "Carhartt Mens Knit Cuffed Beanie Hat, Black",
+                        "price": "$19.99",
+                        "quantity": "1",
+                        "description": "Black, One Size",
+                        "rating": "4.8 stars",
+                        "review_count": "167,432 reviews",
+                        "image_url": "https://m.media-amazon.com/images/I/beanie.jpg",
+                        "product_url": "https://www.amazon.com/dp/B000000001",
+                        "seller": "Amazon.com",
+                        "shipping": "FREE Two Day delivery, arriving Saturday, Jun 27, 2026",
+                    }
+                ],
+                "totals": {
+                    "subtotal": "$19.99",
+                    "shipping": "$0.00",
+                    "tax": "$1.72",
+                    "total": "$21.71",
+                },
+                "payment_method": "Visa ending in 0000",
+                "delivery_address": "Jane Example, 1 Example St, San Francisco, CA 94105",
+            },
+        },
+        (
+            "Every visible item; one media image (or rendered_summary for multi-item). "
+            "Per item require title, numeric rating, review count, and a canonical "
+            "product-detail URL already in the trajectory — never cart/checkout/order/return URLs. "
+            "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
+        ),
+    ),
+    (
+        "Emails / outbound messages",
+        {
+            "trigger_type": "message",
+            "action": "send email",
+            "service": {
+                "name": "Gmail",
+                "domain": "mail.google.com",
+                "url": "https://mail.google.com/mail/u/0/#inbox?compose=new",
+            },
+            "media": [],
+            "message": {
+                "to": ["alex@example.com"],
+                "cc": [],
+                "bcc": [],
+                "subject": "Dinner Friday",
+                "body": "Want to grab dinner Friday at 7?",
+                "attachments": [],
+            },
+        },
+        "Include visible to/cc/bcc, subject, body, and attachments when shown.",
+    ),
+    (
+        "Social posts",
+        {
+            "trigger_type": "social_post",
+            "action": "post publicly",
+            "service": {"name": "X", "domain": "x.com", "url": "https://x.com/compose/post"},
+            "media": [],
+            "social_post": {
+                "destination": "your profile",
+                "audience": "Public",
+                "body": "Shipped the v1 release today.",
+                "attachments": [],
+            },
+        },
+        "Include visible destination, audience, body, and attachments when shown.",
+    ),
+    (
+        "Returns / refund confirmations",
+        {
+            "trigger_type": "generic_write",
+            "action": "confirm Amazon return for Carhartt beanie",
+            "service": {
+                "name": "Amazon",
+                "domain": "amazon.com",
+                "url": "https://www.amazon.com/spr/returns/contract/example",
+            },
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                    "kind": "product",
+                }
+            ],
+            "generic_write": {
+                "label": "Confirm return",
+                "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                "payload_summary": (
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                    "Return by Sep 19, 2026."
+                ),
+            },
+        },
+        (
+            "Use generic_write for return/refund confirmations. Put item title in target and "
+            "refund amount, original payment method, drop-off/shipping method, and return-by "
+            "date in payload_summary. Do not invent purchase ratings or product-detail URLs."
+        ),
+    ),
+    (
+        "Payment field entry",
+        {
+            "trigger_type": "payment",
+            "action": "enter payment details",
+            "service": {
+                "name": "Delta",
+                "domain": "delta.com",
+                "url": "https://www.delta.com/checkout",
+            },
+            "media": [
+                {
+                    "url": "https://cdn.delta.com/receipt.png",
+                    "alt": "Booking summary",
+                    "kind": "page_preview",
+                }
+            ],
+            "payment": {
+                "merchant": "Delta Air Lines",
+                "amount": "$412.30",
+                "purpose": "Flight SFO -> JFK",
+                "fields": ["card number", "expiration date", "CVV"],
+            },
+        },
+        "Never include card numbers, CVV, passwords, tokens, or one-time codes.",
+    ),
+)
+
+
+def _write_lock_notification_example_block() -> str:
+    """Render prescribed worked examples for the fork prompt."""
+    sections: List[str] = [
+        "Call generate_write_lock_notification exactly once.",
+        "Choose the trigger_type whose example best matches the real-world irreversible action.",
+        "Copy that example's shape; fill fields only from the browser trajectory — never invent.",
+        "If Runtime evidence includes media_candidates, use only those URLs for media / image_url.",
+        "approval_type in Runtime evidence is a hint from the click gate, not a required trigger_type.",
+        "",
+    ]
+    for title, payload, notes in _WRITE_LOCK_NOTIFICATION_EXAMPLES:
+        rendered = _render_write_lock_notification_question(
+            payload,
+            system_name="Rose",
+            fallback_question="Approve?",
+        )
+        sections.append(f"### {title}")
+        sections.append(f"Notes: {notes}")
+        sections.append("Tool args example:")
+        sections.append(json_dumps_compact({"tool": "generate_write_lock_notification", **payload}))
+        sections.append("Notification format this produces:")
+        sections.append(rendered)
+        sections.append("")
+    return "\n".join(sections).strip()
+
+
 def _write_lock_notification_prompt(
     *,
     approval_type: str,
@@ -2451,6 +2650,7 @@ def _write_lock_notification_prompt(
     }
     if media_candidates:
         evidence["media_candidates"] = media_candidates[:12]
+
     return (
         "WRITE_LOCK_NOTIFICATION_FORK_REQUEST\n\n"
         "A write lock was triggered. Call generate_write_lock_notification exactly once using the "
@@ -2458,18 +2658,8 @@ def _write_lock_notification_prompt(
         "Do not perform any browser action. Do not continue the task. Do not ask the user for "
         "approval. Generate structured approval metadata only.\n\n"
         "Describe the real-world action the user is approving, not the clicked button or DOM "
-        "mechanic. For purchases, include every visible item being bought and set media to exactly one "
-        "image when any product, checkout, or page image is visible; for multiple items, use one "
-        "rendered_summary image if available. For each "
-        "purchase item, use the item key title, not name. You MUST include its real numeric rating and "
-        "review count plus its canonical product-detail URL; never substitute the current cart, checkout, "
-        "payment, or order URL. Those required fields must already exist in the browser trajectory; do not "
-        "invent them or perform a browser action in this fork. Also include "
-        "visible price, quantity, description under 80 characters, seller, delivery details, product image URL, order totals, "
-        "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
-        "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
-        "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
-        "passwords, tokens, or one-time codes.\n\n"
+        "mechanic.\n\n"
+        f"{_write_lock_notification_example_block()}\n\n"
         f"Runtime evidence:\n{json_dumps_compact(evidence)}"
     )
 
@@ -2479,16 +2669,34 @@ class PurchaseApprovalContextError(RuntimeError):
 
 
 class PurchaseApprovalNotificationRetryableError(RuntimeError):
-    """Raised when transient notification generation should preserve checkout state for retry."""
+    """Raised when transient notification generation should preserve checkout state for retry.
+
+    Kept for backwards-compatible imports/tests. Write-lock notification forks now
+    retry with the error in context for every gate and fall back to the deterministic
+    question instead of aborting the browser session.
+    """
 
 
 def _enforce_write_lock_notification_failure_policy(approval_type: str, error: Exception) -> None:
-    if approval_type == "purchase":
-        if isinstance(error, PurchaseApprovalContextError):
-            raise error
-        raise PurchaseApprovalNotificationRetryableError(
-            "Purchase approval notification generation failed transiently; retry with the checkout session paused"
-        ) from error
+    """All gates fall through to the deterministic fallback question after fork retries."""
+    logger.info(
+        "Write-lock notification fork exhausted; using fallback question",
+        approval_type=approval_type,
+        error_type=type(error).__name__,
+        error=str(error)[:300],
+    )
+
+
+def _write_lock_notification_retry_feedback(error: Exception) -> str:
+    detail = getattr(error, "detail", None) or str(error)
+    return (
+        "Your previous generate_write_lock_notification call failed:\n"
+        f"{detail}\n"
+        "Call generate_write_lock_notification exactly once again. Choose the trigger_type "
+        "whose example matches the real-world action and satisfy that example's required "
+        "fields using only evidence already in the browser trajectory. Do not invent "
+        "unavailable fields."
+    )
 
 
 def _format_write_lock_value(label: str, value: Any) -> Optional[str]:
@@ -2842,6 +3050,8 @@ async def _generate_write_lock_notification(
     fallback_question: str,
 ) -> Dict[str, Any]:
     """Fork browser-use context to generate write-lock approval metadata."""
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
     prompt = _write_lock_notification_prompt(
         approval_type=approval_type,
         current_url=current_url,
@@ -2849,49 +3059,73 @@ async def _generate_write_lock_notification(
         write_lock_result=write_lock_result,
         media_candidates=browser_state.get("media_candidates"),
     )
-    fork_result = await _call_browser_use_with_rotation(
-        rose_client=rose_client,
-        task=task_prompt,
-        dynamic_system_context=dynamic_system_context,
-        turn_messages=browser_turn_messages,
-        browser_state=browser_state,
-        action_entries=action_entries,
-        config=config,
-        user_id=user_id,
-        agent_id=agent_id,
-        browser_task_id=browser_task_id,
-        iteration=iteration,
-        token_state=token_state,
-        gpt_token=gpt_token,
-        gpt_account_id=gpt_account_id,
-        gpt_token_source=gpt_token_source,
-        gpt_token_pool_id=gpt_token_pool_id,
-        browser_use_mode=browser_use_mode,
-        extra_user_messages=[{"role": "user", "content": prompt}],
-        call_site=f"write_lock_notification_fork_{iteration}",
-        skip_cache_write=True,
-        dump_extra={
-            "write_lock_notification_fork": True,
-            "approval_type": approval_type,
-            "current_url": current_url,
-        },
-    )
-    action = fork_result.get("action") or {}
-    if action.get("action") != "generate_write_lock_notification":
-        raise ValueError(
-            f"write-lock notification fork did not call generate_write_lock_notification; got {action.get('action')!r}"
-        )
-    from browser_tools.schemas import GenerateWriteLockNotificationTool
+    extra_user_messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+    fork_result: Dict[str, Any] = {}
+    validated_notification: Any = None
+    # Same policy for every gate: retry with the error in context, then let the
+    # caller fall back to the deterministic question.
+    for attempt in range(_WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS):
+        try:
+            fork_result = await _call_browser_use_with_rotation(
+                rose_client=rose_client,
+                task=task_prompt,
+                dynamic_system_context=dynamic_system_context,
+                turn_messages=browser_turn_messages,
+                browser_state=browser_state,
+                action_entries=action_entries,
+                config=config,
+                user_id=user_id,
+                agent_id=agent_id,
+                browser_task_id=browser_task_id,
+                iteration=iteration,
+                token_state=token_state,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                browser_use_mode=browser_use_mode,
+                extra_user_messages=extra_user_messages,
+                call_site=f"write_lock_notification_fork_{iteration}"
+                + (f"_retry{attempt}" if attempt else ""),
+                skip_cache_write=True,
+                dump_extra={
+                    "write_lock_notification_fork": True,
+                    "approval_type": approval_type,
+                    "current_url": current_url,
+                    "fork_attempt": attempt,
+                },
+            )
+            action = fork_result.get("action") or {}
+            if action.get("action") != "generate_write_lock_notification":
+                raise ValueError(
+                    "write-lock notification fork did not call generate_write_lock_notification; "
+                    f"got {action.get('action')!r}"
+                )
+            try:
+                validated_notification = GenerateWriteLockNotificationTool.model_validate(
+                    {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
+                    context={"trusted_page_urls": [*trusted_page_urls, current_url]},
+                )
+            except ValueError as error:
+                raise PurchaseApprovalContextError(str(error)) from error
+            break
+        except (BrowserToolArgsValidationError, PurchaseApprovalContextError, ValueError) as fork_error:
+            logger.info(
+                "Write-lock notification fork failed; retrying with error in context",
+                attempt=attempt,
+                approval_type=approval_type,
+                error_type=type(fork_error).__name__,
+                detail=str(getattr(fork_error, "detail", fork_error))[:400],
+            )
+            if attempt >= _WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS - 1:
+                raise
+            extra_user_messages = [
+                {"role": "user", "content": prompt},
+                {"role": "user", "content": _write_lock_notification_retry_feedback(fork_error)},
+            ]
+    else:
+        raise RuntimeError("write-lock notification fork exhausted without a validated notification")
 
-    try:
-        validated_notification = GenerateWriteLockNotificationTool.model_validate(
-            {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
-            context={"trusted_page_urls": [*trusted_page_urls, current_url]},
-        )
-    except ValueError as error:
-        raise PurchaseApprovalContextError(
-            "Purchase approval blocked because reviews and a canonical product link could not be verified"
-        ) from error
     notification = validated_notification.model_dump(exclude={"tool"}, exclude_none=True)
     notification = _normalize_write_lock_notification_media(
         notification,
@@ -4888,6 +5122,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     browser_recorder: Optional[BrowserAgentRecorder] = None
     browser_network_recorder: Optional[BrowserNetworkRecorder] = None
     network_recorder_task: Optional[asyncio.Task] = None
+    browser_download_persister: Optional[BrowserDownloadPersister] = None
+    download_persister_task: Optional[asyncio.Task] = None
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
@@ -4937,16 +5173,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # recovery on this task, later recoveries still re-verify that URL.
     require_payment_cdn = False
     payment_cdn_verify_url = ""
-    # After a successful challenge recovery, pin goto/navback to the recovered
-    # host so the model cannot leave the cleared page for network-log thrash.
-    navigation_pin_host: Optional[str] = None
-    navigation_pin_url: Optional[str] = None
+    # Payment auto-fill on cross-origin handoff (live host ≠ session origin).
+    # Do NOT pin/refuse navigation — that trapped merchant → third-party order
+    # flows (e.g. bluebottlecoffee.com → order.online) after challenge recovery.
     handoff_payment_fill_attempts = 0
     handoff_payment_fill_succeeded = False
     HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 8
-    # Session origin registrable domain — when the live page leaves this domain
-    # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
-    # without path or product-name allowlists.
     _start_domain = get_domain_from_url(start_url) if start_url else ""
     navigation_origin_base_domain: Optional[str] = (
         _get_base_domain(_start_domain) if _start_domain else None
@@ -5624,6 +5856,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             playwright_browser,
             playwright_instance,
         ) = browser_result
+        from browser_tools.captcha_solve_indicator import start_captcha_telemetry_indicator_for_task
+
+        start_captcha_telemetry_indicator_for_task(
+            dom_service,
+            fetch_telemetry=fetch_browser_captcha_telemetry,
+            config=config,
+            task_id=task_id,
+        )
         # Required session provenance is emitted only after both CDP clients
         # connect, but before any credential-use evidence can be published.
         # It is intentionally independent of optional browser recording.
@@ -5677,6 +5917,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         # can take seconds and nothing downstream needs it synchronously, so it
         # attaches in the background (resolved before session close).
         network_recorder_task = asyncio.create_task(_create_network_recorder())
+
+        async def _create_download_persister():
+            # Kernel CDP downloads_path alone does not always yield listFiles entries;
+            # materialize Content-Disposition attachments under /tmp/downloads.
+            return await BrowserDownloadPersister.create(
+                browser_session=dom_service.session,
+                session_id=session_id,
+                config=config,
+                agent_id=agent_id,
+                task_id=task_id or "",
+            )
+
+        download_persister_task = asyncio.create_task(_create_download_persister())
 
         async def _init_humanizer():
             if not _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
@@ -5809,18 +6062,41 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         if not write_lock_resume_state:
             from browser_use.browser.events import NavigateToUrlEvent
 
+            # Align browser-use's hardcoded 20s Page.navigate wait with our
+            # TIMEOUT_NavigateToUrlEvent budget before the first start_url hit.
+            apply_browser_use_navigate_timeout_patch()
+
             nav_url = start_url
             if not nav_url.startswith(("http://", "https://", "about:", "file:")):
                 nav_url = f"https://{nav_url}"
                 logger.info(f"\U0001f517 Auto-added https:// to start URL: {nav_url}")
 
+            start_url_nav_error: Optional[BaseException] = None
+
             async def _navigate_to_start_url():
+                nonlocal start_url_nav_error
                 t = time.monotonic()
-                event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url, wait_until="commit"))
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
-                ready_state = await _wait_for_document_ready(dom_service)
-                logger.info(f"\U0001f310 Start URL readiness: {ready_state}")
+                try:
+                    event = dom_service.session.event_bus.dispatch(
+                        NavigateToUrlEvent(url=nav_url, wait_until="commit")
+                    )
+                    await event
+                    await event.event_result(raise_if_any=True, raise_if_none=False)
+                    ready_state = await _wait_for_document_ready(dom_service)
+                    logger.info(f"\U0001f310 Start URL readiness: {ready_state}")
+                except Exception as nav_exc:
+                    # Do not kill the whole browser activity on start_url
+                    # navigate failure. A tool ERROR here caused the root agent
+                    # to re-spawn with Fandango after an AMC 20s CDP timeout
+                    # (browser-event-ticket, 2026-08-20). Keep the session and
+                    # let the agent loop retry navigation. Do not catch
+                    # CancelledError/BaseException — activity cancellation must
+                    # still abort.
+                    start_url_nav_error = nav_exc
+                    logger.error(
+                        "Start URL navigation failed (continuing into agent loop): %s",
+                        nav_exc,
+                    )
                 _record_timing("navigation.navigate", t)
 
             # The "Navigating" progress message is pure bookkeeping \u2014 write it
@@ -5841,33 +6117,59 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 ),
             )
 
-            async def _mark_navigated():
-                if browser_recorder:
-                    await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
+            if start_url_nav_error is None:
 
-            async def _wait_for_start_url_ready():
-                t = time.monotonic()
-                await wait_for_navigation_ready(dom_service, url=nav_url)
-                _record_timing("navigation.wait_ready", t)
+                async def _mark_navigated():
+                    if browser_recorder:
+                        await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
-            await asyncio.gather(
-                _wait_for_start_url_ready(),
-                save_browser_action_message(
+                async def _wait_for_start_url_ready():
+                    t = time.monotonic()
+                    await wait_for_navigation_ready(dom_service, url=nav_url)
+                    _record_timing("navigation.wait_ready", t)
+
+                await asyncio.gather(
+                    _wait_for_start_url_ready(),
+                    save_browser_action_message(
+                        agent_id=agent_id,
+                        title=f"Navigated \u2192 {nav_url[:50]}",
+                        task_id=task_id,
+                        message="",
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="goto",
+                        tool_call_id=tool_call_id,
+                        steps_taken=0,
+                        total_steps=MAX_ITERATIONS,
+                    ),
+                    _mark_navigated(),
+                )
+                logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
+            else:
+                await save_browser_action_message(
                     agent_id=agent_id,
-                    title=f"Navigated \u2192 {nav_url[:50]}",
+                    title=f"Start URL navigate deferred \u2192 {nav_url[:40]}",
                     task_id=task_id,
-                    message="",
+                    message=(
+                        f"Initial navigation to {nav_url} failed "
+                        f"({type(start_url_nav_error).__name__}: {start_url_nav_error}). "
+                        f"Configured Page.navigate budget="
+                        f"{NAVIGATE_TO_URL_TIMEOUT_SECONDS}s; continuing so the "
+                        f"agent can retry without a tool ERROR."
+                    ),
                     status=MessageStatus.FINISHED,
                     browser_url=browser_url,
                     action_type="goto",
                     tool_call_id=tool_call_id,
                     steps_taken=0,
                     total_steps=MAX_ITERATIONS,
-                ),
-                _mark_navigated(),
-            )
-
-            logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
+                )
+                logger.warning(
+                    "Continuing browser agent after start URL navigate failure "
+                    "(budget=%ss): %s",
+                    NAVIGATE_TO_URL_TIMEOUT_SECONDS,
+                    start_url_nav_error,
+                )
 
             # The provider can replace the pre-navigation target/session while
             # opening the first real page. Revalidate at that exact boundary so
@@ -6180,8 +6482,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     browser_network_recorder=browser_network_recorder,
                     current_auth_realm=auth_realm,
                     prepare_credentials_for_url=_prepare_credentials_for_url,
-                    navigation_pin_host=navigation_pin_host,
-                    navigation_origin_base_domain=navigation_origin_base_domain,
                 )
 
                 if result.get("status") == "needs_write_approval":
@@ -6258,72 +6558,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 f"{browser_state.get('title') or ''}\n{browser_state.get('dom_tree') or ''}"
             )
 
-            # Sticky cross-origin handoff pin: once the live page leaves the
-            # session origin registrable domain, remember that host/URL and
-            # bounce back if clicks/evaluate sneak off it.
-            from urllib.parse import urlparse as _urlparse_handoff
-
-            _handoff_host = (_urlparse_handoff(str(current_url or "")).hostname or "").lower()
-            if navigation_origin_base_domain and _handoff_host:
-                _handoff_base = _get_base_domain(_handoff_host)
-                if _handoff_base and _handoff_base != navigation_origin_base_domain:
-                    if not navigation_pin_host:
-                        navigation_pin_host = _handoff_host
-                    if _handoff_host == navigation_pin_host or _handoff_host.endswith(
-                        f".{navigation_pin_host}"
-                    ):
-                        navigation_pin_url = str(current_url)
-            if (
-                navigation_pin_host
-                and navigation_pin_url
-                and _handoff_host
-                and not (
-                    _handoff_host == navigation_pin_host
-                    or _handoff_host.endswith(f".{navigation_pin_host}")
-                )
-            ):
-                logger.warning(
-                    "Auto-returning to pinned handoff host after leaving it",
-                    pin_host=navigation_pin_host,
-                    left_url=current_url,
-                    pin_url=navigation_pin_url,
-                    agent_id=agent_id,
-                    task_id=task_id,
-                )
-                bounce = await execute_action(
-                    dom_service,
-                    action_history,
-                    {"action": "goto", "params": {"url": navigation_pin_url}},
-                    available_file_paths=available_file_paths,
-                    session_id=session_id,
-                    config=config,
-                    humanizer=humanizer,
-                    secret_refs=secret_refs,
-                    password_origins=password_origins,
-                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                    user_id=user_id,
-                    current_url=current_url,
-                    trusted_page_urls=visited_urls,
-                    write_lock_enabled=write_lock_enabled,
-                    write_lock_approvals=write_lock_approvals,
-                    system_name=system_name,
-                    browser_network_recorder=browser_network_recorder,
-                    current_auth_realm=auth_realm,
-                    prepare_credentials_for_url=_prepare_credentials_for_url,
-                    navigation_pin_host=navigation_pin_host,
-                    navigation_origin_base_domain=navigation_origin_base_domain,
-                )
-                browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                current_url = browser_state.get("url", navigation_pin_url)
-                if not (isinstance(bounce, dict) and bounce.get("success")):
-                    logger.warning(
-                        "Pinned handoff auto-return goto failed",
-                        pin_url=navigation_pin_url,
-                        bounce=bounce,
-                        agent_id=agent_id,
-                        task_id=task_id,
-                    )
-
             # Clicks, form submissions, and server redirects can cross an auth
             # realm without a goto tool call. Prepare that realm before the
             # model observes or interacts with it, then reload once so newly
@@ -6366,20 +6600,22 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
                 if (
-                    navigation_pin_host
-                    and navigation_pin_url
-                    and has_payment_card_secret_refs(secret_refs)
+                    has_payment_card_secret_refs(secret_refs)
                     and not handoff_payment_fill_succeeded
                     and handoff_payment_fill_attempts < HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS
                 ):
                     from urllib.parse import urlparse as _urlparse_nudge
 
                     _nudge_host = (_urlparse_nudge(str(current_url or "")).hostname or "").lower()
-                    _on_pin = bool(_nudge_host) and (
-                        _nudge_host == navigation_pin_host
-                        or _nudge_host.endswith(f".{navigation_pin_host}")
+                    _nudge_base = _get_base_domain(_nudge_host) if _nudge_host else ""
+                    # Cross-origin handoff only (merchant Place-order → hosted checkout).
+                    # No host pin / navigation refusal — agent may leave freely.
+                    _on_cross_origin_handoff = bool(
+                        navigation_origin_base_domain
+                        and _nudge_base
+                        and _nudge_base != navigation_origin_base_domain
                     )
-                    if _on_pin:
+                    if _on_cross_origin_handoff:
                         # Hosted payment widgets mount fields in child frames
                         # after the document URL settles — poll for semantic
                         # payment inputs across frames before spending an attempt.
@@ -6414,12 +6650,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             )
                             logger.info(
                                 "Handoff payment fields not ready; deferring auto-fill attempt",
-                                pin_host=navigation_pin_host,
+                                handoff_host=_nudge_host,
                                 agent_id=agent_id,
                                 task_id=task_id,
                                 iteration=iteration,
                             )
-                            # Do not burn an attempt — keep pin and retry next loop.
+                            # Do not burn an attempt — retry next loop.
                         else:
                             handoff_payment_fill_attempts += 1
                             auto_fill_result: Dict[str, Any] = {}
@@ -6445,7 +6681,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                             "action": "input_text",
                                             "thinking": (
                                                 "Auto-fill approved payment card secret refs "
-                                                "on the pinned cross-origin handoff page."
+                                                "on the cross-origin handoff page."
                                             ),
                                             "params": {"text": "card_number"},
                                         },
@@ -6465,8 +6701,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                         browser_network_recorder=browser_network_recorder,
                                         current_auth_realm=auth_realm,
                                         prepare_credentials_for_url=_prepare_credentials_for_url,
-                                        navigation_pin_host=navigation_pin_host,
-                                        navigation_origin_base_domain=navigation_origin_base_domain,
                                     ),
                                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                                 )
@@ -6478,7 +6712,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 logger.warning(
                                     "Handoff payment auto-fill raised",
                                     error=str(auto_fill_error)[:300],
-                                    pin_host=navigation_pin_host,
+                                    handoff_host=_nudge_host,
                                     agent_id=agent_id,
                                     task_id=task_id,
                                     iteration=iteration,
@@ -6506,19 +6740,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     {
                                         "role": "user",
                                         "content": (
-                                            "Cross-origin handoff page is pinned "
-                                            f"({navigation_pin_url}). Approved payment card "
+                                            "Cross-origin handoff page "
+                                            f"({current_url}). Approved payment card "
                                             f"secret refs were filled automatically "
                                             f"({', '.join(str(r) for r in filled_refs)}). "
-                                            "Submit the payment form on THIS page now. "
-                                            "Do not navigate away, close tabs, or thrash "
-                                            "network/evaluate."
+                                            "Submit the payment form on THIS page now."
                                         ),
                                     }
                                 )
                                 logger.info(
-                                    "Auto-filled payment refs on pinned handoff page",
-                                    pin_host=navigation_pin_host,
+                                    "Auto-filled payment refs on handoff page",
+                                    handoff_host=_nudge_host,
                                     filled_refs=filled_refs,
                                     agent_id=agent_id,
                                     task_id=task_id,
@@ -6545,26 +6777,24 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 )
                                 logger.info(
                                     "Handoff payment auto-fill miss; will retry",
-                                    pin_host=navigation_pin_host,
+                                    handoff_host=_nudge_host,
                                     attempt=handoff_payment_fill_attempts,
                                     agent_id=agent_id,
                                     task_id=task_id,
                                     iteration=iteration,
                                 )
                             else:
-                                # Keep the cross-origin pin. Releasing it let the model
-                                # abandon live handoff pages and restart Place order.
                                 # Stop auto-fill retries and nudge the model to fill/submit.
                                 await save_browser_action_message(
                                     agent_id=agent_id,
                                     title=(
-                                        "Payment auto-fill exhausted — pin held; fill manually"
+                                        "Payment auto-fill exhausted — fill manually"
                                     ),
                                     task_id=task_id,
                                     message=(
-                                        f"Pinned handoff {navigation_pin_url} still has no "
+                                        f"Handoff {current_url} still has no "
                                         "fillable payment fields after auto-fill retries. "
-                                        "Pin stays active — type card refs on this page."
+                                        "Type card refs on this page."
                                     ),
                                     status=MessageStatus.FINISHED,
                                     browser_url=browser_url,
@@ -6577,22 +6807,21 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     {
                                         "role": "user",
                                         "content": (
-                                            "Cross-origin handoff page is still pinned "
-                                            f"({navigation_pin_url}). Automatic payment-field "
+                                            "Cross-origin handoff page "
+                                            f"({current_url}). Automatic payment-field "
                                             f"fill did not succeed after "
                                             f"{handoff_payment_fill_attempts} attempts. "
-                                            "Stay on THIS page. Use input_text with "
+                                            "Use input_text with "
                                             "card_number / card_name / card_expiry / card_cvv "
                                             "into the visible payment fields (including fields "
-                                            "inside iframes), then submit. Do not navigate away, "
-                                            "close tabs, or restart the merchant checkout."
+                                            "inside iframes), then submit."
                                         ),
                                     }
                                 )
                                 logger.info(
-                                    "Handoff payment auto-fill exhausted; pin retained",
-                                    pin_host=navigation_pin_host,
-                                    pin_url=navigation_pin_url,
+                                    "Handoff payment auto-fill exhausted",
+                                    handoff_host=_nudge_host,
+                                    handoff_url=current_url,
                                     auto_fill_error=auto_fill_result.get("error"),
                                     agent_id=agent_id,
                                     task_id=task_id,
@@ -7112,6 +7341,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             fingerprint_injection=replacement.get("fingerprint_injection")
                             or pending_fingerprint_injection,
                             agent_id=agent_id,
+                            config=config,
+                            task_id=task_id,
                         )
                         # Reconnect succeeded: the replacement session is real and
                         # attached, so the identifiers are now safe to publish.
@@ -7139,6 +7370,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if browser_network_recorder is not None:
                             with contextlib.suppress(Exception):
                                 await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                if download_persister_task.done():
+                                    browser_download_persister = download_persister_task.result()
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
@@ -7346,10 +7587,54 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 provider_exit_rejected = bool(
                     unified_action.get("params", {}).get("provider_exit_rejected")
                 )
-                # Intentionally no early skipped_clean_page short-circuit: the
-                # rose-1-mini classifier runs after DOM settle inside probes /
-                # live verify. An up-front clean check would waste an LLM call
-                # and previously false-cleaned soft walls (Expedia Bot or Not).
+                # If the live tab is already clean and this was not a hard
+                # provider-exit rejection, skip — avoids recovery loops the model
+                # invents from third-party network noise on an otherwise fine page.
+                if (
+                    not provider_exit_rejected
+                    and input_page is not None
+                    and not await live_tab_looks_challenged(input_page)
+                ):
+                    skip_message = (
+                        "Current page does not look challenged"
+                        + (f" ({current_url})" if current_url else "")
+                        + ". Continue the task on this page — do not start "
+                        "challenge recovery unless the document itself is blocked."
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Page already clear — skip challenge recovery",
+                        task_id=task_id,
+                        message=skip_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={
+                            "recoveryStage": "skipped_clean_page",
+                            "resumeUrl": current_url,
+                        },
+                    )
+                    action_result = {
+                        "success": True,
+                        "message": skip_message,
+                        "recovery_action": "skipped_clean_page",
+                        "current_url": current_url,
+                    }
+                    await _finalize_browser_recovery_action_result(
+                        action_result=action_result,
+                        dom_service=dom_service,
+                        action_history=action_history,
+                        thinking=thinking,
+                        recovery_reason=recovery_reason,
+                        browser_turn_messages=browser_turn_messages,
+                        task_prompt=task_prompt,
+                        browser_state=browser_state,
+                        unified_action=unified_action,
+                        recovery_call_id=recovery_call_id,
+                        browser_stream=browser_stream,
+                    )
+                    continue
 
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
@@ -7500,6 +7785,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 old_driver_pid=playwright_driver_pid,
                                 fingerprint_injection=fingerprint_injection,
                                 agent_id=agent_id,
+                                config=config,
+                                task_id=task_id,
                             )
                         except Exception:
                             # The reconnect helper disconnects the old stack before attaching to
@@ -7564,6 +7851,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if browser_network_recorder is not None:
                             with contextlib.suppress(Exception):
                                 await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                browser_download_persister = await asyncio.wait_for(
+                                    asyncio.shield(download_persister_task),
+                                    timeout=10,
+                                )
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
@@ -7666,12 +7965,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             f"{recovery_message} Current page URL: {current_url}. "
                             "Continue the task on this page."
                         )
-                        from urllib.parse import urlparse as _urlparse_pin
-
-                        pin_host = (_urlparse_pin(str(current_url)).hostname or "").lower()
-                        if pin_host:
-                            navigation_pin_host = pin_host
-                            navigation_pin_url = str(current_url)
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser challenge recovered",
@@ -8198,8 +8491,6 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_network_recorder=browser_network_recorder,
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
-                        navigation_pin_host=navigation_pin_host,
-                        navigation_origin_base_domain=navigation_origin_base_domain,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -8880,6 +9171,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     error=extract_error_message(diagnostics_error),
                 )
+        if browser_download_persister is None and download_persister_task is not None:
+            with contextlib.suppress(Exception):
+                browser_download_persister = await asyncio.wait_for(
+                    asyncio.shield(download_persister_task),
+                    timeout=10,
+                )
+        if browser_download_persister is not None:
+            with contextlib.suppress(Exception):
+                await browser_download_persister.close()
         _schedule_browser_cleanup(
             agent_id=agent_id,
             task_id=task_id,
@@ -8947,30 +9247,55 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         agent_id = workflow_instance.agent_id
 
         attachments: List[Dict[str, Any]] = []
-        if requested_attachments and hasattr(workflow_instance, "context"):
+        if hasattr(workflow_instance, "context"):
             context_attachments = extract_attachments_from_context(workflow_instance.context)
             filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
 
-            for filename in requested_attachments:
-                if filename in filename_to_pointer:
-                    fp = filename_to_pointer[filename]
-                    attachments.append(
-                        {
-                            "id": fp.id,
-                            "storage_path": fp.storage_path,
-                            "original_filename": fp.original_filename,
-                            "mime_type": fp.mime_type,
-                            "size_bytes": fp.size_bytes,
-                            "created_at": fp.created_at,
-                        }
-                    )
-                else:
+            def _fp_dict(fp: Any) -> Dict[str, Any]:
+                return {
+                    "id": fp.id,
+                    "storage_path": fp.storage_path,
+                    "original_filename": fp.original_filename,
+                    "mime_type": fp.mime_type,
+                    "size_bytes": fp.size_bytes,
+                    "created_at": fp.created_at,
+                }
+
+            if requested_attachments:
+                if isinstance(requested_attachments, str):
+                    requested_attachments = [requested_attachments]
+                for filename in requested_attachments:
+                    if filename in filename_to_pointer:
+                        attachments.append(_fp_dict(filename_to_pointer[filename]))
+                    else:
+                        logger.warning(
+                            "[BrowserAgent] Attachment not found in context",
+                            agent_id=agent_id,
+                            filename=filename,
+                            available_files=list(filename_to_pointer.keys()),
+                        )
+                # Wrong/missing names previously left available_files empty so
+                # upload_file could never succeed. Fall back to every parent
+                # attachment when nothing matched.
+                if not attachments and filename_to_pointer:
                     logger.warning(
-                        "[BrowserAgent] Attachment not found in context",
+                        "[BrowserAgent] No requested attachments matched; "
+                        "falling back to all parent context attachments",
                         agent_id=agent_id,
-                        filename=filename,
+                        requested=requested_attachments,
                         available_files=list(filename_to_pointer.keys()),
                     )
+                    attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+            elif filename_to_pointer:
+                # Parent omitted attachments but context has files — forward them
+                # so upload tasks (e.g. tinypng) do not spawn with an empty set.
+                logger.info(
+                    "[BrowserAgent] No attachments requested; forwarding parent context files",
+                    agent_id=agent_id,
+                    available_files=list(filename_to_pointer.keys()),
+                )
+                attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+
 
         logger.info(
             "Browser agent starting (v3)",
@@ -8984,7 +9309,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             title="Starting up a browser",
             message="",
             status=MessageStatus.IN_PROGRESS,
-            metadata={"toolName": "spawn_browser_agent"},
+            metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
         )
 
         try:
@@ -9198,6 +9523,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             status=MessageStatus.FINISHED,
                             metadata={
                                 "toolName": "spawn_browser_agent",
+                                # Progress, not a terminal: the browser task
+                                # resumes on the same session right after this.
+                                "action_type": "write_lock_granted",
                                 "task_id": write_lock_resume_state.get("task_id"),
                                 "requestUserApproval": {
                                     "writePermission": True,
@@ -9693,6 +10021,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         status=MessageStatus.FINISHED,
                         metadata={
                             "toolName": "spawn_browser_agent",
+                            # Progress, not a terminal: the browser task resumes
+                            # on the same session right after this event.
+                            "action_type": "payment_card_ready",
                             "task_id": result.get("task_id"),
                             "requestUserApproval": {
                                 "writePermission": True,
@@ -9813,7 +10144,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             output_files = result.get("output_files", [])
             final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
-            final_metadata = {"toolName": "spawn_browser_agent"}
+            # Declare terminality explicitly. The front-end must never have to
+            # infer "this browser task is over" from a missing action_type — a
+            # workflow-scope progress event would look identical.
+            final_metadata = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
             for key in (
                 "task_id",
                 "world_model_simulated",
@@ -9895,7 +10229,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_browser_agent"},
+                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
             )
 
 

@@ -1,30 +1,24 @@
-import { benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig } from './config';
+import {
+  benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig,
+} from './config';
+import { readCatalogTasks } from './catalog';
 import { createLogger } from '../../providers/logger';
 import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
-import { getCachedTasks } from './catalogCache';
 
 const log = createLogger('Benchmarks');
 void log; // logger retained for future route-level diagnostics
 
-export class TasksUnavailableError extends Error {
-  constructor() {
-    super('Benchmark tasks unavailable');
-  }
-}
+export { TasksUnavailableError } from './types';
 
 /**
  * Returns all visible benchmark task definitions. Retired tasks exist only
  * for history-ledger integrity — hidden from every serving surface. (The
  * poller's tasks.json export keeps file entries absent from this list
  * untouched, so retired file entries survive round-trips.)
- * Throws TasksUnavailableError if tasks.json failed to load at startup.
+ * Throws TasksUnavailableError if tasks.json is missing or malformed.
  */
 export function getTasks(): unknown[] {
-  const cached = getCachedTasks();
-  if (!cached) {
-    throw new TasksUnavailableError();
-  }
-  return cached.filter((task) => (task as { status?: unknown }).status !== 'retired');
+  return readCatalogTasks().filter((task) => (task as { status?: unknown }).status !== 'retired');
 }
 
 export interface TestPrompt {

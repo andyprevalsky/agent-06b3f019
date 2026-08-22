@@ -13,6 +13,8 @@ export {
   failAgentIfStillActive,
   clearWorkflowForTerminalAgent,
   softDeleteAgent,
+  restoreAgentAndDescendants,
+  findArchivedAgent,
   deleteAttentionRequests,
   createGithubRepoAccess,
   deleteAgentTools,
@@ -21,6 +23,11 @@ export {
 } from './repoMutations';
 export type { BatchCreateAgentParams } from './repoMutations';
 export { findExistingAgentsByIds } from './repoDescendantStarts';
+export {
+  findTopLevelAgents,
+  findTopLevelAgentsMatching,
+  findArchivedTopLevelAgents,
+} from './repoSidebarLists';
 export {
   pauseAgentUnderWorkflowLock,
   updateAgentConfigMutation,
@@ -31,40 +38,6 @@ export {
 // ---------------------------------------------------------------------------
 // Agent queries
 // ---------------------------------------------------------------------------
-
-/** Fetch top-level agents for a user (no parent, not deleted). */
-export async function findTopLevelAgents(userId: string) {
-  return prisma.agent.findMany({
-    where: {
-      userId,
-      parentAgentId: null,
-      deletedAt: null,
-    },
-    select: {
-      id: true,
-      goal: true,
-      model: true,
-      reasoningMaxTokens: true,
-      source: true,
-      progress: true,
-      status: true,
-      statusMessage: true,
-      temporalWorkflowId: true,
-      tokenCount: true,
-      tokensIn: true,
-      tokensOut: true,
-      contextSize: true,
-      messageCount: true,
-      fastModeCacheEnabled: true,
-      worldModelMode: true,
-      createdAt: true,
-      updatedAt: true,
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
-  });
-}
 
 /** Fetch agents in a sub-agent tree by busId. */
 export async function findAgentsByBusId(busId: string) {
@@ -255,23 +228,6 @@ export async function findParentStatus(parentAgentId: string) {
   });
 }
 
-/** Fetch agent with children (for recursive delete). */
-export async function findAgentWithChildren(agentId: string) {
-  return prisma.agent.findFirst({
-    where: {
-      id: agentId,
-      deletedAt: null,
-    },
-    include: {
-      children: {
-        where: {
-          deletedAt: null,
-        },
-      },
-    },
-  });
-}
-
 /** Fetch ancestor chain for breadcrumb navigation using recursive CTE. */
 export async function findAncestors(agentId: string) {
   return prisma.$queryRaw<{ id: string; goal: string }[]>`
@@ -351,4 +307,20 @@ export async function findAgentWithFullRelations(agentId: string) {
       },
     },
   });
+}
+
+/**
+ * The generation an unattributed internal write should join.
+ *
+ * Returns the agent's live `temporalWorkflowId`, or null when it owns no
+ * workflow yet. Callers must NOT substitute the agent id on a miss: the agent
+ * id is generation 1's workflow id, so fabricating it makes an unattributed
+ * write look like a stale first-generation worker.
+ */
+export async function currentAgentWorkflowGeneration(agentId: string): Promise<string | null> {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { temporalWorkflowId: true },
+  });
+  return agent?.temporalWorkflowId ?? null;
 }

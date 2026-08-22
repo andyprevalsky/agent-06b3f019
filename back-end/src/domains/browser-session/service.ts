@@ -16,6 +16,7 @@ import {
   readSessionFile,
   resizeSessionViewport,
   captureScreenshot,
+  pressSessionKeys,
   type BrowserViewport,
   getFingerprintInjectionData,
 } from '../../providers/browser';
@@ -27,6 +28,7 @@ import {
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
+import { validateBrowserKeySymbols } from './service.browser-input';
 import { validateSessionFilePath } from './service.file-path';
 import { findRequiredSteelProfileForStart } from './service.profile-binding';
 import {
@@ -316,11 +318,17 @@ export async function uploadFile(
   sessionId: string,
   buffer: Buffer,
   originalname: string,
-  mimetype: string
+  mimetype: string,
+  options: { directory?: string } = {}
 ) {
-  log.info('Uploading file to session', { sessionId, originalname, sizeBytes: buffer.length });
+  log.info('Uploading file to session', {
+    sessionId,
+    originalname,
+    sizeBytes: buffer.length,
+    directory: options.directory,
+  });
 
-  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype);
+  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype, options);
 
   return {
     path: result.path,
@@ -359,5 +367,11 @@ export async function downloadFile(sessionId: string, filePath: string, userId?:
 export async function takeScreenshot(sessionId: string, userId?: string) {
   await requireSessionOwner(sessionId, userId);
   return captureScreenshot(sessionId);
+}
+
+export async function pressKeys(sessionId: string, keys: string[], userId: string) {
+  await requireSessionOwner(sessionId, userId);
+  validateBrowserKeySymbols(keys);
+  return pressSessionKeys(sessionId, keys);
 }
 /* c8 ignore stop */

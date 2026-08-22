@@ -1,9 +1,13 @@
-import type { Prisma } from '@prisma/client';
-import { prisma } from './database';
+import { Prisma } from '@prisma/client';
+import { prisma, runTransactionWithRetry } from './database';
 import { createMessage } from './messages';
 import { isTerminalToolStatus } from './toolLifecycleMessages';
 import { createLogger } from './logger';
-import { DEPLOY_INTERRUPTED_TOOL_MESSAGE, messageWorkflowGeneration } from './workflowGeneration';
+import {
+  DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+  lockAgentWorkflowGeneration,
+  messageWorkflowGeneration,
+} from './workflowGeneration';
 
 const log = createLogger('StaleWorkflowTools');
 
@@ -30,29 +34,97 @@ function metadataString(metadata: Record<string, unknown>, key: string): string 
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-function attentionRequestId(metadata: Record<string, unknown>): string | null {
-  const direct = metadataString(metadata, 'attentionRequestId');
-  if (direct !== null) return direct;
-  const approval = metadata.requestUserApproval;
-  if (approval === null || typeof approval !== 'object' || Array.isArray(approval)) return null;
-  return metadataString(approval as Record<string, unknown>, 'attentionRequestId');
+/**
+ * Close everything a sealed workflow generation was waiting on.
+ *
+ * The generation owns its attention requests through the durable
+ * `AgentAttentionRequest(agentId, workflowId)` relation, so that relation — not the
+ * shape of whatever tool chip happened to raise the request — is what decides which
+ * rows to close. Correlating through chip metadata silently missed every request kind
+ * the matcher did not enumerate: auth assistance stores its id under
+ * `requestUserAuthentication.requestId`, so a deploy fenced the chip to
+ * DEPLOY_INTERRUPTED and left the request pending forever (prod agents
+ * 2dc4c954-0af7-4f50-8336-11f9925f3c05 and a87224a7-f9ac-4d09-b8c6-b758f37bac38).
+ *
+ * A gate row is the one case where `(agentId, workflowId)` is not sole ownership.
+ * Several agents that hit the same gate collapse onto ONE pending row and the extras
+ * live in `metadata.gateWaiters` (`domains/attention-requests/repo.ts`
+ * appendGateWaiter). Answering such a row on behalf of one fenced agent would strand
+ * every still-live waiter, because `gateResolution.resolveAndSignal` signals waiters
+ * only while `userResponse IS NULL`. So a gate is closed only when this generation is
+ * its sole occupant.
+ *
+ * It must still be closed in that sole-occupant case: the partial unique index
+ * `(userId, gateKey) WHERE userResponse IS NULL` means a stale pending gate blocks the
+ * replacement workflow from ever raising a fresh one
+ * (`workflow-restart-tools.test.ts` "…so retry creates a fresh gate").
+ *
+ * `workflowGeneration` is null only for a pending descendant start that never
+ * recorded a stale generation; there, every open request on the agent is owned by
+ * the start being abandoned.
+ */
+export async function closeInterruptedAttentionRequests(
+  client: Pick<Prisma.TransactionClient, 'agentAttentionRequest'>,
+  agentId: string,
+  workflowGeneration: string | null
+): Promise<number> {
+  const scope = {
+    agentId,
+    ...(workflowGeneration === null ? {} : { workflowId: workflowGeneration }),
+    userResponse: null,
+  };
+  const open = await client.agentAttentionRequest.findMany({
+    where: scope,
+    select: { id: true, gateKey: true, metadata: true },
+  });
+  const closable = open.filter(
+    (row) =>
+      row.gateKey === null || !hasForeignGateWaiter(row.metadata, agentId, workflowGeneration)
+  );
+  if (closable.length === 0) return 0;
+
+  let closed = 0;
+  for (const row of closable) {
+    // `appendGateWaiter` holds this row FOR UPDATE. Compare the metadata snapshot
+    // as well as the pending predicate so either cleanup wins first and the joiner
+    // observes the terminal response, or the joiner commits first and this CAS
+    // refuses to erase its newly appended waiter.
+    const { count } = await client.agentAttentionRequest.updateMany({
+      where: {
+        id: row.id,
+        userResponse: null,
+        // Prisma represents both SQL NULL and JSON null as `null` when reading a
+        // nullable JSON field. AnyNull is therefore the only faithful CAS value.
+        metadata: { equals: row.metadata === null ? Prisma.AnyNull : row.metadata },
+      },
+      data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
+    });
+    closed += count;
+  }
+  return closed;
 }
 
-async function closeInterruptedAttentionRequest(
+/** True when a deduped gate is also holding a waiter outside the sealed generation. */
+function hasForeignGateWaiter(
+  metadata: Prisma.JsonValue | null,
   agentId: string,
-  workflowGeneration: string,
-  metadata: Record<string, unknown>
-): Promise<void> {
-  const requestId = attentionRequestId(metadata);
-  if (requestId === null) return;
-  await prisma.agentAttentionRequest.updateMany({
-    where: {
-      id: requestId,
-      agentId,
-      workflowId: workflowGeneration,
-      userResponse: null,
-    },
-    data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
+  workflowGeneration: string | null
+): boolean {
+  const record = metadataRecord(metadata);
+  const waiters = record?.gateWaiters;
+  if (!Array.isArray(waiters)) return false;
+  return waiters.some((waiter) => {
+    const entry = metadataRecord(waiter as Prisma.JsonValue);
+    if (entry === null) return false;
+    const waiterAgentId = metadataString(entry, 'agentId');
+    const waiterWorkflowId = metadataString(entry, 'workflowId');
+    return (
+      waiterAgentId !== null &&
+      waiterWorkflowId !== null &&
+      (waiterAgentId !== agentId ||
+        workflowGeneration === null ||
+        waiterWorkflowId !== workflowGeneration)
+    );
   });
 }
 
@@ -108,6 +180,40 @@ export async function captureInProgressWorkflowTools(
 }
 
 /**
+ * Which of these tool calls ever emitted a row at PARENT scope (no subAgentId)?
+ *
+ * Only those own a top-level chip in the UI. A browser agent reuses its parent
+ * `toolCallId` for sub-steps, and separate sub-step calls (recording,
+ * network_recording) never open at parent scope at all — so stripping sub-step
+ * identity from EVERY seal turned each one into its own top-level card
+ * (3 identical "Browser Agent / Done" chips for one agent).
+ */
+async function parentScopedCallIds(
+  agentId: string,
+  workflowGeneration: string,
+  toolCallIds: string[]
+): Promise<Set<string>> {
+  if (toolCallIds.length === 0) return new Set();
+  const rows = await prisma.message.findMany({
+    where: { agentId, role: 'TOOL' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const wanted = new Set(toolCallIds);
+  const parentScoped = new Set<string>();
+  for (const row of rows) {
+    if (messageWorkflowGeneration(row) !== workflowGeneration) continue;
+    const metadata = metadataRecord(row.metadata);
+    if (metadata === null) continue;
+    const callId = metadataString(metadata, 'toolCallId');
+    if (callId === null || !wanted.has(callId)) continue;
+    if (metadata.subAgentId === undefined || metadata.subAgentId === null) {
+      parentScoped.add(callId);
+    }
+  }
+  return parentScoped;
+}
+
+/**
  * Close unresolved calls left by a terminated workflow. The durable replacement
  * claim seals the old generation before this runs. Each append shares that claim's
  * advisory lock, so a success committed before the seal wins; any later old-run
@@ -127,14 +233,35 @@ export async function finalizeInterruptedWorkflowTools(
     candidates.set(candidate.toolCallId, candidate);
   }
 
+  const parentScoped = await parentScopedCallIds(agentId, workflowGeneration, [
+    ...candidates.keys(),
+  ]);
+
   let interrupted = 0;
   for (const [toolCallId, candidate] of candidates) {
+    // A deployment seal terminates the WHOLE tool call, so it must be emitted at
+    // workflow scope. `candidate.metadata` is the call's LAST in-progress row,
+    // which for a browser agent is a sub-step (`subAgentId`/`task_id`/
+    // `action_type: 'goto'`). Inheriting those made the seal look like a
+    // sub-step event, and the front-end only terminates the top-level Browser
+    // Agent chip from a row with no `subAgentId` and no `task_id`/`action_type`
+    // (see useMessageRouting `isBrowserAgentChipMessage`). So the browser agent
+    // was genuinely killed and its session closed, while the card rendered
+    // "in progress" forever next to the replacement's new card — two live-looking
+    // browser agents. Strip the sub-step identity; the sub-agent's own rows keep
+    // theirs.
+    // Only a call that owns a top-level chip may be re-scoped; a sub-step seal
+    // keeps its identity so it renders inside the trajectory, not as its own card.
+    const { subAgentId, task_id, action_type, ...stripped } = candidate.metadata;
+    const callScoped = parentScoped.has(toolCallId)
+      ? stripped
+      : { ...stripped, subAgentId, task_id, action_type };
     const terminal = await createMessage({
       agentId,
       role: 'TOOL',
       text: DEPLOY_INTERRUPTED_TOOL_MESSAGE,
       metadata: {
-        ...candidate.metadata,
+        ...callScoped,
         workflowGeneration,
         toolCallId,
         toolStatus: 'FINISHED',
@@ -147,16 +274,24 @@ export async function finalizeInterruptedWorkflowTools(
     });
     const terminalMetadata = metadataRecord(terminal.metadata);
     if (terminalMetadata?.errorCode === 'DEPLOY_INTERRUPTED') {
-      await closeInterruptedAttentionRequest(agentId, workflowGeneration, terminalMetadata);
       interrupted += 1;
     }
   }
+
+  // Take the generation lock before terminalizing attention rows, matching the
+  // order `gateResolution.resolveAndSignal` documents and relies on, so a user
+  // response can never hold the row while waiting for cleanup's lock.
+  const closedAttentionRequests = await runTransactionWithRetry(async (tx) => {
+    await lockAgentWorkflowGeneration(tx, agentId);
+    return closeInterruptedAttentionRequests(tx, agentId, workflowGeneration);
+  });
 
   log.info('Reconciled stale workflow tool calls', {
     agent_id: agentId,
     workflow_generation: workflowGeneration,
     candidate_count: candidates.size,
     interrupted_count: interrupted,
+    closed_attention_requests: closedAttentionRequests,
   });
   return { candidates: candidates.size, interrupted };
 }

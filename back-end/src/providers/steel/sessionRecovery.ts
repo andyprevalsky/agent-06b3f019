@@ -6,6 +6,7 @@
 import type { Browser } from 'playwright';
 import type { ProxyGeoLocation } from '../geoip';
 import { connectValidatedBrowser } from './sessionConnection';
+import { installCaptchaSolveIndicator } from '../browser/captchaSolveIndicator';
 import {
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
@@ -98,6 +99,7 @@ export async function createSteelRecoverySession(
         }
         continue;
       }
+      await installCaptchaSolveIndicator(validationBrowser);
       return {
         sessionId: session.id,
         debugUrl: steelDebugUrl(session.debugUrl),
@@ -109,7 +111,7 @@ export async function createSteelRecoverySession(
         validationBrowser,
       };
     } catch (error) {
-      if (validationBrowser !== null) {
+      if (validationBrowser !== null && typeof validationBrowser.close === 'function') {
         await validationBrowser.close().catch(() => {});
       }
       lastError = error instanceof Error ? error : new Error(String(error));

@@ -32,11 +32,15 @@ async function runAll(): Promise<void> {
   await import('./agents-messages.cases');
   await import('./agents-status-bootstrap.cases');
   await import('./agents-lifecycle.cases');
+  await import('./agents-sidebar-organization.cases');
+  await import('./agents-search.cases');
   await import('./agents-cost-resume.cases');
   await import('./agents-configuration.cases');
   await import('./agents-edge-routes.cases');
   await import('./agents-batch.cases');
   await import('./agents-liveness-reconcile.cases');
+  await import('./agents-terminal-browser-release.cases');
+  await import('./agents-cutover-subagent-close.cases');
   const {
     testBoundary_createAgentModelPricing,
     testBoundary_createAgentGeoip,

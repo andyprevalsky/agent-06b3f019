@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import ipaddress
 import json
 import re
+import socket
 import time as time_module
 from contextlib import suppress
 from dataclasses import dataclass
@@ -17,6 +19,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
+import httpx
 import structlog
 from PIL import Image
 
@@ -39,6 +42,14 @@ logger = structlog.get_logger()
 
 STEEL_COMPUTER_SCREENSHOT_WIDTH = 1288
 STEEL_COMPUTER_SCREENSHOT_HEIGHT = 891
+# Actions after which a page can start a WebAuthn ceremony: focusing or typing
+# into an account field triggers conditional UI, clicking activates a
+# "sign in with a passkey" control, and a navigation can land straight on a
+# sign-in page that invokes WebAuthn on load.
+_CEREMONY_CAPABLE_ACTIONS = frozenset(
+    {"click", "input_text", "press_key", "goto", "navback", "switch_tab", "open_new_tab"}
+)
+
 STEEL_VIEWPORT_CROP_X = 4
 STEEL_VIEWPORT_CROP_Y = 87
 STEEL_VIEWPORT_CROP_WIDTH = 1283
@@ -67,6 +78,11 @@ _API_SURFACE_PATHS = frozenset(
         "/ping",
     }
 )
+_NUMERIC_IPV4_HOST_RE = re.compile(
+    r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
+    re.IGNORECASE,
+)
+_PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES = frozenset({400, 401, 403, 404})
 
 
 def url_looks_like_api_surface(url: str) -> bool:
@@ -91,128 +107,28 @@ def url_looks_like_api_surface(url: str) -> bool:
     return False
 
 
-def effective_navigation_pin_host(
-    *,
-    current_url: str,
-    recovery_pin_host: Optional[str],
-    origin_base_domain: Optional[str],
-) -> Optional[str]:
-    """Resolve the host the agent must stay on.
-
-    Cross-origin handoff (live registrable domain ≠ session origin): pin to the
-    live host so Place-order / OAuth / 3DS redirects stick without path or
-    product-name allowlists. Otherwise keep an explicit post-recovery pin.
-    """
-    current_host = (urlparse(current_url or "").hostname or "").lower()
-    origin = (origin_base_domain or "").lower().strip(".")
-    if current_host and origin:
-        current_base = _get_base_domain(current_host)
-        if current_base and current_base != origin:
-            return current_host
-    pin = (recovery_pin_host or "").lower().strip(".")
-    return pin or None
-
-
-def evaluate_code_looks_like_navigation(code: str) -> bool:
-    """True when JS evaluate would navigate / open windows (bypass for goto guards)."""
-    lowered = (code or "").lower()
-    markers = (
-        "location.href",
-        "location.assign",
-        "location.replace",
-        "location.reload",
-        "document.location",
-        "window.location",
-        "history.pushstate",
-        "history.replacestate",
-        "history.back",
-        "history.go",
-        "window.open",
-        "window.navigate",
-    )
-    return any(marker in lowered for marker in markers)
-
-
-def press_key_looks_like_leave_page(key: str) -> bool:
-    """True for history-back / close-tab chords that abandon a pinned page."""
-    normalized = (key or "").replace(" ", "").lower().replace("ctrl+", "control+")
-    leave_chords = {
-        "alt+left",
-        "alt+arrowleft",
-        "alt+right",
-        "alt+arrowright",
-        "meta+left",
-        "meta+[",
-        "control+[",
-        "control+w",
-        "control+shift+w",
-        "meta+w",
-        "meta+shift+w",
-        "browserback",
-        "browserforward",
+def _kernel_computer_key(key: str) -> str:
+    """Translate Playwright-style key names to Kernel/xdotool key symbols."""
+    aliases = {
+        "control": "Ctrl",
+        "ctrl": "Ctrl",
+        "meta": "Super",
+        "command": "Super",
+        "cmd": "Super",
+        "enter": "Return",
+        "arrowup": "Up",
+        "arrowdown": "Down",
+        "arrowleft": "Left",
+        "arrowright": "Right",
+        "backspace": "BackSpace",
+        "del": "Delete",
+        "pageup": "Prior",
+        "pagedown": "Next",
+        "tab": "Tab",
+        "escape": "Escape",
+        "esc": "Escape",
     }
-    return normalized in leave_chords
-
-
-def click_href_leaves_pinned_base(element: Any, pin_host: Optional[str]) -> Optional[str]:
-    """Return absolute href when a click target leaves the pinned registrable domain."""
-    pin = (pin_host or "").lower().strip(".")
-    if not pin or element is None:
-        return None
-    attrs = getattr(element, "attributes", None) or {}
-    if not isinstance(attrs, dict):
-        return None
-    href = str(attrs.get("href") or attrs.get("xlink:href") or "").strip()
-    if not href.startswith(("http://", "https://")):
-        return None
-    target_host = (urlparse(href).hostname or "").lower()
-    if not target_host:
-        return None
-    if _get_base_domain(target_host) != _get_base_domain(pin):
-        return href
-    return None
-
-
-def navigation_leaves_pinned_host(
-    *,
-    current_url: str,
-    target_url: Optional[str],
-    pin_host: Optional[str],
-    action: str,
-) -> bool:
-    """True when a nav action would leave the pinned browse host."""
-    pin = (pin_host or "").lower().strip(".")
-    if not pin:
-        return False
-    current_host = (urlparse(current_url or "").hostname or "").lower()
-    if not current_host:
-        return False
-    on_pin = current_host == pin or current_host.endswith(f".{pin}")
-    if not on_pin:
-        # Clicks may have already moved us off the pin — do not trap elsewhere.
-        return False
-    # Closing/navback abandons the handoff surface.
-    if action in {"navback", "close_tab"}:
-        return True
-    # switch_tab: allow when the target tab stays on the pinned host (e.g. hotels.com
-    # checkout ↔ property page); block only when focus would move off-pin.
-    if action == "switch_tab":
-        if not target_url:
-            return True
-        target_host = (urlparse(target_url or "").hostname or "").lower()
-        if not target_host:
-            return True
-        if target_host == pin or target_host.endswith(f".{pin}"):
-            return False
-        return True
-    if action in {"goto", "open_new_tab"}:
-        target_host = (urlparse(target_url or "").hostname or "").lower()
-        if not target_host:
-            return True
-        if target_host == pin or target_host.endswith(f".{pin}"):
-            return False
-        return True
-    return False
+    return "+".join(aliases.get(part.strip().lower(), part.strip()) for part in key.split("+"))
 
 
 # ========================================
@@ -320,6 +236,90 @@ def get_domain_from_url(url: str) -> str:
         return domain
     except Exception:
         return ""
+
+
+_BLANK_SPA_MOUNT_DIAGNOSTICS_JS = """() => {
+    const scripts = Array.from(document.scripts).map((el) => ({
+        type: el.type || '',
+        src: el.src || '',
+        async: !!el.async,
+        defer: !!el.defer,
+        hasContent: !!(el.textContent || '').trim(),
+    }));
+    const preloads = Array.from(document.querySelectorAll('link[rel="preload"]')).map((el) => ({
+        as: el.getAttribute('as') || '',
+        href: el.href || '',
+    }));
+    const resources = (performance.getEntriesByType('resource') || []).map((entry) => ({
+        name: entry.name,
+        initiatorType: entry.initiatorType,
+        transferSize: entry.transferSize,
+        encodedBodySize: entry.encodedBodySize,
+        durationMs: Math.round(entry.duration),
+        responseEndMs: Math.round(entry.responseEnd),
+    }));
+    const scriptResources = resources.filter(
+        (entry) =>
+            entry.initiatorType === 'script' ||
+            /\\.(m?js)(\\?|$)/i.test(entry.name) ||
+            entry.name.includes('/src/main.') ||
+            entry.name.includes('/@vite/') ||
+            entry.name.includes('/node_modules/'),
+    );
+    const preloadResources = resources.filter((entry) =>
+        preloads.some((preload) => preload.href && entry.name.startsWith(preload.href.split('?')[0])),
+    );
+    const mainScript = scripts.find((script) => script.src.includes('/src/main.')) || null;
+    const mainResource =
+        scriptResources.find((entry) => entry.name.includes('/src/main.')) ||
+        resources.find((entry) => entry.name.includes('/src/main.')) ||
+        null;
+    return {
+        href: location.href,
+        readyState: document.readyState,
+        rootChildren: (document.getElementById('root') || {}).children
+            ? document.getElementById('root').children.length
+            : -1,
+        scriptCount: scripts.length,
+        scripts,
+        preloadCount: preloads.length,
+        preloads,
+        resourceCount: resources.length,
+        scriptResourceCount: scriptResources.length,
+        scriptResources: scriptResources.slice(0, 40),
+        preloadResources: preloadResources.slice(0, 20),
+        mainScript,
+        mainResource,
+        largestPreloadBytes: preloadResources.reduce(
+            (max, entry) => Math.max(max, entry.transferSize || entry.encodedBodySize || 0),
+            0,
+        ),
+    };
+}"""
+
+
+async def _diagnose_blank_spa_mount(page: Any, *, url: str, phase: str) -> Dict[str, Any]:
+    """Capture script/preload/performance evidence when a SPA shell stays empty."""
+    evaluate = getattr(page, "evaluate", None)
+    if not evaluate:
+        return {"phase": phase, "url": url, "reason": "no_page_evaluate"}
+    try:
+        result = evaluate(_BLANK_SPA_MOUNT_DIAGNOSTICS_JS)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, str):
+            with suppress(Exception):
+                result = json.loads(result)
+        diagnostics = result if isinstance(result, dict) else {"raw": result}
+    except Exception as exc:
+        diagnostics = {"phase": phase, "url": url, "error": str(exc)}
+    logger.warning(
+        "Blank SPA mount diagnostics",
+        url=url,
+        phase=phase,
+        diagnostics=diagnostics,
+    )
+    return diagnostics
 
 
 async def _wait_for_navigation_content(page: Any, deadline: float) -> Dict[str, Any]:
@@ -431,6 +431,7 @@ async def wait_for_navigation_ready(
         logger.warning("Navigation stayed on an empty loading document; reloading once", url=url, state=state)
     else:
         logger.warning("Navigation produced blank SPA shell; reloading once", url=url, state=state)
+        await _diagnose_blank_spa_mount(page, url=url, phase="before_reload")
     try:
         goto = getattr(page, "goto", None)
         reload_page = getattr(page, "reload", None)
@@ -449,6 +450,9 @@ async def wait_for_navigation_ready(
     second = await _wait_for_navigation_content(page, time_module.monotonic() + timeout_seconds)
     if not second.get("ready"):
         logger.warning("Page still lacked usable content after reload", url=url, state=second.get("state"))
+        second_state = second.get("state") if isinstance(second.get("state"), dict) else {}
+        if second_state.get("blankSpaShell") or stuck_loading_shell:
+            await _diagnose_blank_spa_mount(page, url=url, phase="after_reload")
     return second
 
 
@@ -638,6 +642,7 @@ class _ActionContext:
     element: Any
     available_file_paths: Optional[Dict[str, str]]
     session_id: Optional[str]
+    user_id: str
     config: Any
     humanizer: Optional[BrowserHumanizer]
     secret_refs: Optional[Dict[str, str]]
@@ -651,8 +656,6 @@ class _ActionContext:
     browser_network_recorder: Optional[Any]
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
-    navigation_pin_host: Optional[str] = None
-    navigation_origin_base_domain: Optional[str] = None
 
 
 async def _refuse_navigation(
@@ -673,76 +676,80 @@ async def _refuse_navigation(
     return result
 
 
+def _non_public_navigation_reason(url: str) -> Optional[str]:
+    """Explain why a URL is not safe for browser navigation, if applicable."""
+    if url == "about:blank":
+        return None
+
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return "the URL is malformed"
+
+    if parsed.scheme not in {"http", "https"}:
+        return "only public HTTP(S) pages may be opened"
+    if not host:
+        return "the URL has no hostname"
+
+    normalized_host = host.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        return "localhost pages are not allowed"
+
+    address = None
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        # inet_aton recognizes legacy numeric IPv4 forms such as 127.1,
+        # 2130706433, and 0x7f000001 that urlparse leaves looking like names.
+        if _NUMERIC_IPV4_HOST_RE.fullmatch(normalized_host):
+            try:
+                address = ipaddress.ip_address(socket.inet_aton(normalized_host))
+            except (OSError, ValueError):
+                return "the numeric hostname is malformed"
+
+    if address is not None and not address.is_global:
+        return f"the destination address {address} is not public"
+    return None
+
+
 def _navigation_guard_error(
     context: _ActionContext,
     *,
     action: str,
     target_url: Optional[str] = None,
 ) -> Optional[str]:
-    if target_url and url_looks_like_api_surface(target_url):
+    """Refuse non-public destinations and API/non-document URL shapes.
+
+    Host pinning (recovery / cross-origin handoff) was removed: it trapped
+    legitimate merchant → third-party order flows (e.g. bluebottlecoffee.com →
+    order.online) after challenge recovery on the merchant host.
+    """
+    navigation_url = _normalize_goto_url(target_url) if action == "goto" else target_url
+    if target_url:
+        unsafe_reason = _non_public_navigation_reason(navigation_url or target_url)
+        if unsafe_reason:
+            return f"Refusing unsafe navigation to {target_url!r}: {unsafe_reason}."
+    if navigation_url and url_looks_like_api_surface(navigation_url):
         return (
             f"Refusing navigation to API/non-document URL {target_url!r}. "
             "Network request hosts are not pages — stay on the current document "
             f"({context.current_url or 'current page'}) and continue the task there."
         )
-    pin_host = effective_navigation_pin_host(
-        current_url=context.current_url,
-        recovery_pin_host=context.navigation_pin_host,
-        origin_base_domain=context.navigation_origin_base_domain,
-    )
-    if navigation_leaves_pinned_host(
-        current_url=context.current_url,
-        target_url=target_url,
-        pin_host=pin_host,
-        action=action,
-    ):
-        return (
-            f"Refusing to leave pinned page host {pin_host!r}. "
-            f"Current page URL: {context.current_url}. Continue the task on this page "
-            "(do not go back, close/switch tabs, or navigate to another host until "
-            "this page is done)."
-        )
     return None
 
 
-def _pinned_evaluate_guard_error(context: _ActionContext, code: str) -> Optional[str]:
-    """Refuse navigation-shaped evaluate while a host pin is active."""
-    pin_host = effective_navigation_pin_host(
-        current_url=context.current_url,
-        recovery_pin_host=context.navigation_pin_host,
-        origin_base_domain=context.navigation_origin_base_domain,
-    )
-    if not pin_host:
-        return None
-    current_host = (urlparse(context.current_url or "").hostname or "").lower()
-    on_pin = bool(current_host) and (
-        current_host == pin_host or current_host.endswith(f".{pin_host}")
-    )
-    if not on_pin:
-        return None
-    if evaluate_code_looks_like_navigation(code):
-        return (
-            f"Refusing evaluate that would navigate away from pinned host {pin_host!r}. "
-            f"Current page URL: {context.current_url}. Use input_text/click on this page "
-            "instead of location/history/window.open scripts."
-        )
-    return None
+_EXPLICIT_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_BARE_HOST_PORT_RE = re.compile(r"^(?:\[[^\]]+\]|[A-Za-z0-9.-]+):[0-9]+(?:[/?#]|$)")
 
 
-def _active_pin_host(context: _ActionContext) -> Optional[str]:
-    pin_host = effective_navigation_pin_host(
-        current_url=context.current_url,
-        recovery_pin_host=context.navigation_pin_host,
-        origin_base_domain=context.navigation_origin_base_domain,
-    )
-    if not pin_host:
-        return None
-    current_host = (urlparse(context.current_url or "").hostname or "").lower()
-    if not current_host:
-        return None
-    if current_host == pin_host or current_host.endswith(f".{pin_host}"):
-        return pin_host
-    return None
+def _normalize_goto_url(url: Optional[str]) -> Optional[str]:
+    """Add HTTPS to bare hosts while preserving explicit schemes for rejection."""
+    if not url or url.startswith(("http://", "https://", "about:", "file:")):
+        return url
+    if _EXPLICIT_URL_SCHEME_RE.match(url) and not _BARE_HOST_PORT_RE.match(url):
+        return url
+    return f"https://{url}"
 
 
 _INTERACTION_ACTIONS = {
@@ -750,7 +757,6 @@ _INTERACTION_ACTIONS = {
     "input_text",
     "press_key",
     "scroll",
-    "drag",
     "dropdown_options",
     "select_dropdown",
     "upload_file",
@@ -868,19 +874,6 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
     )
 
     if context.action_name == "click":
-        pin_host = _active_pin_host(context)
-        leave_href = click_href_leaves_pinned_base(context.element, pin_host)
-        if leave_href:
-            return await _refuse_navigation(
-                context,
-                action="click",
-                error=(
-                    f"Refusing click that navigates off pinned host {pin_host!r} "
-                    f"via {leave_href!r}. Current page URL: {context.current_url}. "
-                    "Fill and submit the fields on this page instead."
-                ),
-                params={"index": context.index, "href": leave_href},
-            )
         return await _execute_click(
             session=context.session,
             dom_service=context.dom_service,
@@ -917,19 +910,35 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
-        pin_host = _active_pin_host(context)
-        if pin_host and press_key_looks_like_leave_page(str(key)):
-            return await _refuse_navigation(
-                context,
-                action="press_key",
-                error=(
-                    f"Refusing key chord {key!r} that would leave pinned host {pin_host!r}. "
-                    f"Current page URL: {context.current_url}. Continue on this page with "
-                    "input_text/click instead of back/close-tab shortcuts."
-                ),
-                params={"key": key},
-            )
-        if context.humanizer:
+        provider_pressed = False
+        if context.config is not None and context.session_id and context.user_id.strip():
+            from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
+
+            # Fall back only when the provider reports unsupported input or the
+            # backend explicitly rejects the request before provider execution.
+            # A timeout, transport error, or 5xx is ambiguous: the key may already
+            # have executed, and replaying Enter through CDP could submit twice.
+            try:
+                provider_pressed = await press_browser_computer_key(
+                    context.config,
+                    context.session_id,
+                    context.user_id,
+                    _kernel_computer_key(str(key)),
+                )
+            except httpx.HTTPStatusError as error:
+                if (
+                    error.response.status_code
+                    not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES
+                ):
+                    raise
+                logger.info(
+                    "Provider computer input rejected before execution; falling back",
+                    key=key,
+                    status=error.response.status_code,
+                )
+        if provider_pressed:
+            logger.info("Pressed key through provider computer input", key=key)
+        elif context.humanizer:
             await context.humanizer.press_key(key)
         else:
             logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
@@ -995,15 +1004,6 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             result={"success": True},
         )
         return {"success": True, "message": ""}
-    if context.action_name == "drag":
-        return await _execute_drag(
-            session=context.session,
-            dom_service=context.dom_service,
-            action_history=context.action_history,
-            params=context.params,
-            thinking=context.thinking,
-            humanizer=context.humanizer,
-        )
     return await _execute_upload_file(
         session=context.session,
         dom_service=context.dom_service,
@@ -1075,15 +1075,7 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
         return {"success": True, "message": ""}
     if context.action_name == "switch_tab":
-        switch_target_url = await _resolve_switch_tab_target_url(
-            context.session,
-            context.params.get("tab_id"),
-        )
-        guard = _navigation_guard_error(
-            context,
-            action="switch_tab",
-            target_url=switch_target_url,
-        )
+        guard = _navigation_guard_error(context, action="switch_tab")
         if guard:
             return await _refuse_navigation(
                 context,
@@ -1146,20 +1138,30 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
-        guard = _pinned_evaluate_guard_error(context, code)
-        if guard:
-            return await _refuse_navigation(
-                context,
-                action="evaluate",
-                error=guard,
-                params={"code": code[:500]},
-            )
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={"expression": code, "returnByValue": True},
+            params={"expression": code, "returnByValue": True, "awaitPromise": True},
             session_id=cdp_session.session_id,
         )
         value = result.get("result", {}).get("value")
+        # CDP returns exceptionDetails when the expression throws; surface that
+        # instead of a silent null/empty value (async fetch failures used to look
+        # like successful empty objects).
+        exception = result.get("exceptionDetails")
+        if exception:
+            error_text = (
+                exception.get("text")
+                or (exception.get("exception") or {}).get("description")
+                or "evaluate raised"
+            )
+            await context.action_history.record_action(
+                dom_service=context.dom_service,
+                action="evaluate",
+                thinking=context.thinking,
+                params={"code": code},
+                result={"success": False, "error": error_text},
+            )
+            return {"success": False, "error": error_text, "value": value}
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="evaluate",
@@ -1246,8 +1248,6 @@ async def execute_action(
     prepare_credentials_for_url: Optional[
         Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
     ] = None,
-    navigation_pin_host: Optional[str] = None,
-    navigation_origin_base_domain: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1264,6 +1264,16 @@ async def execute_action(
     params = action.get("params", {})
     thinking = action.get("thinking")
     coords = action.get("coordinates")
+
+    # Anything that can make a relying party call navigator.credentials.get must
+    # run against a target whose native WebAuthn UI is suppressed and whose
+    # virtual authenticator holds our passkeys. Chrome scopes both per target, so
+    # arming at connect (or at step start) strands them the moment the agent
+    # follows a link into a new tab — which is how a real run ended up wedged
+    # behind Chrome's own "No passkeys available" modal, a surface no CDP input
+    # can reach. Arming here is idempotent and costs one round trip.
+    if action_name in _CEREMONY_CAPABLE_ACTIONS:
+        await dom_service.ensure_browser_overlays_suppressed()
 
     try:
         element = None
@@ -1284,6 +1294,7 @@ async def execute_action(
             element=element,
             available_file_paths=available_file_paths,
             session_id=session_id,
+            user_id=user_id,
             config=config,
             humanizer=humanizer,
             secret_refs=secret_refs,
@@ -1297,8 +1308,6 @@ async def execute_action(
             browser_network_recorder=browser_network_recorder,
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
-            navigation_pin_host=navigation_pin_host,
-            navigation_origin_base_domain=navigation_origin_base_domain,
         )
         if action_name in _INTERACTION_ACTIONS:
             return await _execute_interaction_action(context)
@@ -1950,6 +1959,82 @@ async def _resolve_payment_ref_coordinates(
     return None
 
 
+_PASSWORD_FIELD_LOCATE_JS = """
+(hint) => {
+    const candidates = Array.from(document.querySelectorAll(
+        'input[type="password"], input[name="password"], input[autocomplete="current-password"], input[autocomplete="new-password"]'
+    ));
+    const matchesHint = (el) => {
+        if (!hint || typeof hint !== 'object') return false;
+        for (const attr of ['id', 'name', 'autocomplete']) {
+            const want = hint[attr];
+            if (want && el.getAttribute(attr) === want) return true;
+        }
+        return false;
+    };
+    const ordered = hint
+        ? [...candidates.filter(matchesHint), ...candidates.filter((el) => !matchesHint(el))]
+        : candidates;
+    for (const el of ordered) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            continue;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) continue;
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const after = el.getBoundingClientRect();
+        if (after.width < 2 || after.height < 2) continue;
+        return {
+            x: Math.round(after.left + after.width / 2),
+            y: Math.round(after.top + after.height / 2),
+            selector: el.id
+                ? ('#' + el.id)
+                : (el.getAttribute('name') ? ('input[name="' + el.getAttribute('name') + '"]') : 'input[type="password"]'),
+        };
+    }
+    return null;
+}
+"""
+
+
+async def _resolve_password_field_coordinates(
+    session: Any,
+    *,
+    input_page: Any = None,
+    field_hint: Optional[Dict[str, str]] = None,
+) -> Optional[tuple[int, int]]:
+    """Resolve coordinates for a visible password input when the indexed node has no rect.
+
+    Account-switch / sign-in transitions often leave the LLM's password index
+    without a bounding box even though a visible ``input[type=password]`` is on
+    the page. Mirror the payment semantic-locate path so humanized typing can
+    continue without falling back to TypeTextEvent.
+
+    When ``field_hint`` carries id/name/autocomplete from the indexed element,
+    prefer that match before the first visible password field so multi-password
+    pages (change-password, sign-in + register) do not type into the wrong input.
+    """
+    if not session:
+        return None
+    hint_payload = field_hint if isinstance(field_hint, dict) and field_hint else None
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(
+            target, _PASSWORD_FIELD_LOCATE_JS, hint_payload
+        )
+        if not result:
+            continue
+        if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
+            logger.debug(
+                "Resolved password field coordinates",
+                target=label,
+                selector=result.get("selector"),
+                matched_hint=bool(hint_payload),
+            )
+            return int(result["x"]), int(result["y"])
+    return None
+
+
 _PAYMENT_METHOD_EXPAND_JS = """
 (_unused) => {
     const pattern = /\\b(card|credit|debit|pay with card|card information|payment method)\\b/i;
@@ -2412,11 +2497,23 @@ async def _click_write_lock_result(
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
+        is_click_write_lock_eligible_control,
         is_email_send_button,
         is_purchase_button,
+        is_return_button,
         is_social_domain,
         is_submit_button,
     )
+
+    # Andy (2026-08-21): never raise click write locks on plain inputs /
+    # textarea / select — only buttons and form submits.
+    if element is not None and not is_click_write_lock_eligible_control(element):
+        logger.info(
+            "Write lock skipped: click target is not a button or form submit",
+            tag=getattr(element, "tag_name", None) or getattr(element, "node_name", None),
+            url=current_url[:80] if current_url else None,
+        )
+        return None
 
     coordinate_click = element is None
     if coordinate_click:
@@ -2453,6 +2550,7 @@ async def _click_write_lock_result(
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
         ("email_send", is_email_send_button(element_text), "email send"),
+        ("return", is_return_button(element_text), "return confirmation"),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""
@@ -2496,154 +2594,6 @@ async def _click_write_lock_result(
             "url": current_url,
         }
     return None
-
-
-async def _resolve_drag_point(
-    dom_service: DOMService,
-    *,
-    index: Any,
-    x: Any,
-    y: Any,
-    label: str,
-) -> tuple[int, int]:
-    """Resolve one drag endpoint from index and/or explicit viewport coordinates."""
-    if x is not None and y is not None:
-        return int(x), int(y)
-    if index is None:
-        raise ValueError(f"drag {label} requires an index or x/y coordinates")
-    coord_tuple = await _maybe_await(dom_service.get_click_coordinates(int(index)))
-    if not coord_tuple:
-        coord_tuple = await _refresh_element_coordinates(dom_service, int(index), for_click=True)
-    if not coord_tuple:
-        raise ValueError(f"drag {label}: no coordinates for element index {index}")
-    return int(coord_tuple[0]), int(coord_tuple[1])
-
-
-async def _cdp_drag_between(
-    session: Any,
-    *,
-    start_x: int,
-    start_y: int,
-    end_x: int,
-    end_y: int,
-    steps: int,
-) -> None:
-    """browser-use Element.drag_to pattern with intermediate held moves."""
-    cdp_session = await session.get_or_create_cdp_session()
-    session_id = cdp_session.session_id
-    send = cdp_session.cdp_client.send.Input.dispatchMouseEvent
-    step_count = max(2, min(120, int(steps)))
-
-    await send(
-        params={"type": "mouseMoved", "x": start_x, "y": start_y},
-        session_id=session_id,
-    )
-    await asyncio.sleep(0.05)
-    await send(
-        params={
-            "type": "mousePressed",
-            "x": start_x,
-            "y": start_y,
-            "button": "left",
-            "buttons": 1,
-            "clickCount": 1,
-        },
-        session_id=session_id,
-    )
-    await asyncio.sleep(0.03)
-    for i in range(1, step_count + 1):
-        t = i / step_count
-        x = start_x + (end_x - start_x) * t
-        y = start_y + (end_y - start_y) * t
-        await send(
-            params={
-                "type": "mouseMoved",
-                "x": x,
-                "y": y,
-                "button": "left",
-                "buttons": 1,
-            },
-            session_id=session_id,
-        )
-        await asyncio.sleep(0.01)
-    await send(
-        params={
-            "type": "mouseReleased",
-            "x": end_x,
-            "y": end_y,
-            "button": "left",
-            "buttons": 0,
-            "clickCount": 1,
-        },
-        session_id=session_id,
-    )
-
-
-async def _execute_drag(
-    *,
-    session: Any,
-    dom_service: DOMService,
-    action_history: ActionHistory,
-    params: Dict[str, Any],
-    thinking: Any,
-    humanizer: Optional[BrowserHumanizer],
-) -> Dict[str, Any]:
-    """Execute a press→move→release drag via humanizer or raw CDP."""
-    try:
-        start_x, start_y = await _resolve_drag_point(
-            dom_service,
-            index=params.get("source_index"),
-            x=params.get("start_x"),
-            y=params.get("start_y"),
-            label="start",
-        )
-        end_x, end_y = await _resolve_drag_point(
-            dom_service,
-            index=params.get("target_index"),
-            x=params.get("end_x"),
-            y=params.get("end_y"),
-            label="end",
-        )
-    except ValueError as exc:
-        return {"success": False, "error": str(exc)}
-
-    steps = int(params.get("steps") or 24)
-    if humanizer:
-        await humanizer.drag_between(start_x, start_y, end_x, end_y, steps=steps)
-    else:
-        logger.warning(
-            "⚠️ HUMANIZATION FALLBACK: No humanizer available, using CDP drag like browser-use Element.drag_to"
-        )
-        await _cdp_drag_between(
-            session,
-            start_x=start_x,
-            start_y=start_y,
-            end_x=end_x,
-            end_y=end_y,
-            steps=steps,
-        )
-
-    recorded = {
-        "start": {"x": start_x, "y": start_y},
-        "end": {"x": end_x, "y": end_y},
-        "steps": steps,
-        "source_index": params.get("source_index"),
-        "target_index": params.get("target_index"),
-    }
-    await action_history.record_action(
-        dom_service=dom_service,
-        action="drag",
-        thinking=thinking,
-        index=params.get("source_index"),
-        coordinates={"x": start_x, "y": start_y},
-        params=recorded,
-        result={"success": True},
-    )
-    return {
-        "success": True,
-        "message": f"Dragged from ({start_x},{start_y}) to ({end_x},{end_y})",
-        **recorded,
-    }
 
 
 async def _execute_click(
@@ -2938,6 +2888,21 @@ async def _execute_indexed_input_text(
             secret_ref_name or "",
             input_page=_humanizer_input_page(humanizer),
         )
+    is_password_credential = bool(
+        credential_ref and str(credential_ref.get("kind") or "") == "password"
+    )
+    if humanizer and not coord_tuple and is_password_credential:
+        attrs = getattr(element, "attributes", None) or {}
+        field_hint = {
+            key: str(attrs[key])
+            for key in ("id", "name", "autocomplete")
+            if attrs.get(key)
+        }
+        coord_tuple = await _resolve_password_field_coordinates(
+            session,
+            input_page=_humanizer_input_page(humanizer),
+            field_hint=field_hint or None,
+        )
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
     asyncio.create_task(session.highlight_interaction_element(element))
 
@@ -3208,9 +3173,9 @@ async def _execute_goto(
     """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
 
-    url = params.get("url", "")
-    if url and not url.startswith(("http://", "https://", "about:", "file:")):
-        url = f"https://{url}"
+    original_url = params.get("url", "")
+    url = _normalize_goto_url(original_url) or ""
+    if url != original_url:
         logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
     credential_summary = None
     target_auth_realm = auth_realm_from_url(url)
@@ -3243,12 +3208,58 @@ async def _execute_goto(
                 if key in prepared
             }
 
-    event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
-    await event
-    await event.event_result(raise_if_any=True, raise_if_none=False)
+    try:
+        event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
 
-    navigation_waiter = wait_for_navigation or wait_for_navigation_ready
-    await navigation_waiter(dom_service, url=url)
+        navigation_waiter = wait_for_navigation or wait_for_navigation_ready
+        await navigation_waiter(dom_service, url=url)
+    except Exception as nav_error:
+        error_text = extract_error_message(nav_error)
+        if (
+            session_id
+            and config is not None
+            and url.startswith(("http://", "https://"))
+            and "ERR_ABORTED" in error_text
+        ):
+            try:
+                from domains.spawn_browser_agent_v3.download_persist import (
+                    persist_navigation_download_via_page_fetch,
+                )
+
+                download = await persist_navigation_download_via_page_fetch(
+                    session=session,
+                    url=url,
+                    session_id=session_id,
+                    config=config,
+                )
+            except Exception as persist_error:
+                logger.warning(
+                    "ERR_ABORTED download persist failed",
+                    url=url[:200],
+                    error=f"{type(persist_error).__name__}:{extract_error_message(persist_error)[:160]}",
+                )
+                download = None
+            if download:
+                result = {
+                    "success": True,
+                    "message": (
+                        f"Navigation aborted into a file download; saved to session "
+                        f"as {download.get('path')} ({download.get('size')} bytes)"
+                    ),
+                    "current_url": url,
+                    "download": download,
+                }
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="goto",
+                    thinking=thinking,
+                    params={"url": url},
+                    result=result,
+                )
+                return result
+        raise
 
     result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:
@@ -3338,20 +3349,6 @@ async def _execute_upload_file(
     return {"success": True, "message": "", "uploaded": filename, "to_index": index}
 
 
-async def _resolve_switch_tab_target_url(session: Any, tab_id: Any) -> Optional[str]:
-    """Return the URL of the tab that switch_tab would focus, if resolvable."""
-    if not tab_id or session is None:
-        return None
-    try:
-        tabs = await session.get_tabs()
-    except Exception:
-        return None
-    target = next((t for t in tabs if t.target_id.endswith(str(tab_id))), None)
-    if not target:
-        return None
-    return str(getattr(target, "url", None) or "")
-
-
 async def _execute_switch_tab(
     *,
     session: Any,
@@ -3428,81 +3425,6 @@ async def _execute_close_tab(
     return {"success": True, "message": "", "closed_tab": tab_id}
 
 
-async def _read_css_viewport_size(session: Any) -> Optional[tuple[int, int]]:
-    """Read the page CSS viewport (innerWidth x innerHeight) via CDP.
-
-    Computer-window screenshots include browser chrome; click/drag tools use CSS
-    coordinates. Callers crop the capture to this size so screenshot pixels match
-    CDP mouse events.
-    """
-    if session is None:
-        return None
-    get_cdp = getattr(session, "get_or_create_cdp_session", None)
-    if not callable(get_cdp):
-        return None
-    try:
-        cdp_session = await get_cdp(focus=True)
-        result = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={
-                "expression": "({w: window.innerWidth, h: window.innerHeight})",
-                "returnByValue": True,
-            },
-            session_id=cdp_session.session_id,
-        )
-        value = (result or {}).get("result", {}).get("value") or {}
-        width = int(value.get("w") or 0)
-        height = int(value.get("h") or 0)
-        if width > 0 and height > 0:
-            return width, height
-    except Exception as exc:
-        logger.warning(
-            "Failed to read CSS viewport for computer-screenshot crop",
-            error=str(exc)[:300],
-        )
-    return None
-
-
-def _crop_computer_screenshot_to_css_viewport(
-    screenshot_bytes: bytes,
-    *,
-    viewport_width: int,
-    viewport_height: int,
-) -> bytes:
-    """Crop a full computer-window PNG to the CSS viewport coordinate space.
-
-    Chromium window chrome sits above the content viewport. Horizontal overflow
-    (if any) is centered. No-op when the image already matches the viewport.
-    """
-    with Image.open(BytesIO(screenshot_bytes)) as img:
-        if img.width == viewport_width and img.height == viewport_height:
-            return screenshot_bytes
-        if img.width < viewport_width or img.height < viewport_height:
-            logger.warning(
-                "Computer screenshot smaller than CSS viewport; skipping crop",
-                image_width=img.width,
-                image_height=img.height,
-                viewport_width=viewport_width,
-                viewport_height=viewport_height,
-            )
-            return screenshot_bytes
-
-        top = img.height - viewport_height
-        left = max(0, (img.width - viewport_width) // 2)
-        cropped = img.crop((left, top, left + viewport_width, top + viewport_height))
-        logger.info(
-            "Cropped computer screenshot to CSS viewport",
-            image_width=img.width,
-            image_height=img.height,
-            viewport_width=viewport_width,
-            viewport_height=viewport_height,
-            crop_left=left,
-            crop_top=top,
-        )
-        output = BytesIO()
-        cropped.save(output, format="PNG")
-        return output.getvalue()
-
-
 async def _execute_screenshot(
     *,
     session: Any,
@@ -3524,26 +3446,11 @@ async def _execute_screenshot(
     screenshot_result = await take_browser_computer_screenshot(config, session_id)
     full_screenshot_b64 = screenshot_result["base64_image"]
     full_screenshot_bytes = base64.b64decode(full_screenshot_b64)
-    provider = screenshot_result.get("provider")
-    if provider == "steel":
-        # Steel uses a fixed window/crop contract (see STEEL_VIEWPORT_CROP_*).
-        screenshot_bytes = _crop_steel_computer_screenshot_to_viewport(full_screenshot_bytes)
-    else:
-        # Kernel (and any other computer capture) includes window chrome above the
-        # CSS viewport. Crop so screenshot pixels match click_coordinates / drag.
-        css_viewport = await _read_css_viewport_size(session)
-        if css_viewport is None:
-            logger.warning(
-                "CSS viewport unavailable; returning uncropped computer screenshot",
-                provider=provider,
-            )
-            screenshot_bytes = full_screenshot_bytes
-        else:
-            screenshot_bytes = _crop_computer_screenshot_to_css_viewport(
-                full_screenshot_bytes,
-                viewport_width=css_viewport[0],
-                viewport_height=css_viewport[1],
-            )
+    screenshot_bytes = (
+        _crop_steel_computer_screenshot_to_viewport(full_screenshot_bytes)
+        if screenshot_result.get("provider") == "steel"
+        else full_screenshot_bytes
+    )
     screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
     saved_path = None

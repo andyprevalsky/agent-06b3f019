@@ -1,46 +1,121 @@
 #!/usr/bin/env bash
+# Cemented guard: RCA/descend evidence links must be durable + self-contained.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-fail() { echo "FAIL: $1" >&2; exit 1; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
 
-require_text() {
-  local file="$1" text="$2" description="$3"
-  grep -Fq -- "$text" "$file" || fail "$description"
-}
+fail() { echo "FAIL: $*" >&2; exit 1; }
 
-HUB="$ROOT_DIR/agents/benchmarks/hub_upload.py"
-RESULTS="$ROOT_DIR/agents/benchmarks/results.py"
-PUBLISH="$ROOT_DIR/scripts/publish_evidence_links.py"
-AGENTS_MD="$ROOT_DIR/AGENTS.md"
+# Agents helpers import temporalio and other venv-only deps — prefer the repo venv.
+PYTHON_BIN="$ROOT/agents/venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    fail "neither agents/venv/bin/python nor python3 is available"
+  fi
+fi
 
-[ -f "$HUB" ] || fail "hub_upload.py missing"
-[ -f "$PUBLISH" ] || fail "publish_evidence_links.py missing"
+# 1) Report FE URL defaults to always-on prod (never ephemeral localhost).
+"$PYTHON_BIN" - <<'PY' || fail "durable report FE URL"
+import os, sys
+sys.path.insert(0, "agents")
+os.environ.pop("BENCHMARK_REPORT_FRONTEND_URL", None)
+os.environ.pop("BENCHMARK_REPORT_ALLOW_EPHEMERAL", None)
+os.environ["CONDUCTOR_PORT"] = "3099"
+from benchmarks.run_benchmark import (
+    _report_frontend_url_for_benchmark,
+    durable_agent_frontend_url,
+    _is_ephemeral_frontend_url,
+)
+assert _report_frontend_url_for_benchmark("http://127.0.0.1:3099") == "https://roselabs.ai"
+assert durable_agent_frontend_url("abc") == "https://roselabs.ai/?agent-id=abc"
+assert _is_ephemeral_frontend_url("http://127.0.0.1:60784")
+assert _is_ephemeral_frontend_url("https://foo.trycloudflare.com")
+assert not _is_ephemeral_frontend_url("https://roselabs.ai")
+print("ok durable FE helpers")
+PY
 
-require_text "$HUB" "mirror_run_bundle_to_durable_hub" \
-  "ephemeral Hub runs must dual-write to the durable Hub"
-require_text "$HUB" "durable_open_agent_url" \
-  "hub_upload must expose durable open-agent URLs"
-require_text "$HUB" "CURSOR_AGENT" \
-  "Cloud Agents must fail closed when durable Hub mirror fails"
-require_text "$RESULTS" "mirror_run_bundle_to_durable_hub" \
-  "BenchmarkRun.save must mirror terminal bundles to the durable Hub"
-require_text "$RESULTS" "print_durable_agent_links" \
-  "BenchmarkRun.save must print durable FE links"
-require_text "$PUBLISH" "/opt/cursor/artifacts/rca_evidence" \
-  "publish_evidence_links must write Cursor artifacts"
-require_text "$PUBLISH" "www.roselabs.ai" \
-  "publish_evidence_links must target the durable www.roselabs.ai origin"
-require_text "$PUBLISH" "/?agent-id=" \
-  "publish_evidence_links must use Terminal /?agent-id= deep links"
-require_text "$HUB" "/?agent-id=" \
-  "durable_open_agent_url must use Terminal /?agent-id= (not a missing /open-agent path alone)"
-require_text "$AGENTS_MD" "publish_evidence_links.py" \
-  "AGENTS.md must instruct Cloud Agents to publish durable evidence"
+# 2) Published dump is a single self-contained HTML (no file://, data URIs for frames).
+"$PYTHON_BIN" - <<'PY' || fail "self-contained dump publish"
+import json, tempfile, shutil
+from pathlib import Path
+import importlib.util
 
-cd "$ROOT_DIR/agents"
-# shellcheck disable=SC1091
-source venv/bin/activate
-PYTHONPATH=. python -m pytest benchmarks/hub_upload_test.py -q
+spec = importlib.util.spec_from_file_location("render_llm_dump", Path("scripts/render_llm_dump.py"))
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
 
-echo "All durable evidence-link checks passed."
+with tempfile.TemporaryDirectory() as tmp:
+    tmp_path = Path(tmp)
+    recording = tmp_path / "rec"
+    frames = recording / "frames"
+    frames.mkdir(parents=True)
+    (frames / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0frame")
+    (recording / "index.html").write_text("<html></html>")
+    manifest = recording / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "frames": [
+                    {
+                        "src": "frames/a.jpg",
+                        "ts_ms": 1,
+                        "label": "x",
+                        "action": "click",
+                        "metadata": {"step": 1, "phase": "start", "action": "click"},
+                    }
+                ]
+            }
+        )
+    )
+    dump = {
+        "call_site": "browser_use_step_1",
+        "agent_id": "agent-1",
+        "model": "t",
+        "messages": [],
+        "output": {"action": {"action": "click"}},
+        "extra": {
+            "browser_recording_manifest_path": str(manifest),
+            "iteration": 1,
+            "output": {"action": {"action": "click"}},
+        },
+    }
+    out = tmp_path / "out.html"
+    src = tmp_path / "dump.json"
+    src.write_text(json.dumps(dump))
+    out.write_text(mod.build_html(dump, src, out))
+    arts = tmp_path / "arts"
+    arts.mkdir()
+    published = mod.publish_rendered_dump(out, arts)
+    assert published is not None
+    html = published.read_text()
+    assert "file://" not in html
+    assert "data:image/jpeg;base64," in html
+    assert "Browser Recording" in html
+    # Sidecar optional: deleting it must not break the published HTML body.
+    for child in arts.iterdir():
+        if child != published:
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
+    assert "data:image/jpeg;base64," in published.read_text()
+print("ok self-contained dump publish")
+PY
+
+# 3) Approval format still demands durable FE + no invalid recordings.
+FORMAT="$ROOT/.claude/shared/approval-format.md"
+grep -Fq 'https://roselabs.ai/?agent-id=' "$FORMAT" || fail "approval format missing durable FE"
+grep -Fq 'omit the recording player entirely' "$FORMAT" || fail "approval format missing invalid-recording ban"
+grep -Fq 'HTTPS URL' "$FORMAT" || fail "approval format missing HTTPS dump URL requirement"
+grep -Fq 'vscode-remote' "$FORMAT" || fail "approval format missing vscode-remote blank-viewer warning"
+
+# 4) Gate must stay wired into /deploy structural suites (both docs + registry).
+DEPLOY="$ROOT/.claude/commands/deploy.md"
+RUNNER="$ROOT/scripts/run-deploy-structural-gates.py"
+grep -Fq 'bash scripts/tests/durable-evidence-links.test.sh' "$DEPLOY" \
+  || fail "/deploy must list durable-evidence-links.test.sh"
+grep -Fq 'durable-evidence-links' "$RUNNER" \
+  || fail "run-deploy-structural-gates.py must register durable-evidence-links"
+
+echo "All durable-evidence-links checks passed."

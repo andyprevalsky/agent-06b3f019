@@ -6,6 +6,7 @@
  */
 
 import { useMemo } from 'react';
+import { BROWSER_INIT_ACTION_TYPES } from '@/lib/backendToolNames';
 import { useAgentContext, type Message } from '../../hooks';
 import type {
   BrowserSessionMetadata,
@@ -151,7 +152,7 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
       if (message.metadata?.action_type === 'session_paused') return true;
       if (
         typeof message.metadata?.browser_url === 'string' &&
-        ['browser', 'session_started', 'system'].includes(message.metadata.action_type ?? '')
+        BROWSER_INIT_ACTION_TYPES.has(message.metadata.action_type ?? '')
       ) {
         return false;
       }

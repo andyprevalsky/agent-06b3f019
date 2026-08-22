@@ -840,6 +840,52 @@ async function testList_happyIsolationAndOrdering() {
   assert(firstIndex < secondIndex, 'List should preserve oldest-first ordering before any skip');
 }
 
+/**
+ * Archive is soft-delete. Even if a delete path forgets to wipe attention rows,
+ * list/count must not keep prompting for an agent the user can no longer open.
+ */
+async function testList_excludesArchivedAgentRequests() {
+  const fixture = await createFixture('list-excludes-archived');
+  const live = await createAttentionRequest(fixture, { question: 'still-live' });
+  const doomed = await createAttentionRequest(fixture, { question: 'about-to-archive' });
+
+  await withTransientDbRetry('soft-delete-agent-for-list', async () => {
+    await prisma.agent.update({
+      where: { id: fixture.realAgentId },
+      data: { deletedAt: new Date() },
+    });
+  });
+
+  // Recreate a live agent so the fixture still has an active owner agent; the
+  // doomed request stays pointed at the archived agentId.
+  const replacementId = await createAgentViaApi(fixture.ownerUserId, 'list-excludes-live');
+  trackedRealAgentIds.add(replacementId);
+  trackedRequestAgentIds.add(replacementId);
+  await withTransientDbRetry('repoint-live-attention', async () => {
+    await prisma.agentAttentionRequest.update({
+      where: { id: live.id },
+      data: { agentId: replacementId },
+    });
+  });
+
+  const list = await listRequests(fixture.ownerToken);
+  assert(
+    list.requests.some((request) => request.id === live.id),
+    'Live agent request should remain listed'
+  );
+  assert(
+    list.requests.every((request) => request.id !== doomed.id),
+    'Archived agent request must be hidden from the inbox list'
+  );
+
+  const count = await getCount(fixture.ownerToken);
+  const listedUnanswered = list.requests.filter((request) => !request.answered).length;
+  assert(
+    count === listedUnanswered,
+    `Count (${count}) must match listed unanswered (${listedUnanswered}) after archive hide`
+  );
+}
+
 async function testList_noAuth() {
   const fixture = await createFixture('list-no-auth');
   await createAttentionRequest(fixture);
@@ -1237,6 +1283,14 @@ async function testReject_missingAgentWithMessageCharacterizesFailure() {
     agentId: fixture.missingAgentId,
   });
 
+  // Missing-agent rows are hidden from list/count (same as archived agents) so
+  // the inbox never prompts for a run the user cannot open. Creating one must
+  // not bump the unanswered badge.
+  assert(
+    (await getCount(fixture.ownerToken)) === countBefore,
+    'Unanswered count must ignore attention rows whose agent does not exist'
+  );
+
   const res = await request(`${BASE_URL}/api/attention-requests/${created.id}/reject`, {
     method: 'POST',
     headers: authHeaders(fixture.ownerToken),
@@ -1251,10 +1305,13 @@ async function testReject_missingAgentWithMessageCharacterizesFailure() {
     'Failed rejection should leave the request unanswered'
   );
 
-  const countAfter = await getCount(fixture.ownerToken);
+  const row = await withTransientDbRetry('reject-missing-agent-row', async () => {
+    return prisma.agentAttentionRequest.findUnique({ where: { id: created.id } });
+  });
+  assert(row?.userResponse === null, 'Failed rejection must leave the DB row pending');
   assert(
-    countAfter === countBefore + 1,
-    `Failed rejection should keep unanswered count at ${countBefore + 1}, got ${countAfter}`
+    (await getCount(fixture.ownerToken)) === countBefore,
+    'Failed rejection must not surface a missing-agent request in the inbox count'
   );
 }
 
@@ -1326,6 +1383,10 @@ async function runAll() {
       name: 'GET / (list)',
       tests: [
         { name: 'owner isolation + oldest-first ordering', fn: testList_happyIsolationAndOrdering },
+        {
+          name: 'excludes requests for archived agents',
+          fn: testList_excludesArchivedAgentRequests,
+        },
         { name: 'no auth -> 401', fn: testList_noAuth },
       ],
     },

@@ -280,12 +280,21 @@ export async function syncIntegrationCredentials(
     void remoteId;
     const synced = await localIntegration.upsert({
       where: {
-        userId_name: {
+        userId_name_accountId: {
           userId: integration.userId,
           name: integration.name,
+          // Carry the source row's accountId so multi-account providers seed as
+          // distinct rows; legacy single-account rows use "" and keep their old
+          // (userId, name) identity.
+          accountId: integration.accountId ?? '',
         },
       },
-      create: integration,
+      // Local Integration ids are intentionally independent from production.
+      // A previous sync may already own the remote id under an older natural
+      // identity (for example after accountId changes). Let Postgres allocate a
+      // fresh id on create so that stale row can be removed after the complete
+      // production snapshot is reconciled, instead of failing on the id PK.
+      create: updateData,
       update: updateData,
       select: { id: true },
     });

@@ -4,6 +4,7 @@ import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma, runTransactionWithRetry } from './database';
 import {
   captureInProgressWorkflowTools,
+  closeInterruptedAttentionRequests,
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   finalizeInterruptedWorkflowTools,
   type InterruptedWorkflowToolsResult,
@@ -12,6 +13,10 @@ import {
 import { resolveTemporalWorkflowExecutionRef, type TemporalWorkflowExecutionRef } from './temporal';
 import { terminateStaleTemporalWorkflow } from './workflowReplacement';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
+import { releaseAgentBrowserSessions } from './agentCleanup';
+import { createLogger } from './logger';
+
+const log = createLogger('WorkflowDescendantCleanup');
 
 interface DescendantRow {
   id: string;
@@ -238,14 +243,7 @@ export async function sealDescendantWorkflow(
 async function completeDescendantCleanup(snapshot: DescendantWorkflowSnapshot): Promise<void> {
   await runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, snapshot.agentId);
-    await tx.agentAttentionRequest.updateMany({
-      where: {
-        agentId: snapshot.agentId,
-        workflowId: snapshot.workflowGeneration,
-        userResponse: null,
-      },
-      data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
-    });
+    await closeInterruptedAttentionRequests(tx, snapshot.agentId, snapshot.workflowGeneration);
     await tx.agent.updateMany({
       where: {
         id: snapshot.agentId,
@@ -293,6 +291,20 @@ async function cleanupSnapshot(
   );
   assertBeforeDeadline(deadlineAtMs, `descendant ${snapshot.agentId} completion`);
   await completeDescendantCleanup(snapshot);
+  // `completeDescendantCleanup` marks the child FAILED with a raw
+  // `tx.agent.updateMany`, which bypasses `updateAgentStatus` and therefore its
+  // terminal hook `releaseTerminalBrowserSessions`. Without this compensation a
+  // descendant that rented a browser is marked dead while its browser keeps
+  // running and billing. `workflowLivenessReconciler` carries the same
+  // compensation for the same bypass hazard.
+  try {
+    await releaseAgentBrowserSessions(snapshot.agentId);
+  } catch (error) {
+    log.warn('Descendant browser release unavailable', {
+      agent_id: snapshot.agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   return {
     sealed: true,
     terminated: snapshot.execution !== null,

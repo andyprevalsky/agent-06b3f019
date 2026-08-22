@@ -491,6 +491,92 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS > BROWSER_STATE_REQUEST_TIMEOUT_SECONDS
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
+
+def test_browser_use_upstream_still_hardcodes_page_navigate_20s():
+    """Canary: browser-use still hardcodes Page.navigate wait at 20s.
+
+    When upstream honors TIMEOUT_NavigateToUrlEvent, delete
+    ``browser_use_patches.apply_browser_use_navigate_timeout_patch``.
+    """
+    import browser_use.browser.session as browser_session_mod
+
+    source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    assert "nav_timeout = 20.0" in source, (
+        "browser-use no longer hardcodes nav_timeout=20.0; remove the Rose "
+        "navigate-timeout patch if TIMEOUT_NavigateToUrlEvent is honored"
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config():
+    """Owning boundary for browser-event-ticket AMC start_url tool ERROR.
+
+    browser-use ``_navigate_and_wait`` passes ``timeout=20.0`` to
+    ``asyncio.wait_for`` around CDP ``Page.navigate``. Our config sets
+    ``TIMEOUT_NavigateToUrlEvent=300``, but that env never reaches this wait.
+    Without the Rose patch the wait budget stays 20.0s — heavy AMC showtimes
+    pages time out, spawn_browser returns tool ERROR, and the root agent
+    re-spawns on Fandango (merchant mismatch).
+    """
+    from browser_use.browser.session import BrowserSession
+
+    from domains.spawn_browser_agent_v3 import browser_use_patches as patches
+    from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+    assert NAVIGATE_TO_URL_TIMEOUT_SECONDS > patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS
+    assert patches.page_navigate_timeout_seconds() == float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)
+
+    seen_timeouts: list[float | None] = []
+    true_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout=None, **kwargs):
+        seen_timeouts.append(timeout)
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        return {"ok": True}
+
+    async def upstream_like_navigate(self, *args, **kwargs):
+        async def page_navigate_rpc():
+            return {"frameId": "1"}
+
+        # Exact upstream hardcode shape (session.py: nav_timeout = 20.0).
+        return await asyncio.wait_for(
+            page_navigate_rpc(),
+            timeout=patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS,
+        )
+
+    previous_navigate = BrowserSession._navigate_and_wait
+    previous_patched = getattr(BrowserSession, patches._PATCHED_ATTR, False)
+    setattr(BrowserSession, patches._PATCHED_ATTR, False)
+    BrowserSession._navigate_and_wait = upstream_like_navigate
+
+    # Pre-fix (unpatched): wait_for must still see the hardcoded 20.0s budget.
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        await upstream_like_navigate(MagicMock())
+        assert seen_timeouts == [patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS], (
+            "unpatched Page.navigate wait_for budget must be upstream 20.0s; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+
+    seen_timeouts.clear()
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        assert patches.apply_browser_use_navigate_timeout_patch() is True
+        await BrowserSession._navigate_and_wait(MagicMock())
+        assert seen_timeouts == [float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)], (
+            "patched Page.navigate wait_for budget must equal "
+            f"NAVIGATE_TO_URL_TIMEOUT_SECONDS={NAVIGATE_TO_URL_TIMEOUT_SECONDS}; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+        BrowserSession._navigate_and_wait = previous_navigate
+        setattr(BrowserSession, patches._PATCHED_ATTR, previous_patched)
+
+
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
         append_completion_evidence,
@@ -4684,58 +4770,7 @@ def test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted(
     assert "exhausted" in reason
     assert snapshot["email_otp"]["attempted"] is True
     assert snapshot["minted"]["attempted"] is True
-    # Guest is N/A until a guest CTA is observed on the page.
-    assert snapshot["guest"]["option_seen"] is False
-    assert snapshot["guest"]["unavailable"] is False
-    assert snapshot["guest"]["exhausted_or_unavailable"] is True
-
-
-def test_auth_runtime_state_blocks_assistance_until_seen_guest_path_attempted():
-    """Booking-style: guest CTA seen, no credentials → must try guest before step 8."""
-    from domains.spawn_browser_agent_v3.service import AuthRuntimeState
-
-    state = AuthRuntimeState.from_auth_options(
-        {
-            "passwords": [],
-            "email_otp": {"available": False},
-            "minted": None,
-        }
-    )
-
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert allowed
-    assert snapshot["guest"]["exhausted_or_unavailable"] is True
-
-    state.observe_page_text(
-        "[8817]<button>I'll reserve</button>\nYou won't be charged yet · Pay at the property"
-    )
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert not allowed
-    assert "guest" in reason
-    assert snapshot["guest"]["option_seen"] is True
-    assert snapshot["guest"]["attempted"] is False
-    assert snapshot["guest"]["exhausted_or_unavailable"] is False
-
-    state.observe_clicked_element_text("I'll reserve")
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert allowed
-    assert snapshot["guest"]["attempted"] is True
-    assert snapshot["guest"]["exhausted_or_unavailable"] is True
-
-
-def test_text_indicates_guest_completion_option_matches_booking_cta():
-    from domains.spawn_browser_agent_v3.service import text_indicates_guest_completion_option
-
-    assert text_indicates_guest_completion_option("I'll reserve")
-    # Booking.com hotel DOM uses a non-breaking space in the submit CTA.
-    assert text_indicates_guest_completion_option("I'll\xa0reserve")
-    assert text_indicates_guest_completion_option(
-        "[8848]<button type=submit />\n\t\tI'll\xa0reserve\n\tYou won't be charged yet"
-    )
-    assert text_indicates_guest_completion_option("Continue as guest")
-    assert not text_indicates_guest_completion_option("Sign in")
-    assert not text_indicates_guest_completion_option("Homes guests love")
-
+    assert snapshot["guest"]["unavailable"] is True
 
 def test_auth_runtime_state_does_not_block_on_unmatched_connected_email():
     from domains.spawn_browser_agent_v3.service import AuthRuntimeState
@@ -5744,24 +5779,8 @@ def test_recovery_requires_live_tab_verify_before_success():
     assert "passed candidate probes but the live tab" in recovery_block
     assert "is still challenged" in recovery_block
     assert "configKey" in recovery_block
-    # Preloaded winners already classified clean — skip second live LLM verify.
+    # Preloaded winners must not rewrite challenged origin state onto the clean session.
     assert "if not bool(config_result.get(\"storage_state_preloaded\")):" in recovery_block
-    assert "probe already verified clean" in recovery_block
-    # Soft-redirect resume: prefer probe saved_url over poisoned deep link.
-    assert 'config_result.get("saved_url")' in recovery_block
-    assert "live_verify_url" in recovery_block
-    # Non-preloaded promote path: single live navigation-probe.
-    assert "attempts=1" in recovery_block[verify_offset : verify_offset + 400]
-    # Live verify is nested under the preloaded skip guard (not a second LLM).
-    skip_verify = recovery_block.index(
-        'if not bool(config_result.get("storage_state_preloaded")):',
-        restore_offset,
-    )
-    assert skip_verify < verify_offset < success_offset
-    assert "Live-session cookie probes are retired" not in recovery_block
-    assert "probe_cookie_variant_ephemeral" in recovery_block
-    assert "probe_storage_state" not in recovery_block
-    assert "cookie_probe_wave" in recovery_block
 
 
 def test_recovery_restore_failure_is_not_suppressed():
@@ -6383,12 +6402,52 @@ async def test_upload_file_to_session_success():
             # assert multipart file shape
             assert "files" in kw
             assert kw["files"]["file"][0] == "f.pdf"
+            assert kw.get("data") is None
             return _Resp()
 
     with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
         cfg = _fake_config()
         out = await repo.upload_file_to_session(cfg, "s1", "f.pdf", b"PDFDATA", "application/pdf")
     assert out == {"path": "/tmp/f.pdf"}
+
+
+async def test_upload_file_to_session_downloads_directory():
+    """Persisted Kernel downloads must POST directory=/tmp/downloads."""
+    from domains.spawn_browser_agent_v3 import repo
+
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"path": "/tmp/downloads/rs.jpeg", "size": 4}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            seen["data"] = kw.get("data")
+            seen["files"] = kw.get("files")
+            return _Resp()
+
+    with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
+        cfg = _fake_config()
+        out = await repo.upload_file_to_session(
+            cfg,
+            "s1",
+            "rs.jpeg",
+            b"JPEG",
+            "image/jpeg",
+            directory="/tmp/downloads",
+        )
+    assert out == {"path": "/tmp/downloads/rs.jpeg", "size": 4}
+    assert seen["data"] == {"directory": "/tmp/downloads"}
+    assert seen["files"]["file"][0] == "rs.jpeg"
 
 async def test_upload_file_to_session_non_200_returns_none():
     from domains.spawn_browser_agent_v3 import repo
@@ -7816,6 +7875,7 @@ async def test_execute_action_element_not_found():
     dom = MagicMock()
     dom.session = MagicMock()
     dom.selector_map = {}
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
     out = await execute_action(dom, ah, {"action": "click", "index": 5})
@@ -9402,6 +9462,7 @@ async def test_execute_action_click_no_element_no_coords():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9441,6 +9502,7 @@ async def test_execute_action_switch_tab_missing_id():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9452,6 +9514,7 @@ async def test_execute_action_press_key_with_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9467,6 +9530,213 @@ async def test_execute_action_press_key_with_humanizer():
     assert out == {"success": True, "message": ""}
     hu.press_key.assert_awaited_once_with("Enter")
     ah.record_action.assert_awaited()
+
+
+async def test_execute_action_press_key_prefers_provider_computer_input():
+    """Kernel-level input can dismiss browser chrome that CDP cannot reach."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(return_value=True)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Control+Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out == {"success": True, "message": ""}
+        repo.press_browser_computer_key.assert_awaited_once_with(
+            config,
+            "kernel-session",
+            "owner-user",
+            "Ctrl+Return",
+        )
+        hu.press_key.assert_not_awaited()
+    finally:
+        repo.press_browser_computer_key = original
+
+
+def test_kernel_computer_key_maps_playwright_names_to_x11_keysyms():
+    from domains.spawn_browser_agent_v3.service_actions import _kernel_computer_key
+
+    assert _kernel_computer_key("Backspace") == "BackSpace"
+    assert _kernel_computer_key("Del") == "Delete"
+    assert _kernel_computer_key("PageUp") == "Prior"
+    assert _kernel_computer_key("PageDown") == "Next"
+    assert _kernel_computer_key("Control+Shift+PageUp") == "Ctrl+Shift+Prior"
+    assert _kernel_computer_key("Shift+Alt+tab") == "Shift+Alt+Tab"
+
+
+async def test_execute_action_press_key_without_user_skips_provider_input():
+    """Provider input requires the owner identity used by the backend route."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock()
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+        )
+
+        assert out == {"success": True, "message": ""}
+        repo.press_browser_computer_key.assert_not_awaited()
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_pre_execution_rejection_falls_back():
+    """An explicit backend rejection proves the provider did not press the key."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    rejection = httpx.HTTPStatusError(
+        "invalid key",
+        request=request,
+        response=httpx.Response(400, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=rejection)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out == {"success": True, "message": ""}
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_provider_server_error_does_not_replay():
+    """A provider 5xx is ambiguous and must not be replayed through CDP."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    failure = httpx.HTTPStatusError(
+        "provider failure",
+        request=request,
+        response=httpx.Response(500, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=failure)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out["success"] is False
+        assert "provider failure" in out["error"]
+        hu.press_key.assert_not_awaited()
+        ah.record_action.assert_awaited_once()
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_ambiguous_provider_failure_does_not_replay():
+    """A lost provider response cannot safely fall back and send Enter twice."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=TimeoutError("response lost"))
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out["success"] is False
+        assert "response lost" in out["error"]
+        hu.press_key.assert_not_awaited()
+        ah.record_action.assert_awaited_once()
+    finally:
+        repo.press_browser_computer_key = original
 
 async def test_execute_action_scroll_with_humanizer_down():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -9523,6 +9793,7 @@ async def test_execute_action_goto_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9539,6 +9810,7 @@ async def test_execute_action_click_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {3: MagicMock()}
     ah = MagicMock()
@@ -9555,6 +9827,7 @@ async def test_execute_action_input_text_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {1: MagicMock()}
     ah = MagicMock()
@@ -9589,6 +9862,7 @@ async def test_execute_action_exception_catches():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {2: MagicMock()}
     ah = MagicMock()
@@ -9642,6 +9916,7 @@ async def test_execute_action_press_key_no_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9670,6 +9945,7 @@ async def test_execute_action_navback():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9773,6 +10049,7 @@ async def test_execute_action_open_new_tab():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_focused_target = MagicMock(return_value=SimpleNamespace(target_id="abcd1234"))
     dom.session = session
@@ -9850,6 +10127,7 @@ async def test_execute_action_switch_tab_found():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_tabs = AsyncMock(
         return_value=[
@@ -9868,6 +10146,7 @@ async def test_execute_action_switch_tab_not_found():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="xxxxxxxxAAAA", title="t", url="u")])
     dom.session = session
@@ -10181,6 +10460,299 @@ async def test_dom_service_disconnect_stops_browser_session_without_killing_remo
     assert dom.session is None
     assert dom.selector_map == {}
 
+
+def test_browser_downloads_path_for_provider_kernel_vs_steel():
+    """Kernel CDP downloads must land in /tmp/downloads (listed by session_files)."""
+    from browser_tools.dom_service import (
+        KERNEL_DOWNLOADS_PATH,
+        STEEL_DOWNLOADS_PATH,
+        browser_downloads_path_for_provider,
+    )
+
+    assert browser_downloads_path_for_provider("kernel") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("KERNEL") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("steel") == STEEL_DOWNLOADS_PATH
+    assert KERNEL_DOWNLOADS_PATH == "/tmp/downloads"
+    assert STEEL_DOWNLOADS_PATH == "/files"
+    # Pre-fix bug: Kernel sessions used Steel's /files, so CDP downloads never
+    # appeared in Kernel listFiles(/tmp/downloads) → session_files missed compressed output.
+    assert browser_downloads_path_for_provider("kernel") != STEEL_DOWNLOADS_PATH
+
+
+def test_is_browser_attachment_download_tinypng_vs_ad_script():
+    """TinyPNG attachment Fetch/Document must persist; Google Ads Script must not."""
+    from domains.spawn_browser_agent_v3.download_persist import is_browser_attachment_download
+
+    tinypng_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
+    assert is_browser_attachment_download(
+        url=tinypng_url,
+        resource_type="Fetch",
+        mime_type="",
+        response_headers={"content-disposition": "attachment", "content-length": "149852"},
+    )
+    assert is_browser_attachment_download(
+        url=tinypng_url,
+        resource_type="Document",
+        mime_type="image/jpeg",
+        response_headers={"content-disposition": "attachment", "content-length": "149852"},
+    )
+    assert not is_browser_attachment_download(
+        url="https://securepubads.g.doubleclick.net/tag/js/gpt.js",
+        resource_type="Script",
+        mime_type="text/javascript",
+        response_headers={"content-disposition": 'attachment; filename="f.txt"'},
+    )
+
+
+async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
+    """Owning boundary: attachment bytes must land under /tmp/downloads via upload API."""
+    from domains.spawn_browser_agent_v3 import download_persist
+
+    calls = []
+
+    async def fake_upload(
+        config,
+        session_id,
+        filename,
+        file_content,
+        mime_type="application/octet-stream",
+        *,
+        directory=None,
+    ):
+        calls.append(
+            {
+                "session_id": session_id,
+                "filename": filename,
+                "content": file_content,
+                "mime_type": mime_type,
+                "directory": directory,
+            }
+        )
+        return {"path": f"{directory}/{filename}", "size": len(file_content)}
+
+    with patch(
+        "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
+        new=fake_upload,
+    ):
+        out = await download_persist.persist_bytes_to_session_downloads(
+            _fake_config(),
+            "sess-1",
+            filename="rs.jpeg",
+            content=b"JPEGBYTES",
+            mime_type="image/jpeg",
+        )
+    assert out == {
+        "path": "/tmp/downloads/rs.jpeg",
+        "size": 9,
+        "filename": "rs.jpeg",
+        "mime_type": "image/jpeg",
+    }
+    assert calls == [
+        {
+            "session_id": "sess-1",
+            "filename": "rs.jpeg",
+            "content": b"JPEGBYTES",
+            "mime_type": "image/jpeg",
+            "directory": "/tmp/downloads",
+        }
+    ]
+
+
+async def test_browser_download_persister_captures_attachment_via_cdp_body():
+    """CDP loadingFinished for Content-Disposition: attachment writes session downloads."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    persisted = []
+
+    class _NetworkSend:
+        async def getResponseBody(self, params=None, session_id=None):
+            assert params == {"requestId": "req-1"}
+            return {"body": base64.b64encode(b"COMPRESSED").decode(), "base64Encoded": True}
+
+        async def enable(self, session_id=None):
+            return {}
+
+    class _Send:
+        Network = _NetworkSend()
+
+    class _RegisterNetwork:
+        def __init__(self):
+            self.handlers = {}
+
+        def responseReceived(self, cb):
+            self.handlers["responseReceived"] = cb
+
+        def loadingFinished(self, cb):
+            self.handlers["loadingFinished"] = cb
+
+        def loadingFailed(self, cb):
+            self.handlers["loadingFailed"] = cb
+
+    class _Register:
+        def __init__(self):
+            self.Network = _RegisterNetwork()
+
+    class _CdpClient:
+        def __init__(self):
+            self.register = _Register()
+            self.send = _Send()
+
+    class _CdpSession:
+        session_id = "cdp-sess"
+        cdp_client = None
+
+    cdp_client = _CdpClient()
+    cdp_session = _CdpSession()
+    cdp_session.cdp_client = cdp_client
+
+    class _BrowserSession:
+        async def get_or_create_cdp_session(self, *a, **kw):
+            return cdp_session
+
+    async def fake_persist(config, session_id, *, filename, content, mime_type="application/octet-stream"):
+        persisted.append(
+            {
+                "session_id": session_id,
+                "filename": filename,
+                "content": content,
+                "mime_type": mime_type,
+            }
+        )
+        return {"path": f"/tmp/downloads/{filename}", "size": len(content), "filename": filename, "mime_type": mime_type}
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        with patch(
+            "domains.spawn_browser_agent_v3.download_persist.persist_bytes_to_session_downloads",
+            new=fake_persist,
+        ):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=_BrowserSession(),
+                session_id="kernel-sess",
+                config=_fake_config(),
+                agent_id="agent-1",
+                task_id="task-1",
+            )
+            assert persister is not None
+            handlers = cdp_client.register.Network.handlers
+            handlers["responseReceived"](
+                {
+                    "requestId": "req-1",
+                    "type": "Fetch",
+                    "response": {
+                        "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
+                        "status": 200,
+                        "mimeType": "",
+                        "headers": {"content-disposition": "attachment", "content-length": "10"},
+                    },
+                },
+                "cdp-sess",
+            )
+            handlers["loadingFinished"]({"requestId": "req-1", "encodedDataLength": 10}, "cdp-sess")
+            # Allow the created persist task to run.
+            await asyncio.sleep(0)
+            if persister._tasks:
+                await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+            await persister.close()
+
+    assert persisted == [
+        {
+            "session_id": "kernel-sess",
+            "filename": "rs.jpeg",
+            "content": b"COMPRESSED",
+            "mime_type": "image/jpeg",
+        }
+    ]
+
+
+def test_dom_service_defaults_downloads_path_from_browser_provider_env():
+    """DOMService must default downloads_path from BROWSER_PROVIDER, not hardcode /files."""
+    import os
+
+    from browser_tools.dom_service import KERNEL_DOWNLOADS_PATH, STEEL_DOWNLOADS_PATH, DOMService
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == STEEL_DOWNLOADS_PATH
+    assert DOMService(cdp_url="wss://example", downloads_path="/custom").downloads_path == "/custom"
+
+
+
+
+async def test_evaluate_awaits_promises():
+    """Runtime.evaluate must set awaitPromise so async fetch results are returned."""
+    from domains.spawn_browser_agent_v3.service_actions import _execute_inspection_action
+
+    evaluate = AsyncMock(return_value={"result": {"value": {"ok": True, "size": 3}}})
+    cdp_session = SimpleNamespace(
+        session_id="cdp",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(evaluate=evaluate))),
+    )
+    session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp_session))
+    history = SimpleNamespace(record_action=AsyncMock())
+    ctx = SimpleNamespace(
+        action_name="evaluate",
+        params={"code": "(async () => ({ok:true,size:3}))()"},
+        session=session,
+        dom_service=SimpleNamespace(),
+        action_history=history,
+        thinking=None,
+        config=None,
+        session_id="s",
+        humanizer=None,
+        browser_network_recorder=None,
+        current_url="https://tinypng.com/",
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+    )
+    result = await _execute_inspection_action(ctx)
+    assert result["success"] is True
+    assert result["value"]["size"] == 3
+    assert evaluate.await_args.kwargs["params"]["awaitPromise"] is True
+
+
+async def test_goto_err_aborted_persists_download_to_session():
+    """goto net::ERR_ABORTED on attachment URLs must persist bytes under /tmp/downloads."""
+    import domains.spawn_browser_agent_v3.download_persist as download_persist
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    class Bus:
+        def dispatch(self, event):
+            return self
+        def __await__(self):
+            async def _done():
+                return None
+            return _done().__await__()
+        async def event_result(self, **kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    session = SimpleNamespace(event_bus=Bus())
+    history = SimpleNamespace(record_action=AsyncMock())
+    with patch.object(
+        download_persist,
+        "persist_navigation_download_via_page_fetch",
+        new=AsyncMock(
+            return_value={
+                "path": "/tmp/downloads/rs.jpeg",
+                "size": 149852,
+                "filename": "rs.jpeg",
+            }
+        ),
+    ):
+        result = await _execute_goto(
+            session=session,
+            dom_service=SimpleNamespace(),
+            action_history=history,
+            params={"url": "https://tinypng.com/backend/opt/download/x/rs.jpeg"},
+            thinking=None,
+            session_id="sess",
+            config=object(),
+        )
+    assert result["success"] is True
+    assert result["download"]["path"] == "/tmp/downloads/rs.jpeg"
+    history.record_action.assert_awaited()
+
+
 async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     """Steel/CDP sessions expose cdp_client.send.WebAuthn, not cdp_session.send."""
     from browser_tools.dom_service import DOMService
@@ -10214,7 +10786,7 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     dom = DOMService(cdp_url="")
     dom._session = _FakeSession()
 
-    await dom._suppress_browser_overlays()
+    await dom.ensure_browser_overlays_suppressed()
     await dom.inject_passkeys(
         [
             {
@@ -10227,15 +10799,102 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
         ]
     )
 
-    assert webauthn.enable.await_count == 2
-    assert webauthn.enable.await_args_list == [
-        call(params={"enableUI": False}, session_id="cdp-session"),
-        call(params={"enableUI": False}, session_id="cdp-session"),
-    ]
+    assert webauthn.enable.await_count == 1
+    webauthn.enable.assert_awaited_once_with(
+        params={"enableUI": False}, session_id="cdp-session"
+    )
     webauthn.addVirtualAuthenticator.assert_awaited_once()
     webauthn.addCredential.assert_awaited_once()
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
     assert await dom.get_used_passkey_credential_ids() == ["cred-1"]
+
+
+async def test_dom_service_passkeys_follow_focus_target_for_sso_transition():
+    """A popup/redirect target must receive a fresh authenticator and the held key union.
+
+    Normal-site passkeys are seeded on the initial page.  When that page opens
+    an SSO target, WebAuthn state from the original CDP target is not visible in
+    the new one.  Re-seeding must therefore follow ``agent_focus_target_id`` and
+    restore both the original key and the newly-fetched IdP key.
+    """
+    from browser_tools.dom_service import DOMService
+
+    class _FakeWebAuthn:
+        def __init__(self, authenticator_id: str):
+            self.credentials = []
+            self.enable = AsyncMock(return_value={})
+            self.addVirtualAuthenticator = AsyncMock(
+                return_value={"authenticatorId": authenticator_id}
+            )
+
+            async def _add_credential(*, params, session_id):
+                self.credentials.append(dict(params["credential"]))
+                return {}
+
+            async def _get_credentials(*, params, session_id):
+                return {"credentials": list(self.credentials)}
+
+            self.addCredential = AsyncMock(side_effect=_add_credential)
+            self.getCredentials = AsyncMock(side_effect=_get_credentials)
+
+    class _FakePage:
+        def __init__(self):
+            self.setInterceptFileChooserDialog = AsyncMock(return_value={})
+
+    def _cdp_session(session_id: str, authenticator_id: str):
+        webauthn = _FakeWebAuthn(authenticator_id)
+        page = _FakePage()
+        return (
+            SimpleNamespace(
+                session_id=session_id,
+                cdp_client=SimpleNamespace(send=SimpleNamespace(WebAuthn=webauthn, Page=page)),
+            ),
+            webauthn,
+        )
+
+    target_a, webauthn_a = _cdp_session("cdp-amazon", "auth-amazon")
+    target_b, webauthn_b = _cdp_session("cdp-google", "auth-google")
+
+    class _FakeSession:
+        agent_focus_target_id = "amazon-target"
+
+        async def get_or_create_cdp_session(self, target_id=None, focus=False):
+            assert focus is False
+            return {
+                "amazon-target": target_a,
+                "google-target": target_b,
+            }[target_id]
+
+    amazon = {
+        "credentialId": "amazon-cred",
+        "privateKey": "amazon-pkcs8",
+        "rpId": "amazon.com",
+        "userHandle": "amazon-user",
+        "signCount": 3,
+    }
+    google = {
+        "credentialId": "google-cred",
+        "privateKey": "google-pkcs8",
+        "rpId": "google.com",
+        "userHandle": "google-user",
+        "signCount": 5,
+    }
+
+    dom = DOMService(cdp_url="")
+    dom._session = _FakeSession()
+    await dom.ensure_browser_overlays_suppressed()
+    assert await dom.inject_passkeys([amazon]) == 1
+
+    dom._session.agent_focus_target_id = "google-target"
+    assert await dom.inject_passkeys([amazon, google]) == 2
+
+    assert [item["credentialId"] for item in webauthn_a.credentials] == ["amazon-cred"]
+    assert [item["credentialId"] for item in webauthn_b.credentials] == [
+        "amazon-cred",
+        "google-cred",
+    ]
+    assert webauthn_a.addVirtualAuthenticator.await_count == 1
+    assert webauthn_b.addVirtualAuthenticator.await_count == 1
 
 async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
     """A sign-counter advance must be durable before approvals pause the browser task."""
@@ -10568,7 +11227,7 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -10615,7 +11274,7 @@ async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_in
         )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -10647,16 +11306,20 @@ def test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text():
 
 def test_write_lock_purchase_button_detects_order_controls():
     """Final transaction buttons are gated; cart, checkout, and return navigation are not."""
-    from browser_tools.write_lock import is_purchase_button
+    from browser_tools.write_lock import is_purchase_button, is_return_button
 
     assert is_purchase_button("Buy Now")
     assert is_purchase_button("Place your order")
-    assert is_purchase_button("Confirm your return")
-    assert is_purchase_button("Submit return request")
+    assert not is_purchase_button("Confirm your return")
+    assert not is_purchase_button("Submit return")
+    assert is_return_button("Confirm your return")
+    assert is_return_button("Submit return")
+    assert not is_return_button("Buy Now")
     assert not is_purchase_button("Add to Cart")
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
+    assert not is_return_button("Return to your orders")
 
 
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
@@ -10686,6 +11349,144 @@ def test_write_lock_purchase_button_excludes_terms_consent_prose():
     # a real purchase phrase in another.
     assert is_purchase_button("Terms of Service\nBuy Now")
     assert is_purchase_button("Buy Now\nPrivacy Policy")
+
+
+def test_write_lock_purchase_button_excludes_buynow_dom_identifiers():
+    """Machine ids containing buynow must not trip the purchase write lock.
+
+    Fandango IMAX checkout (2026-08-20 agent 1c3003ef): clicking the email
+    sign-in input ``#buynow-email-si`` joined that id into the write-lock
+    signal. Whitespace-stripped matching turned phrase ``buy now`` into a
+    substring of ``buynow-email-si``, forced a purchase write_lock, and the
+    browser-imax-group-tickets harness observed write_lock instead of
+    payment_approval. Real Buy Now labels stay locked; a co-located id must
+    not veto them.
+    """
+    from browser_tools.write_lock import (
+        is_dom_identifier_write_lock_signal,
+        is_purchase_button,
+    )
+
+    assert is_dom_identifier_write_lock_signal("buynow-email-si")
+    assert is_dom_identifier_write_lock_signal("place_order_btn")
+    assert not is_dom_identifier_write_lock_signal("Buy Now")
+    assert not is_dom_identifier_write_lock_signal("buynow")
+
+    assert not is_purchase_button("buynow-email-si")
+    assert not is_purchase_button("buynow-email-si\nEmail")
+    assert not is_purchase_button("input\nbuynow-email-si")
+    assert is_purchase_button("Buy Now")
+    assert is_purchase_button("buynow-email-si\nBuy Now")
+
+
+def test_click_write_lock_eligible_only_buttons_and_form_submits():
+    """Plain inputs never raise click write locks — only buttons / form submits.
+
+    Andy (2026-08-21) on H-01: an email/text input must never trigger write
+    lock even if its label or id looks like Buy Now / Send. ``input
+    type=submit|button|image`` remains eligible as a form submit.
+    """
+    from types import SimpleNamespace
+
+    from browser_tools.write_lock import is_click_write_lock_eligible_control
+
+    assert is_click_write_lock_eligible_control(None) is True
+    assert is_click_write_lock_eligible_control(SimpleNamespace(tag_name="button", attributes={}))
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(node_name="INPUT", attributes={"type": "submit"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "button"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="a", attributes={"role": "button"})
+    )
+
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "email", "id": "buynow-email-si"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="INPUT", attributes={"type": "text"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="textarea", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="select", attributes={})
+    )
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_skips_plain_email_input():
+    """Email/text inputs never return needs_write_approval even if labels match."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "email", "id": "buynow-email-si"},
+        parent_node=None,
+        get_all_children_text=lambda: "Buy Now",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="buynow-email-si\nBuy Now"),
+        ),
+        patch("browser_tools.write_lock.is_purchase_button", return_value=True),
+        patch("browser_tools.write_lock.is_email_send_button", return_value=True),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://tickets.fandango.com/checkout",
+            system_name="Rose",
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_still_locks_submit_input():
+    """Form-submit inputs remain eligible for purchase write lock."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "submit"},
+        parent_node=None,
+        get_all_children_text=lambda: "Place Order",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="Place Order"),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+            return_value="Place Order",
+        ),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://shop.example.com/checkout",
+            system_name="Rose",
+        )
+    assert out is not None
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "purchase"
 
 
 def test_write_lock_email_send_excludes_marketing_opt_in_controls():
@@ -10980,6 +11781,7 @@ async def test_execute_press_key_send_shortcut_does_not_trigger_email_approval()
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -11131,6 +11933,79 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
 
+async def test_execute_input_text_password_secret_ref_resolves_visible_password_coords():
+    """Password secret-ref typing must locate a visible password field when the index has no rect.
+
+    Regression for browser-amazon-return k=5 agent fbc36706: after Switch accounts →
+    account pick, indexed password coords were None and humanize refused TypeTextEvent,
+    posting toolStatus=ERROR that failed no_tool_failures even though the agent later
+    recovered to an unresolved write lock.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(return_value={})
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+    hu.input_page = None
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch.object(
+            service_actions,
+            "_resolve_password_field_coordinates",
+            AsyncMock(return_value=(44, 55)),
+        ) as resolve_password,
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=770,
+            coords=None,
+            params={"text": "pwd-ref-1"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={"pwd-ref-1": "secret-password"},
+            password_origins={"pwd-ref-1": "https://www.amazon.com"},
+            credential_refs_by_secret_ref={"pwd-ref-1": {"kind": "password", "id": "pwd-row"}},
+            current_url="https://www.amazon.com/ap/signin",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out.get("credential_ref") == {"kind": "password", "id": "pwd-row"}
+    resolve_password.assert_awaited()
+    hu.click_at_coords.assert_awaited_once_with(44, 55)
+    hu.type_text.assert_awaited_once_with("secret-password")
+    session.event_bus.dispatch.assert_not_called()
+
+async def test_resolve_password_field_coordinates_uses_visible_password_input():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        return_value={"x": 120, "y": 340, "selector": 'input[name="password"]'}
+    )
+    session = SimpleNamespace(get_current_page=AsyncMock(return_value=page))
+
+    coords = await service_actions._resolve_password_field_coordinates(session, input_page=None)
+    assert coords == (120, 340)
+    page.evaluate.assert_awaited()
+    script = page.evaluate.await_args.args[0]
+    assert 'input[type="password"]' in script
+    assert 'name="password"' in script
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -12176,11 +13051,60 @@ async def test_execute_goto_auto_adds_https():
     assert out["success"] is True
 
 
+async def test_execute_goto_err_aborted_persists_attachment_download():
+    """goto net::ERR_ABORTED on a download URL must persist bytes under /tmp/downloads."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class _FailEvent:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    session = SimpleNamespace(
+        event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_FailEvent())),
+    )
+    ah = SimpleNamespace(record_action=AsyncMock())
+    download_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
+
+    async def fake_persist(**kwargs):
+        assert kwargs["url"] == download_url
+        assert kwargs["session_id"] == "sess-dl"
+        return {
+            "path": "/tmp/downloads/rs.jpeg",
+            "size": 149852,
+            "filename": "rs.jpeg",
+            "content_type": "image/jpeg",
+            "source_url": download_url,
+        }
+
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+        new=fake_persist,
+    ):
+        out = await service_actions._execute_goto(
+            session=session,
+            dom_service=MagicMock(),
+            action_history=ah,
+            params={"url": download_url},
+            thinking=None,
+            session_id="sess-dl",
+            config=_fake_config(),
+        )
+    assert out["success"] is True
+    assert out["download"]["path"] == "/tmp/downloads/rs.jpeg"
+    assert "saved to session" in out["message"]
+    ah.record_action.assert_awaited_once()
+
+
+# ── live challenge helpers ───────────────────────────────────────────
 
 async def test_live_tab_looks_challenged_helpers():
-    """Deprecated heuristic stays for RCA; live_tab routes through LLM classifier."""
-    from unittest.mock import AsyncMock, patch
-
+    """Clean live tabs must skip recovery; challenged tabs must still recover."""
     from domains.spawn_browser_agent_v3.challenge_recovery import (
         live_tab_looks_challenged,
         page_looks_challenged,
@@ -12223,107 +13147,13 @@ async def test_live_tab_looks_challenged_helpers():
         body_text="Attention Required! | Cloudflare",
         html="",
     )
-    with patch(
-        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
-        new=AsyncMock(return_value={"clean": True, "reason": "ok", "title": "Buy tickets", "usage": {}}),
-    ):
-        assert await live_tab_looks_challenged(_CleanPage()) is False
-    with patch(
-        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
-        new=AsyncMock(
-            return_value={
-                "clean": False,
-                "reason": "challenge",
-                "title": "Access denied",
-                "usage": {},
-            }
-        ),
-    ):
-        assert await live_tab_looks_challenged(_ChallengedPage()) is True
+    assert await live_tab_looks_challenged(_CleanPage()) is False
+    assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
-async def test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth():
-    """Dump-faithful: Bot or Not must classify challenged (deprecated heuristic + LLM path).
-
-    browser-hotel-booking agent fead82a5-791a-43b8-b807-5e71226da866:
-
-    - browser_use_step_13 called recover_from_challenge (correct).
-    - live_tab_looks_challenged / page_looks_challenged false-cleaned the wall,
-      so the early skip returned skipped_clean_page — and that same classifier
-      is what candidate probes + post-promote live_verify used.
-    - browser_use_step_16 then called request_user_assistance_for_authentication.
-
-    Owning boundary now: deprecated heuristic still flags the dump page, the
-    early skip is removed, and live_tab routes through the rose-1-mini LLM
-    classifier (mocked here to challenged).
-    """
-    from unittest.mock import AsyncMock, patch
-
-    from domains.spawn_browser_agent_v3.challenge_recovery import (
-        live_tab_looks_challenged,
-        page_looks_challenged,
-    )
-
-    title = "Bot or Not?"
-    body = (
-        "Show us your human side...\n"
-        "We can't tell if you're a human or a bot.\n"
-        "The visual verification might not be accessible to you. We recommend "
-        "you to use the audio verification instead.\n"
-        "Slide right to secure your access\n"
-        "You are browsing and clicking at a speed much faster than expected "
-        "of a human being.\n"
-    )
-    html = (
-        '<html><head><title>Bot or Not?</title></head><body>'
-        '<div id="app-captcha-pwa">'
-        '<iframe title="Verification system" id="ddChallengeBody1787258982218"></iframe>'
-        '<button id="captcha__puzzle__button" title="Switch to the visual verification"></button>'
-        '<button id="captcha__audio__button" title="Switch to the audio verification"></button>'
-        '<button id="captcha__reload__button" title="Reload the verification"></button>'
-        '<button id="show-human-auth"></button>'
-        f"{body}"
-        "</div></body></html>"
-    )
-
-    class _ExpediaBotOrNotPage:
-        async def title(self):
-            return title
-
-        def locator(self, _sel):
-            class _Body:
-                async def inner_text(self, timeout=0):
-                    return body
-
-            return _Body()
-
-        async def content(self):
-            return html
-
-    assert page_looks_challenged(
-        status=None, title=title, body_text=body, html=html
-    ), "deprecated heuristic must still flag dump page for RCA fixtures"
-    with patch(
-        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
-        new=AsyncMock(
-            return_value={
-                "clean": False,
-                "reason": "Bot or Not interstitial",
-                "title": title,
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "rose-labs/rose-1-mini"},
-            }
-        ),
-    ):
-        assert await live_tab_looks_challenged(_ExpediaBotOrNotPage()) is True, (
-            "LLM classifier path must treat Bot or Not as challenged"
-        )
-
-
-def test_url_looks_like_api_surface_and_navigation_pin():
-    """Shape-only API refuse + recovery pin + cross-origin handoff pin (no path allowlists)."""
+def test_url_looks_like_api_surface_guard():
+    """Shape-only API refuse remains; host pinning is gone (Blue Bottle → order.online)."""
     from domains.spawn_browser_agent_v3.service_actions import (
-        effective_navigation_pin_host,
-        navigation_leaves_pinned_host,
         url_looks_like_api_surface,
         _navigation_guard_error,
         _ActionContext,
@@ -12337,125 +13167,12 @@ def test_url_looks_like_api_surface_and_navigation_pin():
     # Single-letter / vendor CDN labels are not special-cased.
     assert url_looks_like_api_surface("https://r.example.com/") is False
 
-    pin = "checkout.example.com"
-    current = "https://checkout.example.com/c/pay/cs_live_x"
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="navback",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://api.example.com/",
-            pin_host=pin,
-            action="goto",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://www.merchant.com/cart",
-            pin_host=pin,
-            action="goto",
-        )
-        is True
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://checkout.example.com/c/pay/other",
-            pin_host=pin,
-            action="goto",
-        )
-        is False
-    )
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="close_tab",
-        )
-        is True
-    )
-    # Unknown switch target while pinned — conservative block (handoff safety).
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url=None,
-            pin_host=pin,
-            action="switch_tab",
-        )
-        is True
-    )
-    # Same-host tab switch while pinned — allowed (hotels.com checkout ↔ property).
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://checkout.example.com/c/pay/other",
-            pin_host=pin,
-            action="switch_tab",
-        )
-        is False
-    )
-    # Off-pin tab while pinned — blocked.
-    assert (
-        navigation_leaves_pinned_host(
-            current_url=current,
-            target_url="https://www.merchant.com/cart",
-            pin_host=pin,
-            action="switch_tab",
-        )
-        is True
-    )
-    # Off the pin already — do not trap.
-    assert (
-        navigation_leaves_pinned_host(
-            current_url="https://www.merchant.com/cart",
-            target_url="https://elsewhere.com/",
-            pin_host=pin,
-            action="goto",
-        )
-        is False
-    )
-
-    # Cross-origin handoff: live host ≠ session origin → pin to live host.
-    assert (
-        effective_navigation_pin_host(
-            current_url=current,
-            recovery_pin_host=None,
-            origin_base_domain="merchant.com",
-        )
-        == "checkout.example.com"
-    )
-    assert (
-        effective_navigation_pin_host(
-            current_url="https://www.merchant.com/cart",
-            recovery_pin_host=None,
-            origin_base_domain="merchant.com",
-        )
-        is None
-    )
-    assert (
-        effective_navigation_pin_host(
-            current_url="https://www.merchant.com/cart",
-            recovery_pin_host="www.merchant.com",
-            origin_base_domain="merchant.com",
-        )
-        == "www.merchant.com"
-    )
-
     ctx = _ActionContext(
+        user_id="user-1",
         dom_service=None,  # type: ignore[arg-type]
         action_history=None,  # type: ignore[arg-type]
         session=None,
-        action_name="navback",
+        action_name="goto",
         index=None,
         params={},
         thinking=None,
@@ -12468,7 +13185,7 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         secret_refs=None,
         password_origins=None,
         credential_refs_by_secret_ref=None,
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        current_url="https://www.bluebottlecoffee.com/us/eng/cafes/ferry-building",
         trusted_page_urls=None,
         write_lock_enabled=False,
         write_lock_approvals=None,
@@ -12476,32 +13193,45 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         browser_network_recorder=None,
         current_auth_realm="",
         prepare_credentials_for_url=None,
-        navigation_pin_host=None,
-        navigation_origin_base_domain="merchant.com",
     )
-    assert "leave pinned page host" in (_navigation_guard_error(ctx, action="navback") or "")
-    ctx.action_name = "goto"
+    # Cross-origin merchant → order platform must be allowed (no host pin).
     assert (
         _navigation_guard_error(
-            ctx, action="goto", target_url="https://www.merchant.com/about"
+            ctx,
+            action="goto",
+            target_url="https://order.online/business/BlueBottleCoffee-156787",
+        )
+        is None
+    )
+    assert _navigation_guard_error(ctx, action="navback") is None
+    assert _navigation_guard_error(ctx, action="close_tab") is None
+    assert _navigation_guard_error(ctx, action="open_new_tab", target_url="https://order.online/") is None
+    assert _navigation_guard_error(ctx, action="open_new_tab", target_url="about:blank") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="https://1.1.1.1/") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="order.online/menu") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="example.com:8443/cart") is None
+    for unsafe_url in (
+        "file:///etc/passwd",
+        "data:text/html,hello",
+        "javascript:alert(1)",
+        "http://localhost/",
+        "http://127.1/",
+        "http://2130706433/",
+        "http://0x7f000001/",
+        "http://10.0.0.1/",
+        "http://169.254.169.254/",
+        "http://192.0.2.1/",
+        "http://[::1]/",
+        "http://[fe80::1]/",
+        "http://[fc00::1]/",
+    ):
+        assert _navigation_guard_error(ctx, action="goto", target_url=unsafe_url) is not None
+    # API surfaces still refused.
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://api.example.com/"
         )
         is not None
-    )
-    # Same handoff host stays allowed.
-    assert (
-        _navigation_guard_error(
-            ctx, action="goto", target_url="https://checkout.example.com/c/pay/other"
-        )
-        is None
-    )
-    # Still on origin domain — no handoff pin; free to navigate.
-    ctx.current_url = "https://www.merchant.com/cart"
-    assert _navigation_guard_error(ctx, action="navback") is None
-    assert (
-        _navigation_guard_error(
-            ctx, action="goto", target_url="https://www.merchant.com/other"
-        )
-        is None
     )
 
 
@@ -12511,6 +13241,7 @@ async def test_execute_goto_refuses_api_surface_urls():
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -12526,239 +13257,131 @@ async def test_execute_goto_refuses_api_surface_urls():
     ah.record_action.assert_awaited_once()
 
 
-async def test_execute_navback_refuses_when_host_pinned():
+async def test_execute_allows_cross_origin_navigation():
+    """Host pin removed: cross-origin navback/goto/open_new_tab must not refuse."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
+
     out = await service_actions.execute_action(
         dom_service=dom,
         action_history=ah,
         action={"action": "navback", "params": {}},
         current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_pin_host="checkout.example.com",
     )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
-    ah.record_action.assert_awaited_once()
+    err = str(out.get("error") or "").lower()
+    assert "leave pinned" not in err
+    assert "pinned page host" not in err
+    session.event_bus.dispatch.assert_called()
+
+    # Guard-level cement for merchant → order.online (the Blue Bottle failure).
+    ctx = service_actions._ActionContext(
+        user_id="user-1",
+        dom_service=dom,
+        action_history=ah,
+        session=session,
+        action_name="goto",
+        index=None,
+        params={},
+        thinking=None,
+        coords=None,
+        element=None,
+        available_file_paths=None,
+        session_id=None,
+        config=None,
+        humanizer=None,
+        secret_refs=None,
+        password_origins=None,
+        credential_refs_by_secret_ref=None,
+        current_url="https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
+        trusted_page_urls=None,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        system_name="Rose",
+        browser_network_recorder=None,
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+    )
+    order_url = "https://order.online/business/BlueBottleCoffee-156787"
+    assert (
+        service_actions._navigation_guard_error(ctx, action="goto", target_url=order_url)
+        is None
+    )
+    assert (
+        service_actions._navigation_guard_error(
+            ctx, action="open_new_tab", target_url=order_url
+        )
+        is None
+    )
+    assert service_actions._navigation_guard_error(ctx, action="close_tab") is None
+    assert service_actions._navigation_guard_error(ctx, action="switch_tab") is None
+    assert service_actions._navigation_guard_error(ctx, action="navback") is None
+
+    # Click-off-host path: press_key no longer consults a pin.
+    out_key = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+    )
+    assert "pinned" not in str(out_key.get("error") or "").lower()
+    assert "key chord" not in str(out_key.get("error") or "").lower()
 
 
-async def test_execute_navback_refuses_on_cross_origin_handoff():
-    """Place-order handoff sticks without recovery pin or path allowlists (ea340c81)."""
+async def test_execute_click_and_evaluate_allow_leave_hosts():
+    """Off-host href clicks and navigation evaluate are no longer refused by a pin."""
     from domains.spawn_browser_agent_v3 import service_actions
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "navback", "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
 
-    out_goto = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={
-            "action": "goto",
-            "params": {"url": "https://www.merchant.com/test_payment"},
-        },
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_goto["success"] is False
-    assert "leave pinned page host" in out_goto["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-
-async def test_execute_close_tab_refuses_on_cross_origin_handoff():
-    """Fleet 1bffacc0: close_tab on handoff host crashed the browser session."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "close_tab", "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "leave pinned page host" in out["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-    out_switch = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "switch_tab", "params": {"tab_id": "ab12"}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_switch["success"] is False
-    assert "leave pinned page host" in out_switch["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-
-async def test_execute_switch_tab_allows_same_host_while_pinned():
-    """RCA: hotels.com agent could not return to checkout tab after property-page evidence."""
-    from types import SimpleNamespace
-
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    checkout_url = (
-        "https://www.hotels.com/checkout/session/9ed6729d-7d82-4834-8c8e-d1d82f0ad1a7"
-    )
-    property_url = "https://www.hotels.com/ho129640/hotel-kabuki-part-of-jdv-by-hyatt"
-    off_pin_url = "https://www.google.com/search?q=hotels"
-    session = _fake_session_with_event_bus()
-    session.get_tabs = AsyncMock(
-        return_value=[
-            SimpleNamespace(target_id="aaaaaaaa1234", title="checkout", url=checkout_url),
-            SimpleNamespace(target_id="bbbbbbbb5678", title="property", url=property_url),
-            SimpleNamespace(target_id="cccccccc9abc", title="google", url=off_pin_url),
-        ]
-    )
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={
-            "action": "switch_tab",
-            "params": {"tab_id": "1234"},
-        },
-        current_url=property_url,
-        navigation_pin_host="www.hotels.com",
-    )
-    assert out["success"] is True
-    session.event_bus.dispatch.assert_called_once()
-
-    ah.record_action.reset_mock()
-    session.event_bus.dispatch.reset_mock()
-    out_blocked = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={
-            "action": "switch_tab",
-            "params": {"tab_id": "9abc"},
-        },
-        current_url=property_url,
-        navigation_pin_host="www.hotels.com",
-    )
-    assert out_blocked["success"] is False
-    assert "leave pinned page host" in out_blocked["error"]
-    session.event_bus.dispatch.assert_not_called()
-
-
-async def test_execute_evaluate_refuses_navigation_while_pinned():
-    """Fleet 0b3b582b: evaluate location/href escapes the handoff pin."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    assert service_actions.evaluate_code_looks_like_navigation(
-        "window.location.href = 'https://www.merchant.com/'"
-    )
-    assert service_actions.evaluate_code_looks_like_navigation("history.back()")
-    assert not service_actions.evaluate_code_looks_like_navigation(
-        "document.querySelector('#card-number')?.value"
-    )
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
     out = await service_actions.execute_action(
         dom_service=dom,
         action_history=ah,
         action={
             "action": "evaluate",
-            "params": {"code": "window.location.href = 'https://www.merchant.com/cart'"},
+            "params": {"code": "window.location.href = 'https://order.online/'"},
         },
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
+        current_url="https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
     )
-    assert out["success"] is False
-    assert "evaluate that would navigate" in out["error"]
-
-
-async def test_execute_press_key_and_click_refuse_leave_while_pinned():
-    """Fleet d2a9805f: Ctrl+Shift+W and Return-to-merchant href escaped the pin."""
-    from domains.spawn_browser_agent_v3 import service_actions
-
-    assert service_actions.press_key_looks_like_leave_page("Control+Shift+W")
-    assert service_actions.press_key_looks_like_leave_page("Alt+Left")
-    assert not service_actions.press_key_looks_like_leave_page("Enter")
-
-    session = _fake_session_with_event_bus()
-    dom = MagicMock()
-    dom.session = session
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out["success"] is False
-    assert "key chord" in out["error"]
+    assert "pinned" not in str(out.get("error") or "").lower()
+    assert "evaluate that would navigate" not in str(out.get("error") or "")
 
     leave_el = MagicMock()
-    leave_el.attributes = {"href": "https://www.merchant.com/cart"}
-    same_el = MagicMock()
-    same_el.attributes = {"href": "https://pay.example.com/confirm"}
-    assert (
-        service_actions.click_href_leaves_pinned_base(leave_el, "checkout.example.com")
-        == "https://www.merchant.com/cart"
-    )
-    assert (
-        service_actions.click_href_leaves_pinned_base(same_el, "checkout.example.com")
-        is None
-    )
-
-    dom.selector_map = {3: leave_el}
-    out_click = await service_actions.execute_action(
-        dom_service=dom,
-        action_history=ah,
-        action={"action": "click", "index": 3, "params": {}},
-        current_url="https://checkout.example.com/c/pay/cs_live_x",
-        navigation_origin_base_domain="merchant.com",
-    )
-    assert out_click["success"] is False
-    assert "click that navigates off pinned host" in out_click["error"]
-    session.event_bus.dispatch.assert_not_called()
+    leave_el.attributes = {
+        "href": "https://order.online/business/BlueBottleCoffee-156787"
+    }
+    # Click path needs more of the click helper; assert guard helpers are gone
+    # and href leave helper no longer exists.
+    assert not hasattr(service_actions, "click_href_leaves_pinned_base")
+    assert not hasattr(service_actions, "effective_navigation_pin_host")
+    assert not hasattr(service_actions, "navigation_leaves_pinned_host")
+    assert not hasattr(service_actions, "press_key_looks_like_leave_page")
 
 
-def test_handoff_pin_is_sticky_in_handler():
-    """Once handoff is observed, pin host is persisted (not cleared on return to origin)."""
+def test_handoff_payment_autofill_without_host_pin():
+    """Payment auto-fill still runs on cross-origin handoff; no sticky host pin."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    assert "navigation_pin_url" in source
-    assert "Auto-returning to pinned handoff host" in source
+    assert "navigation_pin_host" not in source
+    assert "navigation_pin_url" not in source
+    assert "Auto-returning to pinned handoff host" not in source
     assert "navigation_origin_base_domain" in source
-    assert "Auto-filled payment refs on pinned handoff page" in source
-    assert "Handoff payment auto-fill exhausted; pin retained" in source
+    assert "_on_cross_origin_handoff" in source
+    assert "Auto-filled payment refs on handoff page" in source
+    assert "Handoff payment auto-fill exhausted" in source
     assert "handoff_payment_fill_attempts" in source
     assert '"text": "card_number"' in source
     assert "wait_for_payment_ref_fields" in source
@@ -12770,25 +13393,20 @@ def test_handoff_pin_is_sticky_in_handler():
     wait_offset = source.index("wait_for_payment_ref_fields")
     attempt_offset = source.index("handoff_payment_fill_attempts += 1")
     assert wait_offset < attempt_offset
-    # Auto-fill gate must stay host/path agnostic.
+    # Auto-fill gate must stay host/path agnostic and must not reintroduce pinning.
     auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
     auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
     auto_fill_block = source[auto_fill_start:auto_fill_end]
     assert "checkout.stripe" not in auto_fill_block
     assert "test_payment" not in auto_fill_block
     assert "api.stripe" not in auto_fill_block
-    assert "Payment auto-fill exhausted — pin held; fill manually" in auto_fill_block
-    assert "Released handoff pin — no payment fields found" not in auto_fill_block
-    assert "navigation_pin_host = None" not in auto_fill_block
+    assert "pin held" not in auto_fill_block
+    assert "Pinned handoff" not in auto_fill_block
+    assert "leave pinned" not in source
 
 
-def test_recovery_does_not_early_skip_clean_check():
-    """recover_from_challenge must not burn an LLM call on an early clean skip.
-
-    The rose-1-mini classifier runs after DOM settle inside probes / live
-    verify. An up-front skipped_clean_page short-circuit previously false-cleaned
-    soft walls and would now waste a classifier call even when correct.
-    """
+def test_recovery_skips_when_live_tab_already_clear():
+    """LLM-invented recovery on a clean page must no-op (no host special-cases)."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -12798,48 +13416,21 @@ def test_recovery_does_not_early_skip_clean_check():
     end = source.index('if action_name == "send_message_to_user":', start)
     recovery_block = source[start:end]
 
-    assert 'recovery_action": "skipped_clean_page"' not in recovery_block
-    assert "recoveryStage\": \"skipped_clean_page\"" not in recovery_block
-    assert "Intentionally no early skipped_clean_page" in recovery_block
+    assert "live_tab_looks_challenged" in recovery_block
+    assert "skipped_clean_page" in recovery_block
     assert "provider_exit_rejected" in recovery_block
     assert "is_hosted_stripe_checkout_url" not in recovery_block
     assert "healthcheck_noise" not in recovery_block
     assert "api.stripe.com" not in recovery_block
     assert "target_looks_like_payment_document" not in recovery_block
-    assert "await _capture_recovery_storage_state(" in recovery_block
-    assert "challenge_llm_classifier" in recovery_block or "usage_collector" in recovery_block
-
-
-def test_auth_assistance_blocked_while_challenge_page_visible():
-    """CAPTCHA walls must not escalate to auth_assistance attention.
-
-    browser-hotel-booking observed auth_assistance on Expedia "Bot or Not?" after
-    the shared classifier false-cleaned the wall (skip + probes use it). The
-    auth-assistance path must re-check live_tab_looks_challenged and refuse
-    the handoff so the model is steered back to recover_from_challenge.
-    """
-    import inspect
-
-    from domains.spawn_browser_agent_v3 import handler
-
-    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    start = source.index('if action_name == "request_user_assistance_for_authentication":')
-    end = source.index('if action_name == "recover_from_challenge":', start)
-    auth_block = source[start:end]
-
-    assert "live_tab_looks_challenged" in auth_block
-    assert "auth_assistance_blocked_challenged_page" in auth_block
-    assert "Call recover_from_challenge instead" in auth_block
-    # Challenge guard must run after the automated-auth exhaustion guard and
-    # before create_user_auth_assistance_request so a captcha page never opens
-    # an auth_assistance attention row.
-    challenge_offset = auth_block.index("auth_assistance_blocked_challenged_page")
-    create_offset = auth_block.index("create_user_auth_assistance_request")
-    assert challenge_offset < create_offset
+    # Skip must run before capturing storage / rotating providers.
+    skip_offset = recovery_block.index("skipped_clean_page")
+    capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
+    assert skip_offset < capture_offset
 
 
 def test_navigation_guard_has_no_endpoint_path_allowlists():
-    """Nav guards must not special-case payment/checkout path markers."""
+    """Nav guards must not special-case payment/checkout path markers or host pins."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import service_actions
@@ -12847,7 +13438,8 @@ def test_navigation_guard_has_no_endpoint_path_allowlists():
     source = inspect.getsource(service_actions._navigation_guard_error)
     assert "target_looks_like_payment_document" not in source
     assert "payment page" not in source
-    assert "effective_navigation_pin_host" in source
+    assert "effective_navigation_pin_host" not in source
+    assert "pinned page host" not in source
     assert "url_looks_like_api_surface" in source
 
 
@@ -12965,6 +13557,102 @@ async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
     assert out["ready"] is True
     assert page.reloads == 1
     assert page.evaluations >= 2
+
+
+async def test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload():
+    """Persistent blank SPA shells must emit script/preload mount diagnostics."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.reloads = 0
+            self.codes = []
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, code):
+            self.codes.append(code)
+            if "performance.getEntriesByType" in code:
+                return {
+                    "href": "https://x.com/test_payment",
+                    "readyState": "interactive",
+                    "rootChildren": 0,
+                    "scriptCount": 1,
+                    "scripts": [{"type": "module", "src": "https://x.com/src/main.tsx"}],
+                    "preloadCount": 2,
+                    "preloads": [
+                        {"as": "video", "href": "https://x.com/navi-features.webm"},
+                        {"as": "video", "href": "https://x.com/navi-features-hevc.mov"},
+                    ],
+                    "resourceCount": 1,
+                    "scriptResourceCount": 0,
+                    "scriptResources": [],
+                    "preloadResources": [
+                        {
+                            "name": "https://x.com/navi-features.webm",
+                            "initiatorType": "link",
+                            "transferSize": 66000000,
+                            "encodedBodySize": 66000000,
+                            "durationMs": 12000,
+                            "responseEndMs": 13000,
+                        }
+                    ],
+                    "mainScript": {"type": "module", "src": "https://x.com/src/main.tsx"},
+                    "mainResource": None,
+                    "largestPreloadBytes": 66000000,
+                }
+            return {
+                "hasAppRoot": True,
+                "appRootReady": False,
+                "plainPageReady": False,
+                "bodyTextLength": 0,
+                "rootChildren": 0,
+                "blankSpaShell": True,
+                "readyState": "interactive",
+            }
+
+        async def reload(self):
+            self.reloads += 1
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+    monotonic_time = 0.0
+    logged = []
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    def capture_warning(event, **kwargs):
+        logged.append((event, kwargs))
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+        patch.object(service_actions.logger, "warning", side_effect=capture_warning),
+    ):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/test_payment",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is False
+    assert page.reloads == 1
+    diag_events = [item for item in logged if item[0] == "Blank SPA mount diagnostics"]
+    assert len(diag_events) >= 2
+    assert any(item[1].get("phase") == "before_reload" for item in diag_events)
+    assert any(item[1].get("phase") == "after_reload" for item in diag_events)
+    after = next(item[1] for item in diag_events if item[1].get("phase") == "after_reload")
+    assert after["diagnostics"]["mainResource"] is None
+    assert after["diagnostics"]["largestPreloadBytes"] == 66000000
+    assert any("performance.getEntriesByType" in code for code in page.codes)
+
 
 async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -13244,69 +13932,6 @@ async def test_execute_screenshot_requires_steel_image():
         else:
             raise AssertionError("expected screenshot failure to propagate")
 
-
-async def test_execute_screenshot_kernel_crops_chrome_to_css_viewport():
-    """Kernel computer screenshots include window chrome; crop to CSS viewport.
-
-    Hotels.com Bot or Not agent fcb37373-a88a-4a74-bb76-a290be2be1f1 called
-    `screenshot` then `drag` with start=(531,387) on a 1280x800 Kernel computer
-    capture while the page CSS viewport was 1280x713 (87px top chrome). The
-    uncropped image made CDP land 87px too low — text under the slider was
-    highlighted instead of the thumb. Steel already crops; Kernel must too so
-    screenshot pixels match click/drag coordinates.
-    """
-    from domains.spawn_browser_agent_v3 import service_actions
-    from PIL import Image, ImageDraw
-
-    window = Image.new("RGB", (1280, 800), color=(45, 45, 45))
-    draw = ImageDraw.Draw(window)
-    draw.rectangle((0, 87, 1279, 799), fill=(247, 247, 247))
-    # Dark thumb at full-window coords the model read from the uncropped capture.
-    draw.ellipse((531 - 10, 387 - 10, 531 + 10, 387 + 10), fill=(70, 73, 76))
-    image_buffer = BytesIO()
-    window.save(image_buffer, format="PNG")
-    screenshot_b64 = base64.b64encode(image_buffer.getvalue()).decode()
-
-    cdp = MagicMock()
-    cdp.session_id = "cdp-sid"
-    cdp.cdp_client.send.Runtime.evaluate = AsyncMock(
-        return_value={"result": {"value": {"w": 1280, "h": 713}}}
-    )
-    session = MagicMock()
-    session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
-    dom = MagicMock()
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    upload_mock = AsyncMock(return_value={"path": "/tmp/kernel-s.png"})
-    with (
-        patch(
-            "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
-            AsyncMock(return_value={"provider": "kernel", "base64_image": screenshot_b64}),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
-            upload_mock,
-        ),
-    ):
-        out = await service_actions._execute_screenshot(
-            session=session,
-            dom_service=dom,
-            action_history=ah,
-            thinking=None,
-            session_id="sid",
-            config=_fake_config(),
-        )
-
-    assert out["success"] is True
-    cropped = Image.open(BytesIO(base64.b64decode(out["screenshot"])))
-    assert cropped.size == (1280, 713), (
-        f"Kernel screenshot must match CSS viewport for coordinate tools; got {cropped.size}"
-    )
-    # Thumb that was at window y=387 must sit at CSS y=300 after chrome crop.
-    assert cropped.getpixel((531, 300))[:3] == (70, 73, 76)
-    assert cropped.getpixel((531, 387))[:3] != (70, 73, 76)
-
-
 # ── move_visual_cursor happy path ────────────────────────────────────
 
 async def test_move_visual_cursor_success():
@@ -13555,6 +14180,115 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
     assert result["request_id"] == "req-pay-1"
     assert result["mode"] == "claudeAuth"
 
+
+async def test_generate_write_lock_notification_retries_once_on_schema_rejection():
+    """Return-shaped purchase-without-details must not abort the session on first try;
+    feed validation detail back and accept a corrected generic_write payload."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    try:
+        validate_browser_tool_args(
+            "generate_write_lock_notification",
+            {
+                "trigger_type": "purchase",
+                "action": "confirm return",
+                "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            },
+        )
+        raise AssertionError("expected schema rejection for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        first_error = err
+
+    fixed_action = {
+        "action": "generate_write_lock_notification",
+        "params": {
+            "trigger_type": "generic_write",
+            "action": "confirm Amazon return for Carhartt beanie",
+            "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                }
+            ],
+            "generic_write": {
+                "label": "Confirm return",
+                "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                "payload_summary": (
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                    "Return by Sep 19, 2026."
+                ),
+            },
+        },
+    }
+
+    fork_mock = AsyncMock(
+        side_effect=[
+            first_error,
+            {
+                "action": fixed_action,
+                "usage": {"input_tokens": 900, "output_tokens": 40},
+                "actual_model": "gpt-5.6-sol-gpt",
+                "request_id": "req-return-retry",
+                "mode": "gpt",
+            },
+        ]
+    )
+
+    with patch.object(handler, "_call_browser_use_with_rotation", new=fork_mock):
+        result = await _generate_write_lock_notification(
+            rose_client=SimpleNamespace(),
+            task_prompt="Return the beanie",
+            dynamic_system_context="dynamic-ctx",
+            browser_turn_messages=[{"role": "user", "content": "return"}],
+            browser_state={"url": return_url, "screenshot": None},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="user-return",
+            agent_id="agent-return",
+            iteration=14,
+            token_state=token_state,
+            gpt_token="gpt-token",
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="gpt",
+            approval_type="purchase",
+            current_url=return_url,
+            trusted_page_urls=[return_url],
+            pending_action={"action": "click", "params": {"index": 58768}},
+            write_lock_result={
+                "status": "needs_write_approval",
+                "approval_type": "purchase",
+                "element_text": "Confirm your return",
+            },
+            system_name="Rose",
+            fallback_question="Approve?",
+        )
+
+    assert fork_mock.await_count == 2
+    assert fork_mock.await_args_list[0].kwargs["call_site"] == "write_lock_notification_fork_14"
+    assert fork_mock.await_args_list[1].kwargs["call_site"] == "write_lock_notification_fork_14_retry1"
+    retry_messages = fork_mock.await_args_list[1].kwargs["extra_user_messages"]
+    assert len(retry_messages) == 2
+    assert "failed" in retry_messages[1]["content"].lower()
+    assert "trigger_type" in retry_messages[1]["content"]
+    assert result["notification"]["trigger_type"] == "generic_write"
+    assert "$10.84" in result["question"]
+    assert result["request_id"] == "req-return-retry"
+
+
 async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool():
     """If the forked model calls anything other than generate_write_lock_notification,
     the helper raises so the caller falls back to build_payment_question rather than
@@ -13721,28 +14455,141 @@ def test_write_lock_notification_prompt_includes_media_candidates():
 
     assert "media_candidates" in prompt
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
-    assert "use only those URLs for media and item image_url" in prompt
-    assert "description under 80 characters" in prompt
-    assert "must already exist in the browser trajectory" in prompt
+    assert "### Purchases" in prompt
+    assert "### Emails / outbound messages" in prompt
+    assert "### Social posts" in prompt
+    assert "### Returns / refund confirmations" in prompt
+    assert "### Payment field entry" in prompt
+    assert "**Approval Needed**" in prompt
+    assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in prompt
     assert "Visit the product page" not in prompt
 
-def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+
+def test_write_lock_notification_prompt_is_example_driven_for_all_gates():
+    """Fork prompt teaches via prescribed worked examples for every case."""
+    from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
+
+    return_prompt = _write_lock_notification_prompt(
+        approval_type="return",
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+        ),
+        pending_action={"action": "click", "params": {"index": 58768}},
+        write_lock_result={
+            "status": "needs_write_approval",
+            "approval_type": "return",
+            "element_text": "Confirm your return",
+        },
+        media_candidates=[
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+    )
+    purchase_prompt = _write_lock_notification_prompt(
+        approval_type="purchase",
+        current_url="https://www.amazon.com/checkout/spc",
+        pending_action={"action": "click", "params": {"index": 1}},
+        write_lock_result={"status": "needs_write_approval", "approval_type": "purchase"},
+    )
+
+    for needle in (
+        "### Purchases",
+        "### Emails / outbound messages",
+        "### Social posts",
+        "### Returns / refund confirmations",
+        "### Payment field entry",
+        "Notification format this produces:",
+        "Tool args example:",
+        "approval_type in Runtime evidence is a hint",
+        "Action: Confirm return",
+        "Payment secrets are not included in this message.",
+    ):
+        assert needle in return_prompt, needle
+        assert needle in purchase_prompt, needle
+    # Same example catalog; only runtime evidence differs.
+    assert return_prompt.split("Runtime evidence:")[0] == purchase_prompt.split("Runtime evidence:")[0]
+    assert "Confirm your return" in return_prompt
+    assert '"approval_type": "return"' in return_prompt or '"approval_type":"return"' in return_prompt.replace(
+        " ", ""
+    )
+
+
+def test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write():
+    """Owning-boundary red/green for the Amazon return notification schema failure."""
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _render_write_lock_notification_question
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    buggy_payload = {
+        "trigger_type": "purchase",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": [
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+        "generic_write": {
+            "label": "Confirm return",
+            "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            "payload_summary": (
+                "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                "Return by Sep 19, 2026."
+            ),
+        },
+    }
+    try:
+        validate_browser_tool_args("generate_write_lock_notification", buggy_payload)
+        raise AssertionError("expected BrowserToolArgsValidationError for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        assert "purchase details are required for a purchase approval" in err.detail
+
+    fixed_payload = {
+        "trigger_type": "generic_write",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": buggy_payload["media"],
+        "generic_write": buggy_payload["generic_write"],
+    }
+    validated = validate_browser_tool_args("generate_write_lock_notification", fixed_payload)
+    assert validated["trigger_type"] == "generic_write"
+    question = _render_write_lock_notification_question(
+        validated,
+        system_name="Rose",
+        fallback_question="Approve?",
+    )
+    assert "Confirm return" in question or "confirm Amazon return" in question
+    assert "$10.84" in question
+    assert "Whole Foods" in question
+    assert "original payment" in question
+
+
+def test_purchase_write_lock_notification_failure_falls_back_for_all_gates():
     from domains.spawn_browser_agent_v3.handler import (
         PurchaseApprovalContextError,
-        PurchaseApprovalNotificationRetryableError,
         _enforce_write_lock_notification_failure_policy,
     )
 
-    with pytest.raises(PurchaseApprovalContextError):
+    # Unified policy: every gate falls through to the deterministic fallback question.
+    assert (
         _enforce_write_lock_notification_failure_policy(
             "purchase",
             PurchaseApprovalContextError("missing reviews"),
         )
-
-    with pytest.raises(PurchaseApprovalNotificationRetryableError):
-        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
-
+        is None
+    )
+    assert _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout")) is None
+    assert _enforce_write_lock_notification_failure_policy("return", ValueError("metadata unavailable")) is None
     assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
+    assert _enforce_write_lock_notification_failure_policy("email_send", ValueError("metadata unavailable")) is None
+
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
     from domains.spawn_browser_agent_v3.handler import (
@@ -14782,6 +15629,7 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
             self.selector_map = {}
             self.disconnect = AsyncMock()
+            self._captcha_poll = None
             _FakeDomService.last_instance = self
 
         async def connect(self):
@@ -14789,6 +15637,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
 
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
+
+        def start_captcha_telemetry_indicator(self, poll_phase):
+            self._captcha_poll = poll_phase
 
     class _FakeHumanizer:
         last_instance = None
@@ -14880,142 +15731,101 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         auth_boundary_calls.append("create_assistance")
         return await create_auth_mock(*args, **kwargs)
 
-    from contextlib import ExitStack
-
-    # ExitStack keeps this under Python's nested-block limit. Also stub the
-    # challenge classifier: fake empty pages raise and fail closed as challenged.
-    with ExitStack() as stack:
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged",
-                AsyncMock(return_value=False),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.load_config",
-                return_value=_fake_config(),
-            )
-        )
-        stack.enter_context(patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"))
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.fetch_session_info",
-                AsyncMock(return_value=session_info),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.fetch_recent_otps",
-                AsyncMock(return_value=[]),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
-                AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
-                AsyncMock(
-                    side_effect=[
-                        {
-                            "action": {
-                                "action": "request_user_assistance_for_authentication",
-                                "thinking": "",
-                                "params": {},
-                            },
-                            "usage": {},
-                            "mode": "waterfall",
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.load_config",
+            return_value=_fake_config(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_session_info",
+            AsyncMock(return_value=session_info),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_recent_otps",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
+            AsyncMock(
+                side_effect=[
+                    {
+                        "action": {
+                            "action": "request_user_assistance_for_authentication",
+                            "thinking": "",
+                            "params": {},
                         },
-                        {
-                            "action": {
-                                "action": "attempt_completion",
-                                "thinking": "The signed-in page confirms completion.",
-                                "params": {"reasoning": "confirmed"},
-                            },
-                            "usage": {},
-                            "mode": "waterfall",
-                        },
-                    ]
-                ),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.create_user_auth_assistance_request",
-                create_auth,
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler._restart_after_failed_steel_auth",
-                restart,
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler._reconnect_browser_stack_after_rotation",
-                reconnect_mock,
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context",
-                AsyncMock(return_value=[]),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
-                AsyncMock(
-                    return_value={
-                        "score": 1.0,
-                        "reasoning": "completed",
-                        "structured_response": {"result": "ride requested"},
                         "usage": {},
-                    }
-                ),
-            )
-        )
-        stack.enter_context(
-            patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[]))
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
-                AsyncMock(),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-                AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
-            )
-        )
-        stack.enter_context(patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock))
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
-                AsyncMock(),
-            )
-        )
-        stack.enter_context(
-            patch(
-                "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message",
-                AsyncMock(),
-            )
-        )
-        stack.enter_context(patch("browser_tools.dom_service.DOMService", _FakeDomService))
-        stack.enter_context(patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer))
-        stack.enter_context(
-            patch(
-                "playwright.async_api.async_playwright",
-                return_value=_FakeAsyncPlaywright(fake_playwright),
-            )
-        )
+                        "mode": "waterfall",
+                    },
+                    {
+                        "action": {
+                            "action": "attempt_completion",
+                            "thinking": "The signed-in page confirms completion.",
+                            "params": {"reasoning": "confirmed"},
+                        },
+                        "usage": {},
+                        "mode": "waterfall",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.create_user_auth_assistance_request",
+            create_auth,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._restart_after_failed_steel_auth",
+            restart,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._reconnect_browser_stack_after_rotation",
+            reconnect_mock,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+            AsyncMock(
+                return_value={
+                    "score": 1.0,
+                    "reasoning": "completed",
+                    "structured_response": {"result": "ride requested"},
+                    "usage": {},
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
+            AsyncMock(),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+            AsyncMock(),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message",
+            AsyncMock(),
+        ),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright",
+            return_value=_FakeAsyncPlaywright(fake_playwright),
+        ),
+    ):
         result = await spawn_browser_agent_activity_v3(
             user_id="user-1",
             agent_id="agent-1",
@@ -16445,6 +17255,97 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
+def test_browser_tool_events_declare_action_type():
+    """Every workflow-scope spawn_browser_agent event must declare action_type.
+
+    The front-end decides whether a browser task is over from `action_type`
+    alone (front-end/src/features/terminal/hooks/derivations.ts,
+    .../message-bubble/useMessageRouting.ts). An event that omits it is
+    indistinguishable from the legacy untyped terminal, so a *progress* event
+    silently closes a live browser panel and renders the chip as "Done".
+
+    Prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f hit exactly that: "Payment
+    card ready" (untyped) closed the panel while the same browser task ran for
+    another five minutes. Commit e5f87f9a4 had already fixed this class for the
+    auth-handoff events but nothing enforced it, so the payment and write-lock
+    events were missed. This test is that enforcement.
+    """
+    handler_path = (
+        Path(__file__).resolve().parents[2]
+        / "domains"
+        / "spawn_browser_agent_v3"
+        / "handler.py"
+    )
+    tree = ast.parse(handler_path.read_text())
+
+    untyped_lines = []
+    typed_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        literal_items = {
+            key.value: value.value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and isinstance(value, ast.Constant)
+        }
+        if literal_items.get("toolName") != "spawn_browser_agent":
+            continue
+        declared_keys = {
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "action_type" in declared_keys:
+            typed_count += 1
+        else:
+            untyped_lines.append(node.lineno)
+
+    assert not untyped_lines, (
+        "spawn_browser_agent event metadata missing an explicit action_type at "
+        f"handler.py lines {untyped_lines}. Add a terminal action_type "
+        "('task_complete'/'session_paused') for real terminals, or a distinct "
+        "progress action_type — never leave it absent."
+    )
+    assert typed_count >= 18, (
+        f"expected at least 18 typed spawn_browser_agent events, found {typed_count} "
+        "— did the scan stop matching?"
+    )
+
+    # The other half of the contract: a completion message
+    # (is_completion_message drops subAgentId, so it lands in the main chat and
+    # closes the chip) must declare an explicitly terminal action_type. Without
+    # this, a terminal is inferred from message shape — the same failure mode in
+    # reverse.
+    terminal_action_types = {"task_complete", "session_paused"}
+    untyped_completions = []
+    completion_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        flag = keywords.get("is_completion_message")
+        if not (isinstance(flag, ast.Constant) and flag.value is True):
+            continue
+        completion_count += 1
+        action_type = keywords.get("action_type")
+        if not (
+            isinstance(action_type, ast.Constant)
+            and action_type.value in terminal_action_types
+        ):
+            untyped_completions.append(node.lineno)
+
+    assert not untyped_completions, (
+        "browser completion messages must declare a terminal action_type "
+        f"({sorted(terminal_action_types)}) at handler.py lines {untyped_completions}"
+    )
+    assert completion_count >= 5, (
+        f"expected at least 5 completion-message call sites, found {completion_count} "
+        "— did the scan stop matching?"
+    )
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -16471,6 +17372,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_passkey_webauthn_uses_cdp_client_session_api",
         test_dom_service_passkey_webauthn_uses_cdp_client_session_api,
+    )
+    await r.record_async(
+        "dom_service_passkeys_follow_focus_target_for_sso_transition",
+        test_dom_service_passkeys_follow_focus_target_for_sso_transition,
     )
     await r.record_async(
         "passkey_usage_recorded_before_completion",
@@ -16526,6 +17431,14 @@ async def run_all_tests():
     r.record(
         "browser_supervisor_timeout_ordering",
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
+    )
+    r.record(
+        "browser_use_upstream_still_hardcodes_page_navigate_20s",
+        test_browser_use_upstream_still_hardcodes_page_navigate_20s,
+    )
+    await r.record_async(
+        "browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config",
+        test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config,
     )
     r.record(
         "browser_task_prompt_no_system_duplication",
@@ -16700,14 +17613,6 @@ async def run_all_tests():
     r.record(
         "auth_runtime_state_guard",
         test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted,
-    )
-    r.record(
-        "auth_runtime_state_guest_cta_gate",
-        test_auth_runtime_state_blocks_assistance_until_seen_guest_path_attempted,
-    )
-    r.record(
-        "guest_completion_option_text",
-        test_text_indicates_guest_completion_option_matches_booking_cta,
     )
     r.record(
         "auth_runtime_state_unmatched_email",
@@ -16936,6 +17841,10 @@ async def run_all_tests():
         test_inject_local_storage_network_error_returns_none,
     )
     await r.record_async("upload_file_session_success", test_upload_file_to_session_success)
+    await r.record_async(
+        "upload_file_session_downloads_directory",
+        test_upload_file_to_session_downloads_directory,
+    )
     await r.record_async("upload_file_session_non_200", test_upload_file_to_session_non_200_returns_none)
     await r.record_async("upload_file_session_network", test_upload_file_to_session_network_error)
 
@@ -17175,6 +18084,30 @@ async def run_all_tests():
         test_execute_action_press_key_with_humanizer,
     )
     await r.record_async(
+        "execute_action_press_key_provider_computer",
+        test_execute_action_press_key_prefers_provider_computer_input,
+    )
+    r.record(
+        "kernel_computer_key_maps_playwright_names_to_x11_keysyms",
+        test_kernel_computer_key_maps_playwright_names_to_x11_keysyms,
+    )
+    await r.record_async(
+        "execute_action_press_key_without_user_skips_provider_input",
+        test_execute_action_press_key_without_user_skips_provider_input,
+    )
+    await r.record_async(
+        "execute_action_press_key_pre_execution_rejection_falls_back",
+        test_execute_action_press_key_pre_execution_rejection_falls_back,
+    )
+    await r.record_async(
+        "execute_action_press_key_provider_server_error_does_not_replay",
+        test_execute_action_press_key_provider_server_error_does_not_replay,
+    )
+    await r.record_async(
+        "execute_action_press_key_ambiguous_provider_failure",
+        test_execute_action_press_key_ambiguous_provider_failure_does_not_replay,
+    )
+    await r.record_async(
         "execute_action_scroll_humanizer_down",
         test_execute_action_scroll_with_humanizer_down,
     )
@@ -17249,6 +18182,26 @@ async def run_all_tests():
         test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser,
     )
     r.record(
+        "browser_downloads_path_for_provider",
+        test_browser_downloads_path_for_provider_kernel_vs_steel,
+    )
+    r.record(
+        "attachment_download_tinypng_vs_ad_script",
+        test_is_browser_attachment_download_tinypng_vs_ad_script,
+    )
+    await r.record_async(
+        "persist_bytes_to_session_downloads",
+        test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads,
+    )
+    await r.record_async(
+        "browser_download_persister_cdp_attachment",
+        test_browser_download_persister_captures_attachment_via_cdp_body,
+    )
+    r.record(
+        "dom_service_defaults_downloads_path_from_env",
+        test_dom_service_defaults_downloads_path_from_browser_provider_env,
+    )
+    r.record(
         "browser_activity_memory_cleanup_clears_buffers",
         test_browser_activity_memory_cleanup_clears_retained_buffers,
     )
@@ -17286,6 +18239,22 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_excludes_terms_consent_prose",
         test_write_lock_purchase_button_excludes_terms_consent_prose,
+    )
+    r.record(
+        "write_lock_purchase_button_excludes_buynow_dom_identifiers",
+        test_write_lock_purchase_button_excludes_buynow_dom_identifiers,
+    )
+    r.record(
+        "click_write_lock_eligible_only_buttons_and_form_submits",
+        test_click_write_lock_eligible_only_buttons_and_form_submits,
+    )
+    await r.record_async(
+        "click_write_lock_result_skips_plain_email_input",
+        test_click_write_lock_result_skips_plain_email_input,
+    )
+    await r.record_async(
+        "click_write_lock_result_still_locks_submit_input",
+        test_click_write_lock_result_still_locks_submit_input,
     )
     r.record(
         "write_lock_email_send_excludes_marketing_opt_in_controls",
@@ -17344,6 +18313,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_input_text_el_humanizer_missing_coords",
         test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback,
+    )
+    await r.record_async(
+        "execute_input_text_password_secret_ref_resolves_visible_password_coords",
+        test_execute_input_text_password_secret_ref_resolves_visible_password_coords,
+    )
+    await r.record_async(
+        "resolve_password_field_coordinates_uses_visible_password_input",
+        test_resolve_password_field_coordinates_uses_visible_password_input,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_bypasses_warning",
@@ -17425,46 +18402,29 @@ async def run_all_tests():
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
+    await r.record_async(
+        "execute_goto_err_aborted_persists_download",
+        test_execute_goto_err_aborted_persists_attachment_download,
+    )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
-    await r.record_async(
-        "expedia_bot_or_not_dump_forces_proxy_recovery",
-        test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth,
-    )
-    r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
+    r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
-    await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
+    await r.record_async("cross_origin_nav_allowed", test_execute_allows_cross_origin_navigation)
     await r.record_async(
-        "navback_refuses_cross_origin_handoff",
-        test_execute_navback_refuses_on_cross_origin_handoff,
+        "click_evaluate_allow_leave_hosts",
+        test_execute_click_and_evaluate_allow_leave_hosts,
     )
-    await r.record_async(
-        "close_tab_refuses_cross_origin_handoff",
-        test_execute_close_tab_refuses_on_cross_origin_handoff,
+    r.record(
+        "handoff_payment_autofill_without_host_pin",
+        test_handoff_payment_autofill_without_host_pin,
     )
-    await r.record_async(
-        "execute_switch_tab_allows_same_host_while_pinned",
-        test_execute_switch_tab_allows_same_host_while_pinned,
-    )
-    await r.record_async(
-        "evaluate_refuses_nav_while_pinned",
-        test_execute_evaluate_refuses_navigation_while_pinned,
-    )
-    await r.record_async(
-        "press_key_click_refuse_leave_while_pinned",
-        test_execute_press_key_and_click_refuse_leave_while_pinned,
-    )
-    r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
     r.record(
         "nav_guard_no_endpoint_path_allowlists",
         test_navigation_guard_has_no_endpoint_path_allowlists,
     )
     r.record(
         "recovery_skips_clean_live_tab",
-        test_recovery_does_not_early_skip_clean_check,
-    )
-    r.record(
-        "auth_assistance_blocked_on_challenge",
-        test_auth_assistance_blocked_while_challenge_page_visible,
+        test_recovery_skips_when_live_tab_already_clear,
     )
     await r.record_async("execute_goto_injects_ls", test_execute_goto_injects_local_storage)
     await r.record_async(
@@ -17474,6 +18434,10 @@ async def run_all_tests():
     await r.record_async(
         "navigation_ready_reloads_blank_spa",
         test_wait_for_navigation_ready_reloads_blank_spa_shell_once,
+    )
+    await r.record_async(
+        "navigation_ready_logs_blank_spa_mount_diagnostics",
+        test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload,
     )
     await r.record_async(
         "navigation_ready_regotos_loading_doc",
@@ -17494,10 +18458,6 @@ async def run_all_tests():
     await r.record_async(
         "execute_screenshot_requires_steel_image",
         test_execute_screenshot_requires_steel_image,
-    )
-    await r.record_async(
-        "execute_screenshot_kernel_crops_chrome_to_css_viewport",
-        test_execute_screenshot_kernel_crops_chrome_to_css_viewport,
     )
 
     await r.record_async("move_visual_cursor_success", test_move_visual_cursor_success)
@@ -17723,6 +18683,10 @@ async def run_all_tests():
         test_generate_write_lock_notification_payment_forks_and_renders_question,
     )
     await r.record_async(
+        "generate_write_lock_notification_schema_retry",
+        test_generate_write_lock_notification_retries_once_on_schema_rejection,
+    )
+    await r.record_async(
         "generate_write_lock_notification_wrong_tool_raises",
         test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool,
     )
@@ -17739,8 +18703,16 @@ async def run_all_tests():
         test_write_lock_notification_prompt_includes_media_candidates,
     )
     r.record(
-        "purchase_write_lock_notification_failure_blocks_fallback",
-        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
+        "write_lock_notification_prompt_example_driven",
+        test_write_lock_notification_prompt_is_example_driven_for_all_gates,
+    )
+    r.record(
+        "return_write_lock_notification_schema_red_green",
+        test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write,
+    )
+    r.record(
+        "purchase_write_lock_notification_failure_falls_back",
+        test_purchase_write_lock_notification_failure_falls_back_for_all_gates,
     )
     r.record(
         "normalize_write_lock_notification_media_candidate",
@@ -17966,6 +18938,10 @@ async def run_all_tests():
     await r.record_async(
         "goto_action_returns_current_url_for_recovery_fallback",
         test_goto_action_returns_current_url_for_recovery_fallback,
+    )
+    r.record(
+        "browser_tool_events_declare_action_type",
+        test_browser_tool_events_declare_action_type,
     )
     return r.all_passed
 

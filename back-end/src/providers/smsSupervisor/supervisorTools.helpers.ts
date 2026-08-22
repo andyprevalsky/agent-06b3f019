@@ -8,8 +8,6 @@
  */
 
 import { prisma } from '../database';
-import { cleanupAgentSessions } from '../agentCleanup';
-import { getTemporalClient } from '../temporal';
 import { createLogger } from '../logger';
 
 const log = createLogger('SmsSupervisorTools');
@@ -125,51 +123,4 @@ export async function resolveAgentPrefix(
   }
 
   return agent;
-}
-
-/**
- * Recursively soft-delete an agent and all its descendants. Cleans up E2B
- * sandboxes and Steel browser sessions, terminates Temporal workflows, and
- * marks rows with `deletedAt`. Idempotent: if the agent is already deleted,
- * returns without further work.
- */
-export async function deleteAgentRecursive(agentId: string): Promise<void> {
-  const agent = await prisma.agent.findFirst({
-    where: { id: agentId, deletedAt: null },
-    include: { children: { where: { deletedAt: null } } },
-  });
-
-  if (!agent) return;
-
-  for (const child of agent.children) {
-    await deleteAgentRecursive(child.id);
-  }
-
-  await cleanupAgentSessions(agentId);
-
-  if (agent.temporalWorkflowId) {
-    try {
-      log.info('Terminating workflow', {
-        phase: 'kill',
-        workflowId: agent.temporalWorkflowId,
-        agentId,
-      });
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.terminate('Agent killed via SMS');
-    } catch (error) {
-      log.warn('Failed to terminate workflow', {
-        phase: 'kill',
-        workflowId: agent.temporalWorkflowId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  await prisma.agent.update({
-    where: { id: agentId },
-    data: { deletedAt: new Date() },
-  });
-
-  log.info('Deleted agent', { phase: 'kill', agentId });
 }
