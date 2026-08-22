@@ -112,17 +112,42 @@ export async function findById(id: string) {
   });
 }
 
+/**
+ * List attention requests for a user, excluding rows whose agent is archived.
+ * `AgentAttentionRequest.agentId` is a plain string (no FK), so soft-delete
+ * paths that forget to `deleteMany` would otherwise keep prompting forever.
+ * Bound by this user's pending/answered request count — not by agent count.
+ */
 export async function findManyByUserId(userId: string) {
-  return prisma.agentAttentionRequest.findMany({
+  const requests = await prisma.agentAttentionRequest.findMany({
     where: { userId },
     orderBy: { updatedAt: 'asc' },
   });
+  if (requests.length === 0) return requests;
+
+  const agentIds = [...new Set(requests.map((r) => r.agentId))];
+  const liveAgents = await prisma.agent.findMany({
+    where: { id: { in: agentIds }, deletedAt: null },
+    select: { id: true },
+  });
+  const live = new Set(liveAgents.map((a) => a.id));
+  return requests.filter((r) => live.has(r.agentId));
 }
 
 export async function countUnanswered(userId: string) {
-  return prisma.agentAttentionRequest.count({
+  const pending = await prisma.agentAttentionRequest.findMany({
     where: { userId, userResponse: null },
+    select: { agentId: true },
   });
+  if (pending.length === 0) return 0;
+
+  const agentIds = [...new Set(pending.map((r) => r.agentId))];
+  const liveAgents = await prisma.agent.findMany({
+    where: { id: { in: agentIds }, deletedAt: null },
+    select: { id: true },
+  });
+  const live = new Set(liveAgents.map((a) => a.id));
+  return pending.filter((r) => live.has(r.agentId)).length;
 }
 
 export async function updateResponse(id: string, userResponse: string) {
