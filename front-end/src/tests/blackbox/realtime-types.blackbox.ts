@@ -723,6 +723,7 @@ describe('extractAssistantStreamPayload', () => {
       sequence: 1,
       is_gpt: true,
       llm_started_at_ms: 1700000000000,
+      char_count: 120,
     };
     expect(extractAssistantStreamPayload(wrap(record))).toEqual(record);
   });
