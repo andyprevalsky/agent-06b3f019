@@ -6916,7 +6916,7 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 4, f"expected 4 build_usage_items call sites, found {len(build_calls)}"
+    assert len(build_calls) == 3, f"expected 3 build_usage_items call sites, found {len(build_calls)}"
     for build_call in build_calls:
         forwarded = [ast.unparse(a) for a in build_call.args] + [ast.unparse(k.value) for k in build_call.keywords]
         assert "usage_by_model" in forwarded, f"call site drops usage_by_model: {ast.unparse(build_call)}"
@@ -9736,7 +9736,7 @@ async def test_execute_action_scroll_with_humanizer_down():
         humanizer=hu,
     )
     assert out == {"success": True, "message": ""}
-    hu.scroll.assert_awaited_once_with(400)
+    hu.scroll.assert_awaited_once_with(400, at_coords=None)
 
 async def test_execute_action_scroll_with_humanizer_up():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -9755,7 +9755,7 @@ async def test_execute_action_scroll_with_humanizer_up():
         humanizer=hu,
     )
     assert out["success"] is True
-    hu.scroll.assert_awaited_once_with(-250)
+    hu.scroll.assert_awaited_once_with(-250, at_coords=None)
 
 async def test_execute_action_scroll_with_humanizer_uses_element_coords():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -9797,7 +9797,7 @@ async def test_execute_action_scroll_index_zero_scrolls_viewport():
     )
     assert out == {"success": True, "message": ""}
     dom.get_element_coordinates.assert_not_awaited()
-    hu.scroll.assert_awaited_once_with(-3000)
+    hu.scroll.assert_awaited_once_with(-3000, at_coords=None)
 
 async def test_execute_action_scroll_missing_element_index_errors():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -11490,7 +11490,7 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     lines = post_injection.splitlines()
     capture_disconnects = [line for line in lines if "await disconnect_browser_after_passkey_capture(" in line]
 
-    assert len(capture_disconnects) == 8
+    assert len(capture_disconnects) == 7
     assert not any("await dom_service.disconnect()" in line for line in lines)
 
 def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():

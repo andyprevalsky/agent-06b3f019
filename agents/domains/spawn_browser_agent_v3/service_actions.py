@@ -947,6 +947,15 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
                     key=key,
                     status=error.response.status_code,
                 )
+            except TimeoutError as error:
+                await context.action_history.record_action(
+                    dom_service=context.dom_service,
+                    action="press_key",
+                    thinking=context.thinking,
+                    params={"key": key},
+                    result={"success": False, "error": str(error)},
+                )
+                return {"success": False, "error": str(error)}
         if provider_pressed:
             logger.info("Pressed key through provider computer input", key=key)
         elif context.humanizer:
