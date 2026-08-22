@@ -76,6 +76,24 @@ async function seedAgentCardConnection(
         `seeding live cardholder ${cardholderId} instead`
     );
   }
+
+  // A cardholder owns ONE funding wallet. Seeding a benchmark fixture onto a cardholder that
+  // already belongs to a real user makes benchmark mints spend that user's live float — which is
+  // exactly what happened in prod when BENCHMARK_AGENTCARD_CARDHOLDER_ID was pointed at a live
+  // cardholder. Fail loudly instead of silently commingling funds.
+  const existing = await prisma.integration.findMany({
+    where: { name: 'agentcard', config: { path: ['cardholderId'], equals: cardholderId } },
+    select: { userId: true },
+  });
+  const foreignOwner = existing.map((row) => row.userId).find((owner) => owner !== userId);
+  if (foreignOwner !== undefined) {
+    throw new Error(
+      `Refusing to seed benchmark user ${userId} onto cardholder ${cardholderId}: it is already ` +
+        `bound to user ${foreignOwner}. Point BENCHMARK_AGENTCARD_CARDHOLDER_ID at a dedicated ` +
+        `sandbox cardholder.`
+    );
+  }
+
   const config = { orgManaged: true, cardholderId };
   await prisma.integration.upsert({
     where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },

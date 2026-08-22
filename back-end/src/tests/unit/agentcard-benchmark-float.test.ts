@@ -124,22 +124,38 @@ async function main(): Promise<void> {
     });
   }
 
+  // A cardholder resolver that answers list_cardholders and per-id KYC status.
+  const cardholderOrg = (
+    cardholders: Array<{ id: string; email?: string }>,
+    kycById: Record<string, string>,
+    calls?: string[]
+  ) => {
+    return async (name: string, args?: Record<string, unknown>) => {
+      calls?.push(name);
+      if (name === 'get_cardholder_kyc_status') {
+        const id = String(args?.cardholder_id ?? '');
+        return { structuredContent: { status: kycById[id] ?? 'pending' } };
+      }
+      return cardholdersResult(cardholders);
+    };
+  };
+
   // Stale BENCHMARK_AGENTCARD_CARDHOLDER_ID must not win over a live AGENTCARD_CARDHOLDER_ID.
   {
     const calls: string[] = [];
-    const callOrgTool = async (name: string) => {
-      calls.push(name);
-      return cardholdersResult([
-        { id: 'ch-live', email: 'agentcard-benchmark@roselabs.ai' },
-        { id: 'ch-other', email: 'a@roselabs.ai' },
-      ]);
-    };
     const resolved = await resolveBenchmarkCardholderId(
       ['ch-stale-missing', 'ch-live'],
-      callOrgTool
+      cardholderOrg(
+        [
+          { id: 'ch-live', email: 'agentcard-benchmark@roselabs.ai' },
+          { id: 'ch-other', email: 'a@roselabs.ai' },
+        ],
+        { 'ch-live': 'verified', 'ch-other': 'verified' },
+        calls
+      )
     );
     assert.equal(resolved, 'ch-live');
-    assert.deepEqual(calls, ['list_cardholders']);
+    assert.equal(calls[0], 'list_cardholders');
   }
 
   // When every configured id is missing, prefer andy@ (live KYC) over agentcard-benchmark@.
@@ -156,13 +172,85 @@ async function main(): Promise<void> {
 
   // Sandbox orgs without andy@ fall back to the verified agentcard-benchmark@ cardholder.
   {
-    const resolved = await resolveBenchmarkCardholderId(['ch-stale'], async () =>
-      cardholdersResult([
-        { id: 'ch-live', email: 'agentcard-benchmark@roselabs.ai' },
-        { id: 'ch-other', email: 'a@roselabs.ai' },
-      ])
+    const resolved = await resolveBenchmarkCardholderId(
+      ['ch-stale'],
+      cardholderOrg(
+        [
+          { id: 'ch-live', email: 'agentcard-benchmark@roselabs.ai' },
+          { id: 'ch-other', email: 'a@roselabs.ai' },
+        ],
+        { 'ch-live': 'verified', 'ch-other': 'verified' }
+      )
     );
     assert.equal(resolved, 'ch-live');
+  }
+
+  // REGRESSION: a preferred id that exists but is stuck at KYC `pending` must NOT be selected when
+  // a verified cardholder is available. Real failure (2026-08-21): the sandbox org held exactly
+  // this pair, AGENTCARD_CARDHOLDER_ID named the pending one, and the payment lifecycle gate died
+  // at bootstrap with "cardholder is not KYC-ready" while a verified cardholder sat beside it.
+  {
+    const resolved = await resolveBenchmarkCardholderId(
+      ['ch-pending'],
+      cardholderOrg(
+        [
+          { id: 'ch-pending', email: 'a@roselabs.ai' },
+          { id: 'ch-verified', email: 'agentcard-benchmark@roselabs.ai' },
+        ],
+        { 'ch-pending': 'pending', 'ch-verified': 'verified' }
+      )
+    );
+    assert.equal(resolved, 'ch-verified');
+  }
+
+  // `approved` is terminal and mint-capable, exactly like `verified`.
+  {
+    const resolved = await resolveBenchmarkCardholderId(
+      ['ch-pending'],
+      cardholderOrg(
+        [
+          { id: 'ch-pending', email: 'a@roselabs.ai' },
+          { id: 'ch-approved', email: 'other@roselabs.ai' },
+        ],
+        { 'ch-pending': 'pending', 'ch-approved': 'approved' }
+      )
+    );
+    assert.equal(resolved, 'ch-approved');
+  }
+
+  // When nothing is verified, return the preferred id unchanged so the caller's more specific
+  // KYC error is what the operator sees.
+  {
+    const resolved = await resolveBenchmarkCardholderId(
+      ['ch-pending'],
+      cardholderOrg(
+        [
+          { id: 'ch-pending', email: 'a@roselabs.ai' },
+          { id: 'ch-other', email: 'agentcard-benchmark@roselabs.ai' },
+        ],
+        { 'ch-pending': 'pending', 'ch-other': 'rejected' }
+      )
+    );
+    assert.equal(resolved, 'ch-pending');
+  }
+
+  // A cardholder whose KYC read throws must not abort resolution — another may be verified.
+  {
+    const resolved = await resolveBenchmarkCardholderId(
+      ['ch-broken'],
+      async (name: string, args?: Record<string, unknown>) => {
+        if (name === 'get_cardholder_kyc_status') {
+          const id = String(args?.cardholder_id ?? '');
+          if (id === 'ch-broken') throw new Error('kyc read failed');
+          return { structuredContent: { status: 'verified' } };
+        }
+        return cardholdersResult([
+          { id: 'ch-broken', email: 'a@roselabs.ai' },
+          { id: 'ch-good', email: 'agentcard-benchmark@roselabs.ai' },
+        ]);
+      }
+    );
+    assert.equal(resolved, 'ch-good');
   }
 
   // An empty org fails closed with an actionable message.
