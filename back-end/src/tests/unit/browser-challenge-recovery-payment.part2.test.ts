@@ -241,8 +241,8 @@ async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
       }),
     }
   );
-  assert.strictEqual(gotoCount, 2, 'CF probe still runs two attempts');
-  assert.strictEqual(result.stablePasses, 2);
+  assert.strictEqual(gotoCount, 1, 'CF probe runs a single navigation');
+  assert.strictEqual(result.stablePasses, 1);
   assert.strictEqual(result.paymentCdnOk, true);
   assert.deepStrictEqual(result.paymentCdnHosts, {});
   assert.strictEqual(evaluateCalls, 0, 'CDN evaluate must not run on LLM-only probes');

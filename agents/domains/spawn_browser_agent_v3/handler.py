@@ -63,7 +63,6 @@ from .challenge_recovery import (
     goal_allows_logged_out_cookie_commit,
     live_tab_looks_challenged,
     page_looks_challenged,
-    probe_storage_state,
     recover_from_challenge,
     verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
@@ -7354,13 +7353,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
-                    "cookie_probe_wave": "Probing cookie variants",
-                    "known_challenge_cookies": "Testing challenge cookies",
-                    "all_target_cookies": "Testing target-site cookies",
-                    "non_auth_cookies": "Testing non-auth cookies",
-                    "cookie_isolation": "Isolating poisoned cookie state",
                     "apply_cookie_fix": "Applying safe cookie recovery",
-                    "preserve_auth_state": "Preserving auth; searching configs",
                     "browser_config_search": "Searching browser configurations",
                     "live_verify": "Verifying live tab cleared challenge",
                 }
@@ -7442,28 +7435,21 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             cookie_recovery_successes=cookie_recovery_successes,
                             reason=recovery_reason,
                         )
+                    async def _live_cookie_probe_forbidden(_candidate: Dict[str, Any]) -> bool:
+                        # Cookie isolation probes must not open new_context on the
+                        # live Kernel session (stacked Chromium windows in debug view).
+                        raise RuntimeError(
+                            "Live-session cookie probes are retired; use ephemeral "
+                            "config-search lanes or known-challenge live-tab strips"
+                        )
+
                     recovery = await recover_from_challenge(
                         source_state=recovery_storage_state,
                         target_url=current_url,
                         wait_for_solver=lambda: _wait_for_provider_captcha_solver(
                             config, task_id, page=input_page
                         ),
-                        probe=lambda candidate: probe_storage_state(
-                            playwright_browser,
-                            candidate,
-                            current_url,
-                            agent_id=agent_id,
-                            user_id=user_id,
-                            claude_token=token_state.access_token,
-                            claude_token_source=token_state.source,
-                            claude_token_pool_id=token_state.pool_token_id,
-                            gpt_token=gpt_token,
-                            gpt_account_id=gpt_account_id,
-                            gpt_token_source=gpt_token_source,
-                            gpt_token_pool_id=gpt_token_pool_id,
-                            usage_collector=challenge_classifier_usages,
-                            recovery_reason=str(recovery_reason or "") or None,
-                        ),
+                        probe=_live_cookie_probe_forbidden,
                         commit_cookie_removals=lambda keys: commit_cookie_removals(
                             input_page,
                             keys,
@@ -7573,56 +7559,55 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             humanizer_factory=BrowserHumanizer,
                         )
 
-                        await emit_recovery_progress(
-                            "live_verify",
-                            "Verifying the promoted browser cleared the challenge on the live tab.",
-                        )
-                        live_verify_dom_tree = None
-                        with contextlib.suppress(Exception):
-                            live_verify_state = await dom_service.get_browser_state(
-                                include_screenshot=False
+                        # Preloaded winners already classified clean once on this
+                        # remote session (single-nav probe). Skip a second live-tab
+                        # LLM verify — resume at the settled URL instead.
+                        if not bool(config_result.get("storage_state_preloaded")):
+                            await emit_recovery_progress(
+                                "live_verify",
+                                "Verifying the promoted browser cleared the challenge on the live tab.",
                             )
-                            live_verify_dom_tree = (
-                                str(live_verify_state.get("dom_tree") or "") or None
-                            )
-                        # Prefer the probe's settled same-site URL (soft-redirect
-                        # resume) so live verify does not re-punch a poisoned
-                        # deep link that already redirected cleanly during probes.
-                        live_verify_url = str(
-                            config_result.get("saved_url") or current_url or ""
-                        ).strip() or current_url
-                        # Preloaded winners already cleared 2/2 navigations on this
-                        # remote session. A second live goto re-triggers Hotels.com
-                        # soft-block (probe clean → live attempt-2 429). One fresh
-                        # navigation-probe is enough to catch Eventim false-stable.
-                        live_verify_attempts = (
-                            1 if bool(config_result.get("storage_state_preloaded")) else 2
-                        )
-                        if not await verify_live_page_cleared_challenge(
-                            input_page,
-                            live_verify_url,
-                            attempts=live_verify_attempts,
-                            agent_id=agent_id,
-                            user_id=user_id,
-                            claude_token=token_state.access_token,
-                            claude_token_source=token_state.source,
-                            claude_token_pool_id=token_state.pool_token_id,
-                            gpt_token=gpt_token,
-                            gpt_account_id=gpt_account_id,
-                            gpt_token_source=gpt_token_source,
-                            gpt_token_pool_id=gpt_token_pool_id,
-                            usage_collector=challenge_classifier_usages,
-                            agent_dom_tree=live_verify_dom_tree,
-                            network_recorder=browser_network_recorder,
-                            recovery_reason=str(recovery_reason or "") or None,
-                        ):
-                            provider = config_result.get("provider")
-                            proxy_tier = config_result.get("proxy_tier")
-                            config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
-                            raise RuntimeError(
-                                f"Promoted {config_key} passed candidate probes but the live tab "
-                                "is still challenged"
-                            )
+                            live_verify_dom_tree = None
+                            with contextlib.suppress(Exception):
+                                live_verify_state = await dom_service.get_browser_state(
+                                    include_screenshot=False
+                                )
+                                live_verify_dom_tree = (
+                                    str(live_verify_state.get("dom_tree") or "") or None
+                                )
+                            live_verify_url = str(
+                                config_result.get("saved_url") or current_url or ""
+                            ).strip() or current_url
+                            if not await verify_live_page_cleared_challenge(
+                                input_page,
+                                live_verify_url,
+                                attempts=1,
+                                agent_id=agent_id,
+                                user_id=user_id,
+                                claude_token=token_state.access_token,
+                                claude_token_source=token_state.source,
+                                claude_token_pool_id=token_state.pool_token_id,
+                                gpt_token=gpt_token,
+                                gpt_account_id=gpt_account_id,
+                                gpt_token_source=gpt_token_source,
+                                gpt_token_pool_id=gpt_token_pool_id,
+                                usage_collector=challenge_classifier_usages,
+                                agent_dom_tree=live_verify_dom_tree,
+                                network_recorder=browser_network_recorder,
+                                recovery_reason=str(recovery_reason or "") or None,
+                            ):
+                                provider = config_result.get("provider")
+                                proxy_tier = config_result.get("proxy_tier")
+                                config_key = (
+                                    config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                                )
+                                raise RuntimeError(
+                                    f"Promoted {config_key} passed candidate probes but the live tab "
+                                    "is still challenged"
+                                )
+                        saved_resume = str(config_result.get("saved_url") or "").strip()
+                        if saved_resume.startswith(("http://", "https://")):
+                            current_url = saved_resume
                         # Blocked-resource CDN hard-verify removed: the LLM live
                         # gate already receives blocked_resource_url via recovery_reason.
 
@@ -7640,8 +7625,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         blocked_resource_url = str(
                             unified_action.get("params", {}).get("blocked_resource_url") or ""
                         ).strip()
+                        verified_phrase = (
+                            "probe already verified clean"
+                            if bool(config_result.get("storage_state_preloaded"))
+                            else "live tab verified clean"
+                        )
                         recovery_message = (
-                            f"Recovered by selecting {config_key}; live tab verified clean"
+                            f"Recovered by selecting {config_key}; {verified_phrase}"
                             + (
                                 f"; blocked resource cleared ({blocked_resource_url})"
                                 if blocked_resource_url

@@ -338,14 +338,14 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
   assert.deepStrictEqual(addedCookies, cookies, 'full auth cookies must be loaded before probing');
   assert.strictEqual(newContextCalls, 0, 'the disposable incognito context is not promoted');
   assert.strictEqual(disposablePageVisits, 0);
-  assert.strictEqual(defaultPageVisits, 2, 'the exact promoted context must pass twice');
+  assert.strictEqual(defaultPageVisits, 1, 'the exact promoted context must pass once');
   assert.strictEqual(initScripts.length, 1, 'origin state is installed on the promoted context');
-  assert.strictEqual(originStorageRestores, 2, 'origin auth is awaited before both clean probes');
+  assert.strictEqual(originStorageRestores, 1, 'origin auth is awaited before the clean probe');
   assert.strictEqual(defaultContextCloseCalls, 0, 'the promoted context must remain alive');
   assert.strictEqual(browserCloseCalls, 1, 'only the validation CDP connection is closed');
   assert.deepStrictEqual(result, {
-    stablePasses: 2,
-    attempts: 2,
+    stablePasses: 1,
+    attempts: 1,
     latencyMs: result.latencyMs,
     paymentCdnOk: true,
     paymentCdnHosts: {},

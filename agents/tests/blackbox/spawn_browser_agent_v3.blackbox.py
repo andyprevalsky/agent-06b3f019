@@ -5744,14 +5744,17 @@ def test_recovery_requires_live_tab_verify_before_success():
     assert "passed candidate probes but the live tab" in recovery_block
     assert "is still challenged" in recovery_block
     assert "configKey" in recovery_block
-    # Preloaded winners must not rewrite challenged origin state onto the clean session.
+    # Preloaded winners already classified clean — skip second live LLM verify.
     assert "if not bool(config_result.get(\"storage_state_preloaded\")):" in recovery_block
-    # Soft-redirect resume: live verify prefers probe saved_url over poisoned deep link.
+    assert "probe already verified clean" in recovery_block
+    # Soft-redirect resume: prefer probe saved_url over poisoned deep link.
     assert 'config_result.get("saved_url")' in recovery_block
     assert "live_verify_url" in recovery_block
-    # Preloaded winners: one live navigation-probe (not a second soft-block punch).
-    assert "live_verify_attempts" in recovery_block
+    # Non-preloaded promote path: single live navigation-probe.
+    assert "attempts=1" in recovery_block[verify_offset : verify_offset + 400]
     assert "storage_state_preloaded" in recovery_block[verify_offset - 400 : verify_offset + 200]
+    assert "Live-session cookie probes are retired" in recovery_block
+    assert "probe_storage_state" not in recovery_block
 
 
 def test_recovery_restore_failure_is_not_suppressed():

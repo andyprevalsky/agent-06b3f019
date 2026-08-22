@@ -1,11 +1,15 @@
 /**
  * BrowserBorderGlow - Canvas overlay with flickering dot grid animation
  *
+ * STATE:
+ *   tone=default            -> soft sky-blue glow (normal agent control)
+ *   tone=challenge_recovery -> warm orange glow (recover_from_challenge active)
+ *
  * Creates an organic wave effect by:
- * 1. Dense grid of blue dots in corner regions extending toward center
+ * 1. Dense grid of dots in corner regions extending toward center
  * 2. "Active regions" that move around
  * 3. Dots in active regions flicker, others are dim
- * 4. Blue glow underlays the corner regions
+ * 4. Tone-colored glow underlays the corner regions
  */
 
 import { useEffect, useRef } from 'react';
@@ -13,9 +17,14 @@ import type { Dot } from './browserBorderGlow/config';
 import { generateGlow } from './browserBorderGlow/glow';
 import { generateDots } from './browserBorderGlow/dots';
 import { renderFrame } from './browserBorderGlow/render';
+import {
+  glowToneColors,
+  type BrowserBorderGlowTone,
+} from './browserBorderGlow/tones';
 
 interface BrowserBorderGlowProps {
   className?: string;
+  tone?: BrowserBorderGlowTone;
 }
 
 interface Dimensions {
@@ -24,12 +33,16 @@ interface Dimensions {
   dpr: number;
 }
 
-export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps) {
+export default function BrowserBorderGlow({
+  className,
+  tone = 'default',
+}: BrowserBorderGlowProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>(0);
   const dotsRef = useRef<Dot[]>([]);
   const glowDataRef = useRef<Uint8ClampedArray | null>(null);
   const dimensionsRef = useRef<Dimensions>({ width: 0, height: 0, dpr: 1 });
+  const colors = glowToneColors(tone);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -49,7 +62,7 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
 
       dotsRef.current = generateDots(canvasWidth, canvasHeight, dpr);
       if (canvasWidth > 0 && canvasHeight > 0) {
-        glowDataRef.current = generateGlow(canvasWidth, canvasHeight, dpr);
+        glowDataRef.current = generateGlow(canvasWidth, canvasHeight, dpr, colors);
       }
     };
 
@@ -72,6 +85,7 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
         glowData,
         dots: dotsRef.current,
         timestamp,
+        colors,
       });
       animationRef.current = requestAnimationFrame(animate);
     };
@@ -86,7 +100,7 @@ export default function BrowserBorderGlow({ className }: BrowserBorderGlowProps)
       cancelAnimationFrame(animationRef.current);
       resizeObserver.disconnect();
     };
-  }, []);
+  }, [colors]);
 
   return (
     <canvas

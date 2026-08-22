@@ -401,7 +401,9 @@ export async function probeCandidateBrowser(
   const started = Date.now();
   let stablePasses = 0;
   const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [];
-  const attempts = 2;
+  // One nav + one classify. Soft-redirect re-nav / dual stablePasses were scar
+  // tissue; resume at whatever URL the single settle lands on.
+  const attempts = 1;
   const blockedResourceUrl = (logContext.blockedResourceUrl || '').trim();
   const recoveryReasonParts = [
     (logContext.recoveryReason || '').trim(),
@@ -426,50 +428,44 @@ export async function probeCandidateBrowser(
       await context.addInitScript(recoveryOriginStorageScript(storageState));
     }
     const page = context.pages()[0] ?? (await context.newPage());
-    // Soft-redirect resume: after a clean settle, follow-up attempts re-nav the
-    // settled same-site URL instead of re-punching a poisoned deep link.
-    let navigateUrl = targetUrl;
-    for (let index = 0; index < attempts; index += 1) {
-      const response = await page
-        .goto(navigateUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-        .catch(() => null);
-      if (origins.length > 0) {
-        await page.evaluate(async () => {
-          const recoveryGlobal = globalThis as typeof globalThis & {
-            __naviRestoreRecoveryStorage?: () => Promise<void>;
-          };
-          await recoveryGlobal.__naviRestoreRecoveryStorage?.();
-        });
-      }
-      const attempt = await solve(page, response, billing, { recoveryReason });
-      if (attempt.usage) classifierLlmUsage.push(attempt.usage);
-      if (!attempt.clean) {
-        log.info('Challenge recovery candidate probe attempt still challenged', {
-          ...logContext,
-          attempt: index + 1,
-          attempts,
-          reason: attempt.reason,
-          title: attempt.title.slice(0, 200),
-          actual_model: attempt.usage?.actual_model ?? null,
-          prompt_tokens: attempt.usage?.prompt_tokens ?? null,
-        });
-        continue;
-      }
+    const response = await page
+      .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      .catch(() => null);
+    if (origins.length > 0) {
+      await page.evaluate(async () => {
+        const recoveryGlobal = globalThis as typeof globalThis & {
+          __naviRestoreRecoveryStorage?: () => Promise<void>;
+        };
+        await recoveryGlobal.__naviRestoreRecoveryStorage?.();
+      });
+    }
+    const attempt = await solve(page, response, billing, { recoveryReason });
+    if (attempt.usage) classifierLlmUsage.push(attempt.usage);
+    if (!attempt.clean) {
+      log.info('Challenge recovery candidate probe attempt still challenged', {
+        ...logContext,
+        attempt: 1,
+        attempts,
+        reason: attempt.reason,
+        title: attempt.title.slice(0, 200),
+        actual_model: attempt.usage?.actual_model ?? null,
+        prompt_tokens: attempt.usage?.prompt_tokens ?? null,
+      });
+    } else {
       const pageUrl = sameSiteNavigationUrl(targetUrl, page.url());
       if (pageUrl) {
         settledUrl = pageUrl;
-        navigateUrl = pageUrl;
       }
       log.info('Challenge recovery candidate probe attempt clean', {
         ...logContext,
-        attempt: index + 1,
+        attempt: 1,
         attempts,
         title: attempt.title.slice(0, 200),
         settledUrl: settledUrl ?? null,
         actual_model: attempt.usage?.actual_model ?? null,
         prompt_tokens: attempt.usage?.prompt_tokens ?? null,
       });
-      stablePasses += 1;
+      stablePasses = 1;
     }
   } finally {
     // Closing this CDP client leaves the remote default context (including any

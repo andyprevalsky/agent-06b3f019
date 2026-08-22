@@ -1,4 +1,5 @@
 import { CONFIG } from './config';
+import type { GlowToneColors } from './tones';
 
 function getCorners(width: number, height: number) {
   return [
@@ -28,8 +29,14 @@ function computeCornerIntensity(
 /**
  * Precompute static glow bitmap. Returns RGBA Uint8ClampedArray of length width*height*4.
  */
-export function generateGlow(width: number, height: number, dpr: number): Uint8ClampedArray {
-  const { glowOpacity, edgeGlowOpacity, cornerRadius, edgeRadius, glowColor } = CONFIG;
+export function generateGlow(
+  width: number,
+  height: number,
+  dpr: number,
+  colors: GlowToneColors,
+): Uint8ClampedArray {
+  const { glowOpacity, edgeGlowOpacity, cornerRadius, edgeRadius } = CONFIG;
+  const { glowColor } = colors;
   const scaledCornerRadius = cornerRadius * dpr;
   const scaledEdgeRadius = edgeRadius * dpr;
   const glowData = new Uint8ClampedArray(width * height * 4);

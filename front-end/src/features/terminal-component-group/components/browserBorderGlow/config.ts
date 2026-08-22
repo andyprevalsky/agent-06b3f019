@@ -10,14 +10,12 @@ export const CONFIG = {
   // Persistent glow underneath
   glowOpacity: 0.45,
   edgeGlowOpacity: 0.2,
-  glowColor: { r: 186, g: 230, b: 253 },
   numWaves: 3,
   waveWidth: 0.22,
   waveSpeed: 0.00003125,
   flickerSpeed: 0.004,
   minOpacity: 0.02,
   maxOpacity: 0.5,
-  dotColor: { r: 224, g: 242, b: 254 },
 } as const;
 
 export interface Dot {
