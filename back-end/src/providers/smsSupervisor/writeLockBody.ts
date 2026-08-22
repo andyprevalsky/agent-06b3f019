@@ -367,7 +367,11 @@ function sentenceCaseAction(action: string): string {
   if (!action) {
     return action;
   }
-  if (action.length >= 2 && action[0] === action[0].toUpperCase() && action[1] === action[1].toUpperCase()) {
+  if (
+    action.length >= 2 &&
+    action[0] === action[0].toUpperCase() &&
+    action[1] === action[1].toUpperCase()
+  ) {
     return action;
   }
   return action[0].toLowerCase() + action.slice(1);
@@ -385,7 +389,9 @@ function formatRecipientList(value: unknown): string | null {
   if (!Array.isArray(value)) {
     return asString(value);
   }
-  const recipients = value.map((entry) => asString(entry)).filter((entry): entry is string => entry !== null);
+  const recipients = value
+    .map((entry) => asString(entry))
+    .filter((entry): entry is string => entry !== null);
   return recipients.length > 0 ? recipients.join(', ') : null;
 }
 
@@ -464,7 +470,10 @@ function appendMessageSmsLines(lines: string[], message: Record<string, unknown>
   return lines.length - before;
 }
 
-function appendSocialPostSmsLines(lines: string[], socialPost: Record<string, unknown> | null): number {
+function appendSocialPostSmsLines(
+  lines: string[],
+  socialPost: Record<string, unknown> | null
+): number {
   if (!socialPost) {
     return 0;
   }
@@ -560,7 +569,11 @@ function formatWriteLockNotificationBody(
   const body = lines.map((line) => sanitizeSmsText(line)).join('\n');
   // Message / social / return bodies are the content being approved — do not
   // apply the purchase 900-char truncate budget (same rule as plain-question path).
-  if (triggerType === 'message' || triggerType === 'social_post' || triggerType === 'generic_write') {
+  if (
+    triggerType === 'message' ||
+    triggerType === 'social_post' ||
+    triggerType === 'generic_write'
+  ) {
     return body;
   }
   return truncateText(body, 900);
