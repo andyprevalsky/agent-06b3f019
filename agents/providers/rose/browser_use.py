@@ -206,18 +206,17 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
-            "unusual-traffic pages — those are not authentication blockers. Attempt to complete the challenge "
-            "yourself first; call recover_from_challenge only after that attempt fails."
+            "unusual-traffic pages — those are not authentication blockers. Call recover_from_challenge "
+            "immediately instead of trying to solve them yourself."
         ),
         "params": {},
     },
     "recover_from_challenge": {
         "description": (
-            "Last-resort recovery for a persistent CAPTCHA, bot challenge, access-denied interstitial, "
-            "unusual-traffic page, or repeated 429. Call this ONLY after you already tried to clear the "
-            "challenge yourself with normal browser actions (use `drag` for sliders, click the checkbox/verify "
-            "button, complete the widget, use an audio or alternative path when offered) and the page is "
-            "still blocked. Do not call this as the first reaction to a challenge, and never use it for bad "
+            "Recovery for a CAPTCHA, bot challenge, access-denied interstitial, unusual-traffic page, or "
+            "repeated 429. Call this immediately when a challenge interstitial blocks progress — do not spend "
+            "steps dragging sliders, clicking verify buttons, or otherwise trying to solve the widget yourself. "
+            "Never use it for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
             "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
@@ -233,9 +232,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "reason": {
                 "type": "string",
                 "description": (
-                    "One line of concrete evidence that the challenge still blocks after your own "
-                    "solve attempt (e.g. 'Bot or Not slider still present after drag', "
-                    "'captcha wall reappears after solving', 'repeated 429s on search')."
+                    "One line of concrete evidence that the challenge blocks the page (e.g. "
+                    "'Bot or Not slider interstitial on hotels.com', 'captcha wall on search results', "
+                    "'repeated 429s on search')."
                 ),
                 "required": True,
             },
@@ -447,10 +446,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "(repeated clicks/waits with no state change), take a screenshot to view components that may be "
             "hidden from the DOM, e.g. a CAPTCHA, Cloudflare 'verify you are human' challenge, or other "
             "content rendered inside a cross-origin iframe that the DOM tree cannot see. "
-            "For CAPTCHA / bot-challenge / 'Bot or Not' pages, call this before recover_from_challenge: "
-            "the DOM is often a misleading shell (#app-captcha-pwa with only div/a/span indexes) while the "
-            "real slider/checkbox/widget is visual-only — use the screenshot to confirm the challenge type, "
-            "then `drag` (preferred for sliders) or click_coordinates / an indexed control to solve it."
+            "For CAPTCHA / bot-challenge / 'Bot or Not' pages, the DOM is often a misleading shell "
+            "(#app-captcha-pwa with only div/a/span indexes) while the real widget is visual-only. "
+            "Use a screenshot only if you need to confirm the challenge type, then call recover_from_challenge "
+            "immediately — do not attempt to solve the widget yourself."
         ),
         "params": {},
     },
@@ -699,7 +698,7 @@ action envelope in text; use the provided tool call.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
 - When authentication still blocks the task after steps 1–7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. First attempt to complete the challenge yourself with normal browser actions (`drag` for sliders, click/checkbox/verify button, audio/alternative path when present). Only call recover_from_challenge after that attempt fails and the challenge still blocks the page. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
+- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. Call recover_from_challenge immediately when one blocks progress — do not drag sliders, click verify buttons, or otherwise try to solve the widget yourself first. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 
