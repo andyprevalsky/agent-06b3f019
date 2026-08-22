@@ -10654,6 +10654,120 @@ async def test_hard_recover_frozen_renderer_page_restores_evaluate():
             await _force_close(browser)
 
 
+async def test_hard_recover_frozen_renderer_page_restores_click():
+    """Click hangs on a frozen renderer; soft bring_to_front fails; hard recover restores click.
+
+    Live afe8a612: action_timeout_click_330s → Recovery actions: bring_to_front only →
+    no further progress until 903s task timeout.
+    """
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.handler import _hard_recover_frozen_renderer_page
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    click_budget_s = 3.0
+
+    async def _force_close(browser) -> None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=5.0)
+        except Exception:
+            proc = getattr(browser, "process", None)
+            if proc is not None and getattr(proc, "pid", None):
+                with contextlib.suppress(Exception):
+                    proc.kill()
+
+    async def _timed_click(page) -> str:
+        try:
+            await asyncio.wait_for(page.click("text=Sign", timeout=60000), timeout=click_budget_s)
+            return "ok"
+        except Exception as exc:
+            return type(exc).__name__
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content("<html><body><button>Sign</button></body></html>")
+            assert await _timed_click(page) == "ok"
+
+            cdp = await page.context.new_cdp_session(page)
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.sleep(0.25)
+            stalled = await classify_evaluate_cdp_stall(
+                input_page=page, playwright_browser=browser, timeout_s=1.5
+            )
+            assert stalled["verdict"] == "renderer_main_thread_blocked"
+            assert await _timed_click(page) != "ok"
+
+            await asyncio.wait_for(page.bring_to_front(), timeout=2.0)
+            assert await _timed_click(page) != "ok", "soft bring_to_front must not restore click"
+
+            new_page, actions = await _hard_recover_frozen_renderer_page(
+                input_page=page,
+                playwright_browser=browser,
+                fallback_url="about:blank",
+            )
+            assert new_page is not None
+            assert any(
+                a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions
+            )
+            await new_page.set_content("<html><body><button>Sign</button></body></html>")
+            assert await _timed_click(new_page) == "ok"
+        finally:
+            await _force_close(browser)
+
+
+def test_action_timeout_cdp_classify_not_gated_on_evaluate():
+    """TimeoutError recovery must classify CDP stalls for every action, not only evaluate.
+
+    Regression for afe8a612: click timeouts skipped classify because of
+    `if action_name == \"evaluate\":` and only soft-recovered.
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "handler.py"
+    text = src.read_text()
+    anchor = "timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS"
+    a = text.find(anchor)
+    assert a > 0
+    block = None
+    pos = a
+    while True:
+        start = text.find("except asyncio.TimeoutError:", pos)
+        if start < 0:
+            break
+        end = text.find('"supervisor_recovered": True', start)
+        if end < 0:
+            pos = start + 1
+            continue
+        cand = text[start:end]
+        if "classify_evaluate_cdp_stall" in cand:
+            block = cand
+            break
+        pos = start + 1
+    assert block is not None, "action-timeout TimeoutError block with CDP classify not found"
+    # Classify must run for every action; fingerprint logging may still special-case evaluate.
+    classify_pos = block.find("classify_evaluate_cdp_stall")
+    assert classify_pos > 0
+    before_classify = block[:classify_pos]
+    assert 'if action_name == "evaluate":' not in before_classify, (
+        "CDP classify must not be gated on action_name==evaluate (afe8a612 click soft-only)"
+    )
+    assert "_hard_recover_frozen_renderer_page" in block
+    hard_pos = block.find("_hard_recover_frozen_renderer_page")
+    assert hard_pos > classify_pos
+    # Hard recover is driven by renderer_frozen from classify, not by action_name.
+    between_classify_and_hard = block[classify_pos:hard_pos]
+    assert "renderer_frozen" in between_classify_and_hard or "renderer_main_thread_blocked" in block
+
+
 async def test_goto_err_aborted_persists_download_to_session():
     """goto net::ERR_ABORTED on attachment URLs must persist bytes under /tmp/downloads."""
     import domains.spawn_browser_agent_v3.download_persist as download_persist
@@ -17511,6 +17625,14 @@ async def run_all_tests():
     await r.record_async(
         "hard_recover_frozen_renderer_page_restores_evaluate",
         test_hard_recover_frozen_renderer_page_restores_evaluate,
+    )
+    await r.record_async(
+        "hard_recover_frozen_renderer_page_restores_click",
+        test_hard_recover_frozen_renderer_page_restores_click,
+    )
+    r.record(
+        "action_timeout_cdp_classify_not_gated_on_evaluate",
+        test_action_timeout_cdp_classify_not_gated_on_evaluate,
     )
     await r.record_async("execute_action_open_new_tab", test_execute_action_open_new_tab)
     await r.record_async("execute_action_close_tab_focused", test_execute_action_close_tab_via_focused)

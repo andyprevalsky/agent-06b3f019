@@ -8129,29 +8129,35 @@ Based on this feedback, I need to continue working on the task and address the i
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                stall: Dict[str, Any] = {}
-                if action_name == "evaluate":
-                    from domains.spawn_browser_agent_v3.service_actions import (
-                        _evaluate_code_fingerprint,
-                        classify_evaluate_cdp_stall,
-                    )
+                # Any action can hang on a frozen renderer (Momence Konva waiver:
+                # evaluate OR click). Classify via browser-process CDP before soft
+                # recovery; soft bring_to_front alone cannot reclaim the page.
+                from domains.spawn_browser_agent_v3.service_actions import (
+                    _evaluate_code_fingerprint,
+                    classify_evaluate_cdp_stall,
+                )
 
+                stall: Dict[str, Any] = await classify_evaluate_cdp_stall(
+                    input_page=input_page,
+                    playwright_browser=playwright_browser,
+                    timeout_s=2.0,
+                )
+                stall_log: Dict[str, Any] = {
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "iteration": iteration,
+                    "current_url": current_url,
+                    "action_name": action_name,
+                    "stall": stall,
+                }
+                if action_name == "evaluate":
                     eval_code = str((unified_action.get("params") or {}).get("code") or "")
-                    stall = await classify_evaluate_cdp_stall(
-                        input_page=input_page,
-                        playwright_browser=playwright_browser,
-                        timeout_s=2.0,
-                    )
-                    logger.error(
-                        "Browser evaluate timed out; CDP stall classification",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        session_id=session_id,
-                        iteration=iteration,
-                        current_url=current_url,
-                        stall=stall,
-                        **_evaluate_code_fingerprint(eval_code),
-                    )
+                    stall_log.update(_evaluate_code_fingerprint(eval_code))
+                logger.error(
+                    "Browser action timed out; CDP stall classification",
+                    **stall_log,
+                )
                 renderer_frozen = stall.get("verdict") == "renderer_main_thread_blocked"
                 await _recover_browser_step(
                     f"action_timeout_{action_name}_{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s",
@@ -8164,9 +8170,10 @@ Based on this feedback, I need to continue working on the task and address the i
                         fallback_url=current_url or "",
                     )
                     logger.warning(
-                        "Hard recovery after renderer-frozen evaluate timeout",
+                        "Hard recovery after renderer-frozen action timeout",
                         agent_id=agent_id,
                         task_id=task_id,
+                        action_name=action_name,
                         actions=hard_actions,
                         recycled=recycled_page is not None,
                     )

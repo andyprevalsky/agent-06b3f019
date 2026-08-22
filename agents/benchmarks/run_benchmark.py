@@ -8205,14 +8205,14 @@ def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[d
 def _is_intermediate_evaluate_hard_recovery_failure(
     candidate: dict, message: Optional[dict] = None
 ) -> bool:
-    """Evaluate hard-recovery ERRORs are intentional supervisor noise, not tool failures.
+    """Frozen-renderer hard-recovery ERRORs are intentional supervisor noise, not tool failures.
 
-    When page-target CDP `evaluate` hangs (`renderer_main_thread_blocked`), the browser
-    supervisor emits an `action_type=error` evaluate row after hard recovery
-    (new context/page), then the agent continues. Counting those rows in
-    `no_tool_failures` fails closed on expected recovery protocol — the same class as
-    challenge-recovery ERRORs (see Eventim) once a later grounded payment boundary
-    is reachable.
+    When the page renderer freezes (`renderer_main_thread_blocked`), any action
+    (evaluate, click, …) can time out; the supervisor emits an `action_type=error`
+    row after hard recovery (new context/page), then the agent continues. Counting
+    those rows in `no_tool_failures` fails closed on expected recovery protocol —
+    the same class as challenge-recovery ERRORs (see Eventim) once a later grounded
+    payment boundary is reachable.
     """
     tool_name = candidate.get("toolName") or candidate.get("tool_name")
     is_browser = tool_name == "spawn_browser_agent" or (
@@ -8223,7 +8223,7 @@ def _is_intermediate_evaluate_hard_recovery_failure(
     blob = _message_failure_text(message, candidate).lower()
     if "hard renderer recovery" in blob and "renderer_main_thread_blocked" in blob:
         return True
-    return "action_timeout_evaluate" in blob and "hard renderer recovery" in blob
+    return "action_timeout_" in blob and "hard renderer recovery" in blob
 
 
 def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
