@@ -762,7 +762,7 @@ _INTERACTION_ACTIONS = {
     "upload_file",
 }
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
-_INSPECTION_ACTIONS = {"read_network_requests", "evaluate", "extract", "screenshot"}
+_INSPECTION_ACTIONS = {"read_logs", "read_network_requests", "evaluate", "extract", "screenshot"}
 _TERMINAL_ACTIONS = {
     "request_payment_card",
     "done",
@@ -806,6 +806,77 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
         "payment_request": context.params,
         "current_url": context.current_url,
     }
+
+
+async def _execute_read_logs_action(context: _ActionContext) -> Dict[str, Any]:
+    recorder = context.browser_network_recorder
+    if recorder is None:
+        return {
+            "success": False,
+            "error": (
+                "Log capture is not attached to this browser session, so there is "
+                "nothing to read. Rely on the DOM tree and screenshots instead."
+            ),
+        }
+    params = context.params
+    pattern = str(params.get("pattern") or params.get("regex") or "")
+    sources_param = params.get("sources")
+    sources: Optional[List[str]] = None
+    if isinstance(sources_param, list):
+        sources = [str(item) for item in sources_param]
+    elif isinstance(sources_param, str) and sources_param.strip():
+        sources = [part.strip() for part in sources_param.split(",") if part.strip()]
+    try:
+        logs = recorder.query_logs(
+            pattern=pattern,
+            limit=int(params.get("limit") or 100),
+            clear=bool(params.get("clear")),
+            sources=sources,
+            level=str(params.get("level") or ""),
+            status=str(params.get("status") or ""),
+            url_pattern=str(params.get("url_pattern") or ""),
+            method=str(params.get("method") or ""),
+            resource_type=str(params.get("resource_type") or ""),
+            include_query=bool(params.get("include_query")),
+            include_headers=bool(params.get("include_headers")),
+            include_bodies=bool(params.get("include_bodies")),
+            max_body_chars=int(params.get("max_body_chars") or 4000),
+        )
+    except ValueError as error:
+        return {"success": False, "error": str(error)}
+    message = f"Matched {len(logs)} log line(s)."
+    if logs:
+        preview = logs[0].get("text") or ""
+        if preview:
+            message += f" Latest: {str(preview)[:160]}"
+    recorded_params = {
+        key: params[key]
+        for key in (
+            "pattern",
+            "regex",
+            "limit",
+            "clear",
+            "sources",
+            "level",
+            "status",
+            "url_pattern",
+            "method",
+            "resource_type",
+            "include_query",
+            "include_headers",
+            "include_bodies",
+            "max_body_chars",
+        )
+        if key in params
+    }
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="read_logs",
+        thinking=context.thinking,
+        params=recorded_params,
+        result={"success": True, "count": len(logs)},
+    )
+    return {"success": True, "message": message, "logs": logs}
 
 
 async def _execute_read_network_requests_action(context: _ActionContext) -> Dict[str, Any]:
@@ -1134,6 +1205,8 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
 
 
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "read_logs":
+        return await _execute_read_logs_action(context)
     if context.action_name == "read_network_requests":
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":

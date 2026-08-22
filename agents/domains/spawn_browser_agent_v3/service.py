@@ -989,6 +989,11 @@ def build_action_titles(  # noqa: C901
     elif action_name == "screenshot":
         title_progress = "Taking screenshot..."
         title_done = "Screenshot captured"
+    elif action_name == "read_logs":
+        pattern = str(unified_action.get("params", {}).get("pattern") or unified_action.get("params", {}).get("regex") or "").strip()
+        scope = f" matching /{pattern[:40]}/" if pattern else ""
+        title_progress = f"Reading browser logs{scope}..."
+        title_done = f"Read browser logs{scope}"
     elif action_name == "read_network_requests":
         url_pattern = str(unified_action.get("params", {}).get("url_pattern") or "").strip()
         scope = f" matching '{url_pattern[:40]}'" if url_pattern else ""

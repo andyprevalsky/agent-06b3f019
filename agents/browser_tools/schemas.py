@@ -50,6 +50,55 @@ class ExtractTool(BaseModel):
     instruction: str = Field(description="Clear instruction describing what data to extract from the page")
 
 
+class ReadLogsBrowserTool(BaseModel):
+    """Read merged browser console + network logs with regex filtering."""
+
+    tool: Literal["read_logs"]
+    pattern: Optional[str] = Field(
+        default=None,
+        description="Optional regex matched against each log line (console text, network summary, URL, status).",
+    )
+    limit: Optional[int] = Field(default=None, description="Maximum number of log lines to return (default 100).")
+    clear: Optional[bool] = Field(default=None, description="When true, clear captured logs after reading.")
+    sources: Optional[List[str]] = Field(
+        default=None,
+        description="Optional subset of log sources: 'console', 'network'. Defaults to both.",
+    )
+    level: Optional[str] = Field(
+        default=None,
+        description="Optional console level filter (e.g. 'error', 'warning', 'log').",
+    )
+    status: Optional[str] = Field(
+        default=None,
+        description="Optional network status filter when network source is included: '403', '4xx', 'error', 'ok'.",
+    )
+    url_pattern: Optional[str] = Field(
+        default=None,
+        description="Optional substring filter for network request URLs.",
+    )
+    method: Optional[str] = Field(default=None, description="Optional HTTP method filter for network rows.")
+    resource_type: Optional[str] = Field(
+        default=None,
+        description="Optional network resource-type filter (e.g. 'Fetch', 'XHR').",
+    )
+    include_query: Optional[bool] = Field(
+        default=None,
+        description="When true, return full network URLs including query strings.",
+    )
+    include_headers: Optional[bool] = Field(
+        default=None,
+        description="When true, include network request/response headers (credentials masked).",
+    )
+    include_bodies: Optional[bool] = Field(
+        default=None,
+        description="When true, include captured network request/response bodies.",
+    )
+    max_body_chars: Optional[int] = Field(
+        default=None,
+        description="Per-body character cap when include_bodies is set (default 4000).",
+    )
+
+
 class ReadNetworkRequestsBrowserTool(BaseModel):
     """Read the HTTP network requests made by the current page, with optional headers and bodies."""
 
@@ -789,7 +838,7 @@ class GenerateWriteLockNotificationTool(BaseModel):
 BROWSER_TOOL_MODELS = {
     # Observation
     "screenshot": ScreenshotTool,
-    "read_network_requests": ReadNetworkRequestsBrowserTool,
+    "read_logs": ReadLogsBrowserTool,
     # Index-based actions
     "click": ClickTool,
     "input_text": InputTextTool,

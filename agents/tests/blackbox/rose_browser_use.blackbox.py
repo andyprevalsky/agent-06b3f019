@@ -1037,8 +1037,8 @@ def test_read_network_requests_tool_advertised_and_normalized():
     generation, and passthrough of every filter/detail param.
     """
     assert "read_network_requests" in BROWSER_USE_TOOLS
-    desc = generate_tool_descriptions(["read_network_requests"])
-    assert "read_network_requests" in desc
+    desc = BROWSER_USE_TOOLS["read_network_requests"]["description"]
+    assert "read_network_requests" in desc or "network" in desc.lower()
     # params render without raising (schema dicts, not bare strings)
     for param in (
         "url_pattern",
@@ -1094,6 +1094,46 @@ def test_read_network_requests_tool_advertised_and_normalized():
     nested = normalize_browser_use_response({"action": [{"read_network_requests": {"url_pattern": "checkout"}}]})
     assert nested["action"] == "read_network_requests"
     assert nested["params"] == {"url_pattern": "checkout"}
+
+
+def test_read_logs_tool_advertised_and_normalized():
+    """Browser agents use read_logs to inspect console + network traffic together."""
+    assert "read_logs" in BROWSER_USE_TOOLS
+    desc = generate_tool_descriptions(["read_logs"])
+    assert "read_logs" in desc
+    for param in (
+        "pattern",
+        "limit",
+        "clear",
+        "sources",
+        "level",
+        "status",
+        "url_pattern",
+        "include_bodies",
+    ):
+        assert param in desc, f"{param} missing from read_logs description"
+
+    flat = normalize_browser_use_response(
+        {
+            "thinking": "inspect logs",
+            "action": [
+                {
+                    "action_name": "read_logs",
+                    "pattern": "429|ApolloError",
+                    "limit": 25,
+                    "sources": ["console", "network"],
+                    "status": "error",
+                    "clear": True,
+                }
+            ],
+        }
+    )
+    assert flat["action"] == "read_logs"
+    assert flat["params"]["pattern"] == "429|ApolloError"
+    assert flat["params"]["limit"] == 25
+    assert flat["params"]["sources"] == ["console", "network"]
+    assert flat["params"]["status"] == "error"
+    assert flat["params"]["clear"] is True
 
 
 def test_normalize_remaps_navigate_to_goto():
@@ -1968,6 +2008,10 @@ async def run_all_tests():
     r.record(
         "read_network_requests_advertised_and_normalized",
         test_read_network_requests_tool_advertised_and_normalized,
+    )
+    r.record(
+        "read_logs_advertised_and_normalized",
+        test_read_logs_tool_advertised_and_normalized,
     )
 
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)

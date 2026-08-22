@@ -453,6 +453,80 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {},
     },
+    "read_logs": {
+        "description": (
+            "Read merged browser logs from console errors/warnings AND network traffic "
+            "(like DevTools Console + Network together). Use this to detect soft-blocks "
+            "(403, 429, Cloudflare, Apollo GraphQL errors), discover which API a page "
+            "called, or debug a failed form submission.\n"
+            "Each row is newest-first with {source, level, text, url, status, ...}. "
+            "Console rows include JavaScript exceptions and 'Failed to load resource' lines. "
+            "Network rows include HTTP method, URL, status code, and resource type.\n"
+            "Pass 'pattern' with any regex to filter lines (e.g. '429', "
+            "'ApolloError|graphql', 'botOrNot'). Omit pattern to return recent logs.\n"
+            "Optional filters: 'sources' (['console','network']), 'level' (console only), "
+            "'status'/'url_pattern'/'method' (network only), 'limit' (default 100).\n"
+            "Set 'include_bodies'/'include_headers'/'include_query' when you need full "
+            "network payloads. Use 'clear' to isolate traffic caused by your next action.\n"
+            "Prefer this over screenshots when the DOM is ambiguous but the failure is "
+            "likely HTTP/rate-limit/bot-detection related."
+        ),
+        "params": {
+            "pattern": {
+                "type": "string",
+                "description": "Optional regex filter applied to each log line.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of log lines to return (default 100).",
+            },
+            "clear": {
+                "type": "boolean",
+                "description": "When true, clear captured logs after reading.",
+            },
+            "sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional subset: 'console', 'network'. Default both.",
+            },
+            "level": {
+                "type": "string",
+                "description": "Optional console level filter (error, warning, log, ...).",
+            },
+            "status": {
+                "type": "string",
+                "description": "Optional network status filter: '403', '4xx', 'error', or 'ok'.",
+            },
+            "url_pattern": {
+                "type": "string",
+                "description": "Optional substring filter for network URLs.",
+            },
+            "method": {
+                "type": "string",
+                "description": "Optional HTTP method filter for network rows.",
+            },
+            "resource_type": {
+                "type": "string",
+                "description": "Optional network resource-type filter.",
+            },
+            "include_query": {
+                "type": "boolean",
+                "description": "When true, return full network URLs including query strings.",
+            },
+            "include_headers": {
+                "type": "boolean",
+                "description": "When true, include network headers (credentials masked).",
+            },
+            "include_bodies": {
+                "type": "boolean",
+                "description": "When true, include captured network bodies.",
+            },
+            "max_body_chars": {
+                "type": "integer",
+                "description": "Per-body character cap when include_bodies is set.",
+            },
+        },
+    },
     "read_network_requests": {
         "description": (
             "Inspect the page's network traffic, like the DevTools Network panel. Every http(s) "
@@ -1057,6 +1131,7 @@ _VALID_ACTIONS = frozenset(
         # allowlist or normalize_browser_use_response() rejects the model's call and
         # the browser step aborts before the handler can run staged recovery.
         "recover_from_challenge",
+        "read_logs",
         "read_network_requests",
     }
 )
@@ -1181,6 +1256,28 @@ def _normalize_action_params(
 ) -> Dict[str, Any]:
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
+
+    if normalized_action == "read_logs":
+        log_params: Dict[str, Any] = {}
+        for key in (
+            "pattern",
+            "regex",
+            "limit",
+            "level",
+            "status",
+            "url_pattern",
+            "method",
+            "resource_type",
+            "max_body_chars",
+        ):
+            if params.get(key) is not None:
+                log_params[key] = params[key]
+        if params.get("sources") is not None:
+            log_params["sources"] = params["sources"]
+        for key in ("clear", "include_query", "include_headers", "include_bodies"):
+            if params.get(key) is not None:
+                log_params[key] = bool(params[key])
+        return log_params
 
     if normalized_action == "read_network_requests":
         network_params: Dict[str, Any] = {}
