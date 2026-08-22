@@ -1,6 +1,31 @@
 from benchmarks.benchmark_tasks import get_task_by_name
 
 
+def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():
+    """AMC ticket runtime contract uses one browser session via spawn_browser_agent.
+
+    expected_tool_counts previously required spawn_agent:1 while the root agent
+    correctly calls spawn_browser_agent (same as browser-imax-group-tickets).
+    That mismatched the authoritative browser_agent_session_count evaluator and
+    failed a green AMC payment-approval run (descend H-02, 2026-08-22).
+    """
+    task = get_task_by_name("browser-event-ticket")
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+
+    # Owning-boundary shape from the post-H-01 local outcome run:
+    # payment reached AMC Theatres; only the spawn_agent count check failed.
+    actual = {"agent_init": 1, "spawn_browser_agent": 1, "request_payment_card": 1}
+    for tool_name, expected_count in task.expected_tool_counts.items():
+        assert actual.get(tool_name, 0) == expected_count, (
+            f"{tool_name}: expected {expected_count}, got {actual.get(tool_name, 0)}; "
+            f"full={actual}"
+        )
+
+    sibling = get_task_by_name("browser-imax-group-tickets")
+    assert sibling.expected_tool_counts.get("spawn_browser_agent") == 1
+
+
 def test_no_anthropic_smoke_price_limit_is_route_aware(monkeypatch):
     task = get_task_by_name("spawn-sub-agents")
 
