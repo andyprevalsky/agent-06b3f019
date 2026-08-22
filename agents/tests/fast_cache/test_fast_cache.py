@@ -1063,7 +1063,7 @@ def test_position_llm_key_busts_when_user_attachment_metadata_changes():
     assert ctx.llm_key("execute_loop", with_metadata) == ctx.llm_key("execute_loop", noisy_tool_history)
 
 
-def test_position_llm_key_unchanged_without_user_attachments():
+def test_position_llm_key_unchanged_when_only_assistant_tool_history_differs():
     ctx = FastCacheContext(enabled=True, goal="plain coding task", base_step=1)
     request = {
         "pool": "rose-1-ultra",
@@ -1079,11 +1079,31 @@ def test_position_llm_key_unchanged_without_user_attachments():
         "messages": [
             request["messages"][0],
             {"role": "user", "content": "Refactor the helper module."},
+            {"role": "assistant", "content": "different prior text"},
             {"role": "tool", "tool_call_id": "call_x", "content": "noisy tool output"},
         ],
     }
-    assert normalize._user_attachment_context_fingerprint(request["messages"]) is None
     assert ctx.llm_key("execute_loop", request) == ctx.llm_key("execute_loop", noisy)
+
+
+def test_position_llm_key_busts_when_user_goal_changes():
+    ctx = FastCacheContext(enabled=True, goal="tint the attached image red", base_step=1)
+    base = {
+        "pool": "rose-1-ultra",
+        "messages": [
+            {"role": "system", "content": "Static system prompt v1"},
+            {"role": "user", "content": "Make this image completely red-tinted."},
+        ],
+        "tools": [{"name": "spawn_agent"}],
+    }
+    changed_goal = {
+        **base,
+        "messages": [
+            base["messages"][0],
+            {"role": "user", "content": "Make this image completely blue-tinted."},
+        ],
+    }
+    assert ctx.llm_key("execute_loop", base) != ctx.llm_key("execute_loop", changed_goal)
 
 
 def test_position_llm_key_ignores_completion_summary_structured_output_block():
@@ -1105,7 +1125,11 @@ def test_position_llm_key_ignores_completion_summary_structured_output_block():
                     "Write a BRIEF 1-2 sentence summary of what was accomplished."
                 ),
             },
-            {"role": "user", "content": "prior live output A"},
+            {"role": "assistant", "content": "prior live output A"},
+            {
+                "role": "user",
+                "content": "Provide a brief 1-2 sentence summary of what was accomplished. Plain text only, no markdown.",
+            },
         ],
     }
     hot_request = {
@@ -1125,7 +1149,8 @@ def test_position_llm_key_ignores_completion_summary_structured_output_block():
                     "Write a BRIEF 1-2 sentence summary of what was accomplished."
                 ),
             },
-            {"role": "user", "content": "prior live output B"},
+            {"role": "assistant", "content": "prior live output B"},
+            cold_request["messages"][-1],
         ],
     }
     changed_static_prompt = {
