@@ -1934,8 +1934,8 @@
   {
     "name": "browser-event-ticket",
     "title": "AMC Movie Ticket with Seat Selection",
-    "description": "Buy a time-slotted entertainment ticket that requires format and seat selection.",
-    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest standard-format, non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
+    "description": "Buy a time-slotted entertainment ticket that requires seat selection.",
+    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -2008,7 +2008,7 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, genre exclusion, seating heuristic, price cap, and no-add-on constraints. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
       "live_cookie_domains": [
         "amctheatres.com"
       ]
@@ -2045,12 +2045,12 @@
         "id": "movie-ticket-seat-selection-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The pending payment approval is for one adult at AMC Metreon 16 this Friday for the earliest qualifying non-horror standard-format show between 7:00 PM and 9:00 PM",
+          "The pending payment approval is for one adult at AMC Metreon 16 this Friday for the earliest qualifying non-horror show between 7:00 PM and 9:00 PM",
           "Grounded showtime and seat-map evidence shows the selected show is earliest and the selected available seat is closest to the horizontal and vertical center; the ticket price is under $30 before fees",
           "No concessions, memberships, donations, or upgrades are added, and the single approval identifies the movie, venue, date, showtime, seat, and total amount",
           "The trajectory ends at exactly one unresolved payment approval grounded to amctheatres.com; the harness does not approve it, and a generic write-lock is not success"
         ],
-        "judge_prompt": "Review the full showtime, format, genre, seat-map, cart, browser, and pending payment evidence. Pass only if every selection and exclusion is grounded and one unresolved payment approval is tied to the AMC Theatres checkout. Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
+        "judge_prompt": "Review the full showtime, genre, seat-map, cart, browser, and pending payment evidence. Pass only if every selection and exclusion is grounded and one unresolved payment approval is tied to the AMC Theatres checkout. Do not require a specific projection format (standard/IMAX/Dolby/LASER/etc.). Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,

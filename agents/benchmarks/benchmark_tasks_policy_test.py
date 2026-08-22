@@ -26,6 +26,30 @@ def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():
     assert sibling.expected_tool_counts.get("spawn_browser_agent") == 1
 
 
+def test_browser_event_ticket_omits_standard_format_from_prompt_and_judge():
+    """H-03 edit: do not require standard-format / reject LASER-at-AMC labels.
+
+    Andy: remove standard-format from task.prompt and movie-ticket-seat-selection-
+    semantics so projection-format labels are not a pass/fail axis.
+    """
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    prompt = task["prompt"]
+    assert "standard-format" not in prompt
+    assert "standard format" not in prompt.lower()
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"])
+    assert "standard-format" not in criteria_blob
+    assert "standard format" not in criteria_blob.lower()
+    assert "Do not require a specific projection format" in semantics["judge_prompt"]
+
+
 def test_no_anthropic_smoke_price_limit_is_route_aware(monkeypatch):
     task = get_task_by_name("spawn-sub-agents")
 
