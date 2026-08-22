@@ -67,7 +67,7 @@ export async function testPersistOutput_coolsExhaustedOAuthCredential() {
     );
     const fundedKeyCooldown = await prisma.integration.findUnique({
       where: {
-        userId_name: { userId: COOLDOWN_USER_ID, name: COOLDOWN_NAME },
+        userId_name_accountId: { userId: COOLDOWN_USER_ID, name: COOLDOWN_NAME, accountId: '' },
       },
     });
     assert(

@@ -1,4 +1,6 @@
 import type { Message, Prisma } from '@prisma/client';
+import { runTransactionWithRetry } from './database';
+import type { TemporalWorkflowExecutionRef } from './temporal';
 
 const WORKFLOW_GENERATION_LOCK_SEED = 6_901_733;
 
@@ -54,4 +56,45 @@ export async function lockAgentWorkflowGenerationShared(
     )
     SELECT 1 AS locked FROM acquired
   `;
+}
+
+/**
+ * Commit a chat escalation only while the agent still belongs to chat mode.
+ * A deployment replacement or another workflow start that wins first remains
+ * authoritative; delayed fire-and-forget chat work may never overwrite it.
+ */
+export async function acceptChatWorkflowExecution(
+  agentId: string,
+  execution: TemporalWorkflowExecutionRef
+): Promise<boolean> {
+  return runTransactionWithRetry(async (tx) => {
+    await lockAgentWorkflowGeneration(tx, agentId);
+    const agent = await tx.agent.findUnique({
+      where: { id: agentId },
+      select: {
+        deletedAt: true,
+        status: true,
+        temporalWorkflowId: true,
+        temporalFirstExecutionRunId: true,
+      },
+    });
+    if (
+      agent === null ||
+      agent.deletedAt !== null ||
+      agent.status !== 'ACTIVE' ||
+      (agent.temporalWorkflowId !== null && agent.temporalWorkflowId !== execution.workflowId) ||
+      (agent.temporalFirstExecutionRunId !== null &&
+        agent.temporalFirstExecutionRunId !== execution.firstExecutionRunId)
+    ) {
+      return false;
+    }
+    await tx.agent.update({
+      where: { id: agentId },
+      data: {
+        temporalWorkflowId: execution.workflowId,
+        temporalFirstExecutionRunId: execution.firstExecutionRunId,
+      },
+    });
+    return true;
+  });
 }

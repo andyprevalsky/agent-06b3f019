@@ -104,7 +104,7 @@ async function runTest(userId: string) {
   // 1. Load expected fingerprint
   console.log('📥 Loading stored fingerprint...');
   const integration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
   });
 
   if (!integration) {

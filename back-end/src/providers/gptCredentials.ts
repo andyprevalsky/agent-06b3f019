@@ -265,9 +265,10 @@ export async function markGptIntegrationRateLimited(
 export async function isGptApiKeyOnCooldown(): Promise<boolean> {
   const row = await prisma.integration.findUnique({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: GPT_API_KEY_COOLDOWN_USER_ID,
         name: GPT_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     select: { rateLimitedUntil: true },
@@ -280,9 +281,10 @@ export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
   const until = new Date(Date.now() + GPT_API_KEY_COOLDOWN_MS);
   await prisma.integration.upsert({
     where: {
-      userId_name: {
+      userId_name_accountId: {
         userId: GPT_API_KEY_COOLDOWN_USER_ID,
         name: GPT_API_KEY_COOLDOWN_NAME,
+        accountId: '',
       },
     },
     create: {

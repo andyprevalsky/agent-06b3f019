@@ -91,119 +91,6 @@ def url_looks_like_api_surface(url: str) -> bool:
     return False
 
 
-def effective_navigation_pin_host(
-    *,
-    current_url: str,
-    recovery_pin_host: Optional[str],
-    origin_base_domain: Optional[str],
-) -> Optional[str]:
-    """Resolve the host the agent must stay on.
-
-    Cross-origin handoff (live registrable domain ≠ session origin): pin to the
-    live host so Place-order / OAuth / 3DS redirects stick without path or
-    product-name allowlists. Otherwise keep an explicit post-recovery pin.
-    """
-    current_host = (urlparse(current_url or "").hostname or "").lower()
-    origin = (origin_base_domain or "").lower().strip(".")
-    if current_host and origin:
-        current_base = _get_base_domain(current_host)
-        if current_base and current_base != origin:
-            return current_host
-    pin = (recovery_pin_host or "").lower().strip(".")
-    return pin or None
-
-
-def evaluate_code_looks_like_navigation(code: str) -> bool:
-    """True when JS evaluate would navigate / open windows (bypass for goto guards)."""
-    lowered = (code or "").lower()
-    markers = (
-        "location.href",
-        "location.assign",
-        "location.replace",
-        "location.reload",
-        "document.location",
-        "window.location",
-        "history.pushstate",
-        "history.replacestate",
-        "history.back",
-        "history.go",
-        "window.open",
-        "window.navigate",
-    )
-    return any(marker in lowered for marker in markers)
-
-
-def press_key_looks_like_leave_page(key: str) -> bool:
-    """True for history-back / close-tab chords that abandon a pinned page."""
-    normalized = (key or "").replace(" ", "").lower().replace("ctrl+", "control+")
-    leave_chords = {
-        "alt+left",
-        "alt+arrowleft",
-        "alt+right",
-        "alt+arrowright",
-        "meta+left",
-        "meta+[",
-        "control+[",
-        "control+w",
-        "control+shift+w",
-        "meta+w",
-        "meta+shift+w",
-        "browserback",
-        "browserforward",
-    }
-    return normalized in leave_chords
-
-
-def click_href_leaves_pinned_base(element: Any, pin_host: Optional[str]) -> Optional[str]:
-    """Return absolute href when a click target leaves the pinned registrable domain."""
-    pin = (pin_host or "").lower().strip(".")
-    if not pin or element is None:
-        return None
-    attrs = getattr(element, "attributes", None) or {}
-    if not isinstance(attrs, dict):
-        return None
-    href = str(attrs.get("href") or attrs.get("xlink:href") or "").strip()
-    if not href.startswith(("http://", "https://")):
-        return None
-    target_host = (urlparse(href).hostname or "").lower()
-    if not target_host:
-        return None
-    if _get_base_domain(target_host) != _get_base_domain(pin):
-        return href
-    return None
-
-
-def navigation_leaves_pinned_host(
-    *,
-    current_url: str,
-    target_url: Optional[str],
-    pin_host: Optional[str],
-    action: str,
-) -> bool:
-    """True when a nav action would leave the pinned browse host."""
-    pin = (pin_host or "").lower().strip(".")
-    if not pin:
-        return False
-    current_host = (urlparse(current_url or "").hostname or "").lower()
-    if not current_host:
-        return False
-    on_pin = current_host == pin or current_host.endswith(f".{pin}")
-    if not on_pin:
-        # Clicks may have already moved us off the pin — do not trap elsewhere.
-        return False
-    # Closing/switching tabs abandons the handoff surface the same way navback does.
-    if action in {"navback", "close_tab", "switch_tab"}:
-        return True
-    if action in {"goto", "open_new_tab"}:
-        target_host = (urlparse(target_url or "").hostname or "").lower()
-        if not target_host:
-            return True
-        if target_host == pin or target_host.endswith(f".{pin}"):
-            return False
-        return True
-    return False
-
-
 # ========================================
 # ELEMENT DESCRIPTION
 # ========================================
@@ -309,6 +196,90 @@ def get_domain_from_url(url: str) -> str:
         return domain
     except Exception:
         return ""
+
+
+_BLANK_SPA_MOUNT_DIAGNOSTICS_JS = """() => {
+    const scripts = Array.from(document.scripts).map((el) => ({
+        type: el.type || '',
+        src: el.src || '',
+        async: !!el.async,
+        defer: !!el.defer,
+        hasContent: !!(el.textContent || '').trim(),
+    }));
+    const preloads = Array.from(document.querySelectorAll('link[rel="preload"]')).map((el) => ({
+        as: el.getAttribute('as') || '',
+        href: el.href || '',
+    }));
+    const resources = (performance.getEntriesByType('resource') || []).map((entry) => ({
+        name: entry.name,
+        initiatorType: entry.initiatorType,
+        transferSize: entry.transferSize,
+        encodedBodySize: entry.encodedBodySize,
+        durationMs: Math.round(entry.duration),
+        responseEndMs: Math.round(entry.responseEnd),
+    }));
+    const scriptResources = resources.filter(
+        (entry) =>
+            entry.initiatorType === 'script' ||
+            /\\.(m?js)(\\?|$)/i.test(entry.name) ||
+            entry.name.includes('/src/main.') ||
+            entry.name.includes('/@vite/') ||
+            entry.name.includes('/node_modules/'),
+    );
+    const preloadResources = resources.filter((entry) =>
+        preloads.some((preload) => preload.href && entry.name.startsWith(preload.href.split('?')[0])),
+    );
+    const mainScript = scripts.find((script) => script.src.includes('/src/main.')) || null;
+    const mainResource =
+        scriptResources.find((entry) => entry.name.includes('/src/main.')) ||
+        resources.find((entry) => entry.name.includes('/src/main.')) ||
+        null;
+    return {
+        href: location.href,
+        readyState: document.readyState,
+        rootChildren: (document.getElementById('root') || {}).children
+            ? document.getElementById('root').children.length
+            : -1,
+        scriptCount: scripts.length,
+        scripts,
+        preloadCount: preloads.length,
+        preloads,
+        resourceCount: resources.length,
+        scriptResourceCount: scriptResources.length,
+        scriptResources: scriptResources.slice(0, 40),
+        preloadResources: preloadResources.slice(0, 20),
+        mainScript,
+        mainResource,
+        largestPreloadBytes: preloadResources.reduce(
+            (max, entry) => Math.max(max, entry.transferSize || entry.encodedBodySize || 0),
+            0,
+        ),
+    };
+}"""
+
+
+async def _diagnose_blank_spa_mount(page: Any, *, url: str, phase: str) -> Dict[str, Any]:
+    """Capture script/preload/performance evidence when a SPA shell stays empty."""
+    evaluate = getattr(page, "evaluate", None)
+    if not evaluate:
+        return {"phase": phase, "url": url, "reason": "no_page_evaluate"}
+    try:
+        result = evaluate(_BLANK_SPA_MOUNT_DIAGNOSTICS_JS)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, str):
+            with suppress(Exception):
+                result = json.loads(result)
+        diagnostics = result if isinstance(result, dict) else {"raw": result}
+    except Exception as exc:
+        diagnostics = {"phase": phase, "url": url, "error": str(exc)}
+    logger.warning(
+        "Blank SPA mount diagnostics",
+        url=url,
+        phase=phase,
+        diagnostics=diagnostics,
+    )
+    return diagnostics
 
 
 async def _wait_for_navigation_content(page: Any, deadline: float) -> Dict[str, Any]:
@@ -420,6 +391,7 @@ async def wait_for_navigation_ready(
         logger.warning("Navigation stayed on an empty loading document; reloading once", url=url, state=state)
     else:
         logger.warning("Navigation produced blank SPA shell; reloading once", url=url, state=state)
+        await _diagnose_blank_spa_mount(page, url=url, phase="before_reload")
     try:
         goto = getattr(page, "goto", None)
         reload_page = getattr(page, "reload", None)
@@ -438,6 +410,9 @@ async def wait_for_navigation_ready(
     second = await _wait_for_navigation_content(page, time_module.monotonic() + timeout_seconds)
     if not second.get("ready"):
         logger.warning("Page still lacked usable content after reload", url=url, state=second.get("state"))
+        second_state = second.get("state") if isinstance(second.get("state"), dict) else {}
+        if second_state.get("blankSpaShell") or stuck_loading_shell:
+            await _diagnose_blank_spa_mount(page, url=url, phase="after_reload")
     return second
 
 
@@ -640,8 +615,6 @@ class _ActionContext:
     browser_network_recorder: Optional[Any]
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
-    navigation_pin_host: Optional[str] = None
-    navigation_origin_base_domain: Optional[str] = None
 
 
 async def _refuse_navigation(
@@ -668,69 +641,19 @@ def _navigation_guard_error(
     action: str,
     target_url: Optional[str] = None,
 ) -> Optional[str]:
+    """Refuse navigation to API/non-document URL shapes only.
+
+    Host pinning (recovery / cross-origin handoff) was removed: it trapped
+    legitimate merchant → third-party order flows (e.g. bluebottlecoffee.com →
+    order.online) after challenge recovery on the merchant host.
+    """
+    del action  # kept for call-site stability
     if target_url and url_looks_like_api_surface(target_url):
         return (
             f"Refusing navigation to API/non-document URL {target_url!r}. "
             "Network request hosts are not pages — stay on the current document "
             f"({context.current_url or 'current page'}) and continue the task there."
         )
-    pin_host = effective_navigation_pin_host(
-        current_url=context.current_url,
-        recovery_pin_host=context.navigation_pin_host,
-        origin_base_domain=context.navigation_origin_base_domain,
-    )
-    if navigation_leaves_pinned_host(
-        current_url=context.current_url,
-        target_url=target_url,
-        pin_host=pin_host,
-        action=action,
-    ):
-        return (
-            f"Refusing to leave pinned page host {pin_host!r}. "
-            f"Current page URL: {context.current_url}. Continue the task on this page "
-            "(do not go back, close/switch tabs, or navigate to another host until "
-            "this page is done)."
-        )
-    return None
-
-
-def _pinned_evaluate_guard_error(context: _ActionContext, code: str) -> Optional[str]:
-    """Refuse navigation-shaped evaluate while a host pin is active."""
-    pin_host = effective_navigation_pin_host(
-        current_url=context.current_url,
-        recovery_pin_host=context.navigation_pin_host,
-        origin_base_domain=context.navigation_origin_base_domain,
-    )
-    if not pin_host:
-        return None
-    current_host = (urlparse(context.current_url or "").hostname or "").lower()
-    on_pin = bool(current_host) and (
-        current_host == pin_host or current_host.endswith(f".{pin_host}")
-    )
-    if not on_pin:
-        return None
-    if evaluate_code_looks_like_navigation(code):
-        return (
-            f"Refusing evaluate that would navigate away from pinned host {pin_host!r}. "
-            f"Current page URL: {context.current_url}. Use input_text/click on this page "
-            "instead of location/history/window.open scripts."
-        )
-    return None
-
-
-def _active_pin_host(context: _ActionContext) -> Optional[str]:
-    pin_host = effective_navigation_pin_host(
-        current_url=context.current_url,
-        recovery_pin_host=context.navigation_pin_host,
-        origin_base_domain=context.navigation_origin_base_domain,
-    )
-    if not pin_host:
-        return None
-    current_host = (urlparse(context.current_url or "").hostname or "").lower()
-    if not current_host:
-        return None
-    if current_host == pin_host or current_host.endswith(f".{pin_host}"):
-        return pin_host
     return None
 
 
@@ -856,19 +779,6 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
     )
 
     if context.action_name == "click":
-        pin_host = _active_pin_host(context)
-        leave_href = click_href_leaves_pinned_base(context.element, pin_host)
-        if leave_href:
-            return await _refuse_navigation(
-                context,
-                action="click",
-                error=(
-                    f"Refusing click that navigates off pinned host {pin_host!r} "
-                    f"via {leave_href!r}. Current page URL: {context.current_url}. "
-                    "Fill and submit the fields on this page instead."
-                ),
-                params={"index": context.index, "href": leave_href},
-            )
         return await _execute_click(
             session=context.session,
             dom_service=context.dom_service,
@@ -905,18 +815,6 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
-        pin_host = _active_pin_host(context)
-        if pin_host and press_key_looks_like_leave_page(str(key)):
-            return await _refuse_navigation(
-                context,
-                action="press_key",
-                error=(
-                    f"Refusing key chord {key!r} that would leave pinned host {pin_host!r}. "
-                    f"Current page URL: {context.current_url}. Continue on this page with "
-                    "input_text/click instead of back/close-tab shortcuts."
-                ),
-                params={"key": key},
-            )
         if context.humanizer:
             await context.humanizer.press_key(key)
         else:
@@ -1117,20 +1015,30 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
-        guard = _pinned_evaluate_guard_error(context, code)
-        if guard:
-            return await _refuse_navigation(
-                context,
-                action="evaluate",
-                error=guard,
-                params={"code": code[:500]},
-            )
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={"expression": code, "returnByValue": True},
+            params={"expression": code, "returnByValue": True, "awaitPromise": True},
             session_id=cdp_session.session_id,
         )
         value = result.get("result", {}).get("value")
+        # CDP returns exceptionDetails when the expression throws; surface that
+        # instead of a silent null/empty value (async fetch failures used to look
+        # like successful empty objects).
+        exception = result.get("exceptionDetails")
+        if exception:
+            error_text = (
+                exception.get("text")
+                or (exception.get("exception") or {}).get("description")
+                or "evaluate raised"
+            )
+            await context.action_history.record_action(
+                dom_service=context.dom_service,
+                action="evaluate",
+                thinking=context.thinking,
+                params={"code": code},
+                result={"success": False, "error": error_text},
+            )
+            return {"success": False, "error": error_text, "value": value}
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="evaluate",
@@ -1217,8 +1125,6 @@ async def execute_action(
     prepare_credentials_for_url: Optional[
         Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
     ] = None,
-    navigation_pin_host: Optional[str] = None,
-    navigation_origin_base_domain: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1268,8 +1174,6 @@ async def execute_action(
             browser_network_recorder=browser_network_recorder,
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
-            navigation_pin_host=navigation_pin_host,
-            navigation_origin_base_domain=navigation_origin_base_domain,
         )
         if action_name in _INTERACTION_ACTIONS:
             return await _execute_interaction_action(context)
@@ -2439,12 +2343,23 @@ async def _click_write_lock_result(
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
+        is_click_write_lock_eligible_control,
         is_email_send_button,
         is_purchase_button,
         is_return_button,
         is_social_domain,
         is_submit_button,
     )
+
+    # Andy (2026-08-21): never raise click write locks on plain inputs /
+    # textarea / select — only buttons and form submits.
+    if element is not None and not is_click_write_lock_eligible_control(element):
+        logger.info(
+            "Write lock skipped: click target is not a button or form submit",
+            tag=getattr(element, "tag_name", None) or getattr(element, "node_name", None),
+            url=current_url[:80] if current_url else None,
+        )
+        return None
 
     coordinate_click = element is None
     if coordinate_click:
@@ -3132,12 +3047,58 @@ async def _execute_goto(
                 if key in prepared
             }
 
-    event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
-    await event
-    await event.event_result(raise_if_any=True, raise_if_none=False)
+    try:
+        event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
 
-    navigation_waiter = wait_for_navigation or wait_for_navigation_ready
-    await navigation_waiter(dom_service, url=url)
+        navigation_waiter = wait_for_navigation or wait_for_navigation_ready
+        await navigation_waiter(dom_service, url=url)
+    except Exception as nav_error:
+        error_text = extract_error_message(nav_error)
+        if (
+            session_id
+            and config is not None
+            and url.startswith(("http://", "https://"))
+            and "ERR_ABORTED" in error_text
+        ):
+            try:
+                from domains.spawn_browser_agent_v3.download_persist import (
+                    persist_navigation_download_via_page_fetch,
+                )
+
+                download = await persist_navigation_download_via_page_fetch(
+                    session=session,
+                    url=url,
+                    session_id=session_id,
+                    config=config,
+                )
+            except Exception as persist_error:
+                logger.warning(
+                    "ERR_ABORTED download persist failed",
+                    url=url[:200],
+                    error=f"{type(persist_error).__name__}:{extract_error_message(persist_error)[:160]}",
+                )
+                download = None
+            if download:
+                result = {
+                    "success": True,
+                    "message": (
+                        f"Navigation aborted into a file download; saved to session "
+                        f"as {download.get('path')} ({download.get('size')} bytes)"
+                    ),
+                    "current_url": url,
+                    "download": download,
+                }
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="goto",
+                    thinking=thinking,
+                    params={"url": url},
+                    result=result,
+                )
+                return result
+        raise
 
     result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:

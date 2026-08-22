@@ -37,12 +37,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   },
   {
     file: 'domains/auth-assistance/repo.ts',
-    scope: 'createRequest',
-    fingerprint: '363b182fffe86b00',
-    reason: 'legacy migration debt',
-  },
-  {
-    file: 'domains/auth-assistance/repo.ts',
     scope: 'updateLiveViewHandoff',
     fingerprint: 'd2b826adb47d80a7',
     reason: 'legacy migration debt',
@@ -51,12 +45,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     file: 'domains/credential-propagation/repo.ts',
     scope: 'propagateCredentialInTransaction',
     fingerprint: 'aac2c3d9c497cb1b',
-    reason: 'legacy migration debt',
-  },
-  {
-    file: 'domains/integrations/repo.plaid.ts',
-    scope: 'persistPlaidItem',
-    fingerprint: 'bdf8165a4e322a23',
     reason: 'legacy migration debt',
   },
   {

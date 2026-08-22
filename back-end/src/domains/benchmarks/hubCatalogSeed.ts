@@ -80,7 +80,7 @@ export function ensureBenchmarkTasksSeeded(): Promise<{ inserted: number; total:
 }
 
 /**
- * Three narrow exceptions to DB-wins, applied on every seed:
+ * Narrow exceptions to DB-wins, applied on every seed:
  *   - empty-string descriptions violate the catalog contract (patchTask deletes
  *     the key on clear) — heal rows seeded before that rule existed
  *   - `retired` in tasks.json propagates to existing rows: retirement is a
@@ -91,7 +91,26 @@ export function ensureBenchmarkTasksSeeded(): Promise<{ inserted: number; total:
  *     classification, not hub-editable (absent from taskEditSchema), so it
  *     propagates file→DB on every seed — this is how the label reaches rows
  *     seeded before the field existed without a full reseed.
+ *   - `environment` is likewise not hub-editable. Catalog contract fields
+ *     (secrets, live_targets, services, …) must follow tasks.json or
+ *     GET /api/benchmarks keeps serving a stale seeded shape forever.
  */
+function stableJson(value: unknown): string {
+  // Canonicalize object key order so equivalent environments compare equal.
+  return JSON.stringify(value ?? null, (_key, nested: unknown) => {
+    if (Array.isArray(nested)) return nested;
+    if (nested !== null && typeof nested === 'object') {
+      const record = nested as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(record).sort()) {
+        out[key] = record[key];
+      }
+      return out;
+    }
+    return nested;
+  });
+}
+
 async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
   const retiredInFile = new Set(
     tasks.filter((t) => t.status === 'retired').map((t) => t.name as string)
@@ -100,6 +119,11 @@ async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
     tasks
       .filter((t) => typeof t.group === 'string')
       .map((t) => [t.name as string, t.group as string])
+  );
+  const environmentInFile = new Map(
+    tasks
+      .filter((t) => t.environment !== undefined && t.environment !== null)
+      .map((t) => [t.name as string, t.environment])
   );
   for (const row of await repo.findAllTasks()) {
     const definition = { ...((row.definition ?? {}) as Record<string, unknown>) };
@@ -116,6 +140,16 @@ async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
     const fileGroup = groupInFile.get(row.name);
     if (fileGroup !== undefined && definition.group !== fileGroup) {
       definition.group = fileGroup;
+      data.definition = definition as repo.JsonInput;
+    }
+    const fileEnvironment = environmentInFile.get(row.name);
+    if (
+      fileEnvironment !== undefined &&
+      (stableJson(definition.environment) !== stableJson(fileEnvironment) ||
+        stableJson(row.environment) !== stableJson(fileEnvironment))
+    ) {
+      definition.environment = fileEnvironment;
+      data.environment = fileEnvironment as repo.JsonInput;
       data.definition = definition as repo.JsonInput;
     }
     if (Object.keys(data).length > 0) {

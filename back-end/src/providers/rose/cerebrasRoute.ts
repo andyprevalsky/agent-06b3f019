@@ -1,10 +1,16 @@
 /**
  * Exclusive Cerebras boundary for latency-sensitive synchronous Chat.
  *
- *   explicit route -> direct Cerebras GLM-4.7 stream -> normalized Rose chunks
+ *   explicit route -> direct Cerebras Gemma-4-31B stream -> normalized Rose chunks
  *
  * A short first-content deadline protects the synchronous chat budget. This
  * route is exclusive and surfaces every failure to its caller.
+ *
+ * Model note (2026-08-20): Cerebras archived `zai-glm-4.7` for our org
+ * (`model_archived_error`). Chat then fell through to the OpenRouter
+ * waterfall (gemini 400 → kimi-k3 9–30s), which breached the 5s web_search
+ * lifecycle ratchet. `gemma-4-31b` is the current Cerebras inventory that
+ * still clears the chat latency budget with structured outputs.
  */
 
 import { createLogger } from '../logger';
@@ -24,9 +30,11 @@ import type { CompletionOptions, RoseStreamChunk } from './types';
 
 const log = createLogger('CerebrasRoute');
 
-export const CEREBRAS_CHAT_MODEL = 'zai-glm-4.7';
+export const CEREBRAS_CHAT_MODEL = 'gemma-4-31b';
 export const CEREBRAS_DIRECT_POOL = 'cerebras-direct';
 export const DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = 1_200;
+/** Archived Cerebras id — must never be reintroduced as the chat primary. */
+export const ARCHIVED_CEREBRAS_CHAT_MODEL = 'zai-glm-4.7';
 
 function chatIdleTimeoutMs(): number {
   const configured = Number(process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS);
@@ -47,12 +55,14 @@ export function clearsChatStallGuard(kind: RoseStreamChunk['kind']): boolean {
 }
 
 export function buildCerebrasChatBody(options: CompletionOptions): Record<string, unknown> {
+  // Do not send `clear_thinking` — that flag is GLM-only. Gemma-4-31b rejects
+  // it with 400 wrong_api_format, which would re-trigger the waterfall path
+  // this migration exists to leave.
   return {
     model: CEREBRAS_CHAT_MODEL,
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
-    clear_thinking: true,
     reasoning_effort: 'none',
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_completion_tokens: options.max_tokens } : {}),

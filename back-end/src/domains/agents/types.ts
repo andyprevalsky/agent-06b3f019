@@ -175,6 +175,13 @@ export const updateStatusSchema = z.object({
 });
 
 export const updateAgentSchema = z.object({
+  // Sidebar rename. `null` clears the override and falls back to the goal.
+  title: z.string().trim().min(1).max(80).nullable().optional(),
+  // Internal schema-generator candidate. Applied only to an untitled root agent,
+  // so a concurrent human rename always wins and sub-agents never store titles.
+  generated_title: z.string().trim().min(1).max(80).optional(),
+  // Sidebar pin toggle — maps to Agent.pinnedAt (now / null).
+  pinned: z.boolean().optional(),
   model: z.string().optional(),
   reasoning_max_tokens: z.number().int().min(0).optional(),
   tool_ids: z.array(z.string().uuid()).optional(),
@@ -201,6 +208,30 @@ export const updateAgentSchema = z.object({
 
 export const generateSchemaRequestSchema = z.object({
   goal: z.string().min(1),
+});
+
+// Archived (soft-deleted) agent listing. Bounded on purpose: the archive grows
+// monotonically for the lifetime of an account, so an unbounded read would
+// degrade linearly with agent count.
+export const ARCHIVED_AGENTS_DEFAULT_LIMIT = 100;
+export const ARCHIVED_AGENTS_MAX_LIMIT = 200;
+export const listArchivedAgentsQuerySchema = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(ARCHIVED_AGENTS_MAX_LIMIT)
+    .optional()
+    .default(ARCHIVED_AGENTS_DEFAULT_LIMIT),
+});
+
+// Sidebar search is deliberately bounded even though an account's chat history
+// grows forever. The query fans into Message.text, so accepting arbitrarily
+// large needles or returning the whole account would make a keystroke an
+// unbounded database operation.
+export const AGENT_SEARCH_RESULT_LIMIT = 100;
+export const searchAgentsQuerySchema = z.object({
+  q: z.string().trim().min(1).max(200),
 });
 
 // Batch creation: up to 200 children in one HTTP call, used by the

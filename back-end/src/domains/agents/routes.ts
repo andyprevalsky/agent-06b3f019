@@ -3,64 +3,26 @@
  * Parse request, call service, send response.
  */
 
-import { type Response, Router } from 'express';
-import { z } from 'zod';
+import { Router } from 'express';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { canReadBenchmarkArchive } from '../../providers/benchmarkHubStore';
 import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { createLogger } from '../../providers/logger';
-import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
-import { createAgentSchema, updateAgentSchema } from './types';
+import { createAgentSchema, searchAgentsQuerySchema, updateAgentSchema } from './types';
 import * as routeGuards from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
-import { WorldModelModeAccessError } from './agentExecutionMode';
 import messageRoutes from './routes.messages';
 import batchRoutes from './routes.batch';
 import alertRoutes from './routes.alerts';
 import statusRoutes from './routes.status';
+import archiveRoutes from './routes.archive';
+import { handleRouteError, noCacheHeaders } from './routes.helpers';
 
-const log = createLogger('Agents');
 const router = Router();
 
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function noCacheHeaders(res: Response): void {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
-}
-
-function handleRouteError(
-  res: Response,
-  error: unknown,
-  msg: string,
-  ctx?: Record<string, string>
-): void {
-  if (error instanceof z.ZodError) {
-    res.status(400).json({ error: 'Invalid request body', details: error.issues });
-    return;
-  }
-  if (error instanceof StaleParentWorkflowGenerationError) {
-    res.status(409).json({ error: error.message });
-    return;
-  }
-  if (error instanceof WorldModelModeAccessError) {
-    res.status(403).json({ error: error.message });
-    return;
-  }
-  log.error(msg, {
-    ...ctx,
-    error: error instanceof Error ? error.message : String(error),
-  });
-  res.status(500).json({ error: msg });
-}
 
 // ---------------------------------------------------------------------------
 // Query routes
@@ -85,6 +47,24 @@ router.get(
 );
 
 router.get(
+  '/search',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      noCacheHeaders(res);
+      if (req.userId === undefined) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+      const { q } = searchAgentsQuerySchema.parse(req.query);
+      res.json(await queryService.searchAgents(req.userId, q));
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to search agents');
+    }
+  })
+);
+
+router.get(
   '/tree',
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
@@ -101,6 +81,7 @@ router.get(
   })
 );
 
+router.use('/', archiveRoutes);
 router.use('/', alertRoutes);
 
 router.get(

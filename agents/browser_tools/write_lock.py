@@ -245,6 +245,58 @@ def normalize_write_lock_text(text: str) -> str:
     return re.sub(r"\s+", "", text or "").lower()
 
 
+_DOM_IDENTIFIER_SIGNAL = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def is_dom_identifier_write_lock_signal(signal: str) -> bool:
+    """Return True for CSS-like id/name tokens that are not user-visible labels.
+
+    Fandango checkout (2026-08-20 agent 1c3003ef): clicking the email sign-in
+    input ``#buynow-email-si`` joined the machine id into the write-lock signal.
+    After whitespace stripping, phrase ``buy now`` matched inside ``buynow-…``
+    and forced a purchase write lock before ``request_payment_card``.
+    """
+    text = (signal or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    if "-" not in text and "_" not in text:
+        return False
+    return bool(_DOM_IDENTIFIER_SIGNAL.fullmatch(text))
+
+
+_SUBMIT_INPUT_TYPES = frozenset({"submit", "button", "image"})
+
+
+def is_click_write_lock_eligible_control(element: Any) -> bool:
+    """Return whether a click target may raise a click write-lock approval.
+
+    Andy (2026-08-21): plain inputs never trigger click write locks — only
+    buttons / form submits. Payment-field typing stays on the separate
+    ``input_text`` path. Coordinate clicks (``element is None``) keep using
+    text heuristics.
+    """
+    if element is None:
+        return True
+
+    tag = str(
+        getattr(element, "tag_name", "") or getattr(element, "node_name", "") or ""
+    ).strip().lower()
+    # Missing / mock tags are not form-field exclusions.
+    if not tag or tag.startswith("<") or "magicmock" in tag:
+        return True
+
+    attrs = getattr(element, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    input_type = str(attrs.get("type") or "").strip().lower()
+
+    if tag in {"textarea", "select", "option"}:
+        return False
+    if tag == "input":
+        return input_type in _SUBMIT_INPUT_TYPES
+    return True
+
+
 def is_social_domain(url: str) -> bool:
     """Check if URL is a social media or forum domain.
 
@@ -414,6 +466,11 @@ def is_purchase_button(element_text: str) -> bool:
     # exclusion only within the same signal that carries a purchase phrase so
     # "Terms of Service" in one signal cannot veto "Buy Now" in another.
     for signal in element_text.split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            logger.debug(
+                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label"
+            )
+            continue
         text_lower = normalize_write_lock_text(signal)
         if not text_lower:
             continue

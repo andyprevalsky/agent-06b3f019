@@ -29,9 +29,10 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
     "live": LiveFixtureSpec(
         name="live",
         description=(
-            "Current production compute tokens and complete browser auth state, "
-            "including context, cookies/storage, passwords, passkeys, provider "
-            "profiles, CookieBundles, and Steel sessions."
+            "Current production compute tokens, email send credentials "
+            "(Gmail/Yahoo EmailIntegrationCredential rows), and complete browser "
+            "auth state, including context, cookies/storage, passwords, passkeys, "
+            "provider profiles, CookieBundles, and Steel sessions."
         ),
     ),
 }

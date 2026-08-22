@@ -729,14 +729,18 @@ async def upload_file_to_session(
     filename: str,
     file_content: bytes,
     mime_type: str = "application/octet-stream",
+    *,
+    directory: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Upload a file to a Steel browser session."""
+    """Upload a file into a browser session (uploads or downloads root)."""
     try:
+        data = {"directory": directory} if directory else None
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{config.backend.api_url}/api/browser-session/{session_id}/files",
                 headers={"x-api-key": config.backend.api_key or ""},
                 files={"file": (filename, file_content, mime_type)},
+                data=data,
             )
             if response.status_code in [200, 201]:
                 return response.json()

@@ -1,4 +1,6 @@
 import { prisma, runTransactionWithRetry } from './database';
+import { canonicalAuthRealm } from './authRealm';
+import { SSO_REALMS } from './browserCookies';
 import { INVALIDATED_STEEL_PROFILE_SOURCE } from './browser/profileBinding';
 
 export async function findSteelSessionAuth(
@@ -35,9 +37,22 @@ export async function findBrowserPasswords(userId: string) {
   });
 }
 
-export async function findPasskeys(userId: string, authRealm: string) {
+export async function findPasskeys(
+  userId: string,
+  authRealm: string,
+  { includeSso = false }: { includeSso?: boolean } = {}
+) {
+  // SSO passkeys are opt-in. The browser AGENT path seeds per realm transition,
+  // so it gets a "Sign in with Google" passkey when it actually lands on
+  // google.com -- no need to eagerly load every SSO passkey into every agent
+  // session. The CONNECT flow, by contrast, stays on the target realm while the
+  // IdP opens in a separate popup, so it must load the SSO union up front and
+  // passes includeSso: true.
+  const realms = includeSso
+    ? [...new Set([canonicalAuthRealm(authRealm), ...SSO_REALMS])]
+    : [canonicalAuthRealm(authRealm)];
   return prisma.passkeyCredential.findMany({
-    where: { userId, authRealm },
+    where: { userId, authRealm: { in: realms } },
   });
 }
 

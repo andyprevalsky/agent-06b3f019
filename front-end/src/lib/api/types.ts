@@ -18,6 +18,12 @@ export const MAX_TOTAL_ATTACHMENTS_SIZE = 100 * 1024 * 1024; // 100MB max total
 export interface Agent {
   agent_id: string;
   goal: string;
+  /** Short sidebar label. Generated at spawn, overridable by rename. Null → show `goal`. */
+  title?: string | null;
+  /** Non-null pins the agent to the top of the sidebar. */
+  pinned_at?: string | null;
+  /** Non-null means archived (soft-deleted); only set on rows from the archive view. */
+  archived_at?: string | null;
   model: string;
   source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';
