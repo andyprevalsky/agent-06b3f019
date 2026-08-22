@@ -2875,3 +2875,15 @@
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 222.2, "cost_cents": 0.0, "timestamp": "2026-08-21T21:58:25.465705+00:00", "agent_id": "4fb559c8-79d4-452b-8b2e-7897223e186a"}
 {"task": "agent-payment-abandonment", "duration_seconds": 234.3, "cost_cents": 0.0, "timestamp": "2026-08-21T21:58:25.465705+00:00", "agent_id": "f8890b78-0157-412a-bc65-9184ffae4f89"}
 {"task": "browser-event-ticket", "duration_seconds": 243.0, "cost_cents": 0.0, "timestamp": "2026-08-22T02:40:38.798180+00:00", "agent_id": "a5292ec6-afba-44f1-9ed7-1a94b3812f6f"}
+{"task": "browser-event-ticket", "duration_seconds": 250.5, "cost_cents": 0.0, "timestamp": "2026-08-22T03:47:53.022810+00:00", "agent_id": "b2edea3f-1efd-4ba8-95dc-ced8568df685"}
+{"task": "browser-event-ticket", "duration_seconds": 270.5, "cost_cents": 0.0, "timestamp": "2026-08-22T03:47:53.022810+00:00", "agent_id": "e7f7669c-ba16-4720-9eb0-825fa037aa4f"}
+{"task": "browser-event-ticket", "duration_seconds": 432.1, "cost_cents": 0.0, "timestamp": "2026-08-22T03:47:53.022810+00:00", "agent_id": "47a98796-baf6-4cf8-895e-3ba97431db08"}
+{"task": "browser-event-ticket", "duration_seconds": 209.3, "cost_cents": 0.0, "timestamp": "2026-08-22T03:57:23.915821+00:00", "agent_id": "22b71d6a-7176-4144-833d-419a3b002a4d"}
+{"task": "browser-event-ticket", "duration_seconds": 192.5, "cost_cents": 0.0, "timestamp": "2026-08-22T03:57:23.915821+00:00", "agent_id": "3d1262de-10ad-44ae-a1f9-12e6db773d39"}
+{"task": "browser-event-ticket", "duration_seconds": 208.7, "cost_cents": 0.0, "timestamp": "2026-08-22T03:57:23.915821+00:00", "agent_id": "4079cbb8-02eb-4dc6-89f4-1a04ae07d0ef"}
+{"task": "browser-event-ticket", "duration_seconds": 242.7, "cost_cents": 0.0, "timestamp": "2026-08-22T03:57:23.915821+00:00", "agent_id": "1f9f89eb-6b03-4f4e-aa75-b9ac834f6bf1"}
+{"task": "browser-event-ticket", "duration_seconds": 260.7, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "d92fab8b-bb45-41a3-9287-8eae467b3d4e"}
+{"task": "browser-event-ticket", "duration_seconds": 278.8, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "1e2b8d43-7031-4e3a-9367-369651786457"}
+{"task": "browser-event-ticket", "duration_seconds": 278.7, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "3da459d3-93bf-473d-8c30-f2189f5c9060"}
+{"task": "browser-event-ticket", "duration_seconds": 324.8, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "15249c47-08bf-4b0d-bc20-75cf664f6f4c"}
+{"task": "browser-event-ticket", "duration_seconds": 344.9, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "96136f5f-e807-4651-bed2-67dba3845aba"}
