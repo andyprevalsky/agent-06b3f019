@@ -2355,7 +2355,8 @@
   },
   {
     "name": "minted-agent-accounts-x",
-    "title": "Minted Agent Accounts X",
+    "title": "Live X Hello World Write Lock",
+    "description": "Post Hello World on X using live synced browser auth and grade exactly one social-post write lock.",
     "prompt": "Make a post on X.com that says, Hello World",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
@@ -2371,10 +2372,76 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "write_lock",
+    "min_steps": {
+      "browser": 5
+    },
     "start_phase": "execute",
     "bench": "pipeline-e2e",
-    "group": "daily"
+    "group": "daily",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "x.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://x.com"
+      ],
+      "context_notes": "Live X via synced-prod browser auth. Reuses the signed-in CookieBundle; grades exactly one social-post write lock whose notification covers Hello World / X / Public / destination. Does not require MintedAccount creation or phone-auth grading.",
+      "live_cookie_domains": [
+        "x.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "x.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "minted-x-write-lock-contract",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one write_lock approval is triggered for the X post",
+          "The write-lock notification identifies Hello World, X, Public audience, and the destination account"
+        ],
+        "checks": [
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Hello World",
+              "Public",
+              "x.com",
+              "on X"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "minted-x-notification-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Exactly one write_lock request is raised for posting Hello World on X",
+          "The writeLockNotification is a social_post with body Hello World, Public audience, service X/x.com, and a destination on X",
+          "The trajectory reuses live signed-in X auth rather than creating a MintedAccount"
+        ],
+        "judge_prompt": "Pass only when browser/tool evidence shows exactly one social-post write lock for posting Hello World publicly on X, the notification names X/x.com plus a destination on X, and the agent used an already signed-in session. Fail if MintedAccount signup or phone-auth recovery is required for success, if zero or multiple write locks fire, or if the notification body/audience/service/destination is wrong."
+      }
+    ],
+    "enforce_declared_evaluators": true
   },
   {
     "name": "browser-indeed-account-create",
