@@ -1690,7 +1690,7 @@
     "name": "browser-alchemy-springs-sauna",
     "title": "Alchemy Springs Sauna Session",
     "description": "Book a time-slotted local wellness service with a flexible Sunday window.",
-    "prompt": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, use my saved guest details, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete the booking.",
+    "prompt": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, checkout as guest, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete the booking.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
