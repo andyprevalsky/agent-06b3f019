@@ -81,12 +81,26 @@ function preferredBenchmarkCardholderIds(
   return [...new Set(preferred)];
 }
 
+/** AgentCard's terminal, mint-capable verification states. */
+const KYC_READY_STATUSES = new Set(['verified', 'approved']);
+
 /**
- * Resolve a sandbox org cardholder that actually exists for the OAuth client.
+ * Resolve a sandbox org cardholder that actually exists AND can mint.
  *
  * Stale `BENCHMARK_AGENTCARD_CARDHOLDER_ID` values previously seeded Integration
  * rows that made every `create_card` return "Cardholder not found", which the
  * purchase path then rewrote as a funding-in-progress retry loop.
+ *
+ * Existing is necessary but NOT sufficient: a cardholder stuck at KYC `pending` resolves fine and
+ * then fails the lifecycle gate at bootstrap. That is not hypothetical — the sandbox org holds two
+ * cardholders, and `AGENTCARD_CARDHOLDER_ID` in `agents/.env` names the `pending` one, so plain
+ * preference order deterministically picked the unusable cardholder while a `verified` one sat
+ * right beside it. Preference order (including `BENCHMARK_CARDHOLDER_EMAILS`) is still honoured;
+ * it is just filtered to cardholders that can actually mint. Ordering by known-good email and
+ * filtering by live KYC state are complementary: the list encodes intent, the filter proves it.
+ *
+ * When nothing is verified we return the first candidate unchanged, so the caller's existing (and
+ * more specific) KYC error is what the operator sees rather than a vaguer one from here.
  */
 export async function resolveBenchmarkCardholderId(
   preferredIds: string[] = preferredBenchmarkCardholderIds(),
@@ -100,17 +114,30 @@ export async function resolveBenchmarkCardholderId(
     );
   }
 
-  for (const preferredId of preferredIds) {
-    if (cardholders.some((cardholder) => cardholder.id === preferredId)) {
-      return preferredId;
-    }
-  }
+  // Preference order: explicit env ids, then each well-known benchmark email in priority order,
+  // then anything else. Deduplicated, preserving first occurrence.
+  const emailOrdered = BENCHMARK_CARDHOLDER_EMAILS.flatMap((email) => {
+    const match = cardholders.find((cardholder) => cardholder.email?.toLowerCase() === email);
+    return match === undefined ? [] : [match.id];
+  });
+  const ordered = [
+    ...preferredIds.filter((id) => cardholders.some((cardholder) => cardholder.id === id)),
+    ...emailOrdered,
+    ...cardholders.map((cardholder) => cardholder.id),
+  ].filter((id, index, all) => all.indexOf(id) === index);
 
-  for (const email of BENCHMARK_CARDHOLDER_EMAILS) {
-    const byEmail = cardholders.find((cardholder) => cardholder.email?.toLowerCase() === email);
-    if (byEmail !== undefined) return byEmail.id;
+  for (const id of ordered) {
+    // A cardholder whose status cannot be read is treated as not-ready rather than failing the
+    // whole resolution: another candidate may still be verified.
+    const status = await getOrgCardholderVerificationStatus(id, { callOrgTool }).catch(
+      () => undefined
+    );
+    if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase())) return id;
   }
-  return cardholders[0].id;
+  // Nothing verifiable: fall back to the highest-preference candidate so the caller's more
+  // specific KYC error surfaces, and so an org whose status endpoint is unavailable still
+  // resolves the same cardholder the preference order would have chosen.
+  return ordered[0];
 }
 
 function minSandboxFloatCents(env: Record<string, string | undefined> = process.env): number {

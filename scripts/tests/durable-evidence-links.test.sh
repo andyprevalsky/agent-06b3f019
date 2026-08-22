@@ -7,8 +7,18 @@ cd "$ROOT"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Agents helpers import temporalio and other venv-only deps — prefer the repo venv.
+PYTHON_BIN="$ROOT/agents/venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    fail "neither agents/venv/bin/python nor python3 is available"
+  fi
+fi
+
 # 1) Report FE URL defaults to always-on prod (never ephemeral localhost).
-python3 - <<'PY' || fail "durable report FE URL"
+"$PYTHON_BIN" - <<'PY' || fail "durable report FE URL"
 import os, sys
 sys.path.insert(0, "agents")
 os.environ.pop("BENCHMARK_REPORT_FRONTEND_URL", None)
@@ -28,7 +38,7 @@ print("ok durable FE helpers")
 PY
 
 # 2) Published dump is a single self-contained HTML (no file://, data URIs for frames).
-python3 - <<'PY' || fail "self-contained dump publish"
+"$PYTHON_BIN" - <<'PY' || fail "self-contained dump publish"
 import json, tempfile, shutil
 from pathlib import Path
 import importlib.util

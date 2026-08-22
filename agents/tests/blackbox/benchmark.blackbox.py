@@ -2141,7 +2141,9 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     task = get_task_by_name("agent-payment-test-shop")
 
     assert "visible Rose Labs Test Payment checkout" in task.prompt
-    assert "do not navigate to source files or API endpoints" in task.prompt
+    assert "do not navigate to source files or API endpoints" not in task.prompt
+    assert "request_payment_card" not in task.prompt
+    assert "card number" not in task.prompt.lower()
     assert "preserve the merchant" not in task.prompt.lower()
     assert task.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
     assert task.expected_payment_lifecycle["walletFunding"]["status"] == "CONSUMED"
@@ -5018,6 +5020,101 @@ def test_amazon_return_catalog_requires_single_clean_completed_return():
         assert approval_detail in semantic_criteria
 
 
+def test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user():
+    """The identity overlay must retarget the seed at the person the task runs as.
+
+    Regression: every prod->local sync mode resolved to the dev user, so a task
+    launched with another BENCHMARK_RUN_USER_ID ran against a DB with no row for
+    it and died at browser-session init on AgentIdentity_userId_fkey, before an
+    agent existed. Scoping the seed is what makes the identity exist locally.
+    """
+    import os
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.live_fixtures import TAMY_IDENTITY_COOKIE_DOMAINS, TAMY_IDENTITY_USER_ID
+
+    captured: dict = {}
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_sync = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_kwargs: True
+        bench._sync_email_credentials = lambda: True
+
+        def capture_browser_sync(domains=(), *, user_id=None):
+            captured.update(user_id=user_id, cookie_domains=domains)
+            return True
+
+        bench._sync_browser_credentials = capture_browser_sync
+        manifest = bench._apply_live_tamy_identity_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id=bench.USER_ID,
+                auth_realm="amazon.com.mx",
+            )
+        )
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_sync
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert captured.get("user_id") == TAMY_IDENTITY_USER_ID, (
+        "the identity fixture must seed the task's run identity, not the default "
+        f"benchmark user; got {captured.get('user_id')!r}"
+    )
+    assert tuple(captured.get("cookie_domains") or ()) == TAMY_IDENTITY_COOKIE_DOMAINS
+    assert manifest == {
+        "fixture": "live-tamy-identity",
+        "browser_auth": True,
+        "source": "prod_sync",
+        "user_id": TAMY_IDENTITY_USER_ID,
+    }
+
+
+def test_tamy_identity_fixture_declaration_drives_the_run_user():
+    """Declaring the fixture and running as that identity cannot drift apart.
+
+    Seeding her rows while still running as the dev user would exercise the
+    wrong account; running as her without the fixture is the FK crash the
+    fixture exists to prevent. One declaration must imply both.
+    """
+    import benchmarks.run_benchmark as bench
+    from benchmarks.live_fixtures import TAMY_IDENTITY_USER_ID
+
+    class _Task:
+        def __init__(self, fixtures):
+            self.name = "browser-agent-amazon-mx-buy-under-5-usd"
+            self.environment = {"live_fixtures": list(fixtures)}
+
+    assert (
+        bench._live_fixture_run_user_id(_Task(["live-tamy-identity"]))
+        == TAMY_IDENTITY_USER_ID
+    )
+    assert bench._live_fixture_run_user_id(_Task(["live"])) is None
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    catalog_task = get_task_by_name("browser-agent-amazon-mx-buy-under-5-usd")
+    assert "live-tamy-identity" in catalog_task.environment["live_fixtures"], (
+        "the amazon.com.mx replay runs as the Mexico identity, so it must declare the "
+        "fixture that seeds her; without it the run dies before an agent exists"
+    )
+    assert bench._live_fixture_run_user_id(catalog_task) == TAMY_IDENTITY_USER_ID
+    assert catalog_task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES, (
+        "the fixture changes BENCHMARK_RUN_USER_ID process-wide and must not overlap siblings"
+    )
+    assert catalog_task.environment["required_injectable_cookie_domains"] == [
+        "amazon.com.mx",
+        "amazon.com",
+    ]
+
+
 def test_live_fixture_fails_when_live_auth_refresh_fails():
     """A live benchmark never starts with missing/stale browser auth."""
     import os
@@ -5248,7 +5345,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
     synced_domains: list[tuple[str, ...]] = []
     queried_domains: list[str] = []
 
-    def fake_sync_browser_credentials(domains: tuple[str, ...] = ()) -> bool:
+    def fake_sync_browser_credentials(domains: tuple[str, ...] = (), *, user_id=None) -> bool:
         synced_domains.append(domains)
         return True
 
@@ -6034,7 +6131,7 @@ def test_agent_sms_benchmark_prepares_phone_only_agentphone_sender():
 
 
 def test_minted_x_benchmark_uses_live_x_default_target():
-    """The X minted-account benchmark points at the real site, not the local Uber fixture."""
+    """The X Hello World benchmark points at live X with write-lock grading, not mint signup."""
     from benchmarks.benchmark_tasks import get_task_by_name
     import benchmarks.run_benchmark as bench
 
@@ -6043,22 +6140,125 @@ def test_minted_x_benchmark_uses_live_x_default_target():
     assert task.name in bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
     assert task.prompt == "Make a post on X.com that says, Hello World"
     assert bench.MINTED_AGENT_ACCOUNT_X_POST_GOAL == task.prompt
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_approval_count == 1
+    assert task.min_steps == {"browser": 5}
+    assert task.enforce_declared_evaluators is True
+    assert task.environment["live_fixtures"] == ["live"]
+    assert task.environment["live_cookie_domains"] == ["x.com"]
+    assert task.environment["required_injectable_cookie_domains"] == ["x.com"]
     assert bench._default_minted_target_url("http://localhost:56151", task.name) == "https://x.com"
     assert bench._auth_realm_from_target_url("https://x.com") == "x.com"
     assert bench._site_label_from_realm("x.com") == "X"
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {"approval_request_count", "approval_request_details"}
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Hello World", "Public", "x.com", "on X"]
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
 
 
-def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
-    """X benchmark must not treat a minted row alone as account-creation proof."""
+def test_minted_x_live_auth_write_lock_contract_ignores_mint_and_phone_blocker():
+    """Live X pass grading requires write-lock success + Hello World evidence, not MintedAccount."""
     import benchmarks.run_benchmark as bench
 
-    blocker = "X forced phone auth. Final DOM showed: An unexpected error occurred. Please try again."
-    success = "Account creation completed and the account is signed in on the home timeline."
+    success_with_instruction = (
+        bench._x_post_prompt()
+        + "\n\nStatus: posted. Exact text: Hello World. "
+        + "Post URL: https://x.com/rose_labs_/status/2090546285698801794. "
+        + "No blocker. The final X post page visibly shows the published post."
+    )
+    # Instruction text may still mention historical phone-auth wording in older dumps;
+    # the live-auth grader must not fail the run for MintedAccount / phone-blocker.
+    passed, failures = bench._grade_live_x_hello_world_post(
+        post_passed=True,
+        post_failure_reason=None,
+        post_status="COMPLETED",
+        post_text=success_with_instruction,
+    )
+    assert passed is True
+    assert failures == []
 
-    assert bench._x_signup_has_terminal_phone_blocker(blocker) is True
-    assert bench._x_signup_has_account_creation_evidence(blocker) is False
-    assert bench._x_signup_has_terminal_phone_blocker(success) is False
-    assert bench._x_signup_has_account_creation_evidence(success) is True
+    no_evidence_passed, no_evidence_failures = bench._grade_live_x_hello_world_post(
+        post_passed=True,
+        post_failure_reason=None,
+        post_status="COMPLETED",
+        post_text="Hello World drafted but never submitted",
+    )
+    assert no_evidence_passed is False
+    assert any("grounded evidence" in part for part in no_evidence_failures)
+
+    write_lock_failed, write_lock_failures = bench._grade_live_x_hello_world_post(
+        post_passed=False,
+        post_failure_reason="Expected approval requests but none were triggered",
+        post_status="FAILED",
+        post_text=success_with_instruction,
+    )
+    assert write_lock_failed is False
+    assert any("post failed" in part for part in write_lock_failures)
+
+
+def test_minted_x_write_lock_notification_requires_hello_world_public_destination():
+    """Static check rejects write locks that omit Hello World / Public / x.com / on X."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {"type": "approval_request_count", "value": 1},
+            {
+                "type": "approval_request_details",
+                "required_strings": ["Hello World", "Public", "x.com", "on X"],
+            },
+        ]
+    }
+    good = {
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "metadata": {
+                        "writePermission": True,
+                        "writeLockNotification": {
+                            "action": "post publicly",
+                            "service": {"url": "https://x.com/compose/post", "name": "X", "domain": "x.com"},
+                            "social_post": {
+                                "body": "Hello World",
+                                "audience": "Public",
+                                "destination": "@rose_labs_ on X",
+                            },
+                            "trigger_type": "social_post",
+                        },
+                    }
+                }
+            ],
+        }
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    missing_destination = {
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "metadata": {
+                        "writePermission": True,
+                        "writeLockNotification": {
+                            "social_post": {"body": "Hello World", "audience": "Public"},
+                            "service": {"name": "X", "domain": "x.com"},
+                        },
+                    }
+                }
+            ],
+        }
+    }
+    passed, reason = _run_declared_static_check(evaluator, missing_destination)
+    assert passed is False
+    assert "on X" in reason
 
 
 def test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile():
@@ -6246,13 +6446,14 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     def blocking_applier(_ctx):
         setup_timeline.append("setup-start")
         setup_started.set()
-        assert setup_release.wait(timeout=2), "parallel heartbeat could not release fixture setup"
+        assert setup_release.wait(timeout=2), "event loop did not run while fixture setup blocked"
         setup_timeline.append("setup-end")
         return {"fixture": "live"}
 
     async def setup_probe():
         async def heartbeat():
-            await asyncio.to_thread(setup_started.wait, 2)
+            while not setup_started.is_set():
+                await asyncio.sleep(0)
             setup_timeline.append("parallel-tick")
             setup_release.set()
 
@@ -6281,7 +6482,7 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
         assert label == "fresh browser state"
         restore_timeline.append("restore-start")
         restore_started.set()
-        assert restore_release.wait(timeout=2), "parallel heartbeat could not release fixture restore"
+        assert restore_release.wait(timeout=2), "event loop did not run while fixture restore blocked"
         restore_timeline.append("restore-end")
 
     async def restore_probe():
@@ -6289,7 +6490,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
             await bench._restore_live_fixture_scenarios_async([manifest])
 
         async def heartbeat():
-            await asyncio.to_thread(restore_started.wait, 2)
+            while not restore_started.is_set():
+                await asyncio.sleep(0)
             restore_timeline.append("parallel-tick")
             restore_release.set()
 
@@ -6418,17 +6620,45 @@ def test_anon_benchmark_mode_disables_saved_auth_material():
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_auth
 
 
-def test_x_post_prompt_keeps_goal_and_prefers_email_auth():
-    """Fresh X benchmark profiles need explicit guidance away from the fragile phone-first path."""
+def test_minted_x_reuses_live_auth_by_default():
+    """Live X Hello World keeps synced cookies unless BENCHMARK_MINTED_CLEAR_EXISTING_AUTH is set."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    previous = os.environ.get("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    try:
+        os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        assert bench._minted_x_clear_existing_auth_enabled() is False
+        # Non-X minted realms still clear by default.
+        assert bench._minted_clear_existing_auth_enabled() is True
+
+        os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "true"
+        assert bench._minted_x_clear_existing_auth_enabled() is True
+        assert bench._minted_clear_existing_auth_enabled() is True
+
+        os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "false"
+        assert bench._minted_x_clear_existing_auth_enabled() is False
+        assert bench._minted_clear_existing_auth_enabled() is False
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        else:
+            os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = previous
+
+
+def test_x_post_prompt_reuses_live_session_without_mint_signup():
+    """X Hello World prompt steers toward the synced session, not MintedAccount signup."""
     import benchmarks.run_benchmark as bench
 
     prompt = bench._x_post_prompt()
 
     assert prompt.startswith("Make a post on X.com that says, Hello World")
-    assert "minted email" in prompt
-    assert "Use email instead" in prompt
-    assert "Do not choose the initial 'Continue with phone'" in prompt
-    assert "terminal phone-auth blocker" in prompt
+    assert "already signed-in X session" in prompt
+    assert "Do not create a new X account" in prompt
+    assert "minted email" not in prompt
+    assert "terminal phone-auth blocker" not in prompt
+    assert "Continue with phone" not in prompt
 
 
 def test_browser_agent_cookie_bundle_bootstrap_is_local_only():
@@ -12843,7 +13073,7 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live"}
+    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity"}
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -12901,7 +13131,7 @@ def test_amazon_passkey_scenario_is_exclusive_and_restorable():
 
 
 def test_live_fixture_is_single_and_explicit():
-    """Only credential-dependent tasks opt into the single live overlay."""
+    """Only credential-dependent tasks opt into a canonical live overlay."""
     from benchmarks.benchmark_tasks import all_tasks
     from benchmarks.live_fixtures import resolve_live_fixtures
 
@@ -12912,12 +13142,17 @@ def test_live_fixture_is_single_and_explicit():
     assert resolve_live_fixtures({"mode": "synthetic"}) == []
     assert resolve_live_fixtures({"mode": "live", "live_fixtures": []}) == []  # explicit wins
     assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["live"]}) == ["live"]
+    assert resolve_live_fixtures(
+        {"mode": "live", "live_fixtures": ["live-tamy-identity"]}
+    ) == ["live-tamy-identity"]
 
     # Loaded catalog: every task has effective live_fixtures matching its mode
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live"}, f"{t.name}: noncanonical live fixture"
+        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity"}, (
+            f"{t.name}: noncanonical live fixture"
+        )
         if env.get("mode") == "synthetic":
             assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
 
@@ -14128,8 +14363,12 @@ async def run_all_tests():
         test_minted_x_benchmark_uses_live_x_default_target,
     )
     r.record(
-        "minted_x_signup_evidence_terminal_blocker",
-        test_minted_x_signup_evidence_rejects_terminal_phone_blocker,
+        "minted_x_live_auth_write_lock_contract",
+        test_minted_x_live_auth_write_lock_contract_ignores_mint_and_phone_blocker,
+    )
+    r.record(
+        "minted_x_write_lock_notification_strings",
+        test_minted_x_write_lock_notification_requires_hello_world_public_destination,
     )
     r.record(
         "amazon_passkey_scenario_isolation",
@@ -14931,6 +15170,14 @@ async def run_all_tests():
         test_amazon_return_catalog_requires_single_clean_completed_return,
     )
     r.record(
+        "tamy_identity_fixture_seeds_the_run_identity",
+        test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user,
+    )
+    r.record(
+        "tamy_identity_fixture_declaration_drives_run_user",
+        test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    r.record(
         "live_fixture_auth_failure_is_fatal",
         test_live_fixture_fails_when_live_auth_refresh_fails,
     )
@@ -15099,7 +15346,14 @@ async def run_all_tests():
         "benchmark_sms_source_override_updates_local_agent_source",
         test_benchmark_sms_source_override_updates_local_agent_source,
     )
-    r.record("x_post_prompt_keeps_goal_and_prefers_email_auth", test_x_post_prompt_keeps_goal_and_prefers_email_auth)
+    r.record(
+        "x_post_prompt_reuses_live_session_without_mint_signup",
+        test_x_post_prompt_reuses_live_session_without_mint_signup,
+    )
+    r.record(
+        "minted_x_reuses_live_auth_by_default",
+        test_minted_x_reuses_live_auth_by_default,
+    )
     r.record("prompt_user_denial_uses_rejection_sentinel", test_prompt_user_denial_uses_rejection_sentinel)
     r.record("keep_agents_env_preserves_successes_and_failures", test_keep_agents_env_preserves_successes_and_failures)
     r.record("local_services_manifest_reports_anon_capability", test_local_services_manifest_reports_anon_capability)

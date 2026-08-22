@@ -228,23 +228,6 @@ export async function findParentStatus(parentAgentId: string) {
   });
 }
 
-/** Fetch agent with children (for recursive delete). */
-export async function findAgentWithChildren(agentId: string) {
-  return prisma.agent.findFirst({
-    where: {
-      id: agentId,
-      deletedAt: null,
-    },
-    include: {
-      children: {
-        where: {
-          deletedAt: null,
-        },
-      },
-    },
-  });
-}
-
 /** Fetch ancestor chain for breadcrumb navigation using recursive CTE. */
 export async function findAncestors(agentId: string) {
   return prisma.$queryRaw<{ id: string; goal: string }[]>`
