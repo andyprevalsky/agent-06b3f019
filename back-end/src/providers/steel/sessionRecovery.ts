@@ -111,7 +111,7 @@ export async function createSteelRecoverySession(
         validationBrowser,
       };
     } catch (error) {
-      if (validationBrowser !== null) {
+      if (validationBrowser !== null && typeof validationBrowser.close === 'function') {
         await validationBrowser.close().catch(() => {});
       }
       lastError = error instanceof Error ? error : new Error(String(error));

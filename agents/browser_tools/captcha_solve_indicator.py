@@ -381,6 +381,9 @@ def start_captcha_telemetry_indicator_for_task(
     task_id: str,
 ) -> None:
     """Background-poll CAPTCHA telemetry into the live-view chip."""
+    starter = getattr(dom_service, "start_captcha_telemetry_indicator", None)
+    if not callable(starter):
+        return
     memory: dict[str, Any] = dict(empty_captcha_indicator_memory())
 
     async def _poll() -> str:
@@ -392,4 +395,4 @@ def start_captcha_telemetry_indicator_for_task(
             memory=memory,
         )
 
-    dom_service.start_captcha_telemetry_indicator(_poll)
+    starter(_poll)
