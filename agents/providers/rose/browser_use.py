@@ -65,6 +65,33 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "y": {"type": "integer", "description": "Y coordinate", "required": True},
         },
     },
+    "drag": {
+        "description": (
+            "Drag from a start point to an end point with a real mouse press → move → release "
+            "(CDP Input.dispatchMouseEvent, same path browser-use uses for Element.drag_to). "
+            "Use for sliders, CAPTCHA / 'Bot or Not' slide-to-verify widgets, scrubbers, and "
+            "drag-and-drop. Prefer source_index/target_index when those nodes are indexed; "
+            "otherwise use start_x/start_y and end_x/end_y from the screenshot viewport."
+        ),
+        "params": {
+            "source_index": {
+                "type": "integer",
+                "description": "DOM index of the drag start element",
+            },
+            "target_index": {
+                "type": "integer",
+                "description": "DOM index of the drag end / drop target",
+            },
+            "start_x": {"type": "integer", "description": "Viewport X of drag start"},
+            "start_y": {"type": "integer", "description": "Viewport Y of drag start"},
+            "end_x": {"type": "integer", "description": "Viewport X of drag end"},
+            "end_y": {"type": "integer", "description": "Viewport Y of drag end"},
+            "steps": {
+                "type": "integer",
+                "description": "Intermediate move samples while held (default 24)",
+            },
+        },
+    },
     "input_text": {
         "description": "Input text into element by index",
         "params": {
@@ -188,7 +215,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Last-resort recovery for a persistent CAPTCHA, bot challenge, access-denied interstitial, "
             "unusual-traffic page, or repeated 429. Call this ONLY after you already tried to clear the "
-            "challenge yourself with normal browser actions (drag the slider, click the checkbox/verify "
+            "challenge yourself with normal browser actions (use `drag` for sliders, click the checkbox/verify "
             "button, complete the widget, use an audio or alternative path when offered) and the page is "
             "still blocked. Do not call this as the first reaction to a challenge, and never use it for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
@@ -423,7 +450,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "For CAPTCHA / bot-challenge / 'Bot or Not' pages, call this before recover_from_challenge: "
             "the DOM is often a misleading shell (#app-captcha-pwa with only div/a/span indexes) while the "
             "real slider/checkbox/widget is visual-only — use the screenshot to confirm the challenge type, "
-            "then click_coordinates (or an indexed control if one exists) to solve it."
+            "then `drag` (preferred for sliders) or click_coordinates / an indexed control to solve it."
         ),
         "params": {},
     },
@@ -672,7 +699,7 @@ action envelope in text; use the provided tool call.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
 - When authentication still blocks the task after steps 1–7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. First attempt to complete the challenge yourself with normal browser actions (slider, checkbox, verify button, audio/alternative path when present). Only call recover_from_challenge after that attempt fails and the challenge still blocks the page. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
+- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. First attempt to complete the challenge yourself with normal browser actions (`drag` for sliders, click/checkbox/verify button, audio/alternative path when present). Only call recover_from_challenge after that attempt fails and the challenge still blocks the page. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 
@@ -994,6 +1021,7 @@ _VALID_ACTIONS = frozenset(
     {
         "click",
         "click_coordinates",
+        "drag",
         "scroll",
         "wait",
         "extract",
@@ -1100,6 +1128,21 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
             "thinking": thinking,
             "coordinates": {"x": x, "y": y},
             "params": {},
+        }
+
+    if normalized_action == "drag":
+        drag_params: Dict[str, Any] = {}
+        for key in ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y", "steps"):
+            if params.get(key) is not None:
+                drag_params[key] = params[key]
+            elif first_action.get(key) is not None:
+                drag_params[key] = first_action[key]
+        return {
+            "action": "drag",
+            "thinking": thinking,
+            "index": drag_params.get("source_index"),
+            "coordinates": None,
+            "params": drag_params,
         }
 
     if normalized_action == "click" and index is None:

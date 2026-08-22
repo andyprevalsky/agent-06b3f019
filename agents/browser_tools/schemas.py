@@ -123,6 +123,67 @@ class ClickAtCoordinatesTool(BaseModel):
     button: Literal["left", "right", "middle"] = Field(default="left", description="Mouse button to click")
 
 
+class DragTool(BaseModel):
+    """Drag from a start point to an end point via CDP mouse press/move/release.
+
+    Prefer indexed elements when both ends appear in the DOM tree. Use viewport
+    coordinates (matching screenshot pixels) when the control is visual-only
+    (CAPTCHA / Bot or Not slider, canvas, etc.).
+    """
+
+    tool: Literal["drag"]
+    source_index: Optional[int] = Field(
+        default=None,
+        description="DOM index of the drag start element (e.g. slider thumb)",
+    )
+    target_index: Optional[int] = Field(
+        default=None,
+        description="DOM index of the drag end / drop target element",
+    )
+    start_x: Optional[int] = Field(
+        default=None,
+        description="Viewport X of drag start (pixels from left; matches screenshot)",
+    )
+    start_y: Optional[int] = Field(
+        default=None,
+        description="Viewport Y of drag start (pixels from top; matches screenshot)",
+    )
+    end_x: Optional[int] = Field(
+        default=None,
+        description="Viewport X of drag end (pixels from left; matches screenshot)",
+    )
+    end_y: Optional[int] = Field(
+        default=None,
+        description="Viewport Y of drag end (pixels from top; matches screenshot)",
+    )
+    steps: int = Field(
+        default=24,
+        ge=2,
+        le=120,
+        description="Number of intermediate mouse-move samples while the button is held (default 24)",
+    )
+
+    @model_validator(mode="after")
+    def require_start_and_end(self) -> "DragTool":
+        has_start = self.source_index is not None or (
+            self.start_x is not None and self.start_y is not None
+        )
+        has_end = self.target_index is not None or (self.end_x is not None and self.end_y is not None)
+        if not has_start:
+            raise ValueError(
+                "drag requires source_index or both start_x and start_y"
+            )
+        if not has_end:
+            raise ValueError(
+                "drag requires target_index or both end_x and end_y"
+            )
+        if (self.start_x is None) ^ (self.start_y is None):
+            raise ValueError("drag start_x and start_y must be provided together")
+        if (self.end_x is None) ^ (self.end_y is None):
+            raise ValueError("drag end_x and end_y must be provided together")
+        return self
+
+
 # ============================================================================
 # DROPDOWN TOOLS (browser-use additions)
 # ============================================================================
@@ -735,6 +796,7 @@ BROWSER_TOOL_MODELS = {
     "press_key": PressKeyTool,
     # Coordinate-based fallback (for vision models)
     "click_coordinates": ClickAtCoordinatesTool,
+    "drag": DragTool,
     # Dropdown handling
     "dropdown_options": DropdownOptionsTool,
     "select_dropdown": SelectDropdownTool,
@@ -870,6 +932,7 @@ __all__ = [
     "PressKeyTool",
     # Coordinate-based
     "ClickAtCoordinatesTool",
+    "DragTool",
     # Dropdown
     "DropdownOptionsTool",
     "SelectDropdownTool",

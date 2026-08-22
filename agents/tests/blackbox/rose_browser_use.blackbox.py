@@ -247,8 +247,42 @@ def test_screenshot_tool_desc_calls_out_misleading_captcha_dom():
     desc = tools[0]["description"]
     assert "misleading shell" in desc
     assert "Bot or Not" in desc
-    assert "click_coordinates" in desc
+    assert "drag" in desc
     assert "before recover_from_challenge" in desc
+
+
+def test_drag_tool_in_catalog_and_normalizes_coordinates():
+    assert "drag" in BROWSER_USE_TOOLS
+    tools = build_browser_use_tools(["drag"])
+    assert tools[0]["name"] == "drag"
+    assert "slider" in tools[0]["description"].lower() or "CAPTCHA" in tools[0]["description"]
+
+    out = normalize_browser_use_response(
+        {
+            "thinking": "slide captcha",
+            "action": [{"drag": {"start_x": 400, "start_y": 420, "end_x": 900, "end_y": 420, "steps": 30}}],
+        }
+    )
+    assert out["action"] == "drag"
+    assert out["params"]["start_x"] == 400
+    assert out["params"]["end_x"] == 900
+    assert out["params"]["steps"] == 30
+
+
+def test_drag_tool_schema_requires_start_and_end():
+    from browser_tools.schemas import DragTool
+
+    DragTool.model_validate(
+        {"tool": "drag", "source_index": 1, "target_index": 2}
+    )
+    DragTool.model_validate(
+        {"tool": "drag", "start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4}
+    )
+    try:
+        DragTool.model_validate({"tool": "drag", "start_x": 1, "start_y": 2})
+        raise AssertionError("expected validation error")
+    except Exception:
+        pass
 
 
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
@@ -268,6 +302,7 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
     assert "CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication." in prompt
     assert "First attempt to complete the challenge yourself" in prompt
+    assert "`drag` for sliders" in prompt
     assert "Only call recover_from_challenge after that attempt fails" in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
@@ -1818,6 +1853,8 @@ async def run_all_tests():
         "screenshot_tool_desc_misleading_captcha_dom",
         test_screenshot_tool_desc_calls_out_misleading_captcha_dom,
     )
+    r.record("drag_tool_catalog_and_normalize", test_drag_tool_in_catalog_and_normalizes_coordinates)
+    r.record("drag_tool_schema_requires_endpoints", test_drag_tool_schema_requires_start_and_end)
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
     r.record(

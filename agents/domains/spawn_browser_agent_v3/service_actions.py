@@ -739,6 +739,7 @@ _INTERACTION_ACTIONS = {
     "input_text",
     "press_key",
     "scroll",
+    "drag",
     "dropdown_options",
     "select_dropdown",
     "upload_file",
@@ -983,6 +984,15 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             result={"success": True},
         )
         return {"success": True, "message": ""}
+    if context.action_name == "drag":
+        return await _execute_drag(
+            session=context.session,
+            dom_service=context.dom_service,
+            action_history=context.action_history,
+            params=context.params,
+            thinking=context.thinking,
+            humanizer=context.humanizer,
+        )
     return await _execute_upload_file(
         session=context.session,
         dom_service=context.dom_service,
@@ -2467,6 +2477,154 @@ async def _click_write_lock_result(
             "url": current_url,
         }
     return None
+
+
+async def _resolve_drag_point(
+    dom_service: DOMService,
+    *,
+    index: Any,
+    x: Any,
+    y: Any,
+    label: str,
+) -> tuple[int, int]:
+    """Resolve one drag endpoint from index and/or explicit viewport coordinates."""
+    if x is not None and y is not None:
+        return int(x), int(y)
+    if index is None:
+        raise ValueError(f"drag {label} requires an index or x/y coordinates")
+    coord_tuple = await _maybe_await(dom_service.get_click_coordinates(int(index)))
+    if not coord_tuple:
+        coord_tuple = await _refresh_element_coordinates(dom_service, int(index), for_click=True)
+    if not coord_tuple:
+        raise ValueError(f"drag {label}: no coordinates for element index {index}")
+    return int(coord_tuple[0]), int(coord_tuple[1])
+
+
+async def _cdp_drag_between(
+    session: Any,
+    *,
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    steps: int,
+) -> None:
+    """browser-use Element.drag_to pattern with intermediate held moves."""
+    cdp_session = await session.get_or_create_cdp_session()
+    session_id = cdp_session.session_id
+    send = cdp_session.cdp_client.send.Input.dispatchMouseEvent
+    step_count = max(2, min(120, int(steps)))
+
+    await send(
+        params={"type": "mouseMoved", "x": start_x, "y": start_y},
+        session_id=session_id,
+    )
+    await asyncio.sleep(0.05)
+    await send(
+        params={
+            "type": "mousePressed",
+            "x": start_x,
+            "y": start_y,
+            "button": "left",
+            "buttons": 1,
+            "clickCount": 1,
+        },
+        session_id=session_id,
+    )
+    await asyncio.sleep(0.03)
+    for i in range(1, step_count + 1):
+        t = i / step_count
+        x = start_x + (end_x - start_x) * t
+        y = start_y + (end_y - start_y) * t
+        await send(
+            params={
+                "type": "mouseMoved",
+                "x": x,
+                "y": y,
+                "button": "left",
+                "buttons": 1,
+            },
+            session_id=session_id,
+        )
+        await asyncio.sleep(0.01)
+    await send(
+        params={
+            "type": "mouseReleased",
+            "x": end_x,
+            "y": end_y,
+            "button": "left",
+            "buttons": 0,
+            "clickCount": 1,
+        },
+        session_id=session_id,
+    )
+
+
+async def _execute_drag(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    params: Dict[str, Any],
+    thinking: Any,
+    humanizer: Optional[BrowserHumanizer],
+) -> Dict[str, Any]:
+    """Execute a press→move→release drag via humanizer or raw CDP."""
+    try:
+        start_x, start_y = await _resolve_drag_point(
+            dom_service,
+            index=params.get("source_index"),
+            x=params.get("start_x"),
+            y=params.get("start_y"),
+            label="start",
+        )
+        end_x, end_y = await _resolve_drag_point(
+            dom_service,
+            index=params.get("target_index"),
+            x=params.get("end_x"),
+            y=params.get("end_y"),
+            label="end",
+        )
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+    steps = int(params.get("steps") or 24)
+    if humanizer:
+        await humanizer.drag_between(start_x, start_y, end_x, end_y, steps=steps)
+    else:
+        logger.warning(
+            "⚠️ HUMANIZATION FALLBACK: No humanizer available, using CDP drag like browser-use Element.drag_to"
+        )
+        await _cdp_drag_between(
+            session,
+            start_x=start_x,
+            start_y=start_y,
+            end_x=end_x,
+            end_y=end_y,
+            steps=steps,
+        )
+
+    recorded = {
+        "start": {"x": start_x, "y": start_y},
+        "end": {"x": end_x, "y": end_y},
+        "steps": steps,
+        "source_index": params.get("source_index"),
+        "target_index": params.get("target_index"),
+    }
+    await action_history.record_action(
+        dom_service=dom_service,
+        action="drag",
+        thinking=thinking,
+        index=params.get("source_index"),
+        coordinates={"x": start_x, "y": start_y},
+        params=recorded,
+        result={"success": True},
+    )
+    return {
+        "success": True,
+        "message": f"Dragged from ({start_x},{start_y}) to ({end_x},{end_y})",
+        **recorded,
+    }
 
 
 async def _execute_click(

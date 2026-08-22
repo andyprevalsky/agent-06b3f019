@@ -77,6 +77,11 @@ DOM shells are often misleading and to screenshot before
 of agent `3c824ea4`: baseline 3/3 `recover_from_challenge`; coords-only 2/3
 recover + 1/3 screenshot; screenshot-desc (± coords) 3/3 `screenshot`.
 
+Added first-class `drag` tool (indexes and/or viewport coordinates) using the
+browser-use CDP pattern (`mousePressed` → held `mouseMoved` → `mouseReleased`)
+via humanizer / raw CDP. Dump turn-2 replay with screenshot + `drag` exposed:
+3/3 `drag` (~647,429 → ~870,429).
+
 10k-agent: O(1) per step; no shared fan-in. Screenshot bytes only when the
 model opts in (or a later auto-include change).
 

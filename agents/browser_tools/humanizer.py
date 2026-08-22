@@ -662,6 +662,69 @@ class BrowserHumanizer:
         self._suppress_idle(0.45)
         logger.debug("Humanized click", x=x, y=y)
 
+    async def drag_between(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        *,
+        steps: int = 24,
+    ) -> None:
+        """CDP mouse drag: press at start, move while held, release at end.
+
+        Mirrors browser-use ``Element.drag_to`` (Input.dispatchMouseEvent
+        mousePressed → mouseMoved → mouseReleased) with intermediate moves so
+        slider CAPTCHAs see a continuous gesture.
+        """
+        step_count = max(2, min(120, int(steps)))
+        async with self._movement_lock:
+            await self._move_to_unlocked(int(start_x), int(start_y))
+            await asyncio.sleep(random.uniform(0.04, 0.1))
+
+            mouse = self.input_page.mouse
+            pressed = await self._dispatch_mouse_button(float(start_x), float(start_y), pressed=True)
+            if not pressed:
+                await mouse.move(int(start_x), int(start_y))
+                await mouse.down()
+
+            for i in range(1, step_count + 1):
+                t = i / step_count
+                x = start_x + (end_x - start_x) * t
+                y = start_y + (end_y - start_y) * t
+                cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
+                if cdp_session is not None and pressed:
+                    try:
+                        await cdp_session.send(
+                            "Input.dispatchMouseEvent",
+                            {
+                                "type": "mouseMoved",
+                                "x": float(x),
+                                "y": float(y),
+                                "button": "left",
+                                "buttons": 1,
+                                "timestamp": time.time(),
+                            },
+                        )
+                    except Exception as exc:
+                        await self._invalidate_cdp_session(cdp_session)
+                        logger.debug("CDP drag move failed; Playwright fallback", error=str(exc))
+                        await mouse.move(int(x), int(y))
+                        pressed = False
+                else:
+                    await mouse.move(int(x), int(y))
+                await self._notify_cursor_observer(int(x), int(y))
+                await asyncio.sleep(random.uniform(0.008, 0.02))
+
+            if not await self._dispatch_mouse_button(float(end_x), float(end_y), pressed=False):
+                await mouse.move(int(end_x), int(end_y))
+                await mouse.up()
+
+            self._last_pos = (int(end_x), int(end_y))
+            self._idle_anchor = (int(end_x), int(end_y))
+        self._suppress_idle(0.35)
+        logger.debug("Humanized drag", start=(start_x, start_y), end=(end_x, end_y), steps=step_count)
+
     async def click_for_input(
         self,
         x: int,
