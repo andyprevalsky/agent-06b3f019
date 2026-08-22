@@ -565,6 +565,7 @@ class DOMService:
             # up — run them concurrently. Each swallows its own failures.
             await asyncio.gather(
                 self._inject_scrollbar_css(),
+                self._inject_captcha_solve_indicator(),
                 self.ensure_browser_overlays_suppressed(),
                 self._inject_anti_detection(),
             )
@@ -610,6 +611,28 @@ class DOMService:
             logger.info("📏 Injected scrollbar-hiding CSS for consistent 1280x800 viewport")
         except Exception as e:
             logger.warning(f"⚠️ Failed to inject scrollbar CSS: {e}")
+
+    async def _inject_captcha_solve_indicator(self) -> None:
+        """Show a live-view banner while Kernel/Steel auto-solve a CAPTCHA.
+
+        Providers solve transparently with no UI. Validation-connection init
+        scripts from the backend do not reliably survive until this agent CDP
+        attach, so re-register here (same pattern as anti-detection spoofs).
+        """
+        try:
+            from browser_tools.captcha_solve_indicator import CAPTCHA_SOLVE_INDICATOR_SCRIPT
+
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                return
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": CAPTCHA_SOLVE_INDICATOR_SCRIPT, "runImmediately": True},
+                session_id=cdp_session.session_id,
+            )
+            logger.info("🧩 Injected CAPTCHA auto-solve live-view indicator")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to inject CAPTCHA auto-solve indicator: {e}")
 
     async def disconnect(self) -> None:
         """Disconnect from the browser.

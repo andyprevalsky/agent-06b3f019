@@ -30,6 +30,7 @@ import { seedConnectPasskeys, waitForAuthorizePage } from './connectSession.gran
 import { buildAuthorizeUrl } from '../../providers/browser/claudeGrantMint';
 import { buildCodexAuthorizeUrl } from '../../providers/browser/codexGrantMint';
 import { attachCdp } from './cdp';
+import { CAPTCHA_SOLVE_INDICATOR_SCRIPT } from '../../providers/browser/captchaSolveIndicator';
 import { finish } from './connectSession.lifecycle';
 import { pending } from './connectSession.state';
 import { startSignInWatcher } from './connectSession.watcher';
@@ -168,6 +169,9 @@ export async function startConnectSession(
           await cdp.armCodexCallback(auth.state);
         }
         await cdp.navigate(auth.url);
+        // Providers solve CAPTCHAs with no UI — paint a live-view banner when a
+        // challenge widget appears so the human watching the iframe can see it.
+        await cdp.evaluate(CAPTCHA_SOLVE_INDICATOR_SCRIPT).catch(() => undefined);
         // Log the destination host: routing a provider to the WRONG sign-in page
         // is invisible in every other signal (cookies still seed, stages still
         // advance) and presents as "the cookies didn't work".
