@@ -4550,6 +4550,132 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
     assert "write-lock" in terminal_criteria
 
 
+def test_alchemy_k5_auth_assistance_terminal_fails_payment_contract():
+    """k=5 agent 9aceb675 stopped at auth_assistance instead of payment_approval.
+
+    Local repro: browser-alchemy-springs-sauna fleet run 20260822_053219, agent
+    9aceb675-d12c-412c-a009-d8c5a4fc4b1e clicked Momence Sign in, entered saved
+    credentials, then credential_propagation paused for auth assistance before
+    any payment-card request.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    auth_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "IN_PROGRESS",
+                    "action_type": "credential_propagation",
+                    "title": "Updating credential state",
+                },
+                "message": (
+                    "Updating saved credential state before waiting for user "
+                    "authentication assistance."
+                ),
+            }
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_request_kind_seen": "auth_assistance",
+            "expected_attention_kind_seen": "auth_assistance",
+        },
+    }
+    passed, reason = evaluate_task(task, auth_terminal, approvals_triggered=1)
+    assert passed is False
+    assert "payment_approval" in (reason or "").lower()
+
+
+def test_alchemy_k5_monday_calendar_switch_visible_in_failure_trajectory():
+    """k=5 agent 8ef2cae5 selected Sun 23 then Mon 24 before Book now."""
+    import json
+    from pathlib import Path
+
+    run_path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks/runs/20260822_053219_browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna.json"
+    )
+    if not run_path.is_file():
+        return
+    run = json.loads(run_path.read_text())
+    task = next(
+        t
+        for t in run["tasks"]
+        if t.get("agent_id") == "8ef2cae5-9b8b-4cfd-b567-f411047d773c"
+    )
+    titles = [
+        (m.get("metadata") or {}).get("title", "")
+        for m in task.get("logs", {}).get("messages", [])
+        if (m.get("metadata") or {}).get("action_type") == "click"
+    ]
+    sun_idx = next(i for i, t in enumerate(titles) if "Sun" in t and "23" in t)
+    mon_idx = next(i for i, t in enumerate(titles) if "Mon" in t and "24" in t)
+    book_idx = next(i for i, t in enumerate(titles) if "Book now" in t)
+    assert sun_idx < mon_idx < book_idx
+    evaluators = task.get("logs", {}).get("declared_evaluators") or []
+    selection = next(e for e in evaluators if e.get("id") == "alchemy-sauna-selection-semantics")
+    assert selection.get("passed") is False
+    assert "Monday Night Sauna Garden" in (selection.get("reasoning") or "")
+
+
+async def test_alchemy_k5_monday_night_receipt_fails_selection_semantics():
+    """Replay selection judge on archived 8ef2cae5 payment receipt (score 0.0)."""
+    import json
+    from pathlib import Path
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _call_declared_llm_judge
+
+    run_path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks/runs/20260822_053219_browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna.json"
+    )
+    if not run_path.is_file():
+        return
+    run = json.loads(run_path.read_text())
+    archived = next(
+        t
+        for t in run["tasks"]
+        if t.get("agent_id") == "8ef2cae5-9b8b-4cfd-b567-f411047d773c"
+    )
+    msgs = archived["logs"]["messages"]
+    pay = next(
+        m
+        for m in msgs
+        if (m.get("metadata") or {}).get("toolName") == "request_user_approval"
+    )
+    approval = (pay.get("metadata") or {}).get("requestUserApproval", {})
+    question = pay.get("message") or pay.get("text") or ""
+    data = {
+        "agent": {"status": archived["status"]},
+        "messages": msgs,
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "approvals_resolved": 0,
+            "attention_request_kind_seen": "payment_approval",
+            "expected_attention_kind_seen": "payment_approval",
+            "expected_payment_receipt_seen": True,
+            "attention_requests_seen": [
+                {
+                    "kind": "payment_approval",
+                    "question": question,
+                    "requestPaymentCard": approval.get("requestPaymentCard", {}),
+                }
+            ],
+        },
+    }
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    selection = task.evaluators[1]
+    result = await _call_declared_llm_judge(task, selection, data)
+    assert float(result.get("score") or 0) < 1.0
+    reasoning = (result.get("reasoning") or "").lower()
+    assert "monday night" in reasoning or "morning sauna" in reasoning
+
+
 def test_approval_request_details_support_multiple_dates_and_seat():
     """Booking approvals can require both stay dates and an assigned seat."""
     from benchmarks.run_benchmark import _run_declared_static_check
@@ -14530,6 +14656,18 @@ async def run_all_tests():
     r.record(
         "alchemy_sauna_grounded_payment_approval",
         test_alchemy_sauna_catalog_stops_at_grounded_payment_approval,
+    )
+    r.record(
+        "alchemy_k5_auth_assistance_terminal_fails_payment_contract",
+        test_alchemy_k5_auth_assistance_terminal_fails_payment_contract,
+    )
+    r.record(
+        "alchemy_k5_monday_calendar_switch_failure_trajectory",
+        test_alchemy_k5_monday_calendar_switch_visible_in_failure_trajectory,
+    )
+    await r.record_async(
+        "alchemy_k5_monday_night_receipt_fails_selection_semantics",
+        test_alchemy_k5_monday_night_receipt_fails_selection_semantics,
     )
     r.record(
         "approval_details_multiple_dates_and_seat",
