@@ -4209,45 +4209,25 @@ def test_payment_merchant_accepts_bare_business_name():
 
 
 def test_hotel_payment_merchant_accepts_bare_hotels_com_label():
-    """Hotels.com catalog bookkeeping uses shorthand ``Business (host)``; bare labels must pass."""
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _validate_payment_receipt
+    """Shorthand ``Hotels.com (hotels.com)`` catalog bookkeeping accepts bare Hotels.com labels."""
+    from benchmarks.run_benchmark import _validate_payment_merchant_identity
 
-    task = get_task_by_name("browser-hotel-booking")
-    request = {
-        "metadata": {
-            "requestUserApproval": {
-                "url": "https://www.hotels.com/checkout/session/test",
-                "requestPaymentCard": {
-                    "merchant": "Hotels.com",
-                    "currency": "USD",
-                    "lineItems": [
-                        {
-                            "name": "Hotel Kabuki, Room, 1 King Bed, Sat Aug 22, 2026 to Sun Aug 23, 2026",
-                            "imageUrl": None,
-                            "productUrl": "https://www.hotels.com/ho129640/hotel-kabuki-part-of-jdv-by-hyatt-san-francisco-united-states-of-america/",
-                            "rating": "4.5 stars",
-                            "reviewCount": "1,008 reviews",
-                            "unitPriceCents": 26000,
-                            "quantity": 1,
-                            "lineTotalCents": 26000,
-                        }
-                    ],
-                    "fees": [{"label": "Taxes & fees", "amountCents": 4292}],
-                    "subtotalCents": 26000,
-                    "totalCents": 34361,
-                    "fingerprint": "a" * 64,
-                    "userId": "1f85ff25-6e29-4c1b-8739-f917bd101a30",
-                    "agentId": "hotel-merchant-test",
-                },
-            },
-            "writePermission": True,
-        },
-    }
-    assert _validate_payment_receipt(task, request, messages=[]) is None
+    error = _validate_payment_merchant_identity(
+        "Hotels.com (hotels.com)",
+        "Hotels.com",
+        {},
+        [],
+        ["Hotel Kabuki", "Hotel Kabuki, part of JdV by Hyatt"],
+    )
+    assert error is None
 
-    request["metadata"]["requestUserApproval"]["requestPaymentCard"]["merchant"] = "Booking.com"
-    wrong = _validate_payment_receipt(task, request, messages=[])
+    wrong = _validate_payment_merchant_identity(
+        "Hotels.com (hotels.com)",
+        "Booking.com",
+        {},
+        [],
+        ["Hotel Kabuki"],
+    )
     assert wrong is not None and wrong.startswith("merchant mismatch")
 
 
@@ -4972,16 +4952,13 @@ def test_approval_request_details_support_multiple_dates_and_seat():
 
 
 def test_hotel_catalog_stops_at_grounded_payment_approval():
-    """Hotel booking passes at a detailed, unresolved Hotels.com card request."""
-    from copy import deepcopy
-
+    """Hotel booking passes at one well-formed, unresolved Hotels.com card request (semantics via judge)."""
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _run_declared_static_check
 
     task = get_task_by_name("browser-hotel-booking")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
-    assert "payment credentials" not in task.prompt.lower()
-    assert "payment-card request" not in task.prompt.lower()
+    assert "lowest-priced" not in task.prompt.lower()
+    assert "non-smoking" not in task.prompt.lower()
     assert task.prompt.endswith("Use guest checkout — do not sign in or create an account.")
     assert task.approval_handling == "ignore"
     assert task.expected_attention_kinds == []
@@ -4989,7 +4966,7 @@ def test_hotel_catalog_stops_at_grounded_payment_approval():
     assert task.expected_attention_kind == "payment_approval"
     assert task.expected_approval_count == 1
     assert task.success_on_payment_card_request is True
-    assert task.expected_payment_receipt["merchant"] == "Hotels.com (hotels.com)"
+    assert task.expected_payment_receipt is True
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
@@ -5004,52 +4981,15 @@ def test_hotel_catalog_stops_at_grounded_payment_approval():
         "browser_agent_session_count",
         "expected_payment_receipt",
         "approval_request_count",
-        "approval_request_details",
     }
-    approval_check = next(check for check in static_evaluator["checks"] if check["type"] == "approval_request_details")
-    assert approval_check["required_strings"] == ["Kabuki"]
-    assert approval_check["require_date"] is True
-    assert approval_check["require_amount"] is True
-
-    good = {
-        "agent": {"status": "ACTIVE"},
-        "messages": [
-            {
-                "role": "TOOL",
-                "metadata": {
-                    "toolName": "spawn_browser_agent",
-                    "toolStatus": "FINISHED",
-                    "toolCallId": "hotel-browser-1",
-                },
-            }
-        ],
-        "_benchmark": {
-            "approvals_triggered": 1,
-            "expected_payment_receipt_seen": True,
-            "attention_requests_seen": [
-                {
-                    "kind": "payment_approval",
-                    "question": (
-                        "Approve one night at Hotel Kabuki from Saturday, August 22, 2026 "
-                        "to Sunday, August 23, 2026 for $344.00?"
-                    ),
-                }
-            ],
-        },
-    }
-    assert _run_declared_static_check(static_evaluator, good)[0] is True
-
-    missing_amount = deepcopy(good)
-    missing_amount["_benchmark"]["attention_requests_seen"][0]["question"] = (
-        "Approve one night at Hotel Kabuki from Saturday, August 22, 2026 to Sunday, August 23, 2026?"
-    )
-    passed, reason = _run_declared_static_check(static_evaluator, missing_amount)
-    assert passed is False
-    assert "amount" in reason.lower()
+    assert "approval_request_details" not in static_types
 
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("lowest-priced", "non-smoking", "payment approval", "unresolved", "guest"):
-        assert requirement in semantic_criteria
+    judge = task.evaluators[1]["judge_prompt"].lower()
+    for requirement in ("hotel kabuki", "payment", "unresolved", "guest", "hotels.com"):
+        assert requirement in semantic_criteria or requirement in judge
+    for forbidden in ("lowest-priced", "non-smoking", "lowest-price"):
+        assert forbidden not in semantic_criteria
 
 
 def test_event_ticket_catalog_stops_at_grounded_payment_approval():

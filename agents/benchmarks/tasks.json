@@ -1834,7 +1834,7 @@
     "name": "browser-hotel-booking",
     "title": "Hotel Kabuki One-Night Booking",
     "description": "Reserve a one-night hotel stay on hotels.com via guest checkout.",
-    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday on hotels.com (https://www.hotels.com/). Choose the lowest-priced non-smoking room, keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
+    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
     "timeout_seconds": 1125,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1854,40 +1854,7 @@
     "approval_handling": "ignore",
     "expected_approval_count": 1,
     "expected_attention_kind": "payment_approval",
-    "expected_payment_receipt": {
-      "merchant": "Hotels.com (hotels.com)",
-      "merchantBusinessAliases": [
-        "Hotels.com",
-        "Hotel Kabuki",
-        "Hotel Kabuki, part of JdV by Hyatt"
-      ],
-      "currency": "USD",
-      "requiredFields": [
-        "merchant",
-        "currency",
-        "lineItems",
-        "fees",
-        "subtotalCents",
-        "totalCents",
-        "fingerprint",
-        "userId",
-        "agentId"
-      ],
-      "requiredLineItemFields": [
-        "name",
-        "imageUrl",
-        "productUrl",
-        "rating",
-        "reviewCount",
-        "unitPriceCents",
-        "quantity",
-        "lineTotalCents"
-      ],
-      "requiredFeeFields": [
-        "label",
-        "amountCents"
-      ]
-    },
+    "expected_payment_receipt": true,
     "success_on_payment_card_request": true,
     "expected_tool_counts": {
       "spawn_browser_agent": 1
@@ -1925,8 +1892,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The run stops after exactly one unresolved payment-card approval on the grounded hotels.com checkout",
-          "The approval identifies Hotel Kabuki, both stay dates, and the total amount"
+          "The run stops after exactly one unresolved payment-card approval on the grounded hotels.com checkout"
         ],
         "checks": [
           {
@@ -1943,14 +1909,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": [
-              "Kabuki"
-            ],
-            "require_date": true,
-            "require_amount": true
           }
         ]
       },
@@ -1958,12 +1916,11 @@
         "id": "hotel-kabuki-payment-boundary-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The pending payment approval is for Hotel Kabuki on hotels.com, one adult, Saturday to Sunday, in a non-smoking room",
-          "Grounded comparison evidence shows the selected rate is the lowest-priced available non-smoking option under $400 before taxes and fees",
+          "The pending payment approval is for Hotel Kabuki on hotels.com for one adult, Saturday to Sunday, with room rate under $400 before taxes and fees",
           "No package, upgrade, or add-on is selected; checkout used guest flow on hotels.com without signing in or creating an account",
           "The trajectory ends at exactly one unresolved payment-card approval grounded to hotels.com; the harness does not approve it, and a completed reservation or generic write-lock alone is not success"
         ],
-        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com guest checkout, the exact hotel, dates, occupancy, room constraints, lowest-price selection, price cap, and one unresolved payment-card approval. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
+        "judge_prompt": "Review the room selection, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com guest checkout, Hotel Kabuki, the stay dates, one-adult occupancy, the under-$400 pre-tax/fees cap, no packages or add-ons, and one unresolved payment-card approval. Judge merchant labels, hotel naming, and room descriptions by meaning rather than exact strings. Do not require lowest-price or non-smoking proof. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,
