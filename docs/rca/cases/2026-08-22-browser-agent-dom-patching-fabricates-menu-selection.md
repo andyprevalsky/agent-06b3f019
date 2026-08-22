@@ -11,11 +11,8 @@ symptoms:
   - blue_bottle_recovery_payment_boundary failed
   - Executed JS, result: patched
   - hasOat: False
-  - Max iterations (60) reached
   - Timeout after 1203s (dynamic cap=1200s)
   - spawn_browser_agent exceeded its exact root call limit expected 1 got 2
-  - browser_session_auth 14
-  - browser_challenge_recovery_failed No stable browser configuration cleared the challenge
 tags:
   - blue-bottle
   - browser
