@@ -289,7 +289,12 @@ export async function syncIntegrationCredentials(
           accountId: integration.accountId ?? '',
         },
       },
-      create: integration,
+      // Local Integration ids are intentionally independent from production.
+      // A previous sync may already own the remote id under an older natural
+      // identity (for example after accountId changes). Let Postgres allocate a
+      // fresh id on create so that stale row can be removed after the complete
+      // production snapshot is reconciled, instead of failing on the id PK.
+      create: updateData,
       update: updateData,
       select: { id: true },
     });

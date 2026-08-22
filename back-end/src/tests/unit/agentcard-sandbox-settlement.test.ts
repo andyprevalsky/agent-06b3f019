@@ -90,6 +90,7 @@ async function main(): Promise<void> {
               stripePaymentIntentId: 'pi_hold_race',
             },
           ],
+          findClearedPurchasesByTotal: async () => [],
           getCardPan: async () => '4242424242420640',
           claimHeldPurchaseForCharge: async () => false,
           testCharge: async (input) => {

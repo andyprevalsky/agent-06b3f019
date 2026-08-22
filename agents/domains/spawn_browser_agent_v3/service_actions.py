@@ -725,10 +725,7 @@ def _navigation_guard_error(
     legitimate merchant → third-party order flows (e.g. bluebottlecoffee.com →
     order.online) after challenge recovery on the merchant host.
     """
-    navigation_url = target_url
-    if action == "goto" and target_url and not urlparse(target_url).scheme:
-        # Match _execute_goto's long-standing convenience for bare hostnames.
-        navigation_url = f"https://{target_url}"
+    navigation_url = _normalize_goto_url(target_url) if action == "goto" else target_url
     if target_url:
         unsafe_reason = _non_public_navigation_reason(navigation_url or target_url)
         if unsafe_reason:
@@ -740,6 +737,19 @@ def _navigation_guard_error(
             f"({context.current_url or 'current page'}) and continue the task there."
         )
     return None
+
+
+_EXPLICIT_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_BARE_HOST_PORT_RE = re.compile(r"^(?:\[[^\]]+\]|[A-Za-z0-9.-]+):[0-9]+(?:[/?#]|$)")
+
+
+def _normalize_goto_url(url: Optional[str]) -> Optional[str]:
+    """Add HTTPS to bare hosts while preserving explicit schemes for rejection."""
+    if not url or url.startswith(("http://", "https://", "about:", "file:")):
+        return url
+    if _EXPLICIT_URL_SCHEME_RE.match(url) and not _BARE_HOST_PORT_RE.match(url):
+        return url
+    return f"https://{url}"
 
 
 _INTERACTION_ACTIONS = {
@@ -3070,9 +3080,9 @@ async def _execute_goto(
     """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
 
-    url = params.get("url", "")
-    if url and not url.startswith(("http://", "https://", "about:", "file:")):
-        url = f"https://{url}"
+    original_url = params.get("url", "")
+    url = _normalize_goto_url(original_url) or ""
+    if url != original_url:
         logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
     credential_summary = None
     target_auth_realm = auth_realm_from_url(url)

@@ -50,6 +50,50 @@ test('runtime seed reads fall back to the direct endpoint when no pooler is conf
   );
 });
 
+test('compute-token sync disables revoked pool rows and excludes stale local eligibility', () => {
+  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const helperStart = source.indexOf('async function syncIntegrations()');
+  const helperEnd = source.indexOf('/** Email providers refreshed', helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+  const gptStart = source.indexOf('async function inspectGptCodeIntegrations()');
+  const claudeStart = source.indexOf('async function inspectClaudeCodeIntegrations()');
+  const inspectors = source.slice(
+    gptStart,
+    source.indexOf('async function countUsableClaude', claudeStart)
+  );
+
+  assert(helperStart > 0 && helperEnd > helperStart, 'expected syncIntegrations helper');
+  assert(
+    helper.includes('const previouslyPooledLocalIntegrations = await local.integration.findMany'),
+    'expected the sync to discover previously pooled foreign rows'
+  );
+  assert(
+    helper.includes('poolingEnabled: false') &&
+      helper.includes('userId: { in: previousPoolUserIds }'),
+    'expected production revocations to be read for previous pool owners'
+  );
+  assert(
+    helper.includes('where: { id: { in: revokedLocalIds } }') &&
+      helper.includes('data: { poolingEnabled: false }'),
+    'expected only exact matching revoked local rows to have pooling disabled'
+  );
+  assert(
+    helper.includes(
+      'activeRemotePoolIntegrationIds = new Set(syncedIds.slice(userIntegrations.length))'
+    ),
+    'expected the current production pool snapshot to determine local eligibility'
+  );
+  assert.equal(
+    inspectors.split('activeRemotePoolIntegrationIds.has(integration.id)').length - 1,
+    2,
+    'both compute-token inspectors must require current remote pool eligibility'
+  );
+  assert(
+    !inspectors.includes('integration.userId === SEED_USER_ID || integration.poolingEnabled'),
+    'compute-token availability must not trust a stale local pooling flag'
+  );
+});
+
 test('an explicit benchmark domain scopes every browser-auth selector', () => {
   const domains = ['amazon.com'];
 

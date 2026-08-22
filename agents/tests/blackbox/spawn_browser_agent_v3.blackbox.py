@@ -13047,6 +13047,7 @@ def test_url_looks_like_api_surface_guard():
     assert _navigation_guard_error(ctx, action="open_new_tab", target_url="about:blank") is None
     assert _navigation_guard_error(ctx, action="goto", target_url="https://1.1.1.1/") is None
     assert _navigation_guard_error(ctx, action="goto", target_url="order.online/menu") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="example.com:8443/cart") is None
     for unsafe_url in (
         "file:///etc/passwd",
         "data:text/html,hello",

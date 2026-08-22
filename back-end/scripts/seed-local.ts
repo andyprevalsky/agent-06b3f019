@@ -129,6 +129,8 @@ const COMPUTE_TOKEN_REQUIRED_TYPES = parseComputeTokenRequiredTypes(
 const POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS =
   process.env.SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS === '1';
 const ISOLATED_BENCHMARK_RUN = process.env.BENCHMARK_ISOLATED_RUN === 'true';
+const COMPUTE_INTEGRATION_NAMES = ['claude_code', 'gpt_code'] as const;
+let activeRemotePoolIntegrationIds = new Set<string>();
 
 // SEED_COOKIE_DOMAINS scopes every domain-bearing browser-auth table to the
 // domains a benchmark task needs. Set by run_benchmark from the task's
@@ -410,6 +412,14 @@ async function findProdIntegrations(
   return rows.map((row) => ({ ...row, accountId: '', accountEmail: null }));
 }
 
+function integrationPoolIdentity(row: {
+  userId: string;
+  name: string;
+  accountId?: string | null;
+}): string {
+  return JSON.stringify([row.userId, row.name, row.accountId ?? '']);
+}
+
 // Keep production reads on the columns that existed before the newest local
 // migration. A deploy seeds from production before that migration is live, so
 // an implicit SELECT * would request the new health columns and fail with P2022.
@@ -431,12 +441,43 @@ const PROD_EMAIL_CREDENTIAL_COLUMNS = {
 } as const;
 
 async function syncIntegrations(): Promise<number> {
+  activeRemotePoolIntegrationIds.clear();
   // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
   const userIntegrations = await findProdIntegrations({ userId: SEED_USER_ID });
   const poolIntegrations = await findProdIntegrations({
     poolingEnabled: true,
     userId: { not: SEED_USER_ID },
   });
+  const previouslyPooledLocalIntegrations = await local.integration.findMany({
+    where: {
+      name: { in: [...COMPUTE_INTEGRATION_NAMES] },
+      poolingEnabled: true,
+      userId: { not: SEED_USER_ID },
+    },
+    select: { id: true, userId: true, name: true, accountId: true },
+  });
+  const previousPoolUserIds = [
+    ...new Set(previouslyPooledLocalIntegrations.map((integration) => integration.userId)),
+  ];
+  const revokedRemoteIntegrations =
+    previousPoolUserIds.length > 0
+      ? await findProdIntegrations({
+          name: { in: [...COMPUTE_INTEGRATION_NAMES] },
+          poolingEnabled: false,
+          userId: { in: previousPoolUserIds },
+        })
+      : [];
+  const revokedRemoteIdentities = new Set(revokedRemoteIntegrations.map(integrationPoolIdentity));
+  const revokedLocalIds = previouslyPooledLocalIntegrations
+    .filter((integration) => revokedRemoteIdentities.has(integrationPoolIdentity(integration)))
+    .map((integration) => integration.id);
+  if (revokedLocalIds.length > 0) {
+    const revoked = await local.integration.updateMany({
+      where: { id: { in: revokedLocalIds } },
+      data: { poolingEnabled: false },
+    });
+    console.log(`  🧹 Integrations: ${revoked.count} revoked pool token(s) disabled locally`);
+  }
   const all = [...userIntegrations, ...poolIntegrations];
   // Pool tokens reference foreign users — ensure those User records exist locally
   const poolUserIds = [...new Set(poolIntegrations.map((i) => i.userId))];
@@ -449,9 +490,10 @@ async function syncIntegrations(): Promise<number> {
   // Preserve the local id (and any dependent rows) while refreshing the
   // production credential fields.
   const syncedIds = await syncIntegrationCredentials(local.integration, all);
+  activeRemotePoolIntegrationIds = new Set(syncedIds.slice(userIntegrations.length));
   const deleted = await local.integration.deleteMany({
     where: {
-      name: { in: ['claude_code', 'gpt_code'] },
+      name: { in: [...COMPUTE_INTEGRATION_NAMES] },
       id: { notIn: syncedIds.length > 0 ? syncedIds : ['__none__'] },
       OR: [{ userId: SEED_USER_ID }, { userId: { in: poolUserIds }, poolingEnabled: true }],
     },
@@ -789,6 +831,7 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   const integrations = await local.integration.findMany({
     where: { name: 'gpt_code', status: 'CONNECTED' },
     select: {
+      id: true,
       userId: true,
       poolingEnabled: true,
       config: true,
@@ -797,7 +840,8 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   });
 
   const eligible = integrations.filter((integration) => {
-    const isAvailableToBench = integration.userId === SEED_USER_ID || integration.poolingEnabled;
+    const isAvailableToBench =
+      integration.userId === SEED_USER_ID || activeRemotePoolIntegrationIds.has(integration.id);
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
   });
 
@@ -829,6 +873,7 @@ async function inspectClaudeCodeIntegrations(): Promise<ClaudeCodeAvailability> 
       status: 'CONNECTED',
     },
     select: {
+      id: true,
       userId: true,
       poolingEnabled: true,
       config: true,
@@ -837,7 +882,8 @@ async function inspectClaudeCodeIntegrations(): Promise<ClaudeCodeAvailability> 
   });
 
   const eligible = integrations.filter((integration) => {
-    const isAvailableToBench = integration.userId === SEED_USER_ID || integration.poolingEnabled;
+    const isAvailableToBench =
+      integration.userId === SEED_USER_ID || activeRemotePoolIntegrationIds.has(integration.id);
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
   });
 
