@@ -13160,6 +13160,69 @@ async def test_execute_screenshot_requires_steel_image():
         else:
             raise AssertionError("expected screenshot failure to propagate")
 
+
+async def test_execute_screenshot_kernel_crops_chrome_to_css_viewport():
+    """Kernel computer screenshots include window chrome; crop to CSS viewport.
+
+    Hotels.com Bot or Not agent fcb37373-a88a-4a74-bb76-a290be2be1f1 called
+    `screenshot` then `drag` with start=(531,387) on a 1280x800 Kernel computer
+    capture while the page CSS viewport was 1280x713 (87px top chrome). The
+    uncropped image made CDP land 87px too low — text under the slider was
+    highlighted instead of the thumb. Steel already crops; Kernel must too so
+    screenshot pixels match click/drag coordinates.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+    from PIL import Image, ImageDraw
+
+    window = Image.new("RGB", (1280, 800), color=(45, 45, 45))
+    draw = ImageDraw.Draw(window)
+    draw.rectangle((0, 87, 1279, 799), fill=(247, 247, 247))
+    # Dark thumb at full-window coords the model read from the uncropped capture.
+    draw.ellipse((531 - 10, 387 - 10, 531 + 10, 387 + 10), fill=(70, 73, 76))
+    image_buffer = BytesIO()
+    window.save(image_buffer, format="PNG")
+    screenshot_b64 = base64.b64encode(image_buffer.getvalue()).decode()
+
+    cdp = MagicMock()
+    cdp.session_id = "cdp-sid"
+    cdp.cdp_client.send.Runtime.evaluate = AsyncMock(
+        return_value={"result": {"value": {"w": 1280, "h": 713}}}
+    )
+    session = MagicMock()
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
+    dom = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    upload_mock = AsyncMock(return_value={"path": "/tmp/kernel-s.png"})
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",
+            AsyncMock(return_value={"provider": "kernel", "base64_image": screenshot_b64}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
+            upload_mock,
+        ),
+    ):
+        out = await service_actions._execute_screenshot(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            thinking=None,
+            session_id="sid",
+            config=_fake_config(),
+        )
+
+    assert out["success"] is True
+    cropped = Image.open(BytesIO(base64.b64decode(out["screenshot"])))
+    assert cropped.size == (1280, 713), (
+        f"Kernel screenshot must match CSS viewport for coordinate tools; got {cropped.size}"
+    )
+    # Thumb that was at window y=387 must sit at CSS y=300 after chrome crop.
+    assert cropped.getpixel((531, 300))[:3] == (70, 73, 76)
+    assert cropped.getpixel((531, 387))[:3] != (70, 73, 76)
+
+
 # ── move_visual_cursor happy path ────────────────────────────────────
 
 async def test_move_visual_cursor_success():
@@ -17343,6 +17406,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_screenshot_requires_steel_image",
         test_execute_screenshot_requires_steel_image,
+    )
+    await r.record_async(
+        "execute_screenshot_kernel_crops_chrome_to_css_viewport",
+        test_execute_screenshot_kernel_crops_chrome_to_css_viewport,
     )
 
     await r.record_async("move_visual_cursor_success", test_move_visual_cursor_success)
