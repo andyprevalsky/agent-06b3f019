@@ -7799,50 +7799,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "params", {}
                 ).get("text", "")
 
-                from domains.spawn_browser_agent_v3.service_actions import (
-                    attempt_completion_blocked_pending_payment_card_request,
-                )
-
-                payment_guard = await attempt_completion_blocked_pending_payment_card_request(
-                    session=dom_service.session,
-                    secret_refs=secret_refs,
-                    action_history=action_history,
-                    humanizer=humanizer,
-                    current_url=current_url,
-                )
-                if payment_guard:
-                    continuing_tool_call_id = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
-                    blocked_result = {"success": False, "error": payment_guard}
-                    await action_history.record_action(
-                        dom_service=dom_service,
-                        action="attempt_completion",
-                        thinking=thinking,
-                        params=unified_action.get("params", {}),
-                        result=blocked_result,
-                    )
-                    _append_browser_turn_messages(
-                        browser_turn_messages,
-                        task=task_prompt,
-                        browser_state=browser_state,
-                        include_screenshot=False,
-                        unified_action=unified_action,
-                        result=blocked_result,
-                        tool_call_id=continuing_tool_call_id,
-                    )
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Payment card request required before completion",
-                        task_id=task_id,
-                        message=payment_guard,
-                        status=MessageStatus.FINISHED,
-                        browser_url=browser_url,
-                        action_type="error",
-                        tool_call_id=continuing_tool_call_id,
-                        tool_name_override="attempt_completion",
-                    )
-                    await browser_stream.finish_tools(status="ERROR")
-                    continue
-
                 verifier_call_id = str(uuid_module.uuid4())
                 completion_tool_status = "ERROR"
                 try:
