@@ -107,6 +107,23 @@ Do not raise task/action timeouts to "pass" this.
 
 10k-agent: one classified hard recovery per stuck page; no shared fan-in.
 
+## Post-fix verification (2026-08-22)
+
+Causal fix landed (`ec14e86ab`): classify+hard recover on every action timeout.
+
+Exact local k=1 `ecec4c65-9512-431c-9e1c-e8a26e5c1060`:
+- `action_timeout_evaluate_330s` → CDP `renderer_main_thread_blocked` → hard recovery
+  `recycled=true` (`new_context_page`, `goto_resume_url`, …)
+- Continued to `Payment card requested ($50.65)` / approvals_triggered=1
+- Still FAIL: `alchemy-sauna-selection-semantics` — judge requires grounded
+  browser/tool evidence of street address `939 Post Street`; trajectory only has
+  that string in the task prompt / task_started chip (Momence page dumps never
+  showed it). Stall/recovery bug is fixed; outcome gate still open on selection
+  address grounding.
+
+FE: https://roselabs.ai/?agent-id=ecec4c65-9512-431c-9e1c-e8a26e5c1060
+Run: `agents/benchmarks/runs/20260822_013511_browser-alchemy-springs-sauna.json`
+
 ## Human feedback
 
 User: evaluate is fine; dig into stall; clean local repro. Then: determine if
