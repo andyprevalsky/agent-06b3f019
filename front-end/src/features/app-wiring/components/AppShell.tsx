@@ -35,6 +35,7 @@ import ErrorBoundary from '@/components/ErrorBoundary';
 import { WaitlistGate } from '@/features/auth';
 
 import { AdminSwitcherMount } from './AdminSwitcherMount';
+import { MacAppOfflineBadge } from '@/features/terminal/components/MacAppOfflineBadge';
 
 import { ROUTE_TABLE } from '../config';
 
@@ -50,6 +51,7 @@ const AppShell = () => (
           <BrowserRouter>
             <WaitlistGate />
             <TopRightControls>
+              <MacAppOfflineBadge />
               <AdminSwitcherMount />
             </TopRightControls>
             <Routes>

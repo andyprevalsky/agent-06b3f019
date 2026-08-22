@@ -35,6 +35,7 @@ interface IntegrationSectionsProps {
   passwords: ReturnType<typeof usePasswordSync>;
   compute: ReturnType<typeof useComputeSync>;
   messages: ReturnType<typeof useMessagesSync>;
+  macAppRelayOffline: boolean;
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
@@ -89,6 +90,7 @@ function MessagesIntegrationSection({
   accordion,
   data,
   messages,
+  macAppRelayOffline,
   gmail,
   actions,
 }: Pick<
@@ -98,6 +100,7 @@ function MessagesIntegrationSection({
   | 'accordion'
   | 'data'
   | 'messages'
+  | 'macAppRelayOffline'
   | 'gmail'
   | 'actions'
 >) {
@@ -108,6 +111,7 @@ function MessagesIntegrationSection({
       isIMessageAvailable={isIMessageAvailable}
       isWhatsAppAvailable={isWhatsAppAvailable}
       iMessageSynced={data.iMessageSynced}
+      macAppRelayOffline={macAppRelayOffline}
       whatsAppConnected={data.whatsAppConnected}
       messageSyncLoading={messages.messageSyncLoading}
       onIMessageSync={() => void actions.onIMessageSync()}
@@ -137,6 +141,7 @@ export default function IntegrationSections({
   passwords,
   compute,
   messages,
+  macAppRelayOffline,
   gmail,
   actions,
   plaid,
@@ -174,6 +179,7 @@ export default function IntegrationSections({
         accordion={accordion}
         data={data}
         messages={messages}
+        macAppRelayOffline={macAppRelayOffline}
         gmail={gmail}
         actions={actions}
       />

@@ -18,7 +18,7 @@ describe('top-right account control ownership', () => {
     );
 
     expect(appShell).toMatch(
-      /<TopRightControls>\s*<AdminSwitcherMount\s*\/>\s*<\/TopRightControls>/,
+      /<TopRightControls>\s*<MacAppOfflineBadge\s*\/>\s*<AdminSwitcherMount\s*\/>\s*<\/TopRightControls>/,
     );
     expect(inspectionBadge).toContain('createPortal(');
     expect(inspectionBadge).toContain('TOP_RIGHT_INSPECTION_SLOT_ID');

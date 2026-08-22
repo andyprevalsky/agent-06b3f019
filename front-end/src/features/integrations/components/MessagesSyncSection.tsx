@@ -24,6 +24,7 @@ import {
 } from './MessageSyncIcons';
 import SectionToggleButton from './SectionToggleButton';
 import WhatsAppRow from './WhatsAppRow';
+import MacAppOfflineChip from './MacAppOfflineChip';
 import SyncItemButton from './SyncItemButton';
 
 interface MessagesSyncSectionProps {
@@ -32,6 +33,7 @@ interface MessagesSyncSectionProps {
   isIMessageAvailable: boolean;
   isWhatsAppAvailable: boolean;
   iMessageSynced: boolean;
+  macAppRelayOffline: boolean;
   whatsAppConnected: boolean;
   messageSyncLoading: MessageSyncType | null;
   onIMessageSync: () => void;
@@ -78,11 +80,13 @@ function ComingSoonRow({
 function IMessageRow({
   isAvailable,
   synced,
+  macAppRelayOffline,
   loading,
   onSync,
 }: {
   isAvailable: boolean;
   synced: boolean;
+  macAppRelayOffline: boolean;
   loading: MessageSyncType | null;
   onSync: () => void;
 }) {
@@ -93,8 +97,9 @@ function IMessageRow({
           <DropdownIconFrame {...DropdownIconPreset.imessage} isSynced={synced}>
             <IMessageIcon gradientId="imessageGrad" />
           </DropdownIconFrame>
-          <div className="flex min-w-0 items-center">
+          <div className="flex min-w-0 items-center gap-2">
             <span className="truncate text-sm">iMessage</span>
+            {synced && macAppRelayOffline && <MacAppOfflineChip />}
           </div>
         </div>
         <SyncItemButton isLoading={loading === 'imessage'} isSynced={synced} onClick={onSync} />
@@ -127,6 +132,7 @@ export default function MessagesSyncSection({
   isIMessageAvailable,
   isWhatsAppAvailable,
   iMessageSynced,
+  macAppRelayOffline,
   whatsAppConnected,
   messageSyncLoading,
   onIMessageSync,
@@ -170,6 +176,7 @@ export default function MessagesSyncSection({
           <IMessageRow
             isAvailable={isIMessageAvailable}
             synced={iMessageSynced}
+            macAppRelayOffline={macAppRelayOffline}
             loading={messageSyncLoading}
             onSync={onIMessageSync}
           />
