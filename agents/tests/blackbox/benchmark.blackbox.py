@@ -4607,6 +4607,143 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
     assert "write-lock" in terminal_criteria
 
 
+def test_alchemy_k5_waiver_pause_terminal_fails_payment_contract():
+    """k=5 agent 338aff82/e61ae529 paused at Momence waiver instead of payment_approval.
+
+    Post-fix fleet run 20260822_160440: browser clicked showWaiverCheck once,
+    took a screenshot, then send_message_to_user → session_paused for handwritten
+    signature. Passing agents double-clicked showWaiverCheck and clicked Accept
+    before request_payment_card ($50.65).
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    waiver_pause_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "session_paused",
+                    "title": "Browser Session Paused",
+                    "toolCallId": "tc-browser-waiver-pause",
+                },
+                "message": (
+                    "Checkout requires a handwritten signature on Alchemy Springs’ "
+                    "liability waiver. I cannot sign a legal agreement for you."
+                ),
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "title": "Browser automation complete",
+                    "toolCallId": "tc-browser-waiver-pause",
+                },
+                "message": (
+                    "Checkout requires a handwritten signature on Alchemy Springs’ "
+                    "liability waiver. I cannot sign a legal agreement for you."
+                ),
+            },
+        ],
+        "_benchmark": {
+            "approvals_triggered": 0,
+            "attention_request_kind_seen": None,
+            "expected_attention_kind_seen": None,
+        },
+    }
+    passed, reason = evaluate_task(task, waiver_pause_terminal, approvals_triggered=0)
+    assert passed is False
+    assert "payment_approval" in (reason or "").lower()
+
+
+def test_alchemy_k5_write_lock_phone_call_fails_payment_contract():
+    """k=5 agent 338aff82 root recovery: explore + phone-call write_lock, no payment."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    write_lock_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "title": "Browser automation complete",
+                    "toolCallId": "tc-browser-waiver-pause",
+                },
+                "message": "Waiver signature required; paused for user.",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "request_user_approval",
+                    "toolStatus": "FINISHED",
+                    "title": "🔐 Requesting user approval",
+                    "toolCallId": "tc-phone-write-lock",
+                    "requestUserApproval": {
+                        "toolApproval": True,
+                        "attentionRequestId": "cmt4kfzqb009z14oqpsrrs0sp",
+                    },
+                },
+                "message": "Make a phone call to +1 (415) 964-0336?",
+            },
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_request_kind_seen": "write_lock",
+            "expected_attention_kind_seen": "write_lock",
+        },
+    }
+    passed, reason = evaluate_task(task, write_lock_terminal, approvals_triggered=1)
+    assert passed is False
+    assert "payment_approval" in (reason or "").lower()
+
+
+def test_alchemy_k5_double_spawn_browser_exceeds_root_tool_count():
+    """k=5 agent e61ae529 spawned a second browser after waiver pause."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _root_exact_tool_count_exceeded
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    double_spawn_messages = [
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "title": "Browser automation complete",
+                "toolCallId": "tc-browser-1",
+            },
+            "message": "Please sign the waiver in the open signature box.",
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "title": "Browser automation complete",
+                "toolCallId": "tc-browser-2",
+            },
+            "message": "Continue and complete the user's Alchemy Springs booking.",
+        },
+    ]
+    exact_count_error = _root_exact_tool_count_exceeded(task, double_spawn_messages)
+    assert exact_count_error is not None
+    assert "spawn_browser_agent" in exact_count_error
+    assert "expected 1, got 2" in exact_count_error
+
+
 def test_alchemy_k5_auth_assistance_terminal_fails_payment_contract():
     """k=5 agent 9aceb675 stopped at auth_assistance instead of payment_approval.
 
@@ -14721,6 +14858,18 @@ async def run_all_tests():
     r.record(
         "alchemy_k5_auth_assistance_terminal_fails_payment_contract",
         test_alchemy_k5_auth_assistance_terminal_fails_payment_contract,
+    )
+    r.record(
+        "alchemy_k5_waiver_pause_terminal_fails_payment_contract",
+        test_alchemy_k5_waiver_pause_terminal_fails_payment_contract,
+    )
+    r.record(
+        "alchemy_k5_write_lock_phone_call_fails_payment_contract",
+        test_alchemy_k5_write_lock_phone_call_fails_payment_contract,
+    )
+    r.record(
+        "alchemy_k5_double_spawn_browser_exceeds_root_tool_count",
+        test_alchemy_k5_double_spawn_browser_exceeds_root_tool_count,
     )
     r.record(
         "alchemy_k5_monday_calendar_switch_failure_trajectory",
