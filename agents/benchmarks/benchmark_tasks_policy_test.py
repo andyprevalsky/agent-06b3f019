@@ -47,7 +47,46 @@ def test_browser_event_ticket_omits_standard_format_from_prompt_and_judge():
     criteria_blob = " ".join(semantics["criteria"])
     assert "standard-format" not in criteria_blob
     assert "standard format" not in criteria_blob.lower()
-    assert "Do not require a specific projection format" in semantics["judge_prompt"]
+    assert "specific projection format" in semantics["judge_prompt"]
+
+
+def test_browser_event_ticket_omits_genre_earliest_and_seat_center():
+    """H-04 edit: drop genre, earliest-show, and seat-map center proof.
+
+    Andy: remove non-horror / earliest / horizontal-vertical-center from
+    prompt + movie-ticket-seat-selection-semantics. Keep venue, Friday,
+    7–9pm window, price cap, no-add-ons, unresolved AMC payment.
+    """
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    prompt = task["prompt"].lower()
+    notes = task["environment"]["context_notes"].lower()
+    for forbidden in (
+        "non-horror",
+        "horror",
+        "earliest",
+        "horizontal and vertical center",
+        "genre exclusion",
+        "seating heuristic",
+    ):
+        assert forbidden not in prompt, f"prompt still has {forbidden!r}"
+        assert forbidden not in notes, f"context_notes still has {forbidden!r}"
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"]).lower()
+    judge = semantics["judge_prompt"].lower()
+    for forbidden in ("non-horror", "horror", "earliest", "horizontal and vertical center"):
+        assert forbidden not in criteria_blob, f"criteria still has {forbidden!r}"
+    assert "genre/non-horror" in judge or "genre" in judge
+    assert "earliest-showtime" in judge or "earliest" in judge
+    assert "seat-map center" in judge
+    assert "7:00 pm" in prompt and "9:00 pm" in prompt
+    assert "under $30" in prompt
 
 
 def test_no_anthropic_smoke_price_limit_is_route_aware(monkeypatch):
