@@ -139,6 +139,14 @@ accepts validated payment-receipt line items / Momence product URLs.
 Agent `cb5e44ef-0d5c-4261-acbf-35d51913c714` — payment card observed; RESULTS 1/1.
 FE: https://roselabs.ai/?agent-id=cb5e44ef-0d5c-4261-acbf-35d51913c714
 
+## Follow-on recurrence 2026-08-22 (k=5 `9fb21e4f`)
+
+Hard recover **did** run (`recycled=true`, `renderer_main_thread_blocked`) but
+only after the full 330s outer action timeout, leaving ~60s — no payment.
+Separate first-bad: unbounded `Runtime.evaluate` await in
+`service_actions._execute_inspection_action`. See
+`2026-08-22-evaluate-cdp-await-unbounded-burns-task-budget`.
+
 ## Human feedback
 
 User: evaluate is fine; dig into stall; clean local repro. Then: determine if
