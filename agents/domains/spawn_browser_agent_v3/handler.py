@@ -9526,6 +9526,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "write_lock_rejected",
+                                "task_id": result.get("task_id"),
                             },
                         )
                         return
