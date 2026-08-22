@@ -2020,28 +2020,6 @@ def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -
     return clean
 
 
-def _browser_state_from_read_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Rebuild the structured browser_state dict from a read_browser_state tool result."""
-    if not result.get("success"):
-        return {}
-    return {
-        key: result[key]
-        for key in (
-            "url",
-            "title",
-            "viewport",
-            "scroll_position",
-            "page_stats",
-            "tabs",
-            "dom_tree",
-            "recent_events",
-            "closed_popups",
-            "media_candidates",
-        )
-        if key in result
-    }
-
-
 def _append_browser_turn_messages(
     turn_messages: List[Dict[str, Any]],
     *,
@@ -4863,7 +4841,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                     task=task_prompt,
                     dynamic_system_context=dynamic_system_context,
                     turn_messages=turn_messages,
-                    browser_state=browser_state,
+                    browser_state={},
                     action_entries=action_entries,
                     config=config,
                     user_id=user_id,
@@ -5428,7 +5406,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
     _heartbeat_task = asyncio.create_task(_background_heartbeat())
     action_entries: List[Dict[str, Any]] = []
-    browser_state: Dict[str, Any] = {}
     browser_turn_messages: List[Dict[str, Any]] = []
     otp_user_messages: List[Dict[str, str]] = []
     seen_otp_codes: set[str] = set()
@@ -6587,7 +6564,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     # retain it and re-resolve against a fresh DOM next step.
                     continue
                 logger.info("Executing pending write lock action after approval")
-                unified_action, browser_state, current_url = await _prepare_pending_write_lock_action(
+                unified_action, _, current_url = await _prepare_pending_write_lock_action(
                     dom_service,
                     pending_write_lock_action,
                     target_signature=pending_write_lock_target,
@@ -6634,9 +6611,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 action_name = unified_action.get("action", "unknown")
                 logger.info(f"Pending write lock action executed: {action_name}", result=result)
 
-                activity.heartbeat(f"Step {iteration} - refreshing browser state after write lock")
-                browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                current_url = browser_state.get("url", "")
+                activity.heartbeat(f"Step {iteration} - write lock action applied")
+                if isinstance(result, dict) and result.get("current_url"):
+                    current_url = str(result.get("current_url") or current_url)
                 await record_passkey_usage_once()
 
                 await action_history.record_action(
@@ -6966,22 +6943,20 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     iteration=iteration,
                                 )
                 if browser_recorder:
-                    observation_state = browser_state
-                    if not observation_state.get("dom_tree"):
-                        with contextlib.suppress(Exception):
-                            observation_state = await dom_service.get_browser_state(include_screenshot=False)
-                    await browser_recorder.record_observation(
-                        iteration=iteration,
-                        browser_state=observation_state,
-                        action_entries=action_entries,
-                    )
+                    with contextlib.suppress(Exception):
+                        observation_state = await dom_service.get_browser_state(include_screenshot=False)
+                        await browser_recorder.record_observation(
+                            iteration=iteration,
+                            browser_state=observation_state,
+                            action_entries=action_entries,
+                        )
 
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
                 # action — only the LLM "what next" decision is cached.
                 async def _live_browser_decision(
                     iteration_snapshot: int = iteration,
-                    browser_state_snapshot: Dict[str, Any] = browser_state,
+                    browser_state_snapshot: Dict[str, Any] = {},
                     action_entries_snapshot: List[Dict[str, Any]] = action_entries,
                     browser_use_mode_snapshot: Optional[str] = browser_use_mode,
                     dom_service_snapshot: Any = dom_service,
@@ -7036,7 +7011,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 "task": task_prompt,
                                 "dynamic_system_context": dynamic_system_context,
                                 "turn_messages": browser_turn_messages,
-                                "browser_state": browser_state,
+                                "browser_state": {},
                                 "action_entries": action_entries,
                                 "config": {
                                     "browser_use_mode": browser_use_mode,
@@ -7110,7 +7085,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     action_history=action_history,
                     browser_turn_messages=browser_turn_messages,
                     dom_service=dom_service,
-                    browser_state=browser_state,
+                    browser_state={},
                     task_prompt=task_prompt,
                     iteration=iteration,
                     agent_id=agent_id,
@@ -7661,7 +7636,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         recovery_reason=recovery_reason,
                         browser_turn_messages=browser_turn_messages,
                         task_prompt=task_prompt,
-                        browser_state=browser_state,
+                        browser_state={},
                         unified_action=unified_action,
                         recovery_call_id=recovery_call_id,
                         browser_stream=browser_stream,
@@ -7984,7 +7959,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     recovery_reason=recovery_reason,
                     browser_turn_messages=browser_turn_messages,
                     task_prompt=task_prompt,
-                    browser_state=browser_state,
+                    browser_state={},
                     unified_action=unified_action,
                     recovery_call_id=recovery_call_id,
                     browser_stream=browser_stream,
@@ -8010,10 +7985,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         tool_call_id=verifier_call_id,
                     )
 
+                    verifier_browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     verifier_context = await build_browser_verifier_context(
                         goal=goal,
                         current_url=current_url,
-                        browser_state=browser_state,
+                        browser_state=verifier_browser_state,
                         action_history=action_history,
                         config=config,
                         session_id=session_id,
@@ -8118,7 +8094,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             session_id, user_id, config, exclude_paths=uploaded_paths
                         )
 
-                        last_screenshot_b64 = browser_state.get("screenshot")
+                        final_screenshot_state = await dom_service.get_browser_state(
+                            include_screenshot=True
+                        )
+                        last_screenshot_b64 = final_screenshot_state.get("screenshot")
                         if last_screenshot_b64:
                             if browser_recorder:
                                 await browser_recorder.write_final_screenshot(last_screenshot_b64)
@@ -8531,22 +8510,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 tool_call_id=tool_call_id_action,
             )
 
-            if action_name == "read_browser_state" and result.get("success"):
-                browser_state = _browser_state_from_read_result(result)
-            elif result.get("success") and action_name not in {
-                "screenshot",
-                "read_network_requests",
-                "wait",
-                "read_browser_state",
-            }:
-                if browser_state:
-                    browser_state = dict(browser_state)
-                    browser_state["dom_tree"] = ""
-                if result.get("current_url"):
-                    browser_state["url"] = str(result["current_url"])
-                elif result.get("url"):
-                    browser_state["url"] = str(result["url"])
-
             if result.get("status") == "needs_write_approval":
                 approval_type = result.get("approval_type", "unknown")
                 question = result.get(
@@ -8558,12 +8521,13 @@ Based on this feedback, I need to continue working on the task and address the i
 
                 try:
                     activity.heartbeat(f"Step {iteration} - generating write lock notification")
+                    write_lock_browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     notification_result = await _generate_write_lock_notification(
                         rose_client=rose_client,
                         task_prompt=task_prompt,
                         dynamic_system_context=dynamic_system_context,
                         browser_turn_messages=browser_turn_messages,
-                        browser_state=browser_state,
+                        browser_state=write_lock_browser_state,
                         action_entries=action_entries,
                         config=config,
                         user_id=user_id,
@@ -8618,10 +8582,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     url=current_url,
                 )
 
-                checkpoint_state = browser_state
-                if not checkpoint_state.get("dom_tree") and dom_service is not None:
-                    with contextlib.suppress(Exception):
-                        checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
+                checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
@@ -8700,12 +8661,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 payment_write_lock_notification_usage = None
                 try:
                     activity.heartbeat(f"Step {iteration} - generating payment approval notification")
+                    payment_notification_state = await dom_service.get_browser_state(include_screenshot=False)
                     payment_notification_result = await _generate_write_lock_notification(
                         rose_client=rose_client,
                         task_prompt=task_prompt,
                         dynamic_system_context=dynamic_system_context,
                         browser_turn_messages=browser_turn_messages,
-                        browser_state=browser_state,
+                        browser_state=payment_notification_state,
                         action_entries=action_entries,
                         config=config,
                         user_id=user_id,
@@ -8739,10 +8701,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         error=str(notification_error),
                     )
 
-                checkpoint_state = browser_state
-                if not checkpoint_state.get("dom_tree") and dom_service is not None:
-                    with contextlib.suppress(Exception):
-                        checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
+                checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
@@ -8878,19 +8837,19 @@ Based on this feedback, I need to continue working on the task and address the i
                 # stale ground truth and can misreport a last-step completion. Fall
                 # back to the last-known state if the refresh fails.
                 try:
-                    browser_state = await asyncio.wait_for(
+                    final_browser_state = await asyncio.wait_for(
                         dom_service.get_browser_state(include_screenshot=False),
                         timeout=10,
                     )
-                    current_url = browser_state.get("url", current_url) or current_url
+                    current_url = final_browser_state.get("url", current_url) or current_url
                 except Exception:
-                    pass
-                if not browser_state:
+                    final_browser_state = {}
+                if not final_browser_state:
                     raise RuntimeError("no browser_state available for final verifier pass")
                 final_verifier_context = await build_browser_verifier_context(
                     goal=goal,
                     current_url=current_url,
-                    browser_state=browser_state,
+                    browser_state=final_browser_state,
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
@@ -9207,7 +9166,6 @@ Based on this feedback, I need to continue working on the task and address the i
             browser_network_recorder=browser_network_recorder if diagnostics_finalized else None,
             mutable_buffers=(
                 action_entries,
-                browser_state,
                 browser_turn_messages,
                 otp_user_messages,
                 seen_otp_codes,
