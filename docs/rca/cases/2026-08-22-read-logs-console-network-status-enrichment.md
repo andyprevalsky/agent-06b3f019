@@ -78,6 +78,15 @@ User requested `read_logs` combining console + network with regex support, robus
 tests on real production captures (not fabricated), then rerun
 `browser-hotel-booking` benchmark.
 
+## Follow-up (2026-08-22 benchmark)
+
+Post-fix `browser-hotel-booking` (agent `343eaf0a`, run
+`20260822_195257_browser-hotel-booking.json`) **failed the guest-checkout
+evaluator** but **proved `read_logs`**: network `status=4xx` returned 20 GraphQL
+429 rows. Agent reached payment approval ($343.61). Failure is orthogonal —
+challenge recovery preserved signed-in cookies (recurrence of
+`2026-08-21-hotels-com-diagnostic-clean-strip-discarded-for-auth`).
+
 ## Reusable lesson
 
 When CDP Network metadata lacks response status, expose console and network through

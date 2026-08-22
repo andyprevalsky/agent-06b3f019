@@ -143,3 +143,25 @@ escalation / repeated hotels.com challenge after config promote.
 ## Follow-up (2026-08-21, agent 2da69edc)
 
 Guest-cookie commit landed; bench still failed. New first-bad is classifier network summary omitting HTTP soft-block status — see `2026-08-21-hotels-com-classifier-network-summary-omits-http-status`.
+
+## Follow-up (2026-08-22, agent 343eaf0a, read_logs branch)
+
+After `read_logs` landed (see `2026-08-22-read-logs-console-network-status-enrichment`),
+exact `scripts/run-bench --local browser-hotel-booking` on commit `783fbed19`:
+
+- Agent `343eaf0a-0418-42e9-b743-acb86f74c33f`, run
+  `agents/benchmarks/runs/20260822_195257_browser-hotel-booking.json`
+- **read_logs worked**: step 16 `read_logs(sources=[network], status=4xx)` returned
+  `Matched 20 log line(s). Latest: POST https://www.hotels.com/graphql -> 429`
+- Reached checkout session URL + **one unresolved `payment_approval`** ($343.61,
+  $260 pre-tax room) — payment-boundary goal satisfied
+- **Evaluator FAIL** (`hotel-kabuki-payment-boundary-semantics`): guest-checkout
+  requirement not met because challenge recovery twice reported
+  `signed-in state was preserved` and session started with `cookie_bundle`
+  (`cookies_injected: true`, 202 cookies)
+- Recording: `/opt/cursor/artifacts/browser_hotel_booking_343eaf0a_recording.mp4`
+- FE: https://www.roselabs.ai/?agent-id=343eaf0a-0418-42e9-b743-acb86f74c33f
+
+Status remains **open** — `read_logs` fix is verified; benchmark failure is a
+**recurrence** of this case's preserve-auth vs guest-checkout boundary, not a
+logging regression.
