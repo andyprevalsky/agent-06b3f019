@@ -3395,6 +3395,81 @@ async def _execute_close_tab(
     return {"success": True, "message": "", "closed_tab": tab_id}
 
 
+async def _read_css_viewport_size(session: Any) -> Optional[tuple[int, int]]:
+    """Read the page CSS viewport (innerWidth x innerHeight) via CDP.
+
+    Computer-window screenshots include browser chrome; click/drag tools use CSS
+    coordinates. Callers crop the capture to this size so screenshot pixels match
+    CDP mouse events.
+    """
+    if session is None:
+        return None
+    get_cdp = getattr(session, "get_or_create_cdp_session", None)
+    if not callable(get_cdp):
+        return None
+    try:
+        cdp_session = await get_cdp(focus=True)
+        result = await cdp_session.cdp_client.send.Runtime.evaluate(
+            params={
+                "expression": "({w: window.innerWidth, h: window.innerHeight})",
+                "returnByValue": True,
+            },
+            session_id=cdp_session.session_id,
+        )
+        value = (result or {}).get("result", {}).get("value") or {}
+        width = int(value.get("w") or 0)
+        height = int(value.get("h") or 0)
+        if width > 0 and height > 0:
+            return width, height
+    except Exception as exc:
+        logger.warning(
+            "Failed to read CSS viewport for computer-screenshot crop",
+            error=str(exc)[:300],
+        )
+    return None
+
+
+def _crop_computer_screenshot_to_css_viewport(
+    screenshot_bytes: bytes,
+    *,
+    viewport_width: int,
+    viewport_height: int,
+) -> bytes:
+    """Crop a full computer-window PNG to the CSS viewport coordinate space.
+
+    Chromium window chrome sits above the content viewport. Horizontal overflow
+    (if any) is centered. No-op when the image already matches the viewport.
+    """
+    with Image.open(BytesIO(screenshot_bytes)) as img:
+        if img.width == viewport_width and img.height == viewport_height:
+            return screenshot_bytes
+        if img.width < viewport_width or img.height < viewport_height:
+            logger.warning(
+                "Computer screenshot smaller than CSS viewport; skipping crop",
+                image_width=img.width,
+                image_height=img.height,
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
+            )
+            return screenshot_bytes
+
+        top = img.height - viewport_height
+        left = max(0, (img.width - viewport_width) // 2)
+        cropped = img.crop((left, top, left + viewport_width, top + viewport_height))
+        logger.info(
+            "Cropped computer screenshot to CSS viewport",
+            image_width=img.width,
+            image_height=img.height,
+            viewport_width=viewport_width,
+            viewport_height=viewport_height,
+            crop_left=left,
+            crop_top=top,
+        )
+        output = BytesIO()
+        cropped.save(output, format="PNG")
+        return output.getvalue()
+
+
 async def _execute_screenshot(
     *,
     session: Any,
@@ -3416,11 +3491,26 @@ async def _execute_screenshot(
     screenshot_result = await take_browser_computer_screenshot(config, session_id)
     full_screenshot_b64 = screenshot_result["base64_image"]
     full_screenshot_bytes = base64.b64decode(full_screenshot_b64)
-    screenshot_bytes = (
-        _crop_steel_computer_screenshot_to_viewport(full_screenshot_bytes)
-        if screenshot_result.get("provider") == "steel"
-        else full_screenshot_bytes
-    )
+    provider = screenshot_result.get("provider")
+    if provider == "steel":
+        # Steel uses a fixed window/crop contract (see STEEL_VIEWPORT_CROP_*).
+        screenshot_bytes = _crop_steel_computer_screenshot_to_viewport(full_screenshot_bytes)
+    else:
+        # Kernel (and any other computer capture) includes window chrome above the
+        # CSS viewport. Crop so screenshot pixels match click_coordinates / drag.
+        css_viewport = await _read_css_viewport_size(session)
+        if css_viewport is None:
+            logger.warning(
+                "CSS viewport unavailable; returning uncropped computer screenshot",
+                provider=provider,
+            )
+            screenshot_bytes = full_screenshot_bytes
+        else:
+            screenshot_bytes = _crop_computer_screenshot_to_css_viewport(
+                full_screenshot_bytes,
+                viewport_width=css_viewport[0],
+                viewport_height=css_viewport[1],
+            )
     screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
     saved_path = None

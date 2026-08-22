@@ -26,7 +26,7 @@ sources:
   - agent fcb37373-a88a-4a74-bb76-a290be2be1f1
   - commit fbf75d590
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_execute_screenshot_kernel_crops_chrome_to_css_viewport
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -43,7 +43,7 @@ Runtime evidence:
 - Chrome height = `800 - 713 = 87` (matches Steel's `STEEL_VIEWPORT_CROP_Y`)
 - Pixel at screenshot `(531,387)` is the dark thumb `(70,73,76)`; CDP y=`387`
   without crop maps to screenshot y=`474` which is light page text `(249,249,249)`
-- Steel path already crops computer screenshots; Kernel path returns raw bytes
+- Steel path already crops computer screenshots; Kernel path returned raw bytes
 
 ## Diagnosis
 
@@ -58,8 +58,8 @@ Binary search:
 2. CDP events use those numbers as CSS viewport coords.
 3. CSS viewport is 1280×713; the image includes ~87px of browser chrome above
    the page.
-4. First-bad boundary: `_execute_screenshot` only crops when
-   `provider == "steel"`; Kernel images stay chrome-inclusive while the tool
+4. First-bad boundary: `_execute_screenshot` only cropped when
+   `provider == "steel"`; Kernel images stayed chrome-inclusive while the tool
    contract says "Coordinates in this image match click_coordinates."
 
 Archive: novel relative of `2026-08-22-bot-or-not-shell-strips-click-coordinates`
@@ -68,11 +68,10 @@ Steel crop itself — Steel was fixed; Kernel never got the same contract.
 
 ## Solution
 
-Proposed (awaiting approval): in `_execute_screenshot`, crop **Kernel** (and any
-non-Steel) computer screenshots to the live CSS viewport
-(`window.innerWidth` × `window.innerHeight` via CDP) with top chrome removed,
-same contract Steel already enforces with its fixed crop. Keep Steel's existing
-crop path unchanged. Cement with
+`_execute_screenshot` now crops non-Steel computer screenshots to the live CSS
+viewport (`window.innerWidth` × `window.innerHeight` via CDP), removing top
+window chrome so screenshot pixels match click/drag coordinates. Steel keeps its
+fixed crop. Cemented by
 `test_execute_screenshot_kernel_crops_chrome_to_css_viewport`.
 
 10k-agent: one crop per screenshot tool call, O(1) image work, no shared state.
@@ -80,7 +79,9 @@ crop path unchanged. Cement with
 ## Human feedback
 
 User observed the replay "highlighted the text underneath" and called it a
-calibration issue; directed `/rca`.
+calibration issue; directed `/rca`. Approved
+`kernel-screenshot-chrome-crop-82ccc` and asked for a new hotel-bench recording
+after the fix.
 
 ## Reusable lesson
 
