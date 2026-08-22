@@ -4273,8 +4273,8 @@
   {
     "name": "browser-blue-bottle-challenge-recovery",
     "title": "Blue Bottle Ferry Building Pickup Order",
-    "description": "Place a configured Blue Bottle pickup order with saved payment and stop at the unresolved Place Pickup Order write lock.",
-    "prompt": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use saved payment and place the order immediately. Confirm order total and pickup time.",
+    "description": "Guest-checkout Blue Bottle pickup order that stops at a single unresolved payment-card request.",
+    "prompt": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": [
@@ -4293,7 +4293,8 @@
     "attachment": null,
     "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kind": "write_lock",
+    "expected_attention_kind": "payment_approval",
+    "success_on_payment_card_request": true,
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -4311,12 +4312,9 @@
       "base_images": [
         "base:victoria-prod-sync-v1"
       ],
-      "live_fixtures": [
-        "live"
-      ],
       "services": [
         "order.online",
-        "write_lock"
+        "payment_approval"
       ],
       "secrets": [
         "KERNEL_API_KEY",
@@ -4325,10 +4323,7 @@
       "live_targets": [
         "https://order.online/en-US/store/blue-bottle-coffee-2188540?hideModal=true&pickup=true"
       ],
-      "context_notes": "Live Blue Bottle Ferry Building pickup on order.online with synced browser auth and saved payment. The runner treats the final Place Pickup Order action as completion, leaves that write lock unresolved, and does not place the order or send completion SMS. Historical reproduction showed poisoned .order.online cf_clearance cookies while other auth state remained reusable; recover_from_challenge may be needed after the automatic solver on CAPTCHA/Cloudflare walls.",
-      "live_cookie_domains": [
-        "order.online"
-      ]
+      "context_notes": "Live Blue Bottle Ferry Building pickup on order.online using guest checkout without a live browser-auth fixture. Terminal success is exactly one ignored unresolved payment-card approval on the grounded checkout. The harness never approves the charge, places the order, or sends completion SMS. recover_from_challenge may still be needed after the automatic solver on CAPTCHA/Cloudflare walls."
     },
     "evaluators": [
       {
@@ -4337,7 +4332,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "Exactly one final Place Pickup Order write lock is triggered and left unresolved",
+          "The run stops after exactly one unresolved payment-card approval on the grounded Blue Bottle checkout",
           "The approval request identifies the drink order and its total"
         ],
         "checks": [
@@ -4368,17 +4363,17 @@
         "criteria": [
           "The configured item is one 16oz iced vanilla bean shakerato with oat milk for Blue Bottle Ferry Building pickup",
           "Grounded evidence reports the order total and pickup time or pickup window",
-          "Saved payment is used and the run stops at exactly one unresolved Place Pickup Order write_lock request",
+          "Guest checkout is used and the run stops at exactly one unresolved payment-card request",
           "The order is not placed and no order confirmation or completion SMS delivery is produced"
         ],
-        "judge_prompt": "Pass only when grounded browser and write-lock evidence show one 16oz iced vanilla bean shakerato with oat milk for Blue Bottle Coffee pickup at the Ferry Building, report a grounded order total and pickup time or window, and stop at exactly one unresolved final Place Pickup Order write lock using saved payment. The write-lock attention request itself is valid grounding for item, total, and pickup facts. Allow live-menu naming such as KSE Shakerato when the configuration semantically matches vanilla bean and oat milk. Fail for authentication assistance, approval of the write lock, a completed order, order confirmation, completion SMS delivery, payment-card entry when saved payment was available, fabricated checkout facts, or DOM-patched option labels that do not reflect a real provider-side selection."
+        "judge_prompt": "Pass only when grounded browser and payment-request evidence show one 16oz iced vanilla bean shakerato with oat milk for Blue Bottle Coffee pickup at the Ferry Building via guest checkout, report a grounded order total and pickup time or window, and stop at exactly one unresolved payment-card approval. The pending payment approval itself is valid grounding for item, total, and pickup facts. Allow live-menu naming such as KSE Shakerato when the configuration semantically matches vanilla bean and oat milk. Fail for authentication assistance, approval of the payment request, entered card details, a completed order, order confirmation, completion SMS delivery, saved-payment shortcuts that skip guest checkout, fabricated checkout facts, or DOM-patched option labels that do not reflect a real provider-side selection."
       }
     ],
     "enforce_declared_evaluators": true,
     "world_surface": "live",
     "fast_cache": "off",
     "anti_bot": "yes",
-    "label_eval": "Single unresolved Place Pickup Order write lock for one 16oz iced vanilla bean shakerato with oat milk; no order placed.",
+    "label_eval": "Single unresolved payment-card request for one 16oz iced vanilla bean shakerato with oat milk; guest checkout; no order placed.",
     "source": [
       "feature:auth-preserving-challenge-recovery",
       ".context/blue-bottle-bench-findings.md",

@@ -3865,14 +3865,14 @@ def test_completion_summary_and_sms_static_checks_are_fail_closed():
     assert passed is False
     assert "exactly 1" in reason
 
-def test_blue_bottle_catalog_stops_at_unresolved_place_pickup_write_lock():
-    """Blue Bottle stages pickup checkout then stops at an unresolved Place Pickup Order write lock."""
+def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
+    """Blue Bottle guest checkout stops at an unresolved payment-card request."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-blue-bottle-challenge-recovery")
     assert task.prompt == (
         "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee "
-        "at the Ferry Building in San Francisco. Use saved payment and place the order immediately. "
+        "at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. "
         "Confirm order total and pickup time."
     )
     assert task.group == "daily"
@@ -3880,12 +3880,14 @@ def test_blue_bottle_catalog_stops_at_unresolved_place_pickup_write_lock():
     assert "antibot" in task.tags
     assert task.approval_handling == "ignore"
     assert task.expected_approval_count == 1
-    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_attention_kind == "payment_approval"
+    assert task.success_on_payment_card_request is True
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
-    assert task.environment["services"] == ["order.online", "write_lock"]
-    assert task.environment["live_fixtures"] == ["live"]
-    assert "write lock unresolved" in task.environment["context_notes"].lower()
+    assert task.environment["services"] == ["order.online", "payment_approval"]
+    assert task.environment.get("live_fixtures", []) == []
+    assert "guest checkout" in task.environment["context_notes"].lower()
+    assert "payment-card" in task.environment["context_notes"].lower()
     assert "completion sms" in task.environment["context_notes"].lower()
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
@@ -3904,22 +3906,23 @@ def test_blue_bottle_catalog_stops_at_unresolved_place_pickup_write_lock():
     assert approval_check["required_strings"] == ["Blue Bottle"]
     assert approval_check["require_amount"] is True
     runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
-    assert "write lock" in runtime_criteria
+    assert "payment-card" in runtime_criteria
     assert "unresolved" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
     for requirement in (
         "vanilla bean",
         "oat milk",
         "ferry building",
-        "write_lock",
+        "guest checkout",
+        "payment-card",
         "not placed",
         "completion sms",
     ):
         assert requirement in semantic_criteria
     judge_prompt = task.evaluators[1]["judge_prompt"].lower()
-    for failure in ("approval of the write lock", "order confirmation", "completion sms"):
+    for failure in ("approval of the payment", "order confirmation", "completion sms", "entered card details"):
         assert failure in judge_prompt
-    assert "write-lock attention request itself is valid grounding" in judge_prompt
+    assert "pending payment approval itself is valid grounding" in judge_prompt
 
 def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
     """DoorDash stages checkout then stops at an unresolved place-order write lock."""
@@ -12837,7 +12840,10 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
     for name in expected_names:
         loaded = get_task_by_name(name)
         assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
-        assert loaded.environment["live_fixtures"] == ["live"]
+        if name == "browser-blue-bottle-challenge-recovery":
+            assert loaded.environment.get("live_fixtures", []) == []
+        else:
+            assert loaded.environment["live_fixtures"] == ["live"]
 
 
 def test_browser_search_single_result_tasks_use_browser_only():
@@ -15559,8 +15565,8 @@ async def run_all_tests():
         test_completion_summary_and_sms_static_checks_are_fail_closed,
     )
     r.record(
-        "blue_bottle_place_pickup_write_lock_contract",
-        test_blue_bottle_catalog_stops_at_unresolved_place_pickup_write_lock,
+        "blue_bottle_payment_card_request_contract",
+        test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
