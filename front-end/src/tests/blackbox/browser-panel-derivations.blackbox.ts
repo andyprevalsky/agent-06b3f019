@@ -414,6 +414,74 @@ describe('computeActiveBrowserPanels', () => {
     expect(computeActiveBrowserPanels(msgs)).toEqual([]);
   });
 
+  // Prod agent c27b4f28 (2026-08-22): user rejected a 1-item DoorDash checkout.
+  // write_lock_rejected ends the browser task but is not task_complete; without
+  // this terminal the live status chip stayed visible after rejection.
+  it('hides the panel when the user rejects a write-lock approval', () => {
+    const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+      {
+        message_id: 'init',
+        timestamp: '2026-08-22T19:39:27.726Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'd398cf8a-b084-4a6b-bb86-8b05fbe36875',
+          toolCallId: '489d5b89-42cd-4d72-8fe6-f219303988cb',
+          toolName: 'spawn_browser_agent',
+          action_type: 'browser',
+          browser_url: 'https://connect.steel.dev/v1/sessions/live/view',
+          toolStatus: 'IN_PROGRESS',
+        },
+      },
+      {
+        message_id: 'rejected',
+        timestamp: '2026-08-22T19:55:56.257Z',
+        text: 'User rejected with feedback',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'd398cf8a-b084-4a6b-bb86-8b05fbe36875',
+          toolCallId: '489d5b89-42cd-4d72-8fe6-f219303988cb',
+          toolName: 'spawn_browser_agent',
+          action_type: 'write_lock_rejected',
+          toolStatus: 'FINISHED',
+        },
+      },
+    ];
+    expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+  });
+
+  it('hides the panel when write_lock_rejected is tool-call-scoped without task_id', () => {
+    const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+      {
+        message_id: 'init',
+        timestamp: '2026-08-22T19:39:27.726Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'd398cf8a-b084-4a6b-bb86-8b05fbe36875',
+          toolCallId: '489d5b89-42cd-4d72-8fe6-f219303988cb',
+          toolName: 'spawn_browser_agent',
+          action_type: 'browser',
+          browser_url: 'https://connect.steel.dev/v1/sessions/live/view',
+          toolStatus: 'IN_PROGRESS',
+        },
+      },
+      {
+        message_id: 'rejected',
+        timestamp: '2026-08-22T19:55:56.257Z',
+        text: 'User rejected with feedback',
+        role: 'TOOL',
+        metadata: {
+          toolCallId: '489d5b89-42cd-4d72-8fe6-f219303988cb',
+          toolName: 'spawn_browser_agent',
+          action_type: 'write_lock_rejected',
+          toolStatus: 'FINISHED',
+        },
+      },
+    ];
+    expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+  });
+
   it('keeps a sibling task alive when another task pauses with a task-scoped session_paused', () => {
     // session_paused with task_id is task-scoped like task_complete: it must
     // not close a sibling retry task under the same tool call. Only a
