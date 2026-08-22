@@ -1919,7 +1919,6 @@ if [ "$MODE" = "refresh-wmh" ]; then
         exit 1
     fi
     warm_source_fetch_ref "$mid" "$EXPECTED_WMH_REF" || exit 1
-
     echo ""
     echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
     # Decode secrets into the checkout .env, mirror deps if needed, then run the

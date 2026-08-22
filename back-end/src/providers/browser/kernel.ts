@@ -9,6 +9,7 @@ import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser, validateSessionConnection } from '../steel/sessionConnection';
 import { browserProviderEnabled } from './config';
 import { kernelCaptchaTelemetryConfig } from './captchaTelemetry';
+import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import {
   getOrCreateKernelProxy,
@@ -272,6 +273,10 @@ async function createRemoteSession(
           try {
             await ensureKernelSessionFileDirectories(session.session_id);
             const closedTabCount = await resetKernelSessionTabs(validationBrowser);
+            // Visible live-view cue while Kernel's stealth auto-solver runs.
+            // Agent CDP attach re-installs this — validation connections close
+            // before the worker attaches (see captchaSolveIndicator.ts).
+            await installCaptchaSolveIndicator(validationBrowser);
             log.info('Reset restored Kernel profile tabs', {
               sessionId: session.session_id,
               closedTabCount,

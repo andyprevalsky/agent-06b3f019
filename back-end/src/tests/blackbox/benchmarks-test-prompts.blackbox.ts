@@ -14,11 +14,11 @@
  *   - filtering: external vitest smokes are excluded
  *   - adaptation: attachment urls live under /test-assets/, {frontend_url} token rewritten
  *   - dev default: the FE auto-load title exists in the catalog
- *   - idempotency: cached at startup, identical across requests
+ *   - idempotency: identical across consecutive requests (same file on disk)
  *
  * Invariants not applicable:
  *   - read-after-write / state transition / atomicity / referential integrity:
- *     read-only stateless endpoint over a startup-cached file
+ *     read-only stateless endpoint over tasks.json
  *   - tenant isolation: public endpoint, no user scoping
  *
  * Usage:

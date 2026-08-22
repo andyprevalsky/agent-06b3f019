@@ -1433,6 +1433,77 @@ async function testBoundary_notifyWriteLockStructuredMms() {
 }
 
 /**
+ * Return / generic_write write locks must SMS Action/Target/Change — not the
+ * purchase-only "checkout" stub that dropped refund and drop-off details.
+ */
+async function testBoundary_notifyWriteLockGenericWriteReturn() {
+  const token = captureToken('notify-write-lock-return');
+  const agent = await createNotifyAgent('boundary write lock return agent');
+  const itemTitle = 'Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US';
+  const change =
+    'Refund $10.84 to original payment method via Whole Foods Dropoff. Return by Sep 19, 2026.';
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'write_lock',
+        agent_id: agent.id,
+        payload: {
+          question: 'legacy markdown question should not be primary for return SMS',
+          attention_request_id: `attn-bb-${crypto.randomUUID()}`,
+          workflow_id: 'wf-boundary-write-lock-return',
+          metadata: {
+            writeLockNotification: {
+              trigger_type: 'generic_write',
+              action: 'confirm Amazon return for Carhartt beanie',
+              service: {
+                name: 'Amazon',
+                domain: 'amazon.com',
+                url: 'https://www.amazon.com/spr/returns/contract/example',
+              },
+              media: [],
+              generic_write: {
+                label: 'Confirm return',
+                target: itemTitle,
+                payload_summary: change,
+              },
+            },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, 'Confirm return');
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!) as { to?: string; body?: string };
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    const text = body.body ?? '';
+    assert(text.includes('Approval needed'), `Expected approval header: ${text}`);
+    assert(
+      text.includes('Rose wants to confirm Amazon return for Carhartt beanie on Amazon.'),
+      `Expected return action header: ${text}`
+    );
+    assert(!/checkout/i.test(text), `Expected no purchase checkout wording: ${text}`);
+    assert(text.includes('Action: Confirm return'), `Expected Action label: ${text}`);
+    assert(text.includes(`Target: ${itemTitle}`), `Expected Target: ${text}`);
+    assert(text.includes(`Change: ${change}`), `Expected Change: ${text}`);
+    assertOnlyAgentLinkUrl(text, agent.id);
+    assertNoRoutingLeaks(text, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+/**
  * write_lock with a requestPaymentCard payload (the normalized, always-populated
  * source) must render merchant, rating, reviews, and cost totals plus the agent
  * deep link — even when writeLockNotification is absent. This is the fix for
@@ -1922,6 +1993,10 @@ async function runAll() {
         {
           name: 'notify write_lock sends structured MMS with image',
           fn: testBoundary_notifyWriteLockStructuredMms,
+        },
+        {
+          name: 'notify write_lock renders generic_write return details',
+          fn: testBoundary_notifyWriteLockGenericWriteReturn,
         },
         {
           name: 'notify write_lock renders payment card (merchant/reviews/cost/link)',

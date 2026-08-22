@@ -3,17 +3,17 @@
  * Black-box tests for /api/benchmarks
  *
  * Domain surface:
- *   GET /api/benchmarks — public, no auth, returns cached task definitions from agents/benchmarks/tasks.json
+ *   GET /api/benchmarks — public, no auth, returns task definitions from agents/benchmarks/tasks.json
  *
  * Boundary capture coverage:
- *   This domain makes zero outbound third-party HTTP calls. The endpoint reads from an
- *   in-memory cache populated from a local JSON file at startup. A boundary capture test
- *   verifies that no outbound calls are triggered by a GET request.
+ *   This domain makes zero outbound third-party HTTP calls. The endpoint reads tasks.json
+ *   from disk on each request. A boundary capture test verifies that no outbound calls are
+ *   triggered by a GET request.
  *
  * Invariants covered:
  *   - auth boundary: endpoint is public, works without any auth headers
  *   - error-surface: only valid responses are 200 with tasks or 500 with { error: string }
- *   - idempotency: multiple GETs return identical data (cached at startup)
+ *   - idempotency: multiple GETs return identical data (read from tasks.json)
  *   - ordering: task order is deterministic across requests
  *   - concurrency: 10 parallel GETs return consistent results
  *   - duplication prevention: task names are unique
@@ -542,7 +542,7 @@ async function testBoundary_noOutboundCalls() {
 // ==================== 500 ERROR SHAPE INVARIANT ====================
 
 async function testError_schemaOnFailure() {
-  // We can't force a 500 from the outside (tasks are cached at startup),
+  // We can't force a 500 from the outside (tasks.json must be present on disk),
   // but we verify that IF the endpoint returns 500, the body matches ErrorResponseSchema.
   const res = await request(`${BASE_URL}/api/benchmarks`);
   if (res.status === 500) {
@@ -600,7 +600,7 @@ async function runAll() {
       ],
     },
     {
-      name: 'Idempotency / cache',
+      name: 'Idempotency',
       tests: [
         { name: 'idempotent same response', fn: testList_idempotentSameResponse },
         { name: 'task order deterministic', fn: testList_taskOrderDeterministic },

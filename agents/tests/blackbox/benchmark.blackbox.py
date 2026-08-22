@@ -3183,6 +3183,107 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors():
+    """Evaluate hard-recovery ERRORs may precede payment; do not fail closed.
+
+    Local repro: browser-alchemy-springs-sauna agents
+    1336b4b4-22e2-4212-923e-8cdfa002742b and 19a568fb-406c-45ff-bf22-fb0346a00b4b
+    reached grounded $50.65 payment_approval after
+    `evaluate timed out … hard renderer recovery … renderer_main_thread_blocked`,
+    then failed only on alchemy-sauna-runtime-contract / no_tool_failures.
+
+    Archived transcripts use `message`; live agent GET uses `text` — both shapes
+    must classify.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    error_body = (
+        "Browser action 'evaluate' timed out after 330s; hard renderer recovery ran "
+        "after CDP classified renderer_main_thread_blocked."
+    )
+    data_archived = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": error_body,
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_mn7KK2m41QCa5JgmTeu3uupx",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_payment_after_recover",
+                    "title": "Payment card requested ($50.65)",
+                },
+            },
+        ]
+    }
+    data_live = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": error_body,
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_ulc7Bp59ZxD3eLDm7m4wFQjf",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_payment_after_recover_live",
+                    "title": "Payment card requested ($50.65)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data_archived) == []
+    assert _run_declared_static_check(evaluator, data_archived) == (
+        True,
+        "All declared static checks passed",
+    )
+    assert _tool_runtime_failures(data_live) == []
+    assert _run_declared_static_check(evaluator, data_live) == (
+        True,
+        "All declared static checks passed",
+    )
+    data_real_fail = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Browser action 'evaluate' failed with TypeError: boom",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_real_evaluate_fail",
+                    "title": "evaluate",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data_real_fail) == [
+        "spawn_browser_agent call_real_evaluate_fail status=ERROR"
+    ]
+
+
 def test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors():
     """Host-pin evaluate refusals may ERROR then continue to write_lock; do not fail closed.
 
@@ -3455,6 +3556,7 @@ def test_no_tool_failures_counts_unrecovered_evaluate_uncaught():
     assert _run_declared_static_check(evaluator, data)[0] is False
 
 
+
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
 
@@ -3608,6 +3710,63 @@ def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
     passed, reason = _run_declared_static_check(evaluator, data)
     assert passed is False
     assert "tool failure" in reason.lower()
+
+def test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery():
+    """Stale selector-map index ERROR after hard recovery is retry noise.
+
+    Local repro: browser-alchemy-springs-sauna agent
+    186b9b29-456b-4544-91d4-042d0e6db5af reached grounded $50.65 payment_approval
+    after evaluate hard-recovery ERROR (already intermediate) plus
+    `Element with index 0 not found` on scroll_up, then failed only on
+    alchemy-sauna-runtime-contract / no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    evaluate_error = (
+        "Browser action 'evaluate' timed out after 330s; hard renderer recovery ran "
+        "after CDP classified renderer_main_thread_blocked."
+    )
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": evaluate_error,
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "toolu_01JGerJatmXL1hDcZmCbs1mY",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "Element with index 0 not found",
+                "metadata": {
+                    "error": True,
+                    "title": "Scrolled up 3000px",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_reB04pp6U951TkzvRjOUsS96",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_payment_ok",
+                    "title": "Payment card requested ($50.65)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
 
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
@@ -4040,17 +4199,25 @@ def test_live_paid_bookings_stop_only_at_payment_approval():
     write_lock = {"metadata": {"requestUserApproval": {"writePermission": True}}}
     auth = {"metadata": {"attentionKind": "auth_assistance"}}
 
-    for task_name in ("browser-alchemy-springs-sauna", "browser-event-ticket"):
-        task = get_task_by_name(task_name)
-        assert task.expected_attention_kinds == []
-        assert task.expected_attention_kind_any_of == []
-        assert task.expected_attention_kind == "payment_approval"
-        assert task.approval_handling == "ignore"
-        assert task.success_on_payment_card_request is True
-        assert task.expected_approval_count == 1
-        assert _attention_request_matches_task(task, payment) is True
-        assert _attention_request_matches_task(task, write_lock) is False
-        assert _attention_request_matches_task(task, auth) is False
+    event_ticket = get_task_by_name("browser-event-ticket")
+    assert event_ticket.expected_attention_kinds == []
+    assert event_ticket.expected_attention_kind_any_of == []
+    assert event_ticket.expected_attention_kind == "payment_approval"
+    assert event_ticket.approval_handling == "ignore"
+    assert event_ticket.success_on_payment_card_request is True
+    assert event_ticket.expected_approval_count == 1
+    assert _attention_request_matches_task(event_ticket, payment) is True
+    assert _attention_request_matches_task(event_ticket, write_lock) is False
+    assert _attention_request_matches_task(event_ticket, auth) is False
+
+    alchemy = get_task_by_name("browser-alchemy-springs-sauna")
+    assert alchemy.expected_attention_kind == "payment_approval"
+    assert alchemy.expected_attention_kind_any_of == []
+    assert alchemy.approval_handling == "ignore"
+    assert alchemy.expected_approval_count == 1
+    assert _attention_request_matches_task(alchemy, payment) is True
+    assert _attention_request_matches_task(alchemy, auth) is False
+    assert _attention_request_matches_task(alchemy, write_lock) is False
 
 
 def _captured_live_paid_payment_approval(task_name: str) -> tuple[dict, list[dict]]:
@@ -4791,11 +4958,11 @@ async def test_toast_poll_stops_without_responding_to_payment_approval():
 
 
 def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
-    """Alchemy passes at a detailed, unresolved card request on the right checkout."""
+    """Alchemy passes only at an unresolved Momence payment approval after correct selection."""
     from copy import deepcopy
 
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _run_declared_static_check
+    from benchmarks.run_benchmark import _run_declared_static_check, evaluate_task
 
     task = get_task_by_name("browser-alchemy-springs-sauna")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
@@ -4811,11 +4978,18 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
         "Alchemy Springs",
         "Alchemy Sauna Garden",
     ]
-    assert task.expected_tool_counts == {"spawn_agent": 1}
+    assert task.expected_tools == ["spawn_browser_agent"]
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
+        "single_turn_llm_judge",
+    ]
+    assert [evaluator["id"] for evaluator in task.evaluators] == [
+        "alchemy-sauna-runtime-contract",
+        "alchemy-sauna-selection-semantics",
+        "alchemy-sauna-terminal-semantics",
     ]
 
     static_evaluator = task.evaluators[0]
@@ -4827,13 +5001,13 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
         "approval_request_count",
         "approval_request_details",
     }
-    approval_check = next(check for check in static_evaluator["checks"] if check["type"] == "approval_request_details")
-    assert approval_check["required_strings"] == ["Alchemy", "Sauna Garden"]
-    assert approval_check["require_date"] is True
-    assert approval_check["require_time"] is True
-    assert approval_check["require_amount"] is True
+    detail_check = next(check for check in static_evaluator["checks"] if check["type"] == "approval_request_details")
+    assert detail_check["required_strings"] == ["Alchemy", "Sauna Garden"]
+    assert detail_check["require_date"] is True
+    assert detail_check["require_time"] is True
+    assert detail_check["require_amount"] is True
 
-    good = {
+    payment_good = {
         "agent": {"status": "ACTIVE"},
         "messages": [
             {
@@ -4848,6 +5022,8 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
         ],
         "_benchmark": {
             "approvals_triggered": 1,
+            "attention_request_kind_seen": "payment_approval",
+            "expected_attention_kind_seen": "payment_approval",
             "expected_payment_receipt_seen": True,
             "attention_requests_seen": [
                 {
@@ -4860,9 +5036,10 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
             ],
         },
     }
-    assert _run_declared_static_check(static_evaluator, good)[0] is True
+    assert _run_declared_static_check(static_evaluator, payment_good)[0] is True
+    assert evaluate_task(task, payment_good, approvals_triggered=1)[0] is True
 
-    missing_date = deepcopy(good)
+    missing_date = deepcopy(payment_good)
     missing_date["_benchmark"]["attention_requests_seen"][0]["question"] = (
         "Approve one Alchemy Springs Sauna Garden session at 10:00 AM for $45.00?"
     )
@@ -4870,9 +5047,310 @@ def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
     assert passed is False
     assert "date" in reason.lower()
 
-    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("earliest available", "10:00 am", "2:00 pm", "payment approval", "unresolved"):
-        assert requirement in semantic_criteria
+    auth_only = {
+        "agent": {"status": "ACTIVE"},
+        "messages": payment_good["messages"],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_request_kind_seen": "auth_assistance",
+            "expected_attention_kind_seen": "auth_assistance",
+            "attention_requests_seen": [
+                {
+                    "kind": "auth_assistance",
+                    "question": "Need help signing into Momence for Alchemy Sauna Garden",
+                }
+            ],
+        },
+    }
+    passed, reason = evaluate_task(task, auth_only, approvals_triggered=1)
+    assert passed is False
+    assert "payment_approval" in reason.lower()
+
+    write_lock = deepcopy(payment_good)
+    write_lock["_benchmark"]["attention_request_kind_seen"] = "write_lock"
+    write_lock["_benchmark"]["expected_attention_kind_seen"] = "write_lock"
+    write_lock["_benchmark"]["attention_requests_seen"][0]["kind"] = "write_lock"
+    passed, reason = evaluate_task(task, write_lock, approvals_triggered=1)
+    assert passed is False
+    assert "payment_approval" in reason.lower()
+
+    selection_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("10:00 am", "2:00 pm", "sauna garden", "sunday"):
+        assert requirement in selection_criteria
+    assert "earliest available" not in selection_criteria
+    assert "939 post street" not in selection_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    assert "do not require proof that the chosen start was the earliest" in judge_prompt
+    assert "do not require grounded proof of the street address" in judge_prompt
+    assert "typed request_payment_card / payment-approval" in judge_prompt
+    assert "non-earliest slot" not in judge_prompt
+    terminal_criteria = " ".join(task.evaluators[2]["criteria"]).lower()
+    assert "payment_approval" in terminal_criteria
+    assert "auth_assistance" in terminal_criteria
+    assert "write-lock" in terminal_criteria
+
+
+def test_alchemy_k5_waiver_pause_terminal_fails_payment_contract():
+    """k=5 agent 338aff82/e61ae529 paused at Momence waiver instead of payment_approval.
+
+    Post-fix fleet run 20260822_160440: browser clicked showWaiverCheck once,
+    took a screenshot, then session_paused for handwritten
+    signature. Passing agents double-clicked showWaiverCheck and clicked Accept
+    before request_payment_card ($50.65).
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    waiver_pause_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "session_paused",
+                    "title": "Browser Session Paused",
+                    "toolCallId": "tc-browser-waiver-pause",
+                },
+                "message": (
+                    "Checkout requires a handwritten signature on Alchemy Springs’ "
+                    "liability waiver. I cannot sign a legal agreement for you."
+                ),
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "title": "Browser automation complete",
+                    "toolCallId": "tc-browser-waiver-pause",
+                },
+                "message": (
+                    "Checkout requires a handwritten signature on Alchemy Springs’ "
+                    "liability waiver. I cannot sign a legal agreement for you."
+                ),
+            },
+        ],
+        "_benchmark": {
+            "approvals_triggered": 0,
+            "attention_request_kind_seen": None,
+            "expected_attention_kind_seen": None,
+        },
+    }
+    passed, reason = evaluate_task(task, waiver_pause_terminal, approvals_triggered=0)
+    assert passed is False
+    assert "payment_approval" in (reason or "").lower()
+
+
+def test_alchemy_k5_write_lock_phone_call_fails_payment_contract():
+    """k=5 agent 338aff82 root recovery: explore + phone-call write_lock, no payment."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    write_lock_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "title": "Browser automation complete",
+                    "toolCallId": "tc-browser-waiver-pause",
+                },
+                "message": "Waiver signature required; paused for user.",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "request_user_approval",
+                    "toolStatus": "FINISHED",
+                    "title": "🔐 Requesting user approval",
+                    "toolCallId": "tc-phone-write-lock",
+                    "requestUserApproval": {
+                        "toolApproval": True,
+                        "attentionRequestId": "cmt4kfzqb009z14oqpsrrs0sp",
+                    },
+                },
+                "message": "Make a phone call to +1 (415) 964-0336?",
+            },
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_request_kind_seen": "write_lock",
+            "expected_attention_kind_seen": "write_lock",
+        },
+    }
+    passed, reason = evaluate_task(task, write_lock_terminal, approvals_triggered=1)
+    assert passed is False
+    assert "payment_approval" in (reason or "").lower()
+
+
+def test_alchemy_k5_double_spawn_browser_exceeds_root_tool_count():
+    """k=5 agent e61ae529 spawned a second browser after waiver pause."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _root_exact_tool_count_exceeded
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    double_spawn_messages = [
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "title": "Browser automation complete",
+                "toolCallId": "tc-browser-1",
+            },
+            "message": "Please sign the waiver in the open signature box.",
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "title": "Browser automation complete",
+                "toolCallId": "tc-browser-2",
+            },
+            "message": "Continue and complete the user's Alchemy Springs booking.",
+        },
+    ]
+    exact_count_error = _root_exact_tool_count_exceeded(task, double_spawn_messages)
+    assert exact_count_error is not None
+    assert "spawn_browser_agent" in exact_count_error
+    assert "expected 1, got 2" in exact_count_error
+
+
+def test_alchemy_k5_auth_assistance_terminal_fails_payment_contract():
+    """k=5 agent 9aceb675 stopped at auth_assistance instead of payment_approval.
+
+    Local repro: browser-alchemy-springs-sauna fleet run 20260822_053219, agent
+    9aceb675-d12c-412c-a009-d8c5a4fc4b1e clicked Momence Sign in, entered saved
+    credentials, then credential_propagation paused for auth assistance before
+    any payment-card request.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    auth_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "IN_PROGRESS",
+                    "action_type": "credential_propagation",
+                    "title": "Updating credential state",
+                },
+                "message": (
+                    "Updating saved credential state before waiting for user "
+                    "authentication assistance."
+                ),
+            }
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_request_kind_seen": "auth_assistance",
+            "expected_attention_kind_seen": "auth_assistance",
+        },
+    }
+    passed, reason = evaluate_task(task, auth_terminal, approvals_triggered=1)
+    assert passed is False
+    assert "payment_approval" in (reason or "").lower()
+
+
+def test_alchemy_k5_monday_calendar_switch_visible_in_failure_trajectory():
+    """k=5 agent 8ef2cae5 selected Sun 23 then Mon 24 before Book now."""
+    import json
+    from pathlib import Path
+
+    run_path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks/runs/20260822_053219_browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna.json"
+    )
+    if not run_path.is_file():
+        return
+    run = json.loads(run_path.read_text())
+    task = next(
+        t
+        for t in run["tasks"]
+        if t.get("agent_id") == "8ef2cae5-9b8b-4cfd-b567-f411047d773c"
+    )
+    titles = [
+        (m.get("metadata") or {}).get("title", "")
+        for m in task.get("logs", {}).get("messages", [])
+        if (m.get("metadata") or {}).get("action_type") == "click"
+    ]
+    sun_idx = next(i for i, t in enumerate(titles) if "Sun" in t and "23" in t)
+    mon_idx = next(i for i, t in enumerate(titles) if "Mon" in t and "24" in t)
+    book_idx = next(i for i, t in enumerate(titles) if "Book now" in t)
+    assert sun_idx < mon_idx < book_idx
+    evaluators = task.get("logs", {}).get("declared_evaluators") or []
+    selection = next(e for e in evaluators if e.get("id") == "alchemy-sauna-selection-semantics")
+    assert selection.get("passed") is False
+    assert "Monday Night Sauna Garden" in (selection.get("reasoning") or "")
+
+
+async def test_alchemy_k5_monday_night_receipt_fails_selection_semantics():
+    """Replay selection judge on archived 8ef2cae5 payment receipt (score 0.0)."""
+    import json
+    from pathlib import Path
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _call_declared_llm_judge
+
+    run_path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks/runs/20260822_053219_browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna,browser-alchemy-springs-sauna.json"
+    )
+    if not run_path.is_file():
+        return
+    run = json.loads(run_path.read_text())
+    archived = next(
+        t
+        for t in run["tasks"]
+        if t.get("agent_id") == "8ef2cae5-9b8b-4cfd-b567-f411047d773c"
+    )
+    msgs = archived["logs"]["messages"]
+    pay = next(
+        m
+        for m in msgs
+        if (m.get("metadata") or {}).get("toolName") == "request_user_approval"
+    )
+    approval = (pay.get("metadata") or {}).get("requestUserApproval", {})
+    question = pay.get("message") or pay.get("text") or ""
+    data = {
+        "agent": {"status": archived["status"]},
+        "messages": msgs,
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "approvals_resolved": 0,
+            "attention_request_kind_seen": "payment_approval",
+            "expected_attention_kind_seen": "payment_approval",
+            "expected_payment_receipt_seen": True,
+            "attention_requests_seen": [
+                {
+                    "kind": "payment_approval",
+                    "question": question,
+                    "requestPaymentCard": approval.get("requestPaymentCard", {}),
+                }
+            ],
+        },
+    }
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    selection = task.evaluators[1]
+    result = await _call_declared_llm_judge(task, selection, data)
+    assert float(result.get("score") or 0) < 1.0
+    reasoning = (result.get("reasoning") or "").lower()
+    assert "monday night" in reasoning or "morning sauna" in reasoning
 
 
 def test_approval_request_details_support_multiple_dates_and_seat():
@@ -4967,6 +5445,7 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
 
     task = get_task_by_name("browser-event-ticket")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert "next week's friday" in task.prompt.lower()
     assert task.prompt.endswith("Complete the ticket purchase.")
     assert task.approval_handling == "ignore"
     assert task.expected_attention_kinds == []
@@ -4975,7 +5454,8 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
     assert task.expected_approval_count == 1
     assert task.success_on_payment_card_request is True
     assert task.expected_payment_receipt["merchant"] == "AMC Theatres (direct - amctheatres.com)"
-    assert task.expected_tool_counts == {"spawn_agent": 1}
+    # H-02: count the browser session tool, not the parent spawn_agent wrapper.
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
@@ -4984,40 +5464,73 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
     static_types = {check["type"] for check in task.evaluators[0]["checks"]}
     assert "expected_payment_receipt" in static_types
     assert "agent_status" not in static_types
-    # The approval must still identify venue, date, showtime, seat and amount —
-    # asserted by the judge, not by substring/regex matching over the payload.
+    # Approval contents are judged semantically, not substring-matched.
     assert "approval_request_details" not in static_types
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("earliest", "center", "payment approval", "unresolved"):
+    # H-04: no earliest-show / seat-center criteria; date window + soft venue.
+    for requirement in (
+        "payment approval",
+        "unresolved",
+        "next week's friday",
+        "7:00 pm",
+        "9:00 pm",
+        "amctheatres.com",
+    ):
         assert requirement in semantic_criteria
-    for approval_detail in ("venue", "date", "showtime", "seat", "total amount"):
+    for forbidden in ("earliest", "center"):
+        assert forbidden not in semantic_criteria
+    for approval_detail in ("date", "showtime", "seat", "total amount"):
         assert approval_detail in semantic_criteria
 
 
-def test_amazon_return_catalog_requires_single_clean_completed_return():
-    """Amazon returns complete after one approval instead of stopping at it."""
+def test_amazon_return_catalog_stops_at_unresolved_return_write_lock():
+    """Amazon return stops at an unresolved write lock with grounded approval copy."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-amazon-return")
-    assert "stop at the final write-lock" not in task.prompt.lower()
     assert task.prompt.endswith("Otherwise, complete the return.")
-    assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.approval_handling == "ignore"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_attention_kinds == []
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.min_steps == {"browser": 5}
     assert task.tool_count_scope == "root"
+    assert task.environment["context_notes"] == (
+        "Live Amazon order history with synced account authentication. Success is exactly one "
+        "unresolved return write-lock approval that identifies the item, refund amount, original "
+        "payment method, and drop-off. The runner leaves that request unresolved and does not "
+        "submit the return."
+    )
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
     ]
     static_types = {check["type"] for check in task.evaluators[0]["checks"]}
-    # Approval contents are judged semantically, not substring-matched.
-    assert "approval_request_details" not in static_types
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    assert "agent_status" not in static_types
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["return"]
+    assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "unresolved" in runtime_criteria
+    assert "write lock" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("most recent", "completed", "confirmation"):
+    for requirement in ("unresolved", "does not approve", "not submitted"):
         assert requirement in semantic_criteria
     for approval_detail in ("refund amount", "original payment method", "drop-off"):
         assert approval_detail in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("approval of the write lock", "submitted/confirmed return", "order-history dom"):
+        assert failure in judge_prompt
+    assert task.evaluators[1]["id"] == "amazon-return-write-lock-semantics"
 
 
 def test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user():
@@ -15018,6 +15531,10 @@ async def run_all_tests():
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
     )
     r.record(
+        "no_tool_failures_ignores_evaluate_hard_recovery",
+        test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors,
+    )
+    r.record(
         "declared_static_no_tool_failures_ignores_navigation_pin_guard",
         test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors,
     )
@@ -15052,6 +15569,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_stale_dom_node",
         test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
+    )
+    r.record(
+        "no_tool_failures_ignores_stale_element_index_after_evaluate_recovery",
+        test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery,
     )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
@@ -15154,6 +15675,30 @@ async def run_all_tests():
         test_alchemy_sauna_catalog_stops_at_grounded_payment_approval,
     )
     r.record(
+        "alchemy_k5_auth_assistance_terminal_fails_payment_contract",
+        test_alchemy_k5_auth_assistance_terminal_fails_payment_contract,
+    )
+    r.record(
+        "alchemy_k5_waiver_pause_terminal_fails_payment_contract",
+        test_alchemy_k5_waiver_pause_terminal_fails_payment_contract,
+    )
+    r.record(
+        "alchemy_k5_write_lock_phone_call_fails_payment_contract",
+        test_alchemy_k5_write_lock_phone_call_fails_payment_contract,
+    )
+    r.record(
+        "alchemy_k5_double_spawn_browser_exceeds_root_tool_count",
+        test_alchemy_k5_double_spawn_browser_exceeds_root_tool_count,
+    )
+    r.record(
+        "alchemy_k5_monday_calendar_switch_failure_trajectory",
+        test_alchemy_k5_monday_calendar_switch_visible_in_failure_trajectory,
+    )
+    await r.record_async(
+        "alchemy_k5_monday_night_receipt_fails_selection_semantics",
+        test_alchemy_k5_monday_night_receipt_fails_selection_semantics,
+    )
+    r.record(
         "approval_details_multiple_dates_and_seat",
         test_approval_request_details_support_multiple_dates_and_seat,
     )
@@ -15166,8 +15711,8 @@ async def run_all_tests():
         test_event_ticket_catalog_stops_at_grounded_payment_approval,
     )
     r.record(
-        "amazon_return_clean_completed_return",
-        test_amazon_return_catalog_requires_single_clean_completed_return,
+        "amazon_return_stops_at_unresolved_return_write_lock",
+        test_amazon_return_catalog_stops_at_unresolved_return_write_lock,
     )
     r.record(
         "tamy_identity_fixture_seeds_the_run_identity",

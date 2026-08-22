@@ -10,6 +10,7 @@ import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
+import { installCaptchaSolveIndicator } from '../browser/captchaSolveIndicator';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
 import {
   envEnabled,
@@ -273,6 +274,10 @@ export async function createSessionWithContext(
         }
         continue; // Retry
       }
+
+      // Visible live-view cue while Steel's native CAPTCHA solver runs.
+      // Agent CDP attach re-installs this after the validation connection closes.
+      await installCaptchaSolveIndicator(validationBrowser);
 
       // If this was the first session for the user, claim the provider profile
       // atomically. Concurrent first sessions can each get a new Steel profile;

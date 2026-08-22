@@ -521,6 +521,7 @@ class DOMService:
         self._passkey_seeded_by_target: Dict[str, set] = {}
         self._held_passkeys_by_credential_id: Dict[str, Dict[str, Any]] = {}
         self._passkey_seed_counts: Dict[str, int] = {}
+        self._captcha_indicator_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
         """Connect to the browser via CDP.
@@ -565,6 +566,7 @@ class DOMService:
             # up — run them concurrently. Each swallows its own failures.
             await asyncio.gather(
                 self._inject_scrollbar_css(),
+                self._inject_captcha_solve_indicator(),
                 self.ensure_browser_overlays_suppressed(),
                 self._inject_anti_detection(),
             )
@@ -611,6 +613,92 @@ class DOMService:
         except Exception as e:
             logger.warning(f"⚠️ Failed to inject scrollbar CSS: {e}")
 
+    async def _inject_captcha_solve_indicator(self) -> None:
+        """Show a live-view banner while Kernel/Steel auto-solve a CAPTCHA.
+
+        Providers solve transparently with no UI. Validation-connection init
+        scripts from the backend do not reliably survive until this agent CDP
+        attach, so re-register here (same pattern as anti-detection spoofs).
+        """
+        try:
+            from browser_tools.captcha_solve_indicator import CAPTCHA_SOLVE_INDICATOR_SCRIPT
+
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                return
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            await cdp_session.cdp_client.send.Page.addScriptToEvaluateOnNewDocument(
+                params={"source": CAPTCHA_SOLVE_INDICATOR_SCRIPT, "runImmediately": True},
+                session_id=cdp_session.session_id,
+            )
+            logger.info("🧩 Injected CAPTCHA auto-solve live-view indicator")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to inject CAPTCHA auto-solve indicator: {e}")
+
+    async def set_captcha_indicator_phase(self, phase: str) -> None:
+        """Push provider CAPTCHA phase (idle|solving|succeeded|failed) into the live-view chip."""
+        try:
+            from browser_tools.captcha_solve_indicator import (
+                captcha_solve_indicator_set_phase_script,
+            )
+
+            target_id = self._session.agent_focus_target_id if self._session else None
+            if not target_id:
+                return
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            await cdp_session.cdp_client.send.Runtime.evaluate(
+                params={
+                    "expression": captcha_solve_indicator_set_phase_script(phase),
+                    "returnByValue": True,
+                },
+                session_id=cdp_session.session_id,
+            )
+        except Exception as e:
+            logger.debug(f"CAPTCHA indicator telemetry push failed: {e}")
+
+    async def set_captcha_auto_solve_active(self, solving: bool) -> None:
+        """Back-compat: map boolean solving onto chip phase."""
+        await self.set_captcha_indicator_phase("solving" if solving else "idle")
+
+    async def probe_captcha_widgets_present(self) -> bool:
+        """Kernel has no in-flight solver flag — probe challenge widgets via CDP."""
+        try:
+            from browser_tools.captcha_solve_indicator import CAPTCHA_WIDGET_PRESENT_SCRIPT
+
+            target_id = self._session.agent_focus_target_id if self._session else None
+            if not target_id:
+                return False
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            result = await cdp_session.cdp_client.send.Runtime.evaluate(
+                params={"expression": CAPTCHA_WIDGET_PRESENT_SCRIPT, "returnByValue": True},
+                session_id=cdp_session.session_id,
+            )
+            value = (result or {}).get("result", {}).get("value")
+            return value is True
+        except Exception:
+            return False
+
+    def start_captcha_telemetry_indicator(
+        self,
+        poll_phase,
+    ) -> None:
+        """Poll provider CAPTCHA telemetry and mirror phase into the live-view chip."""
+        if self._captcha_indicator_task is not None and not self._captcha_indicator_task.done():
+            return
+
+        async def _loop() -> None:
+            while self._session is not None:
+                try:
+                    phase = str(await poll_phase() or "idle")
+                    await self.set_captcha_indicator_phase(phase)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"CAPTCHA telemetry indicator poll failed: {e}")
+                await asyncio.sleep(1.0)
+
+        self._captcha_indicator_task = asyncio.create_task(_loop())
+
     async def disconnect(self) -> None:
         """Disconnect from the browser.
 
@@ -619,6 +707,14 @@ class DOMService:
         """
         if self._session:
             session = self._session
+            task = self._captcha_indicator_task
+            self._captcha_indicator_task = None
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             try:
                 # BrowserSession.stop() uses BrowserStopEvent(force=False): it
                 # closes the CDP client, event bus, and watchdog state without

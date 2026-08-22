@@ -8,6 +8,7 @@ and handler (ClaudeTokenState, get_manager, workflow helper static bits).
 import ast
 import asyncio
 import base64
+import contextlib
 import json
 import os
 import sys
@@ -490,6 +491,92 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
 
     assert BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS > BROWSER_STATE_REQUEST_TIMEOUT_SECONDS
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+
+def test_browser_use_upstream_still_hardcodes_page_navigate_20s():
+    """Canary: browser-use still hardcodes Page.navigate wait at 20s.
+
+    When upstream honors TIMEOUT_NavigateToUrlEvent, delete
+    ``browser_use_patches.apply_browser_use_navigate_timeout_patch``.
+    """
+    import browser_use.browser.session as browser_session_mod
+
+    source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    assert "nav_timeout = 20.0" in source, (
+        "browser-use no longer hardcodes nav_timeout=20.0; remove the Rose "
+        "navigate-timeout patch if TIMEOUT_NavigateToUrlEvent is honored"
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config():
+    """Owning boundary for browser-event-ticket AMC start_url tool ERROR.
+
+    browser-use ``_navigate_and_wait`` passes ``timeout=20.0`` to
+    ``asyncio.wait_for`` around CDP ``Page.navigate``. Our config sets
+    ``TIMEOUT_NavigateToUrlEvent=300``, but that env never reaches this wait.
+    Without the Rose patch the wait budget stays 20.0s — heavy AMC showtimes
+    pages time out, spawn_browser returns tool ERROR, and the root agent
+    re-spawns on Fandango (merchant mismatch).
+    """
+    from browser_use.browser.session import BrowserSession
+
+    from domains.spawn_browser_agent_v3 import browser_use_patches as patches
+    from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+    assert NAVIGATE_TO_URL_TIMEOUT_SECONDS > patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS
+    assert patches.page_navigate_timeout_seconds() == float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)
+
+    seen_timeouts: list[float | None] = []
+    true_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout=None, **kwargs):
+        seen_timeouts.append(timeout)
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        return {"ok": True}
+
+    async def upstream_like_navigate(self, *args, **kwargs):
+        async def page_navigate_rpc():
+            return {"frameId": "1"}
+
+        # Exact upstream hardcode shape (session.py: nav_timeout = 20.0).
+        return await asyncio.wait_for(
+            page_navigate_rpc(),
+            timeout=patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS,
+        )
+
+    previous_navigate = BrowserSession._navigate_and_wait
+    previous_patched = getattr(BrowserSession, patches._PATCHED_ATTR, False)
+    setattr(BrowserSession, patches._PATCHED_ATTR, False)
+    BrowserSession._navigate_and_wait = upstream_like_navigate
+
+    # Pre-fix (unpatched): wait_for must still see the hardcoded 20.0s budget.
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        await upstream_like_navigate(MagicMock())
+        assert seen_timeouts == [patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS], (
+            "unpatched Page.navigate wait_for budget must be upstream 20.0s; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+
+    seen_timeouts.clear()
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        assert patches.apply_browser_use_navigate_timeout_patch() is True
+        await BrowserSession._navigate_and_wait(MagicMock())
+        assert seen_timeouts == [float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)], (
+            "patched Page.navigate wait_for budget must equal "
+            f"NAVIGATE_TO_URL_TIMEOUT_SECONDS={NAVIGATE_TO_URL_TIMEOUT_SECONDS}; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+        BrowserSession._navigate_and_wait = previous_navigate
+        setattr(BrowserSession, patches._PATCHED_ATTR, previous_patched)
+
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
@@ -5682,7 +5769,7 @@ def test_recovery_requires_live_tab_verify_before_success():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     start = source.index('if action_name == "recover_from_challenge":')
-    end = source.index('if action_name == "send_message_to_user":', start)
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
     recovery_block = source[start:end]
 
     preloaded_guard = recovery_block.index('storage_state_preloaded')
@@ -5740,7 +5827,7 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     start = source.index('if action_name == "recover_from_challenge":')
-    end = source.index('if action_name == "send_message_to_user":', start)
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
     recovery_block = source[start:end]
 
     # Clean-page skip may finalize early; measure the full recovery try/except path
@@ -5767,7 +5854,7 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     recovery_block = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
-        'if action_name == "send_message_to_user":', 1
+        'if action_name in ("attempt_completion", "done"):', 1
     )[0]
     reconnect = recovery_block.index("reconnected = await _reconnect_browser_stack_after_rotation(")
     close_humanizer = recovery_block.index("await humanizer.close()", reconnect)
@@ -5829,7 +5916,7 @@ def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
     # 4. The rotation recovery path re-seeds the held passkeys AFTER restoring the
     #    cookie/localStorage state — parity with the storage restore.
     recovery_block = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
-        'if action_name == "send_message_to_user":', 1
+        'if action_name in ("attempt_completion", "done"):', 1
     )[0]
     restore_storage = recovery_block.index("await _restore_rotation_storage_state(")
     reseed_passkeys = recovery_block.index('sync_passkeys_onto_target(context="after proxy rotation")')
@@ -6829,7 +6916,7 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 4, f"expected 4 build_usage_items call sites, found {len(build_calls)}"
+    assert len(build_calls) == 3, f"expected 3 build_usage_items call sites, found {len(build_calls)}"
     for build_call in build_calls:
         forwarded = [ast.unparse(a) for a in build_call.args] + [ast.unparse(k.value) for k in build_call.keywords]
         assert "usage_by_model" in forwarded, f"call site drops usage_by_model: {ast.unparse(build_call)}"
@@ -9339,26 +9426,6 @@ async def test_execute_action_attempt_completion():
     assert out["success"] is True
     assert out["attempt_completion"] is True
 
-async def test_execute_action_send_message_to_user():
-    from domains.spawn_browser_agent_v3.service_actions import execute_action
-
-    dom = MagicMock()
-    dom.session = MagicMock()
-    dom.selector_map = {}
-    ah = MagicMock()
-    ah.record_action = AsyncMock()
-    out = await execute_action(
-        dom,
-        ah,
-        {
-            "action": "send_message_to_user",
-            "params": {"message": "help", "reason": "captcha"},
-        },
-    )
-    assert out["success"] is True
-    assert out["message_to_user"] is True
-    assert out["reason"] == "captcha"
-
 async def test_execute_action_done():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -9669,7 +9736,7 @@ async def test_execute_action_scroll_with_humanizer_down():
         humanizer=hu,
     )
     assert out == {"success": True, "message": ""}
-    hu.scroll.assert_awaited_once_with(400)
+    hu.scroll.assert_awaited_once_with(400, at_coords=None)
 
 async def test_execute_action_scroll_with_humanizer_up():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -9688,7 +9755,70 @@ async def test_execute_action_scroll_with_humanizer_up():
         humanizer=hu,
     )
     assert out["success"] is True
-    hu.scroll.assert_awaited_once_with(-250)
+    hu.scroll.assert_awaited_once_with(-250, at_coords=None)
+
+async def test_execute_action_scroll_with_humanizer_uses_element_coords():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {34: MagicMock()}
+    dom.get_element_coordinates = AsyncMock(return_value=(120, 340))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.scroll = AsyncMock()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "scroll", "index": 34, "params": {"direction": "up", "amount": 500}},
+        humanizer=hu,
+    )
+    assert out == {"success": True, "message": ""}
+    dom.get_element_coordinates.assert_awaited_once_with(34)
+    hu.scroll.assert_awaited_once_with(-500, at_coords=(120, 340))
+
+async def test_execute_action_scroll_index_zero_scrolls_viewport():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_element_coordinates = AsyncMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.scroll = AsyncMock()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "scroll", "index": 0, "params": {"direction": "up", "amount": 3000}},
+        humanizer=hu,
+    )
+    assert out == {"success": True, "message": ""}
+    dom.get_element_coordinates.assert_not_awaited()
+    hu.scroll.assert_awaited_once_with(-3000, at_coords=None)
+
+async def test_execute_action_scroll_missing_element_index_errors():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.scroll = AsyncMock()
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "scroll", "index": 34, "params": {"direction": "down", "amount": 200}},
+        humanizer=hu,
+    )
+    assert out["success"] is False
+    assert out["error"] == "Element with index 34 not found"
+    hu.scroll.assert_not_awaited()
 
 async def test_execute_action_extract_disabled():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -9958,6 +10088,92 @@ async def test_execute_action_evaluate():
     out = await execute_action(dom, ah, {"action": "evaluate", "params": {"code": "1+1"}})
     assert out["success"] is True
     assert out["value"] == 42
+
+
+def test_normalize_evaluate_timeout_seconds_default_and_clamp():
+    from browser_tools.schemas import (
+        EVALUATE_TIMEOUT_SECONDS_DEFAULT,
+        EVALUATE_TIMEOUT_SECONDS_MAX,
+        EvaluateTool,
+        normalize_evaluate_timeout_seconds,
+    )
+
+    assert normalize_evaluate_timeout_seconds(None) == EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    assert normalize_evaluate_timeout_seconds(30) == 30.0
+    assert normalize_evaluate_timeout_seconds(90) == EVALUATE_TIMEOUT_SECONDS_MAX
+    assert normalize_evaluate_timeout_seconds(0) == EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    assert normalize_evaluate_timeout_seconds(-5) == EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    # Schema rejects > max so the LLM gets a validation error, not a silent clamp.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        EvaluateTool(tool="evaluate", code="1+1", timeout=90)
+    parsed = EvaluateTool(tool="evaluate", code="1+1", timeout=45)
+    assert parsed.timeout == 45.0
+    omitted = EvaluateTool(tool="evaluate", code="1+1")
+    assert omitted.timeout is None
+
+
+async def test_execute_action_evaluate_honors_llm_timeout():
+    """Hanging Runtime.evaluate fails at the LLM-set bound, not the 330s outer cap."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    async def _hang(*_args, **_kwargs):
+        await asyncio.Future()
+
+    dom = MagicMock()
+    session = MagicMock()
+    cdp = MagicMock()
+    cdp.session_id = "sid"
+    cdp.cdp_client.send.Runtime.evaluate = _hang
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
+    dom.session = session
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    t0 = time_module.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        await execute_action(
+            dom,
+            ah,
+            {"action": "evaluate", "params": {"code": "while(1){}", "timeout": 1}},
+        )
+    elapsed = time_module.monotonic() - t0
+    assert 0.8 <= elapsed < 5.0, f"expected ~1s LLM timeout, got {elapsed:.2f}s"
+
+
+async def test_execute_action_evaluate_default_timeout_bounds_hang():
+    """Omitting timeout still bounds hanging CDP evaluate (never unbounded)."""
+    from browser_tools.schemas import EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    async def _hang(*_args, **_kwargs):
+        await asyncio.Future()
+
+    dom = MagicMock()
+    session = MagicMock()
+    cdp = MagicMock()
+    cdp.session_id = "sid"
+    cdp.cdp_client.send.Runtime.evaluate = _hang
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
+    dom.session = session
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    # Patch default down so the blackbox stays fast while still proving a bound exists.
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions.normalize_evaluate_timeout_seconds",
+        side_effect=lambda value, **_kw: 0.5 if value is None else float(value),
+    ):
+        t0 = time_module.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await execute_action(dom, ah, {"action": "evaluate", "params": {"code": "1+1"}})
+        elapsed = time_module.monotonic() - t0
+    assert 0.4 <= elapsed < 3.0, f"expected patched default bound, got {elapsed:.2f}s"
+    assert EVALUATE_TIMEOUT_SECONDS_DEFAULT <= 60.0
+
 
 async def test_execute_action_open_new_tab():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -10625,6 +10841,368 @@ async def test_evaluate_awaits_promises():
     assert evaluate.await_args.kwargs["params"]["awaitPromise"] is True
 
 
+# Exact evaluate payloads from alchemy agent 01dce6e9 step 23/24 (Momence Konva waiver).
+_ALCHEMY_STEP23_EVAL = (
+    "(()=>{try{const c=document.querySelector('canvas'); if(c){const r=c.getBoundingClientRect(); "
+    "const ctx=c.getContext('2d'); ctx.beginPath();ctx.moveTo(20,30);ctx.lineTo(90,10);ctx.lineTo(150,35);"
+    "ctx.stroke(); c.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,clientX:r.left+20,"
+    "clientY:r.top+30,pointerId:1}));c.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,"
+    "clientX:r.left+100,clientY:r.top+20,pointerId:1}));c.dispatchEvent(new PointerEvent('pointerup',"
+    "{bubbles:true,clientX:r.left+150,clientY:r.top+35,pointerId:1}));return 'signed canvas';} "
+    "return 'none';}catch(e){return String(e)}})()"
+)
+_ALCHEMY_STEP24_EVAL = (
+    "(()=>{try{const c=document.querySelector('canvas');if(!c)return 'no canvas';"
+    "const r=c.getBoundingClientRect();const pts=[[20,30],[40,20],[60,40],[80,15],[100,35],[130,20]];"
+    "for(let i=0;i<pts.length;i++){const [x,y]=pts[i]; "
+    "const type=i===0?'mousedown':i===pts.length-1?'mouseup':'mousemove';"
+    "c.dispatchEvent(new MouseEvent(type,{bubbles:true,clientX:r.left+x,clientY:r.top+y,"
+    "buttons:type==='mouseup'?0:1}));} return {w:c.width,h:c.height,"
+    "buttons:[...document.querySelectorAll('button')].filter(b=>b.textContent.includes('Accept'))"
+    ".map(b=>({disabled:b.disabled}))};}catch(e){return String(e)}})()"
+)
+
+
+async def test_alchemy_evaluate_js_completes_on_healthy_canvas():
+    """Exact alchemy step23/24 evaluate JS must finish quickly on a healthy page.
+
+    Proves the hung evaluate was not caused by the JS payload itself (CDP
+    Runtime.evaluate + awaitPromise on finite PointerEvent/MouseEvent strokes).
+    """
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(
+                "<canvas width='480' height='150'></canvas><button disabled>Accept</button>"
+            )
+            cdp = await page.context.new_cdp_session(page)
+
+            async def _eval(code: str):
+                return await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {"expression": code, "returnByValue": True, "awaitPromise": True},
+                    ),
+                    timeout=5.0,
+                )
+
+            r23 = await _eval(_ALCHEMY_STEP23_EVAL)
+            assert (r23.get("result") or {}).get("value") == "signed canvas"
+            r24 = await _eval(_ALCHEMY_STEP24_EVAL)
+            value = (r24.get("result") or {}).get("value") or {}
+            assert value.get("w") == 480
+            assert value.get("h") == 150
+        finally:
+            await browser.close()
+
+
+async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
+    """Renderer main-thread freeze reproduces the live evaluate-timeout recovery shape.
+
+    Live agent 01dce6e9: action_timeout_evaluate_330s → soft recovery actions
+    ['bring_to_front'] only (Escape timed out) → subsequent CDP stays dead until
+    harness pause. Cancelling awaitPromise alone does not poison the page.
+    """
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    async def _force_close(browser) -> None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=5.0)
+            return
+        except Exception:
+            pass
+        proc = getattr(browser, "process", None)
+        if proc is not None and getattr(proc, "pid", None):
+            with contextlib.suppress(Exception):
+                proc.kill()
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(
+                "<canvas width='480' height='150'></canvas><button disabled>Accept</button>"
+            )
+            cdp = await page.context.new_cdp_session(page)
+
+            # Control: cancelling a long awaitPromise evaluate must not wedge CDP.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {
+                            "expression": (
+                                "(async () => { await new Promise(r => setTimeout(r, 10000)); "
+                                "return 42; })()"
+                            ),
+                            "returnByValue": True,
+                            "awaitPromise": True,
+                        },
+                    ),
+                    timeout=0.8,
+                )
+            await asyncio.sleep(0.2)
+            retry = await asyncio.wait_for(
+                cdp.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
+                ),
+                timeout=3.0,
+            )
+            assert (retry.get("result") or {}).get("value") == 2
+
+            # Block renderer without awaiting the spinning work.
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.sleep(0.2)
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {
+                            "expression": _ALCHEMY_STEP24_EVAL,
+                            "returnByValue": True,
+                            "awaitPromise": True,
+                        },
+                    ),
+                    timeout=2.0,
+                )
+
+            stall = await classify_evaluate_cdp_stall(
+                input_page=page,
+                playwright_browser=browser,
+                timeout_s=1.5,
+            )
+            assert stall["verdict"] == "renderer_main_thread_blocked"
+            assert stall["renderer"] == "frozen"
+            assert stall["browser"] == "ok"
+
+            soft_actions = []
+            try:
+                await asyncio.wait_for(page.bring_to_front(), timeout=1.5)
+                soft_actions.append("bring_to_front")
+            except asyncio.TimeoutError:
+                soft_actions.append("bring_to_front:TimeoutError")
+            try:
+                await asyncio.wait_for(page.keyboard.press("Escape"), timeout=1.5)
+                soft_actions.append("press_escape")
+            except asyncio.TimeoutError:
+                soft_actions.append("press_escape:TimeoutError")
+            assert "bring_to_front" in soft_actions
+            assert "press_escape:TimeoutError" in soft_actions
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    cdp.send(
+                        "Runtime.evaluate",
+                        {"expression": "1+1", "returnByValue": True},
+                    ),
+                    timeout=1.5,
+                )
+
+            fresh = await browser.new_page()
+            await fresh.goto("about:blank")
+            fresh_cdp = await fresh.context.new_cdp_session(fresh)
+            ok = await asyncio.wait_for(
+                fresh_cdp.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True},
+                ),
+                timeout=2.0,
+            )
+            assert (ok.get("result") or {}).get("value") == 2
+        finally:
+            await _force_close(browser)
+
+
+async def test_hard_recover_frozen_renderer_page_restores_evaluate():
+    """Browser-process Target.closeTarget + new page restores evaluate after freeze."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.handler import _hard_recover_frozen_renderer_page
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    async def _force_close(browser) -> None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=5.0)
+        except Exception:
+            proc = getattr(browser, "process", None)
+            if proc is not None and getattr(proc, "pid", None):
+                with contextlib.suppress(Exception):
+                    proc.kill()
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content("<html><body><h1>waiver</h1></body></html>")
+            cdp = await page.context.new_cdp_session(page)
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.sleep(0.2)
+            stalled = await classify_evaluate_cdp_stall(
+                input_page=page, playwright_browser=browser, timeout_s=1.5
+            )
+            assert stalled["verdict"] == "renderer_main_thread_blocked"
+
+            new_page, actions = await _hard_recover_frozen_renderer_page(
+                input_page=page,
+                playwright_browser=browser,
+                fallback_url="about:blank",
+            )
+            assert new_page is not None
+            assert any(
+                a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions
+            )
+            recovered = await classify_evaluate_cdp_stall(
+                input_page=new_page, playwright_browser=browser, timeout_s=2.0
+            )
+            assert recovered["renderer"] == "ok"
+            cdp2 = await new_page.context.new_cdp_session(new_page)
+            result = await asyncio.wait_for(
+                cdp2.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
+                ),
+                timeout=3.0,
+            )
+            assert (result.get("result") or {}).get("value") == 2
+        finally:
+            await _force_close(browser)
+
+
+async def test_hard_recover_frozen_renderer_page_restores_click():
+    """Click hangs on a frozen renderer; soft bring_to_front fails; hard recover restores click.
+
+    Live afe8a612: action_timeout_click_330s → Recovery actions: bring_to_front only →
+    no further progress until 903s task timeout.
+    """
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.handler import _hard_recover_frozen_renderer_page
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    click_budget_s = 3.0
+
+    async def _force_close(browser) -> None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=5.0)
+        except Exception:
+            proc = getattr(browser, "process", None)
+            if proc is not None and getattr(proc, "pid", None):
+                with contextlib.suppress(Exception):
+                    proc.kill()
+
+    async def _timed_click(page) -> str:
+        try:
+            await asyncio.wait_for(page.click("text=Sign", timeout=60000), timeout=click_budget_s)
+            return "ok"
+        except Exception as exc:
+            return type(exc).__name__
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content("<html><body><button>Sign</button></body></html>")
+            assert await _timed_click(page) == "ok"
+
+            cdp = await page.context.new_cdp_session(page)
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.sleep(0.25)
+            stalled = await classify_evaluate_cdp_stall(
+                input_page=page, playwright_browser=browser, timeout_s=1.5
+            )
+            assert stalled["verdict"] == "renderer_main_thread_blocked"
+            assert await _timed_click(page) != "ok"
+
+            await asyncio.wait_for(page.bring_to_front(), timeout=2.0)
+            assert await _timed_click(page) != "ok", "soft bring_to_front must not restore click"
+
+            new_page, actions = await _hard_recover_frozen_renderer_page(
+                input_page=page,
+                playwright_browser=browser,
+                fallback_url="about:blank",
+            )
+            assert new_page is not None
+            assert any(
+                a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions
+            )
+            await new_page.set_content("<html><body><button>Sign</button></body></html>")
+            assert await _timed_click(new_page) == "ok"
+        finally:
+            await _force_close(browser)
+
+
+def test_action_timeout_cdp_classify_not_gated_on_evaluate():
+    """TimeoutError recovery must classify CDP stalls for every action, not only evaluate.
+
+    Regression for afe8a612: click timeouts skipped classify because of
+    `if action_name == \"evaluate\":` and only soft-recovered.
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "handler.py"
+    text = src.read_text()
+    anchor = "timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS"
+    a = text.find(anchor)
+    assert a > 0
+    block = None
+    pos = a
+    while True:
+        start = text.find("except asyncio.TimeoutError:", pos)
+        if start < 0:
+            break
+        end = text.find('"supervisor_recovered": True', start)
+        if end < 0:
+            pos = start + 1
+            continue
+        cand = text[start:end]
+        if "classify_evaluate_cdp_stall" in cand:
+            block = cand
+            break
+        pos = start + 1
+    assert block is not None, "action-timeout TimeoutError block with CDP classify not found"
+    # Classify must run for every action; fingerprint logging may still special-case evaluate.
+    classify_pos = block.find("classify_evaluate_cdp_stall")
+    assert classify_pos > 0
+    before_classify = block[:classify_pos]
+    assert 'if action_name == "evaluate":' not in before_classify, (
+        "CDP classify must not be gated on action_name==evaluate (afe8a612 click soft-only)"
+    )
+    assert "_hard_recover_frozen_renderer_page" in block
+    hard_pos = block.find("_hard_recover_frozen_renderer_page")
+    assert hard_pos > classify_pos
+    # Hard recover is driven by renderer_frozen from classify, not by action_name.
+    between_classify_and_hard = block[classify_pos:hard_pos]
+    assert "renderer_frozen" in between_classify_and_hard or "renderer_main_thread_blocked" in block
+
+
 async def test_goto_err_aborted_persists_download_to_session():
     """goto net::ERR_ABORTED on attachment URLs must persist bytes under /tmp/downloads."""
     import domains.spawn_browser_agent_v3.download_persist as download_persist
@@ -10912,7 +11490,7 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     lines = post_injection.splitlines()
     capture_disconnects = [line for line in lines if "await disconnect_browser_after_passkey_capture(" in line]
 
-    assert len(capture_disconnects) == 8
+    assert len(capture_disconnects) == 7
     assert not any("await dom_service.disconnect()" in line for line in lines)
 
 def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
@@ -11141,7 +11719,7 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -11188,7 +11766,7 @@ async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_in
         )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -11220,16 +11798,20 @@ def test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text():
 
 def test_write_lock_purchase_button_detects_order_controls():
     """Final transaction buttons are gated; cart, checkout, and return navigation are not."""
-    from browser_tools.write_lock import is_purchase_button
+    from browser_tools.write_lock import is_purchase_button, is_return_button
 
     assert is_purchase_button("Buy Now")
     assert is_purchase_button("Place your order")
-    assert is_purchase_button("Confirm your return")
-    assert is_purchase_button("Submit return request")
+    assert not is_purchase_button("Confirm your return")
+    assert not is_purchase_button("Submit return")
+    assert is_return_button("Confirm your return")
+    assert is_return_button("Submit return")
+    assert not is_return_button("Buy Now")
     assert not is_purchase_button("Add to Cart")
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
+    assert not is_return_button("Return to your orders")
 
 
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
@@ -11843,7 +12425,79 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
 
+async def test_execute_input_text_password_secret_ref_resolves_visible_password_coords():
+    """Password secret-ref typing must locate a visible password field when the index has no rect.
 
+    Regression for browser-amazon-return k=5 agent fbc36706: after Switch accounts →
+    account pick, indexed password coords were None and humanize refused TypeTextEvent,
+    posting toolStatus=ERROR that failed no_tool_failures even though the agent later
+    recovered to an unresolved write lock.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(return_value={})
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+    hu.input_page = None
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch.object(
+            service_actions,
+            "_resolve_password_field_coordinates",
+            AsyncMock(return_value=(44, 55)),
+        ) as resolve_password,
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=770,
+            coords=None,
+            params={"text": "pwd-ref-1"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={"pwd-ref-1": "secret-password"},
+            password_origins={"pwd-ref-1": "https://www.amazon.com"},
+            credential_refs_by_secret_ref={"pwd-ref-1": {"kind": "password", "id": "pwd-row"}},
+            current_url="https://www.amazon.com/ap/signin",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out.get("credential_ref") == {"kind": "password", "id": "pwd-row"}
+    resolve_password.assert_awaited()
+    hu.click_at_coords.assert_awaited_once_with(44, 55)
+    hu.type_text.assert_awaited_once_with("secret-password")
+    session.event_bus.dispatch.assert_not_called()
+
+async def test_resolve_password_field_coordinates_uses_visible_password_input():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        return_value={"x": 120, "y": 340, "selector": 'input[name="password"]'}
+    )
+    session = SimpleNamespace(get_current_page=AsyncMock(return_value=page))
+
+    coords = await service_actions._resolve_password_field_coordinates(session, input_page=None)
+    assert coords == (120, 340)
+    page.evaluate.assert_awaited()
+    script = page.evaluate.await_args.args[0]
+    assert 'input[type="password"]' in script
+    assert 'name="password"' in script
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -13251,7 +13905,7 @@ def test_recovery_skips_when_live_tab_already_clear():
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     start = source.index('if action_name == "recover_from_challenge":')
-    end = source.index('if action_name == "send_message_to_user":', start)
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
     recovery_block = source[start:end]
 
     assert "live_tab_looks_challenged" in recovery_block
@@ -14018,6 +14672,115 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
     assert result["request_id"] == "req-pay-1"
     assert result["mode"] == "claudeAuth"
 
+
+async def test_generate_write_lock_notification_retries_once_on_schema_rejection():
+    """Return-shaped purchase-without-details must not abort the session on first try;
+    feed validation detail back and accept a corrected generic_write payload."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    try:
+        validate_browser_tool_args(
+            "generate_write_lock_notification",
+            {
+                "trigger_type": "purchase",
+                "action": "confirm return",
+                "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            },
+        )
+        raise AssertionError("expected schema rejection for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        first_error = err
+
+    fixed_action = {
+        "action": "generate_write_lock_notification",
+        "params": {
+            "trigger_type": "generic_write",
+            "action": "confirm Amazon return for Carhartt beanie",
+            "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                }
+            ],
+            "generic_write": {
+                "label": "Confirm return",
+                "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                "payload_summary": (
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                    "Return by Sep 19, 2026."
+                ),
+            },
+        },
+    }
+
+    fork_mock = AsyncMock(
+        side_effect=[
+            first_error,
+            {
+                "action": fixed_action,
+                "usage": {"input_tokens": 900, "output_tokens": 40},
+                "actual_model": "gpt-5.6-sol-gpt",
+                "request_id": "req-return-retry",
+                "mode": "gpt",
+            },
+        ]
+    )
+
+    with patch.object(handler, "_call_browser_use_with_rotation", new=fork_mock):
+        result = await _generate_write_lock_notification(
+            rose_client=SimpleNamespace(),
+            task_prompt="Return the beanie",
+            dynamic_system_context="dynamic-ctx",
+            browser_turn_messages=[{"role": "user", "content": "return"}],
+            browser_state={"url": return_url, "screenshot": None},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="user-return",
+            agent_id="agent-return",
+            iteration=14,
+            token_state=token_state,
+            gpt_token="gpt-token",
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="gpt",
+            approval_type="purchase",
+            current_url=return_url,
+            trusted_page_urls=[return_url],
+            pending_action={"action": "click", "params": {"index": 58768}},
+            write_lock_result={
+                "status": "needs_write_approval",
+                "approval_type": "purchase",
+                "element_text": "Confirm your return",
+            },
+            system_name="Rose",
+            fallback_question="Approve?",
+        )
+
+    assert fork_mock.await_count == 2
+    assert fork_mock.await_args_list[0].kwargs["call_site"] == "write_lock_notification_fork_14"
+    assert fork_mock.await_args_list[1].kwargs["call_site"] == "write_lock_notification_fork_14_retry1"
+    retry_messages = fork_mock.await_args_list[1].kwargs["extra_user_messages"]
+    assert len(retry_messages) == 2
+    assert "failed" in retry_messages[1]["content"].lower()
+    assert "trigger_type" in retry_messages[1]["content"]
+    assert result["notification"]["trigger_type"] == "generic_write"
+    assert "$10.84" in result["question"]
+    assert result["request_id"] == "req-return-retry"
+
+
 async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool():
     """If the forked model calls anything other than generate_write_lock_notification,
     the helper raises so the caller falls back to build_payment_question rather than
@@ -14184,28 +14947,141 @@ def test_write_lock_notification_prompt_includes_media_candidates():
 
     assert "media_candidates" in prompt
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
-    assert "use only those URLs for media and item image_url" in prompt
-    assert "description under 80 characters" in prompt
-    assert "must already exist in the browser trajectory" in prompt
+    assert "### Purchases" in prompt
+    assert "### Emails / outbound messages" in prompt
+    assert "### Social posts" in prompt
+    assert "### Returns / refund confirmations" in prompt
+    assert "### Payment field entry" in prompt
+    assert "**Approval Needed**" in prompt
+    assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in prompt
     assert "Visit the product page" not in prompt
 
-def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+
+def test_write_lock_notification_prompt_is_example_driven_for_all_gates():
+    """Fork prompt teaches via prescribed worked examples for every case."""
+    from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
+
+    return_prompt = _write_lock_notification_prompt(
+        approval_type="return",
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+        ),
+        pending_action={"action": "click", "params": {"index": 58768}},
+        write_lock_result={
+            "status": "needs_write_approval",
+            "approval_type": "return",
+            "element_text": "Confirm your return",
+        },
+        media_candidates=[
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+    )
+    purchase_prompt = _write_lock_notification_prompt(
+        approval_type="purchase",
+        current_url="https://www.amazon.com/checkout/spc",
+        pending_action={"action": "click", "params": {"index": 1}},
+        write_lock_result={"status": "needs_write_approval", "approval_type": "purchase"},
+    )
+
+    for needle in (
+        "### Purchases",
+        "### Emails / outbound messages",
+        "### Social posts",
+        "### Returns / refund confirmations",
+        "### Payment field entry",
+        "Notification format this produces:",
+        "Tool args example:",
+        "approval_type in Runtime evidence is a hint",
+        "Action: Confirm return",
+        "Payment secrets are not included in this message.",
+    ):
+        assert needle in return_prompt, needle
+        assert needle in purchase_prompt, needle
+    # Same example catalog; only runtime evidence differs.
+    assert return_prompt.split("Runtime evidence:")[0] == purchase_prompt.split("Runtime evidence:")[0]
+    assert "Confirm your return" in return_prompt
+    assert '"approval_type": "return"' in return_prompt or '"approval_type":"return"' in return_prompt.replace(
+        " ", ""
+    )
+
+
+def test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write():
+    """Owning-boundary red/green for the Amazon return notification schema failure."""
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _render_write_lock_notification_question
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    buggy_payload = {
+        "trigger_type": "purchase",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": [
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+        "generic_write": {
+            "label": "Confirm return",
+            "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            "payload_summary": (
+                "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                "Return by Sep 19, 2026."
+            ),
+        },
+    }
+    try:
+        validate_browser_tool_args("generate_write_lock_notification", buggy_payload)
+        raise AssertionError("expected BrowserToolArgsValidationError for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        assert "purchase details are required for a purchase approval" in err.detail
+
+    fixed_payload = {
+        "trigger_type": "generic_write",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": buggy_payload["media"],
+        "generic_write": buggy_payload["generic_write"],
+    }
+    validated = validate_browser_tool_args("generate_write_lock_notification", fixed_payload)
+    assert validated["trigger_type"] == "generic_write"
+    question = _render_write_lock_notification_question(
+        validated,
+        system_name="Rose",
+        fallback_question="Approve?",
+    )
+    assert "Confirm return" in question or "confirm Amazon return" in question
+    assert "$10.84" in question
+    assert "Whole Foods" in question
+    assert "original payment" in question
+
+
+def test_purchase_write_lock_notification_failure_falls_back_for_all_gates():
     from domains.spawn_browser_agent_v3.handler import (
         PurchaseApprovalContextError,
-        PurchaseApprovalNotificationRetryableError,
         _enforce_write_lock_notification_failure_policy,
     )
 
-    with pytest.raises(PurchaseApprovalContextError):
+    # Unified policy: every gate falls through to the deterministic fallback question.
+    assert (
         _enforce_write_lock_notification_failure_policy(
             "purchase",
             PurchaseApprovalContextError("missing reviews"),
         )
-
-    with pytest.raises(PurchaseApprovalNotificationRetryableError):
-        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
-
+        is None
+    )
+    assert _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout")) is None
+    assert _enforce_write_lock_notification_failure_policy("return", ValueError("metadata unavailable")) is None
     assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
+    assert _enforce_write_lock_notification_failure_policy("email_send", ValueError("metadata unavailable")) is None
+
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
     from domains.spawn_browser_agent_v3.handler import (
@@ -15245,6 +16121,7 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
             self.selector_map = {}
             self.disconnect = AsyncMock()
+            self._captcha_poll = None
             _FakeDomService.last_instance = self
 
         async def connect(self):
@@ -15252,6 +16129,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
 
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
+
+        def start_captcha_telemetry_indicator(self, poll_phase):
+            self._captcha_poll = poll_phase
 
     class _FakeHumanizer:
         last_instance = None
@@ -16629,7 +17509,7 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     # the exact tool call streamed by the browser-use model.
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     recovery_branch = activity_source.split('if action_name == "recover_from_challenge":', 1)[1].split(
-        'if action_name == "send_message_to_user":', 1
+        'if action_name in ("attempt_completion", "done"):', 1
     )[0]
     assert "recovery_call_id = _browser_action_tool_call_id(llm_result)" in recovery_branch
     assert "tool_call_id=recovery_call_id" in recovery_branch
@@ -17043,6 +17923,14 @@ async def run_all_tests():
     r.record(
         "browser_supervisor_timeout_ordering",
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
+    )
+    r.record(
+        "browser_use_upstream_still_hardcodes_page_navigate_20s",
+        test_browser_use_upstream_still_hardcodes_page_navigate_20s,
+    )
+    await r.record_async(
+        "browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config",
+        test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config,
     )
     r.record(
         "browser_task_prompt_no_system_duplication",
@@ -17671,7 +18559,6 @@ async def run_all_tests():
     await r.record_async("execute_action_dropdown_options_no_el", test_execute_action_dropdown_options_missing_element)
     await r.record_async("execute_action_select_dropdown_no_el", test_execute_action_select_dropdown_missing_element)
     await r.record_async("execute_action_attempt_completion", test_execute_action_attempt_completion)
-    await r.record_async("execute_action_send_message", test_execute_action_send_message_to_user)
     await r.record_async("execute_action_done", test_execute_action_done)
     await r.record_async("execute_action_click_no_target", test_execute_action_click_no_element_no_coords)
     await r.record_async(
@@ -17719,6 +18606,18 @@ async def run_all_tests():
         "execute_action_scroll_humanizer_up",
         test_execute_action_scroll_with_humanizer_up,
     )
+    await r.record_async(
+        "execute_action_scroll_humanizer_element_coords",
+        test_execute_action_scroll_with_humanizer_uses_element_coords,
+    )
+    await r.record_async(
+        "execute_action_scroll_index_zero_viewport",
+        test_execute_action_scroll_index_zero_scrolls_viewport,
+    )
+    await r.record_async(
+        "execute_action_scroll_missing_element_index_errors",
+        test_execute_action_scroll_missing_element_index_errors,
+    )
     await r.record_async("execute_action_extract_disabled", test_execute_action_extract_disabled)
     await r.record_async("execute_action_goto_delegates", test_execute_action_goto_delegates)
     await r.record_async("execute_action_click_delegates", test_execute_action_click_delegates)
@@ -17754,6 +18653,38 @@ async def run_all_tests():
         test_execute_action_select_dropdown_with_element,
     )
     await r.record_async("execute_action_evaluate", test_execute_action_evaluate)
+    r.record(
+        "normalize_evaluate_timeout_seconds_default_and_clamp",
+        test_normalize_evaluate_timeout_seconds_default_and_clamp,
+    )
+    await r.record_async(
+        "execute_action_evaluate_honors_llm_timeout",
+        test_execute_action_evaluate_honors_llm_timeout,
+    )
+    await r.record_async(
+        "execute_action_evaluate_default_timeout_bounds_hang",
+        test_execute_action_evaluate_default_timeout_bounds_hang,
+    )
+    await r.record_async(
+        "alchemy_evaluate_js_completes_on_healthy_canvas",
+        test_alchemy_evaluate_js_completes_on_healthy_canvas,
+    )
+    await r.record_async(
+        "renderer_block_matches_evaluate_timeout_recovery_signature",
+        test_renderer_block_matches_evaluate_timeout_recovery_signature,
+    )
+    await r.record_async(
+        "hard_recover_frozen_renderer_page_restores_evaluate",
+        test_hard_recover_frozen_renderer_page_restores_evaluate,
+    )
+    await r.record_async(
+        "hard_recover_frozen_renderer_page_restores_click",
+        test_hard_recover_frozen_renderer_page_restores_click,
+    )
+    r.record(
+        "action_timeout_cdp_classify_not_gated_on_evaluate",
+        test_action_timeout_cdp_classify_not_gated_on_evaluate,
+    )
     await r.record_async("execute_action_open_new_tab", test_execute_action_open_new_tab)
     await r.record_async("execute_action_close_tab_focused", test_execute_action_close_tab_via_focused)
     await r.record_async("execute_action_close_tab_no_focused", test_execute_action_close_tab_no_focused)
@@ -17917,6 +18848,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_input_text_el_humanizer_missing_coords",
         test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback,
+    )
+    await r.record_async(
+        "execute_input_text_password_secret_ref_resolves_visible_password_coords",
+        test_execute_input_text_password_secret_ref_resolves_visible_password_coords,
+    )
+    await r.record_async(
+        "resolve_password_field_coordinates_uses_visible_password_input",
+        test_resolve_password_field_coordinates_uses_visible_password_input,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_bypasses_warning",
@@ -18279,6 +19218,10 @@ async def run_all_tests():
         test_generate_write_lock_notification_payment_forks_and_renders_question,
     )
     await r.record_async(
+        "generate_write_lock_notification_schema_retry",
+        test_generate_write_lock_notification_retries_once_on_schema_rejection,
+    )
+    await r.record_async(
         "generate_write_lock_notification_wrong_tool_raises",
         test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool,
     )
@@ -18295,8 +19238,16 @@ async def run_all_tests():
         test_write_lock_notification_prompt_includes_media_candidates,
     )
     r.record(
-        "purchase_write_lock_notification_failure_blocks_fallback",
-        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
+        "write_lock_notification_prompt_example_driven",
+        test_write_lock_notification_prompt_is_example_driven_for_all_gates,
+    )
+    r.record(
+        "return_write_lock_notification_schema_red_green",
+        test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write,
+    )
+    r.record(
+        "purchase_write_lock_notification_failure_falls_back",
+        test_purchase_write_lock_notification_failure_falls_back_for_all_gates,
     )
     r.record(
         "normalize_write_lock_notification_media_candidate",

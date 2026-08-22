@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import inspect
 import ipaddress
 import json
@@ -23,7 +24,11 @@ import httpx
 import structlog
 from PIL import Image
 
-from browser_tools.schemas import RequestPaymentCardBrowserTool, normalize_browser_wait_ms
+from browser_tools.schemas import (
+    RequestPaymentCardBrowserTool,
+    normalize_browser_wait_ms,
+    normalize_evaluate_timeout_seconds,
+)
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 from domains.spawn_browser_agent_v3.service_crypto import (
     PAYMENT_CARD_SECRET_REFS,
@@ -739,6 +744,13 @@ def _navigation_guard_error(
     return None
 
 
+def _normalize_scroll_index(index: Optional[int]) -> Optional[int]:
+    """Treat index 0 as viewport scroll — models often use it as a page sentinel."""
+    if index == 0:
+        return None
+    return index
+
+
 _EXPLICIT_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _BARE_HOST_PORT_RE = re.compile(r"^(?:\[[^\]]+\]|[A-Za-z0-9.-]+):[0-9]+(?:[/?#]|$)")
 
@@ -767,7 +779,6 @@ _TERMINAL_ACTIONS = {
     "request_payment_card",
     "done",
     "attempt_completion",
-    "send_message_to_user",
     "generate_write_lock_notification",
 }
 
@@ -936,6 +947,15 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
                     key=key,
                     status=error.response.status_code,
                 )
+            except TimeoutError as error:
+                await context.action_history.record_action(
+                    dom_service=context.dom_service,
+                    action="press_key",
+                    thinking=context.thinking,
+                    params={"key": key},
+                    result={"success": False, "error": str(error)},
+                )
+                return {"success": False, "error": str(error)}
         if provider_pressed:
             logger.info("Pressed key through provider computer input", key=key)
         elif context.humanizer:
@@ -958,7 +978,15 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         amount = context.params.get("amount", 300)
         delta_y = amount if direction == "down" else -amount
         if context.humanizer:
-            await context.humanizer.scroll(delta_y)
+            at_coords = None
+            if context.index is not None:
+                at_coords = await context.dom_service.get_element_coordinates(context.index)
+                if at_coords is None:
+                    return {
+                        "success": False,
+                        "error": f"Element with index {context.index} not found",
+                    }
+            await context.humanizer.scroll(delta_y, at_coords=at_coords)
         else:
             logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use ScrollEvent")
             event = context.session.event_bus.dispatch(
@@ -1133,16 +1161,136 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
     return {"success": True, "message": "", "new_tab_id": new_tab_id, "url": url}
 
 
+def _evaluate_code_fingerprint(code: str) -> Dict[str, Any]:
+    """Compact evaluate payload identity for stall diagnostics (no full source)."""
+    text = code if isinstance(code, str) else str(code or "")
+    return {
+        "code_len": len(text),
+        "code_sha256_12": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12],
+    }
+
+
+async def classify_evaluate_cdp_stall(
+    *,
+    input_page: Optional[Any] = None,
+    playwright_browser: Optional[Any] = None,
+    timeout_s: float = 2.0,
+) -> Dict[str, Any]:
+    """Distinguish renderer-main-thread freeze from browser-process / CDP transport death.
+
+    Mirrors agents/tests/e2e/steel_cpu_diagnostic.py:
+    - renderer Runtime.evaluate("1+1") blocks when the page JS thread is pinned
+    - Browser.getVersion stays responsive on the browser process even then
+    """
+    classification: Dict[str, Any] = {
+        "renderer": "skipped",
+        "browser": "skipped",
+        "verdict": "unknown",
+    }
+
+    async def _renderer_ping() -> str:
+        if input_page is None:
+            return "skipped"
+        context = getattr(input_page, "context", None)
+        if context is None or not hasattr(context, "new_cdp_session"):
+            return "skipped"
+        t0 = time_module.monotonic()
+        page_cdp = None
+        try:
+            page_cdp = await context.new_cdp_session(input_page)
+            await asyncio.wait_for(
+                page_cdp.send(
+                    "Runtime.evaluate",
+                    {"expression": "1+1", "returnByValue": True},
+                ),
+                timeout=timeout_s,
+            )
+            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "ok"
+        except asyncio.TimeoutError:
+            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "frozen"
+        except Exception as exc:
+            classification["renderer_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
+            return "error"
+        finally:
+            if page_cdp is not None:
+                with suppress(Exception):
+                    await asyncio.wait_for(page_cdp.detach(), timeout=0.5)
+
+    async def _browser_ping() -> str:
+        if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
+            return "skipped"
+        t0 = time_module.monotonic()
+        browser_cdp = None
+        try:
+            browser_cdp = await playwright_browser.new_browser_cdp_session()
+            await asyncio.wait_for(browser_cdp.send("Browser.getVersion"), timeout=timeout_s)
+            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "ok"
+        except asyncio.TimeoutError:
+            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
+            return "frozen"
+        except Exception as exc:
+            classification["browser_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
+            return "error"
+        finally:
+            if browser_cdp is not None:
+                with suppress(Exception):
+                    await asyncio.wait_for(browser_cdp.detach(), timeout=0.5)
+
+    classification["renderer"] = await _renderer_ping()
+    classification["browser"] = await _browser_ping()
+    rend = classification["renderer"]
+    brow = classification["browser"]
+    if rend == "frozen" and brow == "ok":
+        classification["verdict"] = "renderer_main_thread_blocked"
+    elif rend == "frozen" and brow == "frozen":
+        classification["verdict"] = "cdp_or_browser_process_unresponsive"
+    elif rend == "ok":
+        classification["verdict"] = "renderer_responsive_after_timeout"
+    return classification
+
+
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
     if context.action_name == "read_network_requests":
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
-        cdp_session = await context.session.get_or_create_cdp_session(focus=True)
-        result = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={"expression": code, "returnByValue": True, "awaitPromise": True},
-            session_id=cdp_session.session_id,
+        timeout_s = normalize_evaluate_timeout_seconds(context.params.get("timeout"))
+        fingerprint = _evaluate_code_fingerprint(code)
+        logger.info(
+            "Browser evaluate starting",
+            session_id=context.session_id,
+            timeout_s=timeout_s,
+            **fingerprint,
         )
+        started = time_module.monotonic()
+        cdp_session = await context.session.get_or_create_cdp_session(focus=True)
+        session_acquire_ms = round((time_module.monotonic() - started) * 1000)
+        eval_started = time_module.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                cdp_session.cdp_client.send.Runtime.evaluate(
+                    params={"expression": code, "returnByValue": True, "awaitPromise": True},
+                    session_id=cdp_session.session_id,
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            eval_ms = round((time_module.monotonic() - eval_started) * 1000)
+            logger.warning(
+                "Browser evaluate timed out waiting for Runtime.evaluate",
+                session_id=context.session_id,
+                session_acquire_ms=session_acquire_ms,
+                eval_ms=eval_ms,
+                timeout_s=timeout_s,
+                **fingerprint,
+            )
+            # Propagate so the outer supervisor classify + hard-recover path
+            # runs instead of burning the full action budget on a wedged CDP.
+            raise
+        eval_ms = round((time_module.monotonic() - eval_started) * 1000)
         value = result.get("result", {}).get("value")
         # CDP returns exceptionDetails when the expression throws; surface that
         # instead of a silent null/empty value (async fetch failures used to look
@@ -1154,19 +1302,37 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
                 or (exception.get("exception") or {}).get("description")
                 or "evaluate raised"
             )
+            logger.warning(
+                "Browser evaluate raised",
+                session_id=context.session_id,
+                session_acquire_ms=session_acquire_ms,
+                eval_ms=eval_ms,
+                timeout_s=timeout_s,
+                error=error_text[:200],
+                **fingerprint,
+            )
             await context.action_history.record_action(
                 dom_service=context.dom_service,
                 action="evaluate",
                 thinking=context.thinking,
-                params={"code": code},
+                params={"code": code, "timeout": timeout_s},
                 result={"success": False, "error": error_text},
             )
             return {"success": False, "error": error_text, "value": value}
+        logger.info(
+            "Browser evaluate completed",
+            session_id=context.session_id,
+            session_acquire_ms=session_acquire_ms,
+            eval_ms=eval_ms,
+            timeout_s=timeout_s,
+            cdp_session_id=getattr(cdp_session, "session_id", None),
+            **fingerprint,
+        )
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="evaluate",
             thinking=context.thinking,
-            params={"code": code},
+            params={"code": code, "timeout": timeout_s},
             result={"success": True, "value": value},
         )
         return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
@@ -1204,17 +1370,6 @@ async def _execute_terminal_action(context: _ActionContext) -> Dict[str, Any]:
             result={"success": True},
         )
         return {"success": True, "attempt_completion": True}
-    if context.action_name == "send_message_to_user":
-        message = context.params.get("message", "")
-        reason = context.params.get("reason", "other")
-        await context.action_history.record_action(
-            dom_service=context.dom_service,
-            action="send_message_to_user",
-            thinking=context.thinking,
-            params={"message": message, "reason": reason},
-            result={"success": True},
-        )
-        return {"success": True, "message_to_user": True, "message": message, "reason": reason}
     return {
         "success": False,
         "error": (
@@ -1264,6 +1419,11 @@ async def execute_action(
     params = action.get("params", {})
     thinking = action.get("thinking")
     coords = action.get("coordinates")
+
+    if action_name == "scroll":
+        if index is None:
+            index = params.get("index")
+        index = _normalize_scroll_index(index)
 
     # Anything that can make a relying party call navigator.credentials.get must
     # run against a target whose native WebAuthn UI is suppressed and whose
@@ -1318,6 +1478,11 @@ async def execute_action(
         if action_name in _TERMINAL_ACTIONS:
             return await _execute_terminal_action(context)
         return {"success": False, "error": f"Unknown action: {action_name}"}
+    except asyncio.TimeoutError:
+        # Propagate so the browser supervisor can classify CDP stall and
+        # hard-recover a frozen renderer instead of treating this as a soft
+        # action error (which leaves the page wedged).
+        raise
     except Exception as error:
         logger.error(f"Action {action_name} failed: {error}")
         await action_history.record_action(
@@ -1959,6 +2124,82 @@ async def _resolve_payment_ref_coordinates(
     return None
 
 
+_PASSWORD_FIELD_LOCATE_JS = """
+(hint) => {
+    const candidates = Array.from(document.querySelectorAll(
+        'input[type="password"], input[name="password"], input[autocomplete="current-password"], input[autocomplete="new-password"]'
+    ));
+    const matchesHint = (el) => {
+        if (!hint || typeof hint !== 'object') return false;
+        for (const attr of ['id', 'name', 'autocomplete']) {
+            const want = hint[attr];
+            if (want && el.getAttribute(attr) === want) return true;
+        }
+        return false;
+    };
+    const ordered = hint
+        ? [...candidates.filter(matchesHint), ...candidates.filter((el) => !matchesHint(el))]
+        : candidates;
+    for (const el of ordered) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            continue;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) continue;
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const after = el.getBoundingClientRect();
+        if (after.width < 2 || after.height < 2) continue;
+        return {
+            x: Math.round(after.left + after.width / 2),
+            y: Math.round(after.top + after.height / 2),
+            selector: el.id
+                ? ('#' + el.id)
+                : (el.getAttribute('name') ? ('input[name="' + el.getAttribute('name') + '"]') : 'input[type="password"]'),
+        };
+    }
+    return null;
+}
+"""
+
+
+async def _resolve_password_field_coordinates(
+    session: Any,
+    *,
+    input_page: Any = None,
+    field_hint: Optional[Dict[str, str]] = None,
+) -> Optional[tuple[int, int]]:
+    """Resolve coordinates for a visible password input when the indexed node has no rect.
+
+    Account-switch / sign-in transitions often leave the LLM's password index
+    without a bounding box even though a visible ``input[type=password]`` is on
+    the page. Mirror the payment semantic-locate path so humanized typing can
+    continue without falling back to TypeTextEvent.
+
+    When ``field_hint`` carries id/name/autocomplete from the indexed element,
+    prefer that match before the first visible password field so multi-password
+    pages (change-password, sign-in + register) do not type into the wrong input.
+    """
+    if not session:
+        return None
+    hint_payload = field_hint if isinstance(field_hint, dict) and field_hint else None
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(
+            target, _PASSWORD_FIELD_LOCATE_JS, hint_payload
+        )
+        if not result:
+            continue
+        if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
+            logger.debug(
+                "Resolved password field coordinates",
+                target=label,
+                selector=result.get("selector"),
+                matched_hint=bool(hint_payload),
+            )
+            return int(result["x"]), int(result["y"])
+    return None
+
+
 _PAYMENT_METHOD_EXPAND_JS = """
 (_unused) => {
     const pattern = /\\b(card|credit|debit|pay with card|card information|payment method)\\b/i;
@@ -2424,6 +2665,7 @@ async def _click_write_lock_result(
         is_click_write_lock_eligible_control,
         is_email_send_button,
         is_purchase_button,
+        is_return_button,
         is_social_domain,
         is_submit_button,
     )
@@ -2473,6 +2715,7 @@ async def _click_write_lock_result(
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
         ("email_send", is_email_send_button(element_text), "email send"),
+        ("return", is_return_button(element_text), "return confirmation"),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""
@@ -2809,6 +3052,21 @@ async def _execute_indexed_input_text(
             session,
             secret_ref_name or "",
             input_page=_humanizer_input_page(humanizer),
+        )
+    is_password_credential = bool(
+        credential_ref and str(credential_ref.get("kind") or "") == "password"
+    )
+    if humanizer and not coord_tuple and is_password_credential:
+        attrs = getattr(element, "attributes", None) or {}
+        field_hint = {
+            key: str(attrs[key])
+            for key in ("id", "name", "autocomplete")
+            if attrs.get(key)
+        }
+        coord_tuple = await _resolve_password_field_coordinates(
+            session,
+            input_page=_humanizer_input_page(humanizer),
+            field_hint=field_hint or None,
         )
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
     asyncio.create_task(session.highlight_interaction_element(element))

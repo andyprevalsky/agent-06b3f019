@@ -4,7 +4,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import * as hubStore from '../../providers/benchmarkHubStore';
 import { BENCHMARK_HUB_ADMIN_USER_IDS } from '../../providers/benchmarkHubStore';
 import * as service from './service';
-import { TaskNotFoundError, TasksUnavailableError, UnknownTasksError } from './service';
+import { TasksUnavailableError, UnknownTasksError } from './service';
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
@@ -45,7 +45,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       // Wait for the boot seed so early requests can't read a partial catalog;
-      // a failed seed still serves the file-backed cache (error already logged).
+      // a failed seed still serves tasks.json directly (error already logged).
       await service.ensureBenchmarkTasksSeeded().catch(() => undefined);
       const tasks = service.getTasks();
       res.json({ tasks });
@@ -83,7 +83,9 @@ router.get(
 
 // ── Benchmark Hub endpoints (team-gated) ────────────────────────────────────
 
-/** GET /api/benchmarks/tasks — full catalog from the DB + per-task stats. */
+/**
+ * GET /api/benchmarks/tasks — full catalog from tasks.json + per-task stats.
+ */
 router.get(
   '/tasks',
   auth,
@@ -94,27 +96,15 @@ router.get(
   })
 );
 
-/** PATCH /api/benchmarks/tasks/:name — validated metadata edit. */
+/** PATCH /api/benchmarks/tasks/:name — disabled; tasks.json is the source of truth. */
 router.patch(
   '/tasks/:name',
   auth,
   requireHubAdmin,
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    const parsed = service.taskEditSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: 'Invalid task edit', details: parsed.error.flatten() });
-      return;
-    }
-    try {
-      const task = await service.patchTask(req.params.name, parsed.data, req.userId ?? 'internal');
-      res.json({ task });
-    } catch (error) {
-      if (error instanceof TaskNotFoundError) {
-        res.status(404).json({ error: 'Task not found' });
-        return;
-      }
-      throw error;
-    }
+  asyncHandler<HybridAuthRequest>(async (_req, res) => {
+    res.status(405).json({
+      error: 'Benchmark task definitions are read-only; edit agents/benchmarks/tasks.json',
+    });
   })
 );
 

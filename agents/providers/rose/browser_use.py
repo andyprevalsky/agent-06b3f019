@@ -98,7 +98,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 "type": "integer",
                 "description": "Number of pixels to scroll (default: 300)",
             },
-            "index": {"type": "integer", "description": "Optional element index to scroll within specific container"},
+            "index": {
+                "type": "integer",
+                "description": "Optional scroll-container index from browser_state; omit or use 0 for viewport scroll",
+            },
         },
     },
     "find_text": {
@@ -158,18 +161,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     "attempt_completion": {
         "description": attempt_completion_prompt.strip(),
         "params": {},
-    },
-    "send_message_to_user": {
-        "description": "Send a message to the user (for updates or asking for help)",
-        "params": {
-            "message": {
-                "type": "string",
-                "description": user_facing_text_description(
-                    "The exact message shown to the user for an update or request for help."
-                ),
-                "required": True,
-            }
-        },
     },
     "request_user_assistance_for_authentication": {
         "description": (
@@ -662,7 +653,7 @@ action envelope in text; use the provided tool call.
 - For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
 - When a site offers OTP delivery options, prefer email over SMS.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
-- If authentication blocks the task after all available automated auth options are exhausted, call request_user_assistance_for_authentication. Do not call attempt_completion, send_message_to_user, or report a status instead.
+- If authentication blocks the task after all available automated auth options are exhausted, call request_user_assistance_for_authentication. Do not call attempt_completion or report a status instead.
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 
@@ -1002,10 +993,6 @@ _VALID_ACTIONS = frozenset(
         "close_tab",
         "open_new_tab",
         "attempt_completion",
-        # BROWSER_USE_TOOLS advertises send_message_to_user so the model can ask
-        # the user for help mid-task. Keep the allowlist in sync with the tool
-        # schema or normalize_browser_use_response() will reject it.
-        "send_message_to_user",
         "request_user_assistance_for_authentication",
         "request_payment_card",
         "generate_write_lock_notification",
