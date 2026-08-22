@@ -2481,8 +2481,8 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
                     "tax": "$1.72",
                     "total": "$21.71",
                 },
-                "payment_method": "Visa ending in 9857",
-                "delivery_address": "Aman Gottumukkala, 88 HOWARD ST APT 1413, SAN FRANCISCO, CA 94105",
+                "payment_method": "Visa ending in 0000",
+                "delivery_address": "Jane Example, 1 Example St, San Francisco, CA 94105",
             },
         },
         (

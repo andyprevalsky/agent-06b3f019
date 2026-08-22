@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 import {
   formatPaymentApprovalBody,
+  sanitizeSmsText,
   stripMarkdownForSms,
 } from '../../providers/smsSupervisor/writeLockBody';
 
@@ -246,6 +247,15 @@ function testSanitizeSmsTextPreservesEmailAddresses(): void {
   assert.doesNotMatch(body, /sr-team@A16z/);
 }
 
+function testSanitizeSmsTextIgnoresForgedEmailPlaceholders(): void {
+  // Page/model content that plants a textual __EMAIL_n__ token must not steal a
+  // real recipient during restore (pre-fix used parseable __EMAIL_0__).
+  const forged = sanitizeSmsText('leak __EMAIL_0__ then real@example.com');
+  assert.match(forged, /real@example\.com/);
+  assert.match(forged, /__EMAIL_0__/);
+  assert.doesNotMatch(forged, /leak real@example\.com then real@example\.com/);
+}
+
 const cases = [
   {
     name: 'stripMarkdownForSms removes emphasis markers',
@@ -286,6 +296,10 @@ const cases = [
   {
     name: 'sanitizeSmsText preserves email addresses in message SMS',
     fn: testSanitizeSmsTextPreservesEmailAddresses,
+  },
+  {
+    name: 'sanitizeSmsText ignores forged __EMAIL_n__ placeholders',
+    fn: testSanitizeSmsTextIgnoresForgedEmailPlaceholders,
   },
 ];
 

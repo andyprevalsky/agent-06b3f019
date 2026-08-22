@@ -1826,11 +1826,22 @@ async def _resolve_payment_ref_coordinates(
 
 
 _PASSWORD_FIELD_LOCATE_JS = """
-(_unused) => {
+(hint) => {
     const candidates = Array.from(document.querySelectorAll(
         'input[type="password"], input[name="password"], input[autocomplete="current-password"], input[autocomplete="new-password"]'
     ));
-    for (const el of candidates) {
+    const matchesHint = (el) => {
+        if (!hint || typeof hint !== 'object') return false;
+        for (const attr of ['id', 'name', 'autocomplete']) {
+            const want = hint[attr];
+            if (want && el.getAttribute(attr) === want) return true;
+        }
+        return false;
+    };
+    const ordered = hint
+        ? [...candidates.filter(matchesHint), ...candidates.filter((el) => !matchesHint(el))]
+        : candidates;
+    for (const el of ordered) {
         const style = window.getComputedStyle(el);
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
             continue;
@@ -1857,6 +1868,7 @@ async def _resolve_password_field_coordinates(
     session: Any,
     *,
     input_page: Any = None,
+    field_hint: Optional[Dict[str, str]] = None,
 ) -> Optional[tuple[int, int]]:
     """Resolve coordinates for a visible password input when the indexed node has no rect.
 
@@ -1864,11 +1876,18 @@ async def _resolve_password_field_coordinates(
     without a bounding box even though a visible ``input[type=password]`` is on
     the page. Mirror the payment semantic-locate path so humanized typing can
     continue without falling back to TypeTextEvent.
+
+    When ``field_hint`` carries id/name/autocomplete from the indexed element,
+    prefer that match before the first visible password field so multi-password
+    pages (change-password, sign-in + register) do not type into the wrong input.
     """
     if not session:
         return None
+    hint_payload = field_hint if isinstance(field_hint, dict) and field_hint else None
     for label, target in await _iter_payment_fill_targets(session, input_page):
-        result = await _evaluate_on_payment_fill_target(target, _PASSWORD_FIELD_LOCATE_JS, None)
+        result = await _evaluate_on_payment_fill_target(
+            target, _PASSWORD_FIELD_LOCATE_JS, hint_payload
+        )
         if not result:
             continue
         if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
@@ -1876,6 +1895,7 @@ async def _resolve_password_field_coordinates(
                 "Resolved password field coordinates",
                 target=label,
                 selector=result.get("selector"),
+                matched_hint=bool(hint_payload),
             )
             return int(result["x"]), int(result["y"])
     return None
@@ -2738,9 +2758,16 @@ async def _execute_indexed_input_text(
         credential_ref and str(credential_ref.get("kind") or "") == "password"
     )
     if humanizer and not coord_tuple and is_password_credential:
+        attrs = getattr(element, "attributes", None) or {}
+        field_hint = {
+            key: str(attrs[key])
+            for key in ("id", "name", "autocomplete")
+            if attrs.get(key)
+        }
         coord_tuple = await _resolve_password_field_coordinates(
             session,
             input_page=_humanizer_input_page(humanizer),
+            field_hint=field_hint or None,
         )
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
     asyncio.create_task(session.highlight_interaction_element(element))

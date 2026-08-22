@@ -1783,7 +1783,8 @@ if [ "$MODE" = "refresh-deps" ]; then
     sync_rc=$?
     set -e
     if [ "$sync_rc" -eq 124 ]; then
-        echo "❌ exact remote checkout failed: ssh_exec timed out after ${SYNC_SSH_TIMEOUT}s" >&2        exit 1
+        echo "❌ exact remote checkout failed: ssh_exec timed out after ${SYNC_SSH_TIMEOUT}s" >&2
+        exit 1
     fi
     if [ "$sync_rc" -ne 0 ]; then
         echo "❌ exact remote checkout failed" >&2

@@ -497,6 +497,11 @@ def is_return_button(element_text: str) -> bool:
         return False
 
     for signal in element_text.split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            logger.debug(
+                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a return label"
+            )
+            continue
         text_lower = normalize_write_lock_text(signal)
         if not text_lower:
             continue

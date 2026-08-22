@@ -172,12 +172,15 @@ function displayServiceName(service: WriteLockNotificationService | null): strin
 export function sanitizeSmsText(value: string): string {
   // Preserve email addresses — the domain→label rewrite would turn
   // alex@example.com into alex@Example and break approval copy.
+  // U+0001 cannot appear in notification payloads, so page content cannot forge
+  // a placeholder and hijack restore (unlike a textual `__EMAIL_n__` token).
+  const emailSentinel = '\u0001';
   const emails: string[] = [];
   const withEmailPlaceholders = value.replace(
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
     (match) => {
       emails.push(match);
-      return `__EMAIL_${String(emails.length - 1)}__`;
+      return emailSentinel;
     }
   );
 
@@ -191,9 +194,8 @@ export function sanitizeSmsText(value: string): string {
     .replace(/\s+([.,;:])/g, '$1')
     .trim();
 
-  return cleaned.replace(/__EMAIL_(\d+)__/g, (_match, index: string) => {
-    return emails[Number(index)] ?? '';
-  });
+  let cursor = 0;
+  return cleaned.replace(/\u0001/g, () => emails[cursor++] ?? '');
 }
 
 export function getWriteLockNotification(metadata: unknown): WriteLockNotification | null {
@@ -412,8 +414,8 @@ function appendPurchaseSmsLines(lines: string[], notification: WriteLockNotifica
         lines.push(`Description: ${sanitizedDescription}`);
       }
     }
-    pushLabeledValue(lines, 'Rating', item.rating);
-    pushLabeledValue(lines, 'Reviews', item.review_count);
+    pushLabeledValue(lines, 'Rating', formatRating(item.rating));
+    pushLabeledValue(lines, 'Reviews', formatReviewCount(item.review_count));
   } else if (items.length > 1) {
     lines.push('', `Items (${String(items.length)}):`);
     for (const [index, item] of items.slice(0, 6).entries()) {
