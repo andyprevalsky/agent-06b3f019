@@ -4208,6 +4208,49 @@ def test_payment_merchant_accepts_bare_business_name():
     assert wrong_platform is not None and wrong_platform.startswith("merchant mismatch")
 
 
+def test_hotel_payment_merchant_accepts_bare_hotels_com_label():
+    """Hotels.com catalog bookkeeping uses shorthand ``Business (host)``; bare labels must pass."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-hotel-booking")
+    request = {
+        "metadata": {
+            "requestUserApproval": {
+                "url": "https://www.hotels.com/checkout/session/test",
+                "requestPaymentCard": {
+                    "merchant": "Hotels.com",
+                    "currency": "USD",
+                    "lineItems": [
+                        {
+                            "name": "Hotel Kabuki, Room, 1 King Bed, Sat Aug 22, 2026 to Sun Aug 23, 2026",
+                            "imageUrl": None,
+                            "productUrl": "https://www.hotels.com/ho129640/hotel-kabuki-part-of-jdv-by-hyatt-san-francisco-united-states-of-america/",
+                            "rating": "4.5 stars",
+                            "reviewCount": "1,008 reviews",
+                            "unitPriceCents": 26000,
+                            "quantity": 1,
+                            "lineTotalCents": 26000,
+                        }
+                    ],
+                    "fees": [{"label": "Taxes & fees", "amountCents": 4292}],
+                    "subtotalCents": 26000,
+                    "totalCents": 34361,
+                    "fingerprint": "a" * 64,
+                    "userId": "1f85ff25-6e29-4c1b-8739-f917bd101a30",
+                    "agentId": "hotel-merchant-test",
+                },
+            },
+            "writePermission": True,
+        },
+    }
+    assert _validate_payment_receipt(task, request, messages=[]) is None
+
+    request["metadata"]["requestUserApproval"]["requestPaymentCard"]["merchant"] = "Booking.com"
+    wrong = _validate_payment_receipt(task, request, messages=[])
+    assert wrong is not None and wrong.startswith("merchant mismatch")
+
+
 def _amazon_attention_poll_task():
     from dataclasses import replace
 
@@ -15187,6 +15230,8 @@ async def run_all_tests():
     r.record(
         "payment_merchant_bare_business_name",
         test_payment_merchant_accepts_bare_business_name,
+        "hotel_payment_merchant_bare_hotels_com",
+        test_hotel_payment_merchant_accepts_bare_hotels_com_label,
     )
     await r.record_async(
         "amazon_beanie_poll_stops_unresolved",

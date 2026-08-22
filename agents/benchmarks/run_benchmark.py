@@ -989,6 +989,13 @@ _STRUCTURED_MERCHANT_IDENTITY = re.compile(
     r"(?P<host>(?:[a-z0-9-]+\.)+[a-z0-9-]+)\s*\)\s*$",
     re.IGNORECASE,
 )
+# Catalog shorthand ``Business (host)`` without the ``Platform -`` segment (e.g.
+# ``Hotels.com (hotels.com)``). Must be tried only after the structured pattern
+# so ``Business (Platform - host)`` is not misread as a bare host.
+_SHORTHAND_MERCHANT_IDENTITY = re.compile(
+    r"^\s*(?P<business>.+?)\s*\(\s*(?P<host>(?:[a-z0-9-]+\.)+[a-z0-9-]+)\s*\)\s*$",
+    re.IGNORECASE,
+)
 # NOTE: there is deliberately no "connected merchant" regex here any more. It only accepted the
 # fixed connector vocabulary "via|on|through|by|/", which no prompt or tool schema teaches;
 # free-form merchant strings are now matched with prose_tokens_contain (see above).
@@ -1128,6 +1135,36 @@ def _payment_approval_hosts(req: dict) -> set[str]:
     return hosts
 
 
+def _catalog_merchant_identity(
+    expected_merchant: str,
+    business_aliases: object = None,
+) -> tuple[list[str], Optional[str]]:
+    """Parse catalog merchant bookkeeping into semantic business + platform hints."""
+    structured = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(expected_merchant)
+    if structured is not None:
+        businesses = [structured.group("business")]
+        platform = structured.group("platform")
+    else:
+        shorthand = _SHORTHAND_MERCHANT_IDENTITY.fullmatch(expected_merchant)
+        if shorthand is not None:
+            businesses = [shorthand.group("business")]
+            platform = shorthand.group("host")
+        else:
+            businesses = [expected_merchant]
+            platform = None
+
+    if isinstance(business_aliases, list):
+        businesses.extend(alias for alias in business_aliases if isinstance(alias, str) and alias.strip())
+    return businesses, platform
+
+
+def _merchant_label_matches_businesses(actual_merchant: str, expected_businesses: list[str]) -> bool:
+    return any(
+        prose_match_rank(business, actual_merchant) is not None or prose_tokens_contain(actual_merchant, business)
+        for business in expected_businesses
+    )
+
+
 def _validate_payment_merchant_identity(
     expected_merchant: object,
     actual_merchant: object,
@@ -1150,29 +1187,28 @@ def _validate_payment_merchant_identity(
     if not actual_merchant.strip():
         return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 
-    expected_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(expected_merchant)
-    if expected_match is None:
+    expected_businesses, expected_platform = _catalog_merchant_identity(expected_merchant, business_aliases)
+
+    # Plain catalog labels (no structured/shorthand parse) still compare semantically.
+    if expected_platform is None and len(expected_businesses) == 1 and expected_businesses[0] == expected_merchant:
+        if _merchant_label_matches_businesses(actual_merchant, expected_businesses):
+            return None
         if actual_merchant != expected_merchant:
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         return None
 
-    expected_businesses = [expected_match.group("business")]
-    if isinstance(business_aliases, list):
-        expected_businesses.extend(alias for alias in business_aliases if isinstance(alias, str) and alias.strip())
-    expected_platform = expected_match.group("platform")
     structured_actual = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
     if structured_actual is not None:
         # An actual that DOES adopt the "Business (Platform - host)" convention is making an
         # explicit platform + host claim, so it is still held to that claim exactly.
+        if not _merchant_label_matches_businesses(structured_actual.group("business"), expected_businesses):
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         if (
-            not any(
-                prose_match_rank(business, structured_actual.group("business")) is not None
-                for business in expected_businesses
-            )
-            or prose_match_rank(expected_platform, structured_actual.group("platform")) is None
+            expected_platform is not None
+            and prose_match_rank(expected_platform, structured_actual.group("platform")) is None
         ):
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
-    elif not any(prose_tokens_contain(actual_merchant, business) for business in expected_businesses):
+    elif not _merchant_label_matches_businesses(actual_merchant, expected_businesses):
         # The request_payment_card schema only asks for a "Merchant or site name", so ANY free-form
         # phrasing that carries the expected business ("Nopa Fish", "Nopa Fish via Toast", "Nopa
         # Fish — Toast online ordering") is a legitimate emission; the "Business (Platform - host)"
