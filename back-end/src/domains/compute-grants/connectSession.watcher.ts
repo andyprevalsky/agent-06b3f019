@@ -7,6 +7,14 @@ import {
   parseCodexCallbackUrl,
 } from '../../providers/browser/codexGrantMint';
 import { createLogger } from '../../providers/logger';
+import { getKernelCaptchaTelemetry } from '../../providers/browser/kernel';
+import { getSteelCaptchaTelemetry } from '../../providers/steel/sessionInspect';
+import {
+  CAPTCHA_WIDGET_PRESENT_SCRIPT,
+  captchaSolveIndicatorSetSolvingScript,
+  resolveCaptchaAutoSolveActive,
+} from '../../providers/browser/captchaSolveIndicator';
+import { computeGrantBrowserProvider } from './config';
 import { persistFirstGrant } from './connectSession.grant';
 import { finish, releaseBrowser } from './connectSession.lifecycle';
 import { upsertAccountConnection } from './repo';
@@ -14,6 +22,22 @@ import type { ConnectProviderConfig, PendingConnect } from './connectSession.typ
 
 const log = createLogger('ComputeGrants');
 
+async function syncCaptchaSolveIndicator(entry: PendingConnect): Promise<void> {
+  if (entry.cdp === null || entry.steelSessionId === null) return;
+  const provider = computeGrantBrowserProvider();
+  const telemetry =
+    provider === 'kernel'
+      ? await getKernelCaptchaTelemetry(entry.steelSessionId)
+      : await getSteelCaptchaTelemetry(entry.steelSessionId);
+  let kernelWidgets = false;
+  if (telemetry.isSolving === null && telemetry.provider === 'kernel') {
+    kernelWidgets = (await entry.cdp.evaluate<boolean>(CAPTCHA_WIDGET_PRESENT_SCRIPT)) === true;
+  }
+  const solving = resolveCaptchaAutoSolveActive(telemetry, {
+    kernelChallengeWidgetsPresent: kernelWidgets,
+  });
+  await entry.cdp.evaluate(captchaSolveIndicatorSetSolvingScript(solving));
+}
 interface MintedCredentials {
   accessToken: string;
   expiresIn: number;
@@ -132,6 +156,7 @@ async function watchSignInTick(
     return;
   }
   if (entry.cdp === null || entry.cdpBase === null) return;
+  await syncCaptchaSolveIndicator(entry).catch(() => undefined);
   await readAccountEmail(entry);
   const minted = await mintCredentials(entry);
   if (minted === null) return;

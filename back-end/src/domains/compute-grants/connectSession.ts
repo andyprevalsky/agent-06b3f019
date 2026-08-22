@@ -169,8 +169,8 @@ export async function startConnectSession(
           await cdp.armCodexCallback(auth.state);
         }
         await cdp.navigate(auth.url);
-        // Providers solve CAPTCHAs with no UI — paint a live-view banner when a
-        // challenge widget appears so the human watching the iframe can see it.
+        // Install script is registered at Kernel/Steel session create; after
+        // navigation re-run it so the telemetry flag listener is on this document.
         await cdp.evaluate(CAPTCHA_SOLVE_INDICATOR_SCRIPT).catch(() => undefined);
         // Log the destination host: routing a provider to the WRONG sign-in page
         // is invisible in every other signal (cookies still seed, stages still

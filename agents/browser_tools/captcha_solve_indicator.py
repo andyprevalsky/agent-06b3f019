@@ -1,76 +1,26 @@
 """In-page CAPTCHA auto-solve indicator for Kernel/Steel live views.
 
-Neither Kernel stealth nor Steel solveCaptcha inject a visible UI while their
-native solvers run. This script paints a high-visibility banner when captcha
-widgets are detected so the live view itself shows that auto-solve is underway.
-
-Keep the script body byte-identical to
-``back-end/src/providers/browser/captchaSolveIndicator.ts``
-(``CAPTCHA_SOLVE_INDICATOR_SCRIPT``) — enforced by unit test.
+Banner is driven by provider CAPTCHA telemetry (pushed via CDP), not by
+captcha DOM presence alone. Keep the install script body byte-identical to
+``back-end/src/providers/browser/captchaSolveIndicator.ts``.
 """
 
 from __future__ import annotations
 
+from typing import Any, Mapping, Optional
+
 CAPTCHA_SOLVE_INDICATOR_DOM_ID = "rose-captcha-auto-solve-banner"
+CAPTCHA_SOLVE_INDICATOR_FLAG = "__ROSE_CAPTCHA_AUTO_SOLVE__"
 
 # Keep in sync with back-end captchaSolveIndicator.ts CAPTCHA_SOLVE_INDICATOR_SCRIPT.
 CAPTCHA_SOLVE_INDICATOR_SCRIPT = r"""(() => {
+  if (window.__ROSE_CAPTCHA_AUTO_SOLVE__ && window.__ROSE_CAPTCHA_AUTO_SOLVE__.__roseInstalled) return;
   const BANNER_ID = 'rose-captcha-auto-solve-banner';
   const STYLE_ID = 'rose-captcha-auto-solve-banner-style';
-  const HOST_MARKERS = [
-    'hcaptcha.com',
-    'newassets.hcaptcha.com',
-    'recaptcha.net',
-    'recaptcha/',
-    'google.com/recaptcha',
-    'gstatic.com/recaptcha',
-    'challenges.cloudflare.com',
-    'turnstile',
-    'geetest.com',
-    'captcha-delivery.com',
-    'funcaptcha.com',
-    'arkoselabs.com',
-  ];
-  const SELECTORS = [
-    'iframe[src*="hcaptcha.com"]',
-    'iframe[src*="recaptcha"]',
-    'iframe[src*="challenges.cloudflare.com"]',
-    'iframe[src*="turnstile"]',
-    'iframe[src*="geetest"]',
-    'iframe[src*="funcaptcha"]',
-    'iframe[src*="arkoselabs"]',
-    'iframe[title*="captcha" i]',
-    'iframe[title*="hCaptcha" i]',
-    '.h-captcha',
-    '.g-recaptcha',
-    '.cf-turnstile',
-    '#cf-turnstile',
-    '[data-hcaptcha-widget-id]',
-    '[data-callback][data-sitekey]',
-  ];
-
-  function frameLooksLikeCaptcha(el) {
-    try {
-      const src = String(el.getAttribute('src') || el.src || '').toLowerCase();
-      if (HOST_MARKERS.some((m) => src.includes(m))) return true;
-      const title = String(el.getAttribute('title') || '').toLowerCase();
-      if (title.includes('captcha') || title.includes('hcaptcha')) return true;
-      const name = String(el.getAttribute('name') || '').toLowerCase();
-      if (name.includes('captcha') || name.includes('hcaptcha') || name.includes('recaptcha')) return true;
-    } catch (_) {}
-    return false;
-  }
-
-  function captchaVisible() {
-    try {
-      if (SELECTORS.some((sel) => document.querySelector(sel))) return true;
-      const frames = document.querySelectorAll('iframe');
-      for (const frame of frames) {
-        if (frameLooksLikeCaptcha(frame)) return true;
-      }
-    } catch (_) {}
-    return false;
-  }
+  const state = (window.__ROSE_CAPTCHA_AUTO_SOLVE__ = window.__ROSE_CAPTCHA_AUTO_SOLVE__ || {
+    solving: false,
+  });
+  state.__roseInstalled = true;
 
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
@@ -132,20 +82,18 @@ CAPTCHA_SOLVE_INDICATOR_SCRIPT = r"""(() => {
   }
 
   function sync() {
-    if (captchaVisible()) showBanner();
+    if (state.solving === true) showBanner();
     else hideBanner();
   }
 
+  state.setSolving = function setSolving(next) {
+    state.solving = next === true;
+    sync();
+  };
+
   function start() {
     sync();
-    try {
-      const root = document.documentElement || document.body;
-      if (root) {
-        const mo = new MutationObserver(() => sync());
-        mo.observe(root, { childList: true, subtree: true, attributes: true });
-      }
-    } catch (_) {}
-    setInterval(sync, 750);
+    setInterval(sync, 400);
   }
 
   if (document.readyState === 'loading') {
@@ -154,3 +102,91 @@ CAPTCHA_SOLVE_INDICATOR_SCRIPT = r"""(() => {
     start();
   }
 })();"""
+
+CAPTCHA_WIDGET_PRESENT_SCRIPT = r"""(() => {
+  const HOST_MARKERS = [
+    'hcaptcha.com', 'newassets.hcaptcha.com', 'recaptcha.net', 'recaptcha/',
+    'google.com/recaptcha', 'gstatic.com/recaptcha', 'challenges.cloudflare.com',
+    'turnstile', 'geetest.com', 'captcha-delivery.com', 'funcaptcha.com', 'arkoselabs.com',
+  ];
+  try {
+    const frames = document.querySelectorAll('iframe');
+    for (const frame of frames) {
+      const src = String(frame.getAttribute('src') || frame.src || '').toLowerCase();
+      if (HOST_MARKERS.some((m) => src.includes(m))) return true;
+      const title = String(frame.getAttribute('title') || '').toLowerCase();
+      if (title.includes('captcha') || title.includes('hcaptcha')) return true;
+    }
+    return !!(
+      document.querySelector('.h-captcha, .g-recaptcha, .cf-turnstile, #cf-turnstile, [data-hcaptcha-widget-id]')
+    );
+  } catch (_) {
+    return false;
+  }
+})()"""
+
+
+def captcha_solve_indicator_set_solving_script(solving: bool) -> str:
+    flag = "true" if solving else "false"
+    return (
+        "(() => {"
+        "const s = (window.__ROSE_CAPTCHA_AUTO_SOLVE__ = window.__ROSE_CAPTCHA_AUTO_SOLVE__ || { solving: false });"
+        f"if (typeof s.setSolving === 'function') {{ s.setSolving({flag}); }}"
+        f"else {{ s.solving = {flag}; }}"
+        "return !!s.solving;"
+        "})()"
+    )
+
+
+def resolve_captcha_auto_solve_active(
+    telemetry: Mapping[str, Any],
+    *,
+    kernel_challenge_widgets_present: bool = False,
+) -> bool:
+    """Mirror of back-end resolveCaptchaAutoSolveActive."""
+    is_solving = telemetry.get("isSolving")
+    if is_solving is True:
+        return True
+    if is_solving is False:
+        return False
+    if telemetry.get("provider") == "kernel":
+        return kernel_challenge_widgets_present is True
+    return False
+
+
+async def poll_captcha_auto_solve_active(
+    dom_service: Any,
+    *,
+    fetch_telemetry: Any,
+    config: Any,
+    task_id: str,
+) -> bool:
+    """Fetch provider CAPTCHA telemetry and resolve banner on/off."""
+    telemetry = await fetch_telemetry(config, task_id)
+    widgets = False
+    if telemetry.get("isSolving") is None and telemetry.get("provider") == "kernel":
+        widgets = await dom_service.probe_captcha_widgets_present()
+    return resolve_captcha_auto_solve_active(
+        telemetry,
+        kernel_challenge_widgets_present=widgets,
+    )
+
+
+def start_captcha_telemetry_indicator_for_task(
+    dom_service: Any,
+    *,
+    fetch_telemetry: Any,
+    config: Any,
+    task_id: str,
+) -> None:
+    """Background-poll CAPTCHA telemetry into the live-view banner."""
+
+    async def _poll() -> bool:
+        return await poll_captcha_auto_solve_active(
+            dom_service,
+            fetch_telemetry=fetch_telemetry,
+            config=config,
+            task_id=task_id,
+        )
+
+    dom_service.start_captcha_telemetry_indicator(_poll)

@@ -1,15 +1,14 @@
 #!/usr/bin/env tsx
 /**
- * Permanent coverage for the in-page CAPTCHA auto-solve live-view banner.
+ * Permanent coverage for the telemetry-driven CAPTCHA auto-solve live-view banner.
  *
- * Diagram (feature context):
- *
- *   Kernel/Steel session create ──► installCaptchaSolveIndicator (Playwright)
- *   Compute connect attachCdp   ──► Page.addScriptToEvaluateOnNewDocument
- *   Agent browser CDP attach    ──► same script (Python mirror)
+ *   Provider CAPTCHA telemetry ──► resolveCaptchaAutoSolveActive
  *              │
  *              ▼
- *   Live view shows "AUTO-SOLVING CAPTCHA" banner when widgets detected
+ *   CDP setSolving(true|false) ──► in-page banner show/hide
+ *
+ * Steel uses real isSolving; Kernel synthesizes via live challenge-widget probe
+ * because Kernel only emits terminal captcha_solve_result events.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -18,7 +17,9 @@ import { fileURLToPath } from 'node:url';
 import {
   CAPTCHA_SOLVE_INDICATOR_DOM_ID,
   CAPTCHA_SOLVE_INDICATOR_SCRIPT,
+  captchaSolveIndicatorSetSolvingScript,
   installCaptchaSolveIndicator,
+  resolveCaptchaAutoSolveActive,
 } from '../../providers/browser/captchaSolveIndicator';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -44,14 +45,42 @@ function testTsAndPythonScriptsStayInSync(): void {
     'TS and Python CAPTCHA indicator scripts drifted — update both'
   );
   assert.ok(pySource.includes(CAPTCHA_SOLVE_INDICATOR_DOM_ID));
+  assert.ok(pySource.includes('resolve_captcha_auto_solve_active'));
 }
 
-function testScriptAdvertisesVisibleBannerCopy(): void {
+function testScriptIsTelemetryDrivenNotDomOnly(): void {
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /Auto-solving CAPTCHA/);
-  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /do not click the challenge/);
-  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /hcaptcha\.com/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /__ROSE_CAPTCHA_AUTO_SOLVE__/);
+  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /setSolving/);
   assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /pointer-events:none/);
-  assert.match(CAPTCHA_SOLVE_INDICATOR_SCRIPT, new RegExp(CAPTCHA_SOLVE_INDICATOR_DOM_ID));
+  assert.doesNotMatch(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /hcaptcha\.com/);
+  assert.doesNotMatch(CAPTCHA_SOLVE_INDICATOR_SCRIPT, /captchaVisible/);
+}
+
+function testResolveCaptchaAutoSolveActive(): void {
+  assert.equal(resolveCaptchaAutoSolveActive({ provider: 'steel', isSolving: true }), true);
+  assert.equal(resolveCaptchaAutoSolveActive({ provider: 'steel', isSolving: false }), false);
+  assert.equal(
+    resolveCaptchaAutoSolveActive(
+      { provider: 'kernel', isSolving: null },
+      { kernelChallengeWidgetsPresent: true }
+    ),
+    true
+  );
+  assert.equal(
+    resolveCaptchaAutoSolveActive(
+      { provider: 'kernel', isSolving: null },
+      { kernelChallengeWidgetsPresent: false }
+    ),
+    false
+  );
+  assert.equal(
+    resolveCaptchaAutoSolveActive(
+      { provider: 'steel', isSolving: false },
+      { kernelChallengeWidgetsPresent: true }
+    ),
+    false
+  );
 }
 
 async function testInstallRegistersInitScriptOnAllContexts(): Promise<void> {
@@ -84,34 +113,37 @@ async function testInstallRegistersInitScriptOnAllContexts(): Promise<void> {
   assert.equal(initScripts.length, 2);
   assert.equal(initScripts[0], CAPTCHA_SOLVE_INDICATOR_SCRIPT);
   assert.equal(evaluates.length, 1);
-  assert.equal(evaluates[0], CAPTCHA_SOLVE_INDICATOR_SCRIPT);
 }
 
-async function testScriptShowsAndHidesBannerInRealPage(): Promise<void> {
+async function testScriptShowsOnlyWhenTelemetrySetsSolving(): Promise<void> {
   const { chromium } = await import('playwright');
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
     await page.addInitScript(CAPTCHA_SOLVE_INDICATOR_SCRIPT);
-    await page.goto('data:text/html,<html><body><h1>clean</h1></body></html>');
-    await page.waitForTimeout(100);
+    await page.goto(
+      'data:text/html,' +
+        encodeURIComponent(
+          '<html><body style="font-family:sans-serif;padding:40px">' +
+            '<h1>Sign in</h1>' +
+            '<p>Demo login page</p>' +
+            '<iframe src="https://newassets.hcaptcha.com/captcha/v1/challenge" title="hCaptcha challenge" ' +
+            'style="width:320px;height:120px;border:1px solid #ccc"></iframe>' +
+            '</body></html>'
+        )
+    );
+    await page.waitForTimeout(200);
+    // Captcha iframe is visible but telemetry has not said solving yet.
     assert.equal(await page.locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}`).count(), 0);
 
-    await page.evaluate(() => {
-      const iframe = document.createElement('iframe');
-      iframe.src = 'https://newassets.hcaptcha.com/captcha/v1/challenge';
-      iframe.title = 'hCaptcha challenge';
-      document.body.appendChild(iframe);
-    });
+    await page.evaluate(captchaSolveIndicatorSetSolvingScript(true));
     await page.waitForSelector(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID}`, { timeout: 3_000 });
     const title = await page
       .locator(`#${CAPTCHA_SOLVE_INDICATOR_DOM_ID} .rose-captcha-title`)
       .innerText();
     assert.match(title, /auto-solving captcha/i);
 
-    await page.evaluate(() => {
-      document.querySelectorAll('iframe').forEach((el) => el.remove());
-    });
+    await page.evaluate(captchaSolveIndicatorSetSolvingScript(false));
     await page.waitForFunction(
       (id) => document.getElementById(id) === null,
       CAPTCHA_SOLVE_INDICATOR_DOM_ID,
@@ -129,26 +161,33 @@ function testInstallSitesAreWired(): void {
     join(REPO_ROOT, 'back-end/src/providers/steel/sessionRecovery.ts'),
     'utf8'
   );
-  const cdp = readFileSync(
-    join(REPO_ROOT, 'back-end/src/domains/compute-grants/connectSession.ts'),
+  const watcher = readFileSync(
+    join(REPO_ROOT, 'back-end/src/domains/compute-grants/connectSession.watcher.ts'),
     'utf8'
   );
   const agent = readFileSync(join(REPO_ROOT, 'agents/browser_tools/dom_service.py'), 'utf8');
+  const handler = readFileSync(
+    join(REPO_ROOT, 'agents/domains/spawn_browser_agent_v3/handler.py'),
+    'utf8'
+  );
 
   assert.match(kernel, /installCaptchaSolveIndicator/);
   assert.match(steel, /installCaptchaSolveIndicator/);
   assert.match(recovery, /installCaptchaSolveIndicator/);
-  assert.match(cdp, /CAPTCHA_SOLVE_INDICATOR_SCRIPT/);
-  assert.match(agent, /_inject_captcha_solve_indicator/);
+  assert.match(watcher, /resolveCaptchaAutoSolveActive/);
+  assert.match(watcher, /captchaSolveIndicatorSetSolvingScript/);
+  assert.match(agent, /start_captcha_telemetry_indicator/);
+  assert.match(handler, /start_captcha_telemetry_indicator_for_task/);
 }
 
 testTsAndPythonScriptsStayInSync();
-testScriptAdvertisesVisibleBannerCopy();
+testScriptIsTelemetryDrivenNotDomOnly();
+testResolveCaptchaAutoSolveActive();
 testInstallSitesAreWired();
 
 async function main(): Promise<void> {
   await testInstallRegistersInitScriptOnAllContexts();
-  await testScriptShowsAndHidesBannerInRealPage();
+  await testScriptShowsOnlyWhenTelemetrySetsSolving();
   process.stdout.write('PASS captcha solve indicator\n');
 }
 
