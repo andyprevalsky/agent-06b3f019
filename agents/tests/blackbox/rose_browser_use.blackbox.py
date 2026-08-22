@@ -197,13 +197,13 @@ def test_state_has_indexed_dom_targets_detects_interactive_indices():
     assert state_has_indexed_dom_targets(browser_state)
 
 
-def test_filter_browser_use_actions_removes_coordinates_when_dom_has_indices():
+def test_filter_browser_use_actions_keeps_coordinates_when_dom_has_indices():
     actions = ["click", "click_coordinates", "wait"]
     browser_state = {"dom_tree": "[92]<button aria-label=Add item to Cart />"}
 
     out = filter_browser_use_actions_for_state(actions, browser_state)
 
-    assert out == ["click", "wait"]
+    assert out == actions
 
 
 def test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state():
@@ -218,9 +218,9 @@ def test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state():
 def test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell():
     """Hotels.com Bot or Not mounts indexed shell nodes with no slider index.
 
-    Stripping click_coordinates whenever any [index] exists leaves the model
-    with clickable shell div/a/span only — it then honestly reports
-    'no interactive solve control is available' and skips the visible slider.
+    click_coordinates must stay in the tool list so the model can engage a
+    visual-only widget after screenshot; stripping it produced
+    'no interactive solve control is available' recoveries.
     """
     actions = ["click", "click_coordinates", "screenshot", "wait", "recover_from_challenge"]
     browser_state = {
@@ -238,9 +238,17 @@ def test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell():
 
     out = filter_browser_use_actions_for_state(actions, browser_state)
 
+    assert out == actions
     assert "click_coordinates" in out
-    assert "screenshot" in out
-    assert "recover_from_challenge" in out
+
+
+def test_screenshot_tool_desc_calls_out_misleading_captcha_dom():
+    tools = build_browser_use_tools(["screenshot"])
+    desc = tools[0]["description"]
+    assert "misleading shell" in desc
+    assert "Bot or Not" in desc
+    assert "click_coordinates" in desc
+    assert "before recover_from_challenge" in desc
 
 
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
@@ -1795,8 +1803,8 @@ async def run_all_tests():
     r.record("system_prompt_hides_extract", test_build_browser_use_system_prompt_does_not_advertise_extract)
     r.record("state_has_indexed_dom_targets", test_state_has_indexed_dom_targets_detects_interactive_indices)
     r.record(
-        "filter_actions_removes_coordinates_when_indexed",
-        test_filter_browser_use_actions_removes_coordinates_when_dom_has_indices,
+        "filter_actions_keeps_coordinates_when_indexed",
+        test_filter_browser_use_actions_keeps_coordinates_when_dom_has_indices,
     )
     r.record(
         "filter_actions_keeps_coordinates_when_unindexed",
@@ -1805,6 +1813,10 @@ async def run_all_tests():
     r.record(
         "filter_keeps_click_coordinates_on_bot_or_not_captcha_shell",
         test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell,
+    )
+    r.record(
+        "screenshot_tool_desc_misleading_captcha_dom",
+        test_screenshot_tool_desc_calls_out_misleading_captcha_dom,
     )
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)

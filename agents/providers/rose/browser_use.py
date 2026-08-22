@@ -419,7 +419,11 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "IMPORTANT: if you are attempting to interact with the DOM but progress is not being made "
             "(repeated clicks/waits with no state change), take a screenshot to view components that may be "
             "hidden from the DOM, e.g. a CAPTCHA, Cloudflare 'verify you are human' challenge, or other "
-            "content rendered inside a cross-origin iframe that the DOM tree cannot see."
+            "content rendered inside a cross-origin iframe that the DOM tree cannot see. "
+            "For CAPTCHA / bot-challenge / 'Bot or Not' pages, call this before recover_from_challenge: "
+            "the DOM is often a misleading shell (#app-captcha-pwa with only div/a/span indexes) while the "
+            "real slider/checkbox/widget is visual-only — use the screenshot to confirm the challenge type, "
+            "then click_coordinates (or an indexed control if one exists) to solve it."
         ),
         "params": {},
     },
@@ -510,15 +514,17 @@ def filter_browser_use_actions_for_state(
     available_actions: List[str],
     browser_state: Dict[str, Any],
 ) -> List[str]:
-    """Keep coordinate clicking as a fallback for unindexed/screenshot-only targets.
+    """Return the caller allowlist unchanged.
 
-    Normal web pages expose indexed DOM targets. If `click_coordinates` remains
-    available there, the model can choose raw pixels for indexed controls and
-    loop on visually plausible no-op clicks while the DOM state stays unchanged.
+    Previously this stripped `click_coordinates` whenever the DOM tree exposed
+    any `[index]` node, on the theory that pixels would loop on indexed pages.
+    That broke captcha / Bot-or-Not shells: they index empty `#app-captcha-pwa`
+    wrappers while the real slider has no index, so the only solve path was
+    removed and the model recovered with "no interactive solve control". Prefer
+    indexed click via tool description; never hide the coordinate tool.
     """
-    if not state_has_indexed_dom_targets(browser_state):
-        return list(available_actions)
-    return [action for action in available_actions if action != "click_coordinates"]
+    _ = browser_state
+    return list(available_actions)
 
 
 def generate_tool_descriptions(available_actions: List[str]) -> str:

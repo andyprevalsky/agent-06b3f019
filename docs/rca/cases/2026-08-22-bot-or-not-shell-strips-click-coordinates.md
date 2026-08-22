@@ -24,7 +24,7 @@ sources:
   - PR #1032
   - commit 3a3b88a49
 repro: agents/tests/blackbox/rose_browser_use.blackbox.py::test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -66,27 +66,28 @@ Local repro (0.58s): Bot-or-Not shell `dom_tree` → filter drops
 
 ## Solution
 
-Pending approval. Intended generalizable fix:
+Removed the indexed-DOM strip in
+`filter_browser_use_actions_for_state` — it is now a pass-through so
+`click_coordinates` stays available whenever the allowlist includes it
+(including Bot or Not shells with `#app-captcha-pwa` indexes).
 
-1. Keep `click_coordinates` when the snapshot looks challenged (reuse
-   captcha/`app-captcha-pwa` / Bot-or-Not signals) even if shell indices exist.
-2. Auto-include a viewport screenshot on challenged pages (or after challenge
-   detection) so the model can see the slider without an extra turn.
-3. Prompt/tool-desc: require `screenshot` (or visual self-solve) before
-   `recover_from_challenge` when a challenge page is visible — alone is
-   insufficient without (1).
+Also extended the `screenshot` tool description to tell the model that captcha
+DOM shells are often misleading and to screenshot before
+`recover_from_challenge`, then use `click_coordinates`. Dump replay on step 9
+of agent `3c824ea4`: baseline 3/3 `recover_from_challenge`; coords-only 2/3
+recover + 1/3 screenshot; screenshot-desc (± coords) 3/3 `screenshot`.
 
-10k-agent: O(1) per browser step filter + occasional screenshot bytes on
-challenge pages only; no shared fan-in.
+10k-agent: O(1) per step; no shared fan-in. Screenshot bytes only when the
+model opts in (or a later auto-include change).
 
 ## Human feedback
 
-User asked why the LLM thought there was no solve control, whether we need to
-tell it to screenshot, and for `/rca` on non-engagement. Diagnosis-ready;
-awaiting fix approval.
+User rejected keeping a conditional "coords stay available on challenge pages"
+shape — the indexed-DOM strip should be removed altogether ("sounds hella
+retarded"). Asked to iterate on the specific LLM divergence (coords alone vs
+screenshot tool desc) rather than theorize.
 
 ## Reusable lesson
 
-Never strip `click_coordinates` solely because shell `[index]` nodes exist on a
-challenge page — captcha widgets are often unindexed; keep coords and attach a
-screenshot or the model will honestly report "no interactive solve control."
+Never hide `click_coordinates` because the DOM has indexes — captcha shells
+index empty wrappers; prefer tool-description guidance over stripping the tool.
