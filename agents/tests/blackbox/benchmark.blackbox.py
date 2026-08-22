@@ -4999,11 +4999,17 @@ def test_benchmark_goal_injects_payment_boundary_operational_suffix():
     from benchmarks.benchmark_tasks import get_task_by_name
     from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
 
-    task = get_task_by_name("browser-hotel-booking")
-    goal = bench._benchmark_goal_for_task(task, "http://localhost:3201")
+    hotel = get_task_by_name("browser-hotel-booking")
+    hotel_goal = bench._benchmark_goal_for_task(hotel, "http://localhost:3201")
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in hotel_goal
+    assert "exactly one browser agent" in hotel_goal.lower()
+    assert "do not spawn a second browser agent" in hotel_goal.lower()
+    assert "request_payment_card" not in hotel_goal.lower()
+    assert "do not instruct the browser to submit payment" not in hotel_goal.lower()
+
+    event_ticket = get_task_by_name("browser-event-ticket")
+    goal = bench._benchmark_goal_for_task(event_ticket, "http://localhost:3201")
     assert PAYMENT_BOUNDARY_GOAL_MARKER in goal
-    assert "exactly one browser agent" in goal.lower()
-    assert "do not spawn a second browser agent" in goal.lower()
     assert "do not instruct the browser to submit payment" in goal.lower()
 
 

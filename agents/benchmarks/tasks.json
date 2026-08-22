@@ -1833,8 +1833,8 @@
   {
     "name": "browser-hotel-booking",
     "title": "Hotel Kabuki One-Night Booking",
-    "description": "Reserve a one-night hotel stay on hotels.com via guest checkout.",
-    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
+    "description": "Reserve a one-night hotel stay on hotels.com for the next Saturday-to-Sunday weekend.",
+    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from next Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead.",
     "timeout_seconds": 1125,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1880,7 +1880,7 @@
         "https://www.hotels.com/",
         "https://www.hotels.com/ho129640/hotel-kabuki-part-of-jdv-by-hyatt-san-francisco-united-states-of-america/"
       ],
-      "context_notes": "Live lodging inventory on hotels.com for Hotel Kabuki. Guest checkout is available without an account. Success is the single unresolved payment-card approval grounded to hotels.com after guest checkout; the harness never approves it or completes the charge. Do not require a completed reservation or write-lock.",
+      "context_notes": "Live lodging inventory on hotels.com for Hotel Kabuki. Success is the single unresolved payment-card approval grounded to hotels.com; the harness never approves it or completes the charge. Do not require a completed reservation or write-lock. Stay dates are relative (next Saturday to Sunday); accept the next reasonable one-night Sat–Sun weekend without requiring a specific calendar week.",
       "live_cookie_domains": [
         "hotels.com"
       ]
@@ -1916,11 +1916,11 @@
         "id": "hotel-kabuki-payment-boundary-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The pending payment approval is for Hotel Kabuki on hotels.com for one adult, Saturday to Sunday, with room rate under $400 before taxes and fees",
+          "The pending payment approval is for Hotel Kabuki on hotels.com for one adult on a one-night Saturday-to-Sunday stay (the next upcoming weekend is acceptable; do not require an exact calendar week), with room rate under $400 before taxes and fees",
           "No package, upgrade, or add-on is selected",
           "The trajectory ends at exactly one unresolved payment-card approval grounded to hotels.com; the harness does not approve it, and a completed reservation or generic write-lock alone is not success"
         ],
-        "judge_prompt": "Review the room selection, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com checkout, Hotel Kabuki, the stay dates, one-adult occupancy, the under-$400 pre-tax/fees cap, no packages or add-ons, and one unresolved payment-card approval. Judge merchant labels, hotel naming, and room descriptions by meaning rather than exact strings. Do not require lowest-price or non-smoking proof. Do not judge signed-in vs guest checkout, cookie bundles, or challenge-recovery auth-preservation messages. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
+        "judge_prompt": "Review the room selection, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com checkout, Hotel Kabuki, a one-night Saturday-to-Sunday stay (the next reasonable weekend is fine; do not fail on exact calendar dates), one-adult occupancy, the under-$400 pre-tax/fees cap, no packages or add-ons, and one unresolved payment-card approval. Judge merchant labels, hotel naming, and room descriptions by meaning rather than exact strings. Do not require lowest-price or non-smoking proof. Do not judge signed-in vs guest checkout, cookie bundles, or challenge-recovery auth-preservation messages. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,
