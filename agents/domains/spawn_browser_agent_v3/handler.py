@@ -47,7 +47,7 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
-from providers.rose.browser_use import build_browser_state_message_content
+from providers.rose.browser_use import format_browser_state_for_tool
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.payment_card import (
@@ -2008,39 +2008,51 @@ def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
 def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     clean: Dict[str, Any] = {}
     for key, value in (result or {}).items():
-        if key in {"screenshot", "screenshot_b64", "dom_tree", "base64"}:
+        if key in {"screenshot", "screenshot_b64", "base64"}:
+            continue
+        if action_name != "read_browser_state" and key in {"dom_tree"}:
             continue
         clean[key] = value
     if action_name == "screenshot" and (result.get("screenshot") or result.get("screenshot_b64")):
         clean["screenshot_attached"] = True
+    if action_name == "read_browser_state" and result.get("formatted_state"):
+        clean.setdefault("formatted_state", result["formatted_state"])
     return clean
+
+
+def _browser_state_from_read_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Rebuild the structured browser_state dict from a read_browser_state tool result."""
+    if not result.get("success"):
+        return {}
+    return {
+        key: result[key]
+        for key in (
+            "url",
+            "title",
+            "viewport",
+            "scroll_position",
+            "page_stats",
+            "tabs",
+            "dom_tree",
+            "recent_events",
+            "closed_popups",
+            "media_candidates",
+        )
+        if key in result
+    }
 
 
 def _append_browser_turn_messages(
     turn_messages: List[Dict[str, Any]],
     *,
-    task: str,
-    browser_state: Dict[str, Any],
-    include_screenshot: bool,
     unified_action: Dict[str, Any],
     result: Dict[str, Any],
     tool_call_id: str,
 ) -> None:
-    """Append browser state, assistant tool call, and tool result to the next LLM context."""
+    """Append assistant tool call and tool result to the next LLM context."""
     action_name = unified_action.get("action") or "unknown"
     thinking = unified_action.get("thinking") or ""
     args = _browser_tool_arguments(unified_action)
-    turn_messages.append(
-        {
-            "role": "user",
-            "content": build_browser_state_message_content(
-                task=task,
-                browser_state=browser_state,
-                include_screenshot=include_screenshot,
-                include_task=False,
-            ),
-        }
-    )
     turn_messages.append(
         {
             "role": "assistant",
@@ -2125,9 +2137,6 @@ async def _finalize_browser_recovery_action_result(
         )
     _append_browser_turn_messages(
         browser_turn_messages,
-        task=task_prompt,
-        browser_state=browser_state,
-        include_screenshot=False,
         unified_action=unified_action,
         result=action_result,
         tool_call_id=recovery_call_id,
@@ -2178,9 +2187,6 @@ async def _feed_browser_tool_validation_error_back(
     )
     _append_browser_turn_messages(
         browser_turn_messages,
-        task=task_prompt,
-        browser_state=browser_state,
-        include_screenshot=False,
         unified_action=synthetic_action,
         result=result,
         tool_call_id=tool_call_id_action,
@@ -4250,6 +4256,23 @@ async def _execute_simulated_browser_transition(
 ) -> tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]]]:
     action_name = str(action.get("action") or "unknown")
 
+    if action_name == "read_browser_state":
+        state = dict(browser_state or {})
+        formatted_state = format_browser_state_for_tool(state)
+        result = {
+            "success": True,
+            "message": "Browser state captured.",
+            "formatted_state": formatted_state,
+            "url": state.get("url", ""),
+            "title": state.get("title", ""),
+            "viewport": state.get("viewport"),
+            "scroll_position": state.get("scroll_position"),
+            "page_stats": state.get("page_stats"),
+            "tabs": state.get("tabs"),
+            "dom_tree": state.get("dom_tree", ""),
+        }
+        return result, state, _simulated_browser_frame_from_result(result, state)
+
     async def forbidden_real_browser(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
         raise RuntimeError("Simulator mode forbids launching or connecting to a real browser")
 
@@ -5029,9 +5052,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 completion_entry["result"] = rejection
                 _append_browser_turn_messages(
                     turn_messages,
-                    task=task_prompt,
-                    browser_state=browser_state,
-                    include_screenshot=False,
                     unified_action=action,
                     result=rejection,
                     tool_call_id=action_call_id,
@@ -5071,9 +5091,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
             )
             _append_browser_turn_messages(
                 turn_messages,
-                task=task_prompt,
-                browser_state=browser_state,
-                include_screenshot=False,
                 unified_action=action,
                 result=history_result,
                 tool_call_id=action_call_id,
@@ -6617,7 +6634,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 action_name = unified_action.get("action", "unknown")
                 logger.info(f"Pending write lock action executed: {action_name}", result=result)
 
-                activity.heartbeat(f"Step {iteration} - fetching browser state")
+                activity.heartbeat(f"Step {iteration} - refreshing browser state after write lock")
                 browser_state = await dom_service.get_browser_state(include_screenshot=False)
                 current_url = browser_state.get("url", "")
                 await record_passkey_usage_once()
@@ -6654,16 +6671,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             except Exception as e:
                 logger.warning("Failed to fetch OTPs", error=str(e))
 
-            # 1. Get current browser state
-            activity.heartbeat(f"Step {iteration} - fetching browser state")
+            # Resolve URL for realm prep / handoff without auto-injecting DOM into the LLM.
+            activity.heartbeat(f"Step {iteration} - resolving page URL")
             try:
-                browser_state = await asyncio.wait_for(
-                    dom_service.get_browser_state(include_screenshot=False),
+                current_url = await asyncio.wait_for(
+                    dom_service.get_current_url(fallback=current_url),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
                 recovered = await _recover_browser_step(
-                    f"browser_state_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
+                    f"browser_url_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
                     reload_page=True,
                 )
                 if recovered:
@@ -6671,13 +6688,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 raise
             except Exception as state_error:
                 recovered = await _recover_browser_step(
-                    f"browser_state_error:{type(state_error).__name__}:{extract_error_message(state_error)[:160]}",
+                    f"browser_url_error:{type(state_error).__name__}:{extract_error_message(state_error)[:160]}",
                     reload_page=True,
                 )
                 if recovered:
                     continue
                 raise
-            current_url = browser_state.get("url", "")
             await record_passkey_usage_once()
 
             # Clicks, form submissions, and server redirects can cross an auth
@@ -6950,9 +6966,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     iteration=iteration,
                                 )
                 if browser_recorder:
+                    observation_state = browser_state
+                    if not observation_state.get("dom_tree"):
+                        with contextlib.suppress(Exception):
+                            observation_state = await dom_service.get_browser_state(include_screenshot=False)
                     await browser_recorder.record_observation(
                         iteration=iteration,
-                        browser_state=browser_state,
+                        browser_state=observation_state,
                         action_entries=action_entries,
                     )
 
@@ -7262,9 +7282,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         )
                         _append_browser_turn_messages(
                             browser_turn_messages,
-                            task=task_prompt,
-                            browser_state=browser_state,
-                            include_screenshot=False,
                             unified_action=unified_action,
                             result=blocked_result,
                             tool_call_id=tool_call_id_action,
@@ -7293,9 +7310,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     _append_browser_turn_messages(
                         browser_turn_messages,
-                        task=task_prompt,
-                        browser_state=browser_state,
-                        include_screenshot=False,
                         unified_action=unified_action,
                         result=blocked_result,
                         tool_call_id=tool_call_id_action,
@@ -7435,9 +7449,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         )
                         _append_browser_turn_messages(
                             browser_turn_messages,
-                            task=task_prompt,
-                            browser_state=browser_state,
-                            include_screenshot=False,
                             unified_action=unified_action,
                             result=recovery_result,
                             tool_call_id=tool_call_id_action,
@@ -7542,9 +7553,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                 _append_browser_turn_messages(
                     browser_turn_messages,
-                    task=task_prompt,
-                    browser_state=browser_state,
-                    include_screenshot=False,
                     unified_action=unified_action,
                     result=success_result,
                     tool_call_id=tool_call_id_action,
@@ -8258,9 +8266,6 @@ Based on this feedback, I need to continue working on the task and address the i
                     }
                     _append_browser_turn_messages(
                         browser_turn_messages,
-                        task=task_prompt,
-                        browser_state=browser_state,
-                        include_screenshot=False,
                         unified_action=unified_action,
                         result=rejection_result,
                         tool_call_id=continuing_tool_call_id,
@@ -8521,13 +8526,26 @@ Based on this feedback, I need to continue working on the task and address the i
 
             _append_browser_turn_messages(
                 browser_turn_messages,
-                task=task_prompt,
-                browser_state=browser_state,
-                include_screenshot=False,
                 unified_action=unified_action,
                 result=result,
                 tool_call_id=tool_call_id_action,
             )
+
+            if action_name == "read_browser_state" and result.get("success"):
+                browser_state = _browser_state_from_read_result(result)
+            elif result.get("success") and action_name not in {
+                "screenshot",
+                "read_network_requests",
+                "wait",
+                "read_browser_state",
+            }:
+                if browser_state:
+                    browser_state = dict(browser_state)
+                    browser_state["dom_tree"] = ""
+                if result.get("current_url"):
+                    browser_state["url"] = str(result["current_url"])
+                elif result.get("url"):
+                    browser_state["url"] = str(result["url"])
 
             if result.get("status") == "needs_write_approval":
                 approval_type = result.get("approval_type", "unknown")
@@ -8600,7 +8618,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     url=current_url,
                 )
 
-                checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
+                checkpoint_state = browser_state
+                if not checkpoint_state.get("dom_tree") and dom_service is not None:
+                    with contextlib.suppress(Exception):
+                        checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
+                checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
                 if dom_service:
@@ -8717,7 +8739,11 @@ Based on this feedback, I need to continue working on the task and address the i
                         error=str(notification_error),
                     )
 
-                checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
+                checkpoint_state = browser_state
+                if not checkpoint_state.get("dom_tree") and dom_service is not None:
+                    with contextlib.suppress(Exception):
+                        checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
+                checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
                 if dom_service:

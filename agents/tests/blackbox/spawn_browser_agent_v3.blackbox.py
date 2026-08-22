@@ -612,7 +612,7 @@ def test_browser_task_prompt_does_not_duplicate_system_prompt():
         turn_messages=[],
     )
 
-    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    assert [message["role"] for message in messages] == ["system", "user"]
     assert "You are a browser automation agent" in messages[0]["content"]
     assert "You are a browser automation agent" not in messages[1]["content"]
     assert messages[1]["content"] == "# Current Goal\nBuy socks"
@@ -3679,21 +3679,12 @@ async def test_browser_diagnostics_capture_console_and_redacted_network_metadata
         assert log_send.enabled_session_ids == ["cdp-1"]
 
 
-def test_browser_turn_history_preserves_state_before_tool_result():
+def test_browser_turn_history_appends_tool_call_without_auto_state():
     from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
 
     turns = []
     _append_browser_turn_messages(
         turns,
-        task="# Current Goal\nBuy socks",
-        browser_state={
-            "url": "https://example.com/cart",
-            "title": "Cart",
-            "viewport": {"width": 1280, "height": 800},
-            "dom_tree": "[7]<button>Checkout</button>",
-            "screenshot": "AAAA",
-        },
-        include_screenshot=False,
         unified_action={
             "action": "click",
             "thinking": "Click checkout.",
@@ -3704,13 +3695,27 @@ def test_browser_turn_history_preserves_state_before_tool_result():
         tool_call_id="call_123",
     )
 
-    assert [message["role"] for message in turns] == ["user", "assistant", "tool"]
-    assert "Current URL: https://example.com/cart - Cart" in turns[0]["content"]
-    assert "[7]<button>Checkout</button>" in turns[0]["content"]
-    assert isinstance(turns[0]["content"], str)
-    assert turns[1]["content"] == "Click checkout."
-    assert turns[1]["tool_calls"][0]["function"]["name"] == "click"
-    assert turns[2]["name"] == "click"
+    assert [message["role"] for message in turns] == ["assistant", "tool"]
+    assert turns[0]["content"] == "Click checkout."
+    assert turns[0]["tool_calls"][0]["function"]["name"] == "click"
+    assert turns[1]["name"] == "click"
+
+
+def test_read_browser_state_tool_result_keeps_formatted_state_in_history():
+    from domains.spawn_browser_agent_v3.handler import _browser_tool_result_for_history
+
+    formatted = "# Current Browser State\n\nCurrent URL: https://example.com/cart\nInteractive elements:\n[7]<button>Checkout</button>"
+    clean = _browser_tool_result_for_history(
+        "read_browser_state",
+        {
+            "success": True,
+            "formatted_state": formatted,
+            "dom_tree": "[7]<button>Checkout</button>",
+            "url": "https://example.com/cart",
+        },
+    )
+    assert clean["formatted_state"] == formatted
+    assert "dom_tree" in clean
 
 def _fake_config(
     backend_url: str = "https://backend.example.com",
@@ -16130,6 +16135,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
 
+        async def get_current_url(self, *, fallback: str = ""):
+            return fallback or "https://example.com/login"
+
         def start_captcha_telemetry_indicator(self, poll_phase):
             self._captcha_poll = poll_phase
 
@@ -17941,8 +17949,12 @@ async def run_all_tests():
         test_pending_write_lock_action_rehydrates_url_and_remaps_dom_target,
     )
     r.record(
-        "browser_turn_history_preserves_state",
-        test_browser_turn_history_preserves_state_before_tool_result,
+        "browser_turn_history_no_auto_state",
+        test_browser_turn_history_appends_tool_call_without_auto_state,
+    )
+    r.record(
+        "read_browser_state_history_keeps_formatted_state",
+        test_read_browser_state_tool_result_keeps_formatted_state_in_history,
     )
 
     # service_crypto — pure

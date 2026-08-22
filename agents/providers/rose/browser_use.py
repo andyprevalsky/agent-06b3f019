@@ -42,6 +42,16 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+    "read_browser_state": {
+        "description": (
+            "Read the current browser page state (URL, viewport, scroll, tabs, page stats, indexed DOM tree). "
+            "Call before interacting when you need element [index] values or after navigation/actions that may "
+            "have changed the page. Example output begins with '# Current Browser State' and includes lines like "
+            "'Current URL: https://example.com/checkout - Checkout' and 'Interactive elements:' followed by "
+            "'[7]<button>Pay now</button>'."
+        ),
+        "params": {},
+    },
     "goto": {
         "description": "Navigate to a URL",
         "params": {"url": {"type": "string", "description": "URL to navigate to", "required": True}},
@@ -593,12 +603,12 @@ You are a browser automation agent. You take in a user goal and complete the goa
 
 # Input
 
-Each turn you will receive a snapshot of the current browser environment which includes:
+Page state is NOT injected automatically. Call `read_browser_state` whenever you need:
 1. Current URL, viewport size, and scroll position
-2. Page stats
-3. Tab information
-4. DOM tree with interactive elements indexed for actions (format: [index]<type>text</type>)
-5. A full-page screenshot if the screenshot tool was called on the previous turn
+2. Page stats and open tabs
+3. DOM tree with interactive elements indexed for actions (format: [index]<type>text</type>)
+
+Use `screenshot` when you need a viewport image. Re-read state after navigation, scrolling, or actions that may change the page.
 
 # Browser Rules
 
@@ -680,6 +690,11 @@ def _format_action_history(action_history: List[Dict[str, Any]]) -> str:
             line += f" ✗ Error: {result.get('error') or 'Unknown error'}"
         parts.append(line + "\n")
     return "".join(parts)
+
+
+def format_browser_state_for_tool(browser_state: Dict[str, Any]) -> str:
+    """Format browser state exactly as read_browser_state returns it to the model."""
+    return _format_browser_state_text("", browser_state)
 
 
 def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
@@ -814,21 +829,11 @@ def build_browser_use_messages(
     """Build the OpenAI-style messages array for one browser-use step.
 
     When `turn_messages` is provided, returns a full browser-task transcript:
-    `[system, optional dynamic-system, initial user goal, prior turns,
-    current state]`. Legacy callers without `turn_messages` get the older
-    compact single-step shape.
+    `[system, optional dynamic-system, initial user goal, prior turns]`.
+    Page state is only present when the model previously called `read_browser_state`
+    and that tool result is in `turn_messages`. Legacy callers without `turn_messages`
+    get `[system, user goal (+ optional action history)]`.
     """
-    user_content = build_browser_state_message_content(
-        task=task,
-        browser_state=browser_state,
-        include_screenshot=include_screenshot,
-        include_task=turn_messages is None,
-    )
-    if turn_messages is None and isinstance(user_content, str):
-        user_content = user_content + _format_action_history(action_history)
-    elif turn_messages is None and isinstance(user_content, list) and user_content:
-        user_content[0]["text"] = str(user_content[0].get("text", "")) + _format_action_history(action_history)
-
     system_content = build_browser_use_system_prompt(available_actions)
     if dynamic_system_context:
         from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
@@ -840,8 +845,11 @@ def build_browser_use_messages(
     if turn_messages is not None:
         messages.append({"role": "user", "content": task})
         messages.extend(filter_browser_turn_messages(turn_messages))
-        messages.append({"role": "user", "content": user_content})
     else:
+        user_content = task
+        history_suffix = _format_action_history(action_history)
+        if history_suffix:
+            user_content = user_content + history_suffix
         messages.append({"role": "user", "content": user_content})
 
     state_extra_user_messages = (
@@ -1000,6 +1008,7 @@ _VALID_ACTIONS = frozenset(
         # allowlist or normalize_browser_use_response() rejects the model's call and
         # the browser step aborts before the handler can run staged recovery.
         "recover_from_challenge",
+        "read_browser_state",
         "read_network_requests",
     }
 )

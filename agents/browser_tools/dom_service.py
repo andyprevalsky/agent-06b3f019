@@ -1433,6 +1433,17 @@ class DOMService:
         except Exception as error:
             logger.error(f"📸 Failed to analyze screenshot: {error}")
 
+    async def get_current_url(self, *, fallback: str = "") -> str:
+        """Return the focused tab URL without serializing the DOM tree."""
+        if not self._session:
+            return fallback
+        try:
+            state = await self._session.get_browser_state_summary(include_screenshot=False)
+            return str(state.url or fallback)
+        except Exception as error:
+            logger.warning(f"Failed to read current URL: {error}")
+            return fallback
+
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
 

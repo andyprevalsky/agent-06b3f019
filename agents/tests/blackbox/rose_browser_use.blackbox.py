@@ -15,7 +15,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -159,10 +159,9 @@ def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     prompt = build_browser_use_system_prompt(["click", "goto"])
     assert "# Role" in prompt
     assert "You are a browser automation agent. You take in a user goal" in prompt
-    assert "Each turn you will receive a snapshot of the current browser environment" in prompt
-    assert "Page stats" in prompt
-    assert "Tab information" in prompt
-    assert "A full-page screenshot if the screenshot tool was called on the previous turn" in prompt
+    assert "Call `read_browser_state` whenever you need" in prompt
+    assert "Page stats and open tabs" in prompt
+    assert "Use `screenshot` when you need a viewport image" in prompt
     assert "The full prior assistant/tool turn history" not in prompt
     assert "# Available Actions" not in prompt
     assert "- click:" not in prompt
@@ -719,6 +718,69 @@ def _browser_state(**overrides):
     return state
 
 
+def test_format_browser_state_for_tool_matches_legacy_injection_text():
+    from providers.rose.browser_use import build_browser_state_message_content, format_browser_state_for_tool
+
+    state = _browser_state(timestamp="2026-08-22T20:31:00Z")
+    assert format_browser_state_for_tool(state) == build_browser_state_message_content(
+        task="",
+        browser_state=state,
+        include_screenshot=False,
+        include_task=False,
+    )
+
+
+async def test_execute_read_browser_state_returns_formatted_snapshot():
+    from domains.spawn_browser_agent_v3.service_actions import _ActionContext, _execute_read_browser_state
+
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(
+        return_value={
+            "url": "https://example.com/cart",
+            "title": "Cart",
+            "viewport": {"width": 1280, "height": 800},
+            "scroll_position": {"x": 0, "y": 0, "pages_above": 0, "pages_below": 1},
+            "page_stats": {"links": 1, "interactive": 2, "iframes": 0, "scroll_containers": 0, "total_elements": 3},
+            "tabs": [],
+            "dom_tree": "[7]<button>Checkout</button>",
+        }
+    )
+    action_history = MagicMock()
+    action_history.record_action = AsyncMock()
+    context = _ActionContext(
+        dom_service=dom,
+        action_history=action_history,
+        session=MagicMock(),
+        action_name="read_browser_state",
+        index=None,
+        params={},
+        thinking="Need indexes",
+        coords=None,
+        element=None,
+        available_file_paths=None,
+        session_id="sess-1",
+        user_id="user-1",
+        config=None,
+        humanizer=None,
+        secret_refs=None,
+        password_origins=None,
+        credential_refs_by_secret_ref=None,
+        current_url="https://example.com/cart",
+        trusted_page_urls=None,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        system_name="Rose",
+        browser_network_recorder=None,
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+    )
+    result = await _execute_read_browser_state(context)
+    assert result["success"] is True
+    assert "Interactive elements:" in result["formatted_state"]
+    assert "[7]<button>Checkout</button>" in result["formatted_state"]
+    assert result["dom_tree"] == "[7]<button>Checkout</button>"
+
+
 def test_build_messages_text_only_when_no_screenshot():
     msgs = build_browser_use_messages(
         task="Click submit",
@@ -730,14 +792,26 @@ def test_build_messages_text_only_when_no_screenshot():
     assert len(msgs) == 2
     assert msgs[0]["role"] == "system"
     assert msgs[1]["role"] == "user"
-    # No screenshot → user content is a plain string.
-    assert isinstance(msgs[1]["content"], str)
-    assert "Task: Click submit" in msgs[1]["content"]
-    assert "Current URL: https://example.com - Example" in msgs[1]["content"]
-    assert "[1]<button>Submit</button>" in msgs[1]["content"]
+    assert msgs[1]["content"] == "Click submit"
 
 
-def test_build_messages_browser_state_includes_timezone_aware_timestamp():
+def test_build_messages_legacy_includes_action_history_only():
+    history = [
+        {"step": 1, "thinking": "click submit", "action": "click", "index": 1, "result": {"success": True}},
+    ]
+    msgs = build_browser_use_messages(
+        task="Click submit",
+        browser_state=_browser_state(),
+        action_history=history,
+        available_actions=["click"],
+        include_screenshot=False,
+    )
+    assert len(msgs) == 2
+    assert "Previous Actions:" in msgs[1]["content"]
+    assert "Current URL:" not in msgs[1]["content"]
+
+
+def test_build_messages_browser_state_available_via_read_tool_not_auto_injected():
     msgs = build_browser_use_messages(
         task="Click submit",
         browser_state=_browser_state(timestamp="2026-05-27T22:39:24Z"),
@@ -745,8 +819,8 @@ def test_build_messages_browser_state_includes_timezone_aware_timestamp():
         available_actions=["click"],
         include_screenshot=False,
     )
-    assert "Timestamp: 2026-05-27T22:39:24Z" in msgs[1]["content"]
-    assert msgs[1]["content"].index("Timestamp:") < msgs[1]["content"].index("Current URL:")
+    assert "Timestamp:" not in msgs[1]["content"]
+    assert "Interactive elements:" not in msgs[1]["content"]
 
 
 def test_build_messages_multimodal_when_screenshot_present():
@@ -756,14 +830,31 @@ def test_build_messages_multimodal_when_screenshot_present():
         action_history=[],
         available_actions=["click"],
         include_screenshot=True,
+        turn_messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "screenshot", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Screenshot captured by the screenshot tool."},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                ],
+            },
+        ],
     )
-    user = msgs[1]
-    assert isinstance(user["content"], list)
-    assert user["content"][0]["type"] == "text"
-    img = user["content"][1]
-    assert img["type"] == "image_url"
-    # Raw base64 → wrapped in data: URL
-    assert img["image_url"]["url"] == "data:image/png;base64,AAAA"
+    user_messages = [message for message in msgs if message["role"] == "user"]
+    screenshot_message = user_messages[-1]
+    assert isinstance(screenshot_message["content"], list)
+    assert screenshot_message["content"][1]["image_url"]["url"] == "data:image/png;base64,AAAA"
 
 
 def test_build_messages_screenshot_url_passthrough_when_http():
@@ -773,8 +864,18 @@ def test_build_messages_screenshot_url_passthrough_when_http():
         action_history=[],
         available_actions=["click"],
         include_screenshot=True,
+        turn_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Screenshot captured by the screenshot tool."},
+                    {"type": "image_url", "image_url": {"url": "https://cdn.example/shot.png"}},
+                ],
+            }
+        ],
     )
-    img = msgs[1]["content"][1]
+    screenshot_message = [message for message in msgs if message["role"] == "user"][-1]
+    img = screenshot_message["content"][1]
     assert img["image_url"]["url"] == "https://cdn.example/shot.png"
 
 
@@ -794,6 +895,7 @@ def test_build_messages_action_history_formatting():
     assert "Previous Actions:" in text
     assert "Step 1:" in text and "✓" in text
     assert "Step 2:" in text and "✗ Error: off-screen" in text
+    assert "Current URL:" not in text
 
 
 def test_build_messages_include_screenshot_false_drops_image():
@@ -805,6 +907,7 @@ def test_build_messages_include_screenshot_false_drops_image():
         include_screenshot=False,
     )
     assert isinstance(msgs[1]["content"], str)
+    assert "AAAA" not in msgs[1]["content"]
 
 
 def test_build_messages_appends_extra_user_messages():
@@ -820,7 +923,7 @@ def test_build_messages_appends_extra_user_messages():
     assert msgs[2] == {"role": "user", "content": "OTP 123456"}
 
 
-def test_build_messages_turn_history_keeps_goal_first_and_state_last():
+def test_build_messages_turn_history_keeps_goal_first_without_auto_state():
     msgs = build_browser_use_messages(
         task="# Current Goal\nBuy socks",
         browser_state=_browser_state(),
@@ -843,12 +946,14 @@ def test_build_messages_turn_history_keeps_goal_first_and_state_last():
             {"role": "tool", "tool_call_id": "call_1", "name": "click", "content": '{"success":true}'},
         ],
     )
-    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "tool", "user"]
+    assert [m["role"] for m in msgs] == ["system", "user", "assistant", "tool"]
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" in msgs[0]["content"]
     assert "# User Context\nDelivery address" in msgs[0]["content"]
     assert msgs[1]["content"] == "# Current Goal\nBuy socks"
     assert "Previous Actions:" not in msgs[-1]["content"]
-    assert "Current URL: https://example.com - Example" in msgs[-1]["content"]
+    assert "Current URL:" not in "".join(
+        message["content"] if isinstance(message.get("content"), str) else "" for message in msgs
+    )
 
 
 def test_build_messages_turn_history_filters_in_progress_and_duplicate_tool_results():
@@ -881,7 +986,7 @@ def test_build_messages_turn_history_filters_in_progress_and_duplicate_tool_resu
         include_screenshot=False,
         turn_messages=turn_messages,
     )
-    assert [message["role"] for message in msgs] == ["system", "user", "assistant", "tool", "user"]
+    assert [message["role"] for message in msgs] == ["system", "user", "assistant", "tool"]
     assert msgs[3]["content"] == '{"success":true}'
 
 
@@ -1807,14 +1912,16 @@ async def run_all_tests():
         test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser,
     )
 
+    r.record("format_browser_state_for_tool", test_format_browser_state_for_tool_matches_legacy_injection_text)
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)
-    r.record("messages_timezone_timestamp", test_build_messages_browser_state_includes_timezone_aware_timestamp)
+    r.record("messages_legacy_action_history", test_build_messages_legacy_includes_action_history_only)
+    r.record("messages_no_auto_state", test_build_messages_browser_state_available_via_read_tool_not_auto_injected)
     r.record("messages_multimodal_with_screenshot", test_build_messages_multimodal_when_screenshot_present)
     r.record("messages_http_screenshot_passthrough", test_build_messages_screenshot_url_passthrough_when_http)
     r.record("messages_action_history_formatting", test_build_messages_action_history_formatting)
     r.record("messages_include_screenshot_false", test_build_messages_include_screenshot_false_drops_image)
     r.record("messages_extra_user_messages", test_build_messages_appends_extra_user_messages)
-    r.record("messages_turn_history", test_build_messages_turn_history_keeps_goal_first_and_state_last)
+    r.record("messages_turn_history", test_build_messages_turn_history_keeps_goal_first_without_auto_state)
     r.record(
         "messages_turn_history_filters_tools",
         test_build_messages_turn_history_filters_in_progress_and_duplicate_tool_results,
@@ -1891,6 +1998,8 @@ async def run_all_tests():
     await r.record_async(
         "complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_waterfall
     )
+
+    await r.record_async("execute_read_browser_state", test_execute_read_browser_state_returns_formatted_snapshot)
 
     teardown_mock()
     r.record(
