@@ -2,15 +2,12 @@ import { benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig 
 import { createLogger } from '../../providers/logger';
 import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
 import { getCachedTasks } from './catalogCache';
+import { TasksUnavailableError } from './types';
 
 const log = createLogger('Benchmarks');
 void log; // logger retained for future route-level diagnostics
 
-export class TasksUnavailableError extends Error {
-  constructor() {
-    super('Benchmark tasks unavailable');
-  }
-}
+export { TasksUnavailableError } from './types';
 
 /**
  * Returns all visible benchmark task definitions. Retired tasks exist only

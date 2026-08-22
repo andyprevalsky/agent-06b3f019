@@ -5,12 +5,13 @@
  *      │                    │
  *      └─fetch fail──► error│(retry → loading)
  *                           │
- *   ready + click edit ──► editing(task) ──save ok/cancel──► ready (task row updated)
  *   ready + toggle checkbox / select-all-filtered ──► ready (selection set)
  *   catalog refetch (props.tasks) ──► ready (selection pruned to names that
  *      still exist in the catalog)
  *   ready + click Run (selection ≥ 1) ──► dispatching ──201──► ready
  *      (selection cleared, onDispatched() tells the Runs pane to refresh)
+ *
+ * Task definitions are read-only (served from agents/benchmarks/tasks.json).
  *
  * Filters compose: text search ∧ tag filter ∧ group filter. "Select all"
  * operates on the FILTERED set. The Run button floats bottom-right and shows
@@ -18,7 +19,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, Pencil, Play, Search } from 'lucide-react';
+import { Loader2, Play, Search } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -27,7 +28,6 @@ import { cn } from '@/lib/utils';
 import type { HubTask } from '@/lib/api/benchmarksHub';
 import { createHubRunRequest } from '@/lib/api/benchmarksHub';
 import { TaskFlagIcons } from './TaskFlagIcons';
-import { TaskEditModal } from './TaskEditModal';
 
 const GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'incomplete'] as const;
 
@@ -49,23 +49,14 @@ interface TasksPaneProps {
   loading: boolean;
   error: string | null;
   onRetry: () => void;
-  onTaskUpdated: (task: HubTask) => void;
   onDispatched: () => void;
 }
 
-export function TasksPane({
-  tasks,
-  loading,
-  error,
-  onRetry,
-  onTaskUpdated,
-  onDispatched,
-}: TasksPaneProps) {
+export function TasksPane({ tasks, loading, error, onRetry, onDispatched }: TasksPaneProps) {
   const [search, setSearch] = useState('');
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [editing, setEditing] = useState<HubTask | null>(null);
   const [dispatching, setDispatching] = useState(false);
   const [dispatchError, setDispatchError] = useState<string | null>(null);
 
@@ -264,16 +255,6 @@ export function TasksPane({
                   ))}
                 </div>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="opacity-0 group-hover:opacity-100 h-7 px-2"
-                onClick={() => setEditing(task)}
-                aria-label={`Edit ${task.name}`}
-                data-testid={`task-edit-${task.name}`}
-              >
-                <Pencil className="h-3.5 w-3.5" />
-              </Button>
             </div>
           ))}
         {!loading && error === null && visibleTasks.length === 0 && (
@@ -303,17 +284,6 @@ export function TasksPane({
           Run{selected.size > 0 ? ` ${selected.size}` : ''}
         </Button>
       </div>
-
-      {editing !== null && (
-        <TaskEditModal
-          task={editing}
-          onClose={() => setEditing(null)}
-          onSaved={(updated) => {
-            onTaskUpdated(updated);
-            setEditing(null);
-          }}
-        />
-      )}
     </div>
   );
 }

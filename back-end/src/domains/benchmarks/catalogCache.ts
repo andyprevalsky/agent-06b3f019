@@ -1,7 +1,6 @@
 /**
- * In-memory public catalog cache shared by the legacy file-backed routes and
- * the SQL-backed hub: seeded from tasks.json at import, replaced with DB
- * definitions once the BenchmarkTask table is seeded/edited.
+ * In-memory public catalog cache for benchmark tasks. Always reflects
+ * agents/benchmarks/tasks.json — the git-checked-in source of truth.
  */
 
 import { readTasksFile } from './config';
@@ -12,8 +11,7 @@ const log = createLogger('Benchmarks');
 // tasks.json entries are keyed by `name` and `prompt` (mirrors
 // benchmarks.blackbox.ts BenchmarkTaskSchema). The earlier `id`/`goal`
 // validator never matched any entry, which silently turned the route into
-// a permanent 500 — fix is to validate the actual shape. The same check
-// guards the DB-sync path so a malformed row can't reintroduce that bug.
+// a permanent 500 — fix is to validate the actual shape.
 function isValidTaskShape(t: unknown): boolean {
   return (
     typeof t === 'object' &&
@@ -26,28 +24,45 @@ function isValidTaskShape(t: unknown): boolean {
 }
 
 let cachedTasks: unknown[] | null = null;
-try {
-  const parsed = readTasksFile();
-  if (!Array.isArray(parsed)) {
-    log.error('Benchmark tasks file is not an array');
-  } else if (!parsed.every(isValidTaskShape)) {
-    log.error('Benchmark tasks file contains malformed entries');
-  } else {
-    cachedTasks = parsed;
+
+function loadTasksFromFile(): unknown[] | null {
+  try {
+    const parsed = readTasksFile();
+    if (!Array.isArray(parsed)) {
+      log.error('Benchmark tasks file is not an array');
+      return null;
+    }
+    if (!parsed.every(isValidTaskShape)) {
+      log.error('Benchmark tasks file contains malformed entries');
+      return null;
+    }
+    return parsed;
+  } catch (err) {
+    log.error('Failed to load benchmark tasks from file', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
   }
-} catch (err) {
-  log.error('Failed to load benchmark tasks at startup', {
-    error: err instanceof Error ? err.message : String(err),
-  });
 }
+
+// Prime the cache at import so routes can serve before the async seed finishes.
+cachedTasks = loadTasksFromFile();
 
 export function getCachedTasks(): unknown[] | null {
   return cachedTasks;
 }
 
+/** Reload the in-memory cache from tasks.json on disk. */
+export function reloadTasksFromFile(): void {
+  const tasks = loadTasksFromFile();
+  if (tasks !== null) {
+    cachedTasks = tasks;
+  }
+}
+
 export function setCachedTasks(tasks: unknown[]): void {
   if (!tasks.every(isValidTaskShape)) {
-    log.error('Refusing to cache malformed task definitions from DB sync');
+    log.error('Refusing to cache malformed task definitions');
     return;
   }
   cachedTasks = tasks;

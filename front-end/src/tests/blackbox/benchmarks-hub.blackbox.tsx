@@ -6,12 +6,12 @@
  *   GET  /api/benchmarks/runs          → uploaded run index
  *   GET  /api/benchmarks/run-requests  → dispatch queue
  *   POST /api/benchmarks/run-requests  → dispatch (captured + asserted)
- *   PATCH /api/benchmarks/tasks/:name  → metadata edit (captured + asserted)
+ *   POST /api/benchmarks/run-requests  → dispatch (captured + asserted)
  *   GET  /api/benchmarks/runs/:id/agents/:aid → transcript + tree
  *
  * Covers: render with stats + flag icons, tag/group filtering, select-all on
- * the FILTERED set, dispatch POST body, edit modal PATCH body, run rows with
- * open-agent → in-app transcript render (root + tree node swap).
+ * the FILTERED set, dispatch POST body, run rows with open-agent → in-app
+ * transcript render (root + tree node swap).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -252,10 +252,6 @@ function installFetchMock() {
     }
     capturedRequests.push({ url, method, body });
 
-    if (url.includes('/benchmarks/tasks') && method === 'PATCH') {
-      const edit = body as Record<string, unknown>;
-      return jsonResponse({ task: { ...CATALOG.tasks[0], ...edit } });
-    }
     if (url.includes('/benchmarks/tasks')) return jsonResponse(CATALOG);
     if (url.includes('/benchmarks/run-requests') && method === 'POST') {
       return new Response(
@@ -359,23 +355,10 @@ describe('BenchmarksView (in-app hub)', () => {
     });
   });
 
-  it('edits task metadata through the modal (PATCH body)', async () => {
+  it('does not expose task edit controls (catalog is read-only)', async () => {
     renderWithProviders(<BenchmarksView />);
     await waitFor(() => expect(screen.getByTestId('task-row-chat-mode')).toBeInTheDocument());
-
-    fireEvent.click(screen.getByTestId('task-edit-chat-mode'));
-    await waitFor(() => expect(screen.getByTestId('task-edit-modal')).toBeInTheDocument());
-
-    fireEvent.change(screen.getByTestId('edit-title'), { target: { value: 'Chat Mode v2' } });
-    fireEvent.change(screen.getByTestId('edit-timeout'), { target: { value: '300' } });
-    fireEvent.click(screen.getByTestId('edit-save'));
-
-    await waitFor(() => {
-      const patch = capturedRequests.find((r) => r.method === 'PATCH');
-      expect(patch).toBeDefined();
-      expect(patch!.url).toContain('/benchmarks/tasks/chat-mode');
-      expect(patch!.body).toEqual({ title: 'Chat Mode v2', timeout_seconds: 300 });
-    });
+    expect(screen.queryByTestId('task-edit-chat-mode')).not.toBeInTheDocument();
   });
 
   it('renders the run status bar with passed/failed/queued segments', async () => {

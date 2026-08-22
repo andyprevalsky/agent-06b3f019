@@ -22,6 +22,15 @@ export function readTasksFile(): unknown {
   return JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
 }
 
+/** ISO timestamp of the last tasks.json modification (for hub catalog metadata). */
+export function tasksFileUpdatedAtIso(): string {
+  try {
+    return fs.statSync(TASKS_PATH).mtime.toISOString();
+  } catch {
+    return new Date(0).toISOString();
+  }
+}
+
 export function benchmarkAgentPreviewEnabled(): boolean {
   const enabledValues = new Set(['1', 'true', 'yes', 'on']);
   // Defense-in-depth: the preview is unauthenticated and RLS-free, so it must
