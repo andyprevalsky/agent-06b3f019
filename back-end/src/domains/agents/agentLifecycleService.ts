@@ -3,10 +3,10 @@
  */
 
 import { randomUUID } from '../../providers/crypto';
-import { startAgentWorkflow, getTemporalClient } from '../../providers/temporal';
+import { startAgentWorkflow } from '../../providers/temporal';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
-import { cleanupAgentSessions } from '../../providers/agentCleanup';
+import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
 import type { CreateAgentBody } from './types';
@@ -288,49 +288,9 @@ async function launchAgentWorkflow(
 // Delete agent
 // ---------------------------------------------------------------------------
 
+/** Soft-delete an agent tree via the canonical kill path (UI Archive / SMS /clear). */
 export async function deleteAgentRecursive(agentId: string): Promise<void> {
-  const agent = await repo.findAgentWithChildren(agentId);
-  if (!agent) {
-    return;
-  }
-  for (const child of agent.children) {
-    await deleteAgentRecursive(child.id);
-  }
-  await cleanupAgentSessions(agentId);
-  /* c8 ignore start -- Temporal termination requires live Temporal server */
-  if (agent.temporalWorkflowId !== null) {
-    try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.terminate('Agent deleted by user');
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (
-        msg.includes('not found') ||
-        msg.includes('already completed') ||
-        msg.includes('terminated')
-      ) {
-        log.info('No active workflow to terminate', {
-          agent_id: agentId,
-          workflow_id: agent.temporalWorkflowId,
-          reason: msg,
-        });
-      } else {
-        log.warn('Failed to terminate workflow', {
-          agent_id: agentId,
-          workflow_id: agent.temporalWorkflowId,
-          error: msg,
-        });
-      }
-    }
-  } else {
-    /* c8 ignore stop */
-    log.info('No workflow id for agent, skipping termination', { agent_id: agentId });
-  }
-  await repo.deleteAttentionRequests(agentId);
-  // Fast Mode cache entries intentionally outlive agent deletion. They are keyed by
-  // goal hash and only removed by the explicit fast-cache purge endpoint.
-  await repo.softDeleteAgent(agentId);
+  await killAgentRecursive(agentId, { terminateReason: 'Agent deleted by user' });
 }
 
 /** Delete an agent after verifying ownership. Returns true if found. */

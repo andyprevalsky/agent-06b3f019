@@ -22,8 +22,8 @@ import { prisma } from '../database';
 import { getTemporalClient } from '../temporal';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
+import { deleteAgentRecursive } from '../agentKill';
 import {
-  deleteAgentRecursive,
   resolveAgentPrefix,
   smsIntendsAgentReply,
   unknownSupervisorToolError,
@@ -95,7 +95,7 @@ interface IncreaseBudgetArgs {
 // Prefix Resolution Helper
 // ============================================
 
-// resolveAgentPrefix + deleteAgentRecursive live in supervisorTools.helpers.ts
+// resolveAgentPrefix lives in supervisorTools.helpers.ts
 // so this file stays under the max-lines budget. Both are pure DB/Temporal
 // operations with no tool-specific logic.
 
@@ -599,8 +599,8 @@ async function commitKillAgent(
     goal: agent.goal.substring(0, 80),
   });
 
-  // Recursive delete (same logic as DELETE /api/agents/:id)
-  await deleteAgentRecursive(agent.id);
+  // Recursive delete — same canonical path as DELETE /api/agents/:id (UI Archive)
+  await deleteAgentRecursive(agent.id, { terminateReason: 'Agent killed via SMS' });
 
   log.info('Agent killed', { phase: 'kill', agentId: agent.id });
 
@@ -746,4 +746,4 @@ async function commitIncreaseBudget(
 
 // commitStartNewAgent + executeWebSearchTool live in supervisorTools.startAgent.ts
 
-// deleteAgentRecursive moved to supervisorTools.helpers.ts
+// deleteAgentRecursive lives in providers/agentKill.ts (shared with UI Archive)
