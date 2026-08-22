@@ -15,6 +15,7 @@
  *   network errors   -> RoseServerError after retries
  */
 
+import { classifyComputeGrantFailure } from '../computeGrantFailure';
 import {
   RoseAuthError,
   RoseError,
@@ -386,7 +387,17 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     }
 
     if (status === 401 || status === 403) {
-      throw new RoseAuthError(`Anthropic ${status}: ${errorBody.substring(0, 200)}`, status);
+      // Grant liveness is observed HERE, from real agent traffic, rather than by
+      // a scheduled prober. Classify on the BODY: revocation arrives as both 401
+      // and 403, so a status-only check marks a dead grant healthy and suppresses
+      // the re-mint that would fix it. The 429 branch above returns earlier, so a
+      // throttle can never reach this and be mistaken for death.
+      const failure = classifyComputeGrantFailure({ status, body: errorBody });
+      throw new RoseAuthError(
+        `Anthropic ${status}: ${errorBody.substring(0, 200)}`,
+        status,
+        failure.shouldRemint
+      );
     }
 
     // 402 = out of credits/quota. Terminal for this credential (a retry won't

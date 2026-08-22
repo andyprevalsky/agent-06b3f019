@@ -19,6 +19,9 @@
  * Activation: BLACKBOX_TEST_CAPTURE_OUTBOUND=1 before server boot. Replay is a
  * separate opt-in via BLACKBOX_TEST_REPLAY_OUTBOUND=1.
  * Only intended for isolated blackbox test backends — never in production.
+ *
+ * Binary responses (`image/*`, `application/pdf`, …) are stored as base64 so
+ * capture/replay does not UTF-8-corrupt attachment bytes used by E2B uploads.
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
@@ -68,6 +71,64 @@ interface SerializedResponse {
   statusText: string;
   body: string;
   headers: Record<string, string>;
+  /** Private capture metadata — never store this in upstream HTTP headers. */
+  bodyEncoding?: 'base64';
+}
+
+/**
+ * Content types whose bodies must not pass through `response.text()` — that path
+ * UTF-8-decodes with U+FFFD replacement and permanently corrupts JPEGs/PDFs/etc.
+ * Benchmark stacks enable capture by default (`BLACKBOX_TEST_CAPTURE_OUTBOUND=1`),
+ * so this boundary sits on the real attachment → E2B upload path.
+ *
+ * Prefer an allowlist for *text* decoding: missing/unknown content-types are
+ * treated as binary. Supabase Storage occasionally omits Content-Type on
+ * signed-URL downloads; treating those as text reintroduced the 207364→369851
+ * JPEG corruption on fleet after the image/* fix landed.
+ */
+export function isBinaryContentType(contentType: string | null | undefined): boolean {
+  return !isTextContentType(contentType);
+}
+
+/** Only these content-types may safely go through `response.text()`. */
+export function isTextContentType(contentType: string | null | undefined): boolean {
+  if (contentType === null || contentType === undefined || contentType === '') return false;
+  const ct = contentType.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (ct.startsWith('text/')) return true;
+  if (ct === 'application/json') return true;
+  if (ct === 'application/ld+json') return true;
+  if (ct === 'application/xml' || ct === 'text/xml' || ct.endsWith('+xml')) return true;
+  if (ct === 'application/javascript' || ct === 'application/x-javascript') return true;
+  if (ct === 'application/xhtml+xml') return true;
+  if (ct === 'application/graphql' || ct === 'application/graphql+json') return true;
+  if (ct === 'application/x-www-form-urlencoded') return true;
+  if (ct === 'application/problem+json') return true;
+  return false;
+}
+
+/**
+ * Detect the classic fetchCapture `response.text()` JPEG corruption signature:
+ * UTF-8 replacement sequences (EF BF BD) dominating a buffer that should be
+ * binary (no JPEG/PNG SOI). Used as a last-line guard before E2B upload.
+ *
+ * PDF magic alone is not enough to skip the scan — a `%PDF` prefix can survive
+ * UTF-8 replacement while the rest of the stream is corrupted.
+ */
+export function looksLikeUtf8ReplacementCorruption(buf: Buffer): boolean {
+  if (buf.length < 16) return false;
+  // Intact image magic → not this failure mode.
+  if (buf[0] === 0xff && buf[1] === 0xd8) return false; // JPEG
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return false; // PNG
+  const fffd = Buffer.from([0xef, 0xbf, 0xbd]);
+  let count = 0;
+  for (let i = 0; i <= buf.length - 3; i++) {
+    if (buf[i] === fffd[0] && buf[i + 1] === fffd[1] && buf[i + 2] === fffd[2]) {
+      count += 1;
+      i += 2;
+    }
+  }
+  // Classic rs.jpeg case: 82673 / 369851 ≈ 22% of bytes are the 3-byte sequence.
+  return count >= 100 && count * 3 >= Math.floor(buf.length * 0.15);
 }
 
 export function isRetryableOutboundResponseStatus(status: number): boolean {
@@ -76,6 +137,18 @@ export function isRetryableOutboundResponseStatus(status: number): boolean {
 
 export function outboundReplayCacheKey(url: string, method: string, body: string | null): string {
   return `call:${JSON.stringify([url, method, body])}`;
+}
+
+function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
+  const headers: Record<string, string> = { ...serialized.headers };
+  const body =
+    serialized.bodyEncoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
+
+  return new globalThis.Response(body, {
+    status: serialized.status,
+    statusText: serialized.statusText,
+    headers,
+  });
 }
 
 class NonReplayableResponseError extends Error {
@@ -108,12 +181,32 @@ class FetchReplayClient {
       body: body ?? undefined,
     });
 
-    const responseBody = await response.text();
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((v, k) => {
       responseHeaders[k] = v;
     });
 
+    const contentType =
+      responseHeaders['content-type'] ??
+      responseHeaders['Content-Type'] ??
+      response.headers.get('content-type');
+
+    // Binary / unknown content-types must round-trip as raw bytes. `response.text()`
+    // UTF-8-decodes with replacement characters (U+FFFD), expanding a 207KB JPEG
+    // into ~370KB of corrupted text — the files-in-sub-agents / Claude Code
+    // attachment failure mode. Only known text types use `.text()`.
+    if (!isTextContentType(contentType)) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        body: bytes.toString('base64'),
+        headers: responseHeaders,
+        bodyEncoding: 'base64',
+      };
+    }
+
+    const responseBody = await response.text();
     return {
       status: response.status,
       statusText: response.statusText,
@@ -476,12 +569,8 @@ export function installFetchCapture(): Router {
 
       captures.push(entry);
 
-      // Reconstruct a Response object from the serialized data
-      return new globalThis.Response(serialized.body, {
-        status: serialized.status,
-        statusText: serialized.statusText,
-        headers: serialized.headers,
-      });
+      // Reconstruct a Response object from the serialized data (base64 for binary).
+      return responseFromSerialized(serialized);
     } catch (err) {
       entry.durationMs = Date.now() - start;
       entry.error = err instanceof Error ? err.message : String(err);

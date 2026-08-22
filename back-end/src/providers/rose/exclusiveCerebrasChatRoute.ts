@@ -80,12 +80,12 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
 }
 
 /**
- * Race the same-model OpenRouter GLM spill against a paid, low-latency Gemini
- * model. This branch is entered only after direct Cerebras has remained silent
- * long enough to arm the outer hedge, so the normal fast path still makes one
- * provider request. The former Gemini 3.5 fallback took 6–10s to first token
- * under burst; this route's dedicated model keeps the same schema/tool contract
- * with a measured sub-1.4s first-token tail.
+ * Race the same-model OpenRouter Cerebras spill against a paid, low-latency
+ * Gemini model. This branch is entered only after direct Cerebras has remained
+ * silent long enough to arm the outer hedge, so the normal fast path still
+ * makes one provider request. The former Gemini 3.5 fallback took 6–10s to
+ * first token under burst; this route's dedicated model keeps the same
+ * schema/tool contract with a measured sub-1.4s first-token tail.
  */
 export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   poolSpec: PoolSpec;
@@ -269,14 +269,14 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     }
   }
 
-  // Same-model fallover for a rate cap: GLM-4.7 on Cerebras is capped hard at the
-  // org level (5 req/min), so a burst trips a 402 `quota` / 429. Before the
-  // generic waterfall (different models), keep the chat on GLM-4.7 by reaching it
-  // via OpenRouter with the provider UNPINNED — OpenRouter still PREFERS Cerebras
-  // but may spill to another GLM-4.7 host past the cap. This is NOT a
-  // same-provider retry (a different host serves it), so it can't re-hit the cap.
-  // Only for quota/rate causes; stalls, 5xx, and empty streams go straight to the
-  // generic waterfall below.
+  // Same-model fallover for a rate cap: the Cerebras chat model is capped hard
+  // at the org level (5 req/min), so a burst trips a 402 `quota` / 429. Before
+  // the generic waterfall (different models), keep the chat on the same model
+  // by reaching it via OpenRouter with the provider UNPINNED — OpenRouter still
+  // PREFERS Cerebras but may spill to another host of that model past the cap.
+  // This is NOT a same-provider retry (a different host serves it), so it can't
+  // re-hit the cap. Only for quota/rate causes; stalls, 5xx, and empty streams
+  // go straight to the generic waterfall below.
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (
     openrouterKey &&

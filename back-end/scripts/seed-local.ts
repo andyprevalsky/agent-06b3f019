@@ -10,7 +10,7 @@
 
 import { writeFileSync } from 'node:fs';
 
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type Prisma } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import dotenv from 'dotenv';
@@ -38,6 +38,7 @@ import {
 } from './cookie-domain-scope';
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
 import { streamCookies, streamJsonbOrigins, type JsonbOriginTable } from './seed-jsonb-stream';
+import { createRetryableProbe } from './retryable-probe';
 import {
   SEED_PEAK_RSS_BUDGET_MB,
   SEED_RSS_REPORT_ENV,
@@ -95,6 +96,13 @@ const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 // --passkeys-only benchmark mode is authoritative and removes stale local
 // passkeys so its live-fixture preflight cannot succeed on obsolete material.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
+// Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential tokens from
+// prod. The canonical base-image dump can freeze abandoned OAuth rows
+// (null email / null accessToken); cache-coverage and any message_person email
+// path then fail closed with "Missing from_email" because Connected Integrations
+// never lists a usable send-from address. Benchmark runs that need email pull
+// this overlay the same way compute tokens are refreshed.
+const EMAIL_CREDENTIALS_ONLY = process.argv.includes('--email-credentials-only');
 const SKIP_BROWSER_AUTH_SYNC =
   process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
   process.env.BENCHMARK_WORLD_MODEL_MODE === 'simulate';
@@ -138,6 +146,7 @@ const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
   ['--passkeys-only', PASSKEYS_ONLY],
   ['--credentials-only', CREDENTIALS_ONLY],
+  ['--email-credentials-only', EMAIL_CREDENTIALS_ONLY],
 ].filter(([, enabled]) => enabled);
 if (requestedSeedModes.length > 1) {
   throw new Error(
@@ -148,7 +157,11 @@ if (requestedSeedModes.length > 1) {
 }
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
-const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
+// Pin the local URL the same way as remote. Relying on process.env.DATABASE_URL
+// at query time fails under --compute-tokens-only when Prisma re-validates
+// schema env("DATABASE_URL") and the engine no longer sees the parent-injected
+// value (AgentCard lifecycle: "Environment variable not found: DATABASE_URL").
+const local = new PrismaClient({ datasources: { db: { url: LOCAL_URL } } });
 /**
  * Deterministic ordering is what makes `skip`/`take` paging safe — without it
  * Postgres may return overlapping or missing rows across pages.
@@ -351,15 +364,69 @@ const PROD_INTEGRATION_COLUMNS = {
   updatedAt: true,
 } as const;
 
-async function syncIntegrations(): Promise<number> {
-  // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
-  const userIntegrations = await remote.integration.findMany({
-    where: { userId: DEV_USER_ID },
+const PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT = {
+  ...PROD_INTEGRATION_COLUMNS,
+  accountId: true,
+  accountEmail: true,
+} as const;
+
+type ProdIntegrationRow = Prisma.IntegrationGetPayload<{
+  select: typeof PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT;
+}>;
+
+const remoteHasIntegrationAccountColumns = createRetryableProbe(async () => {
+  const rows = await remote.$queryRaw<Array<{ columnCount: number }>>`
+      SELECT COUNT(*)::int AS "columnCount"
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'Integration'
+        AND column_name IN ('accountId', 'accountEmail')
+    `;
+  return rows[0]?.columnCount === 2;
+});
+
+async function findProdIntegrations(
+  where: Prisma.IntegrationWhereInput
+): Promise<ProdIntegrationRow[]> {
+  if (await remoteHasIntegrationAccountColumns()) {
+    return remote.integration.findMany({
+      where,
+      select: PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT,
+    });
+  }
+  const rows = await remote.integration.findMany({
+    where,
     select: PROD_INTEGRATION_COLUMNS,
   });
-  const poolIntegrations = await remote.integration.findMany({
-    where: { poolingEnabled: true, userId: { not: DEV_USER_ID } },
-    select: PROD_INTEGRATION_COLUMNS,
+  return rows.map((row) => ({ ...row, accountId: '', accountEmail: null }));
+}
+
+// Keep production reads on the columns that existed before the newest local
+// migration. A deploy seeds from production before that migration is live, so
+// an implicit SELECT * would request the new health columns and fail with P2022.
+const PROD_EMAIL_CREDENTIAL_COLUMNS = {
+  id: true,
+  userId: true,
+  integrationId: true,
+  provider: true,
+  pkceVerifier: true,
+  stateToken: true,
+  accessToken: true,
+  refreshToken: true,
+  expiresAt: true,
+  scopes: true,
+  metadata: true,
+  createdAt: true,
+  updatedAt: true,
+  email: true,
+} as const;
+
+async function syncIntegrations(): Promise<number> {
+  // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
+  const userIntegrations = await findProdIntegrations({ userId: DEV_USER_ID });
+  const poolIntegrations = await findProdIntegrations({
+    poolingEnabled: true,
+    userId: { not: DEV_USER_ID },
   });
   const all = [...userIntegrations, ...poolIntegrations];
   // Pool tokens reference foreign users — ensure those User records exist locally
@@ -367,7 +434,7 @@ async function syncIntegrations(): Promise<number> {
   for (const uid of poolUserIds) {
     await syncUserRecord(remote.user, local.user, uid);
   }
-  // Integrations are unique by (userId, name). A local credential may have a
+  // Integrations are unique by (userId, name, accountId). A local credential may have a
   // different primary key from its production counterpart, so syncing by id
   // can collide with that compound key and fail every benchmark preflight.
   // Preserve the local id (and any dependent rows) while refreshing the
@@ -383,6 +450,88 @@ async function syncIntegrations(): Promise<number> {
     console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
   }
   return syncedIds.length;
+}
+
+/** Email providers refreshed by `--email-credentials-only` (no compute-token churn). */
+const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
+
+/**
+ * Sync only Gmail/Yahoo integration rows for the dev user. Unlike
+ * `syncIntegrations`, this never imports pool tokens and never deletes
+ * `claude_code` / `gpt_code` rows — email overlay must not disturb compute
+ * tokens already present in an isolated benchmark DB.
+ *
+ * Returns a remote-integration-id → local-integration-id map so credential
+ * upserts can rewrite foreign keys onto the preserved local IDs.
+ */
+async function syncEmailIntegrations(): Promise<Map<string, string>> {
+  const emailIntegrations = await findProdIntegrations({
+    userId: DEV_USER_ID,
+    name: { in: [...EMAIL_INTEGRATION_NAMES] },
+  });
+  const remoteToLocal = new Map<string, string>();
+  for (const integration of emailIntegrations) {
+    const { id: remoteId, ...updateData } = integration;
+    const accountId = integration.accountId ?? '';
+    const synced = await local.integration.upsert({
+      where: {
+        userId_name_accountId: {
+          userId: integration.userId,
+          name: integration.name,
+          accountId,
+        },
+      },
+      create: { ...integration, accountId },
+      update: { ...updateData, accountId },
+      select: { id: true },
+    });
+    remoteToLocal.set(remoteId, synced.id);
+  }
+  return remoteToLocal;
+}
+
+/**
+ * Rewrite credential.integrationId onto the local Integration id when IDs diverge.
+ * Production may not have the health columns yet, so every authoritative sync
+ * must also clear stale local failures instead of preserving them through upsert.
+ */
+function remapEmailCredentialIntegrationIds<
+  T extends { integrationId: string; [key: string]: unknown },
+>(creds: T[], remoteToLocal: Map<string, string>): T[] {
+  return creds.map((cred) => ({
+    ...cred,
+    integrationId: remoteToLocal.get(cred.integrationId) ?? cred.integrationId,
+    state: 'connected',
+    lastErrorReason: null,
+    lastFailedSyncAt: null,
+  }));
+}
+
+/**
+ * Build remote→local Integration id map for the email providers that own
+ * EmailIntegrationCredential rows. Used after any integration sync that
+ * preserves local primary keys via (userId, name).
+ */
+async function emailIntegrationIdMap(): Promise<Map<string, string>> {
+  const remoteRows = await findProdIntegrations({
+    userId: DEV_USER_ID,
+    name: { in: [...EMAIL_INTEGRATION_NAMES] },
+  });
+  const remoteToLocal = new Map<string, string>();
+  for (const row of remoteRows) {
+    const localRow = await local.integration.findUnique({
+      where: {
+        userId_name_accountId: {
+          userId: row.userId,
+          name: row.name,
+          accountId: row.accountId,
+        },
+      },
+      select: { id: true },
+    });
+    if (localRow) remoteToLocal.set(row.id, localRow.id);
+  }
+  return remoteToLocal;
 }
 
 /**
@@ -586,13 +735,19 @@ function hasEncryptedCredentials(config: unknown): boolean {
 
 function parseComputeTokenRequiredTypes(raw: string | undefined): Set<'claude' | 'gpt'> {
   const value = raw?.trim() || 'claude,gpt';
+  // "any" = at least one of claude_code / gpt_code must be usable. Used by
+  // code-agent benchmarks (spawn_claude_code_agent selects Claude Code or
+  // Codex from whichever compute token the run actually holds).
+  if (value.toLowerCase() === 'any') {
+    return new Set<'claude' | 'gpt'>(['claude', 'gpt']);
+  }
   const types = new Set<'claude' | 'gpt'>();
   for (const part of value.split(',')) {
     const token = part.trim().toLowerCase();
     if (token === '') continue;
     if (token !== 'claude' && token !== 'gpt') {
       throw new Error(
-        `SEED_REQUIRE_COMPUTE_TOKEN_TYPES must contain only claude,gpt; received ${JSON.stringify(
+        `SEED_REQUIRE_COMPUTE_TOKEN_TYPES must contain only claude,gpt,any; received ${JSON.stringify(
           raw
         )}`
       );
@@ -605,6 +760,10 @@ function parseComputeTokenRequiredTypes(raw: string | undefined): Set<'claude' |
     );
   }
   return types;
+}
+
+function requireAnyComputeTokenType(): boolean {
+  return (process.env.SEED_REQUIRE_COMPUTE_TOKEN_TYPES || '').trim().toLowerCase() === 'any';
 }
 
 interface GptCodeAvailability {
@@ -697,6 +856,30 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       await poolRequiredDevComputeTokensForSyntheticUsers();
       const { usable: usableClaudeCodeCount, rateLimited: rateLimitedClaudeCodeCount } =
         await inspectClaudeCodeIntegrations();
+      const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
+        await inspectGptCodeIntegrations();
+      // Code-agent tasks accept Claude Code OR Codex (gpt_code). Fail only when
+      // neither provider is usable (rate-limited rows still proceed — same as
+      // the per-provider external-quota policy below).
+      if (requireAnyComputeTokenType()) {
+        if (usableClaudeCodeCount > 0 || usableGptCodeCount > 0) {
+          console.log(
+            `  ✅ Compute Tokens (integrations): ${count} synced, ` +
+              `${usableClaudeCodeCount} usable claude_code, ${usableGptCodeCount} usable gpt_code ` +
+              '(SEED_REQUIRE_COMPUTE_TOKEN_TYPES=any)'
+          );
+          return;
+        }
+        if (rateLimitedClaudeCodeCount > 0 || rateLimitedGptCodeCount > 0) {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable code-agent tokens ` +
+              `(claude_rate_limited=${rateLimitedClaudeCodeCount}, gpt_rate_limited=${rateLimitedGptCodeCount}) — ` +
+              'proceeding under SEED_REQUIRE_COMPUTE_TOKEN_TYPES=any; runtime surfaces quota errors'
+          );
+          return;
+        }
+        throw new Error('No usable claude_code or gpt_code integrations after sync');
+      }
       if (usableClaudeCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {
           console.warn(
@@ -736,8 +919,6 @@ async function syncComputeTokensWithRetries(): Promise<void> {
           throw new Error('No usable claude_code integrations after sync');
         }
       }
-      const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
-        await inspectGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('gpt')) {
           console.warn(
@@ -959,6 +1140,26 @@ async function sync() {
     return;
   }
 
+  if (EMAIL_CREDENTIALS_ONLY) {
+    let remoteToLocal = new Map<string, string>();
+    await syncTable('Integrations', async () => {
+      remoteToLocal = await syncEmailIntegrations();
+      return remoteToLocal.size;
+    });
+    await syncTable('Email Credentials', async () => {
+      const creds = await remote.emailIntegrationCredential.findMany({
+        where: { userId: DEV_USER_ID },
+        select: PROD_EMAIL_CREDENTIAL_COLUMNS,
+      });
+      return upsertById(
+        local.emailIntegrationCredential,
+        remapEmailCredentialIntegrationIds(creds, remoteToLocal)
+      );
+    });
+    console.log('\n🔄 Email credential sync complete.');
+    return;
+  }
+
   // ── Global: Tools ──
   await syncTable('Tools', async () => {
     const tools = await remote.tool.findMany();
@@ -1005,8 +1206,13 @@ async function sync() {
   await syncTable('Email Credentials', async () => {
     const creds = await remote.emailIntegrationCredential.findMany({
       where: { userId: DEV_USER_ID },
+      select: PROD_EMAIL_CREDENTIAL_COLUMNS,
     });
-    return upsertById(local.emailIntegrationCredential, creds);
+    const remoteToLocal = await emailIntegrationIdMap();
+    return upsertById(
+      local.emailIntegrationCredential,
+      remapEmailCredentialIntegrationIds(creds, remoteToLocal)
+    );
   });
 
   // ── People (contacts) ──

@@ -368,7 +368,7 @@ export async function importLinkedInData(
 
   // Update integration metadata
   const integration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'linkedin' } },
+    where: { userId_name_accountId: { userId, name: 'linkedin', accountId: '' } },
   });
 
   if (integration) {

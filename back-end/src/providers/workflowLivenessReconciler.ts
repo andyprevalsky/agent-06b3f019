@@ -22,7 +22,9 @@
  * never with total agent count, and holds no cross-agent shared state.
  */
 
+import type { AgentStatus } from '@prisma/client';
 import { WorkflowNotFoundError } from '@temporalio/client';
+import { releaseAgentBrowserSessions } from './agentCleanup';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import {
@@ -61,7 +63,8 @@ export const RECONCILED_STATUS_MESSAGE =
 export interface LivenessCandidate {
   agentId: string;
   workflowId: string;
-  status: string;
+  status: AgentStatus;
+  statusMessage: string | null;
 }
 
 export interface WorkflowLivenessDependencies {
@@ -74,6 +77,8 @@ export interface WorkflowLivenessDependencies {
   now: () => number;
   batchSize: number;
   concurrency: number;
+  finalizeInterruptedTools: typeof finalizeInterruptedWorkflowTools;
+  releaseBrowserSessions: typeof releaseAgentBrowserSessions;
 }
 
 function defaultDependencies(): WorkflowLivenessDependencies {
@@ -91,6 +96,8 @@ function defaultDependencies(): WorkflowLivenessDependencies {
     now: () => Date.now(),
     batchSize: DEFAULT_BATCH_SIZE,
     concurrency: DEFAULT_CONCURRENCY,
+    finalizeInterruptedTools: finalizeInterruptedWorkflowTools,
+    releaseBrowserSessions: releaseAgentBrowserSessions,
   };
 }
 
@@ -108,7 +115,7 @@ export async function findLivenessCandidates(
       status: { notIn: [...TERMINAL_AGENT_STATUSES] },
       updatedAt: { lt: new Date(deps.now() - MIN_QUIET_MS) },
     },
-    select: { id: true, temporalWorkflowId: true, status: true },
+    select: { id: true, temporalWorkflowId: true, status: true, statusMessage: true },
     orderBy: { updatedAt: 'asc' },
     take: deps.batchSize,
   });
@@ -116,7 +123,14 @@ export async function findLivenessCandidates(
   return rows.flatMap((row) =>
     row.temporalWorkflowId === null
       ? []
-      : [{ agentId: row.id, workflowId: row.temporalWorkflowId, status: String(row.status) }]
+      : [
+          {
+            agentId: row.id,
+            workflowId: row.temporalWorkflowId,
+            status: row.status,
+            statusMessage: row.statusMessage,
+          },
+        ]
   );
 }
 
@@ -125,12 +139,25 @@ export async function findLivenessCandidates(
  * non-terminal, so a concurrent reconciler or a late in-workflow write wins
  * without producing a second transition.
  */
-async function sealAgent(candidate: LivenessCandidate, temporalStatus: string): Promise<boolean> {
-  const inProgressTools = await captureInProgressWorkflowTools(candidate.agentId);
+async function sealAgent(
+  candidate: LivenessCandidate,
+  temporalStatus: string,
+  deps: Pick<WorkflowLivenessDependencies, 'finalizeInterruptedTools' | 'releaseBrowserSessions'>
+): Promise<boolean> {
+  // Reconcile the generation that actually died — `candidate.workflowId` — not the
+  // agent id. They differ for every agent that already survived a deploy
+  // (`<agentId>:replacement:<token>`), and chips plus attention requests are both
+  // keyed on the generation that wrote them, so defaulting to the agent id silently
+  // matched nothing and left the chip IN_PROGRESS and the request pending forever.
+  const inProgressTools = await captureInProgressWorkflowTools(
+    candidate.agentId,
+    candidate.workflowId
+  );
 
   const { count } = await prisma.agent.updateMany({
     where: {
       id: candidate.agentId,
+      temporalWorkflowId: candidate.workflowId,
       deletedAt: null,
       status: { notIn: [...TERMINAL_AGENT_STATUSES] },
     },
@@ -140,7 +167,54 @@ async function sealAgent(candidate: LivenessCandidate, temporalStatus: string): 
   if (count === 0) return false;
 
   // Close dangling IN_PROGRESS chips and open approvals so the UI settles too.
-  await finalizeInterruptedWorkflowTools(candidate.agentId, candidate.agentId, inProgressTools);
+  // If any terminal cleanup fails, put the exact row we sealed back into its
+  // prior nonterminal state. The next quiet-window scan can then retry instead
+  // of permanently excluding unresolved tools or attention requests.
+  let cleanupFailed = false;
+  let cleanupError: unknown;
+  try {
+    await deps.finalizeInterruptedTools(candidate.agentId, candidate.workflowId, inProgressTools);
+  } catch (error) {
+    cleanupFailed = true;
+    cleanupError = error;
+  }
+  try {
+    // This seal writes the row directly, so it bypasses `updateAgentStatus`'s
+    // terminal hook. Always attempt provider cleanup even when tool cleanup
+    // rejects, so a failed message append cannot leak a rented browser session.
+    await deps.releaseBrowserSessions(candidate.agentId);
+  } catch (error) {
+    if (cleanupFailed) {
+      log.warn('Browser cleanup also failed after interrupted-tool cleanup rejected', {
+        agentId: candidate.agentId,
+        workflowId: candidate.workflowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } else {
+      cleanupFailed = true;
+      cleanupError = error;
+    }
+  }
+
+  if (cleanupFailed) {
+    const restored = await prisma.agent.updateMany({
+      where: {
+        id: candidate.agentId,
+        temporalWorkflowId: candidate.workflowId,
+        deletedAt: null,
+        status: 'FAILED',
+        statusMessage: RECONCILED_STATUS_MESSAGE,
+      },
+      data: { status: candidate.status, statusMessage: candidate.statusMessage },
+    });
+    if (restored.count === 0) {
+      log.error('Could not restore liveness row after terminal cleanup failed', {
+        agentId: candidate.agentId,
+        workflowId: candidate.workflowId,
+      });
+    }
+    throw cleanupError;
+  }
   log.warn('Sealed agent whose workflow was already closed', {
     agentId: candidate.agentId,
     workflowId: candidate.workflowId,
@@ -193,7 +267,19 @@ export async function reconcileWorkflowLiveness(
     const normalized = temporalStatus.replace(/^WORKFLOW_EXECUTION_STATUS_/, '').toUpperCase();
     if (normalized !== 'NOT_FOUND' && !CLOSED_TEMPORAL_STATUSES.has(normalized)) return;
 
-    if (await sealAgent(candidate, normalized)) sealed++;
+    try {
+      if (await sealAgent(candidate, normalized, deps)) sealed++;
+    } catch (error) {
+      // One provider/tool cleanup failure must not reject the shared worker and
+      // abandon every later candidate in its cursor. `sealAgent` has already
+      // restored this row so a later quiet-window scan can retry it.
+      inconclusive++;
+      log.warn('Liveness terminal cleanup inconclusive; restored agent for retry', {
+        agentId: candidate.agentId,
+        workflowId: candidate.workflowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   });
 
   if (sealed > 0 || inconclusive > 0) {

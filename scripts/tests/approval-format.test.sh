@@ -59,12 +59,26 @@ require_text "$FORMAT" "Invalid if deleting the task goal still leaves a grammat
   "approval failure sentences must not stand without the task goal"
 require_text "$FORMAT" '**FE link:** [Open agent](<frontend-agent-url>) — <verification status>' \
   "approval requests must include a concrete FE agent link"
+require_text "$FORMAT" 'https://roselabs.ai/?agent-id=' \
+  "approval FE links must prefer the durable always-on viewer"
+require_text "$FORMAT" "localhost, ngrok, trycloudflare, or ephemeral hub URL" \
+  "approval FE guidance must forbid ephemeral localhost/tunnel hosts"
 require_text "$FORMAT" '**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`' \
   "approval requests must include a rendered LLM dump of the last call in the trajectory"
 require_text "$FORMAT" "last LLM call in the entire trajectory" \
   "approval LLM dumps must be the last call across the whole agent tree"
 require_text "$FORMAT" "python3 scripts/render_llm_dump.py" \
   "approval requests must render LLM dumps before presenting"
+require_text "$FORMAT" "HTTPS URL" \
+  "approval LLM dumps must link the HTTPS URL the renderer prints"
+require_text "$FORMAT" "vscode-remote" \
+  "approval LLM dumps must warn that vscode-remote local paths are not viewable"
+require_text "$FORMAT" "Never link a VM-local path" \
+  "approval LLM dumps must forbid /opt/cursor and file:// markdown links"
+require_text "$FORMAT" "omit the recording player entirely" \
+  "approval LLM dumps must never attach invalid browser recordings"
+require_text "$FORMAT" "/opt/cursor/artifacts" \
+  "approval LLM dumps must still reference artifacts for screenshots / bans"
 require_text "$FORMAT" "**Local repro (<wall-clock>):**" \
   "approval requests must include local repro steps with measured wall-clock"
 require_text "$FORMAT" "Tests: <one sentence naming the actual assertion" \

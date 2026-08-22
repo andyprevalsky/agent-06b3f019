@@ -49,7 +49,10 @@ the expected tool>`. Do not start from the bug; start from the goal.
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 
 The URL must open the concrete agent run that proves the reported failure or
-outcome, not a generic dashboard. Check it immediately before presenting the
+outcome, not a generic dashboard. Prefer the durable always-on viewer
+`https://roselabs.ai/?agent-id=<id>` (hub archive fallback) — never a
+localhost, ngrok, trycloudflare, or ephemeral hub URL that dies when the stack
+tears down. Check it immediately before presenting the
 approval and report `verified rendered`, `verified reachable` (when only an HTTP
 and agent-data probe is available), or `expired/unreachable` honestly.
 Never omit the FE link, substitute a run JSON path, or imply that a dead localhost
@@ -62,9 +65,16 @@ Render the last LLM call in the entire trajectory — root agent plus every
 spawned sub-agent. Collect `.llm-dumps/<agent_id>/*.json` for all of those
 ids, sort by the millisecond prefix in the filename, and render the latest
 file with `python3 scripts/render_llm_dump.py <dump> --no-open`. Link the
-HTML URL the renderer prints. Never pick an earlier failing call, a directory
-listing, or raw JSON. If there was no LLM call, write
-`**LLM dump:** Not applicable — <reason>`.
+**HTTPS URL** the renderer prints on stdout (R2 presigned when `R2_*` is
+configured). Never link a VM-local path such as `/opt/cursor/artifacts/*.html`,
+`vscode-remote://…`, or `file://…` — those open blank/broken pages for remote
+reviewers in Cursor Browser. The HTML must be self-contained (browser recording
+frames inlined as data URIs; never `file://` frame paths). If frames are missing
+or unreadable, omit the recording player entirely — never attach an
+invalid/broken recording section. As a secondary check, also embed a screenshot
+of the rendered dump via an `<img src="/opt/cursor/artifacts/…">` tag when
+available. Never pick an earlier failing call, a directory listing, or raw JSON.
+If there was no LLM call, write `**LLM dump:** Not applicable — <reason>`.
 
 **Local repro (<wall-clock>):**
 

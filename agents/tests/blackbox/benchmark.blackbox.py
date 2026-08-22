@@ -324,7 +324,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "14 passed" in result.stdout
+    # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases plus
+    # controller-token / private-repo auth cementing raised this to 17.
+    assert "17 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -836,6 +838,40 @@ def test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start():
         local.configure_task_environment(["gate-kyc-card-mint"])
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        # Admin-bypass shares /test_payment + public Kernel tunnel; omitting it
+        # from TEST_PAYMENT_FRONTEND_TASK_NAMES served Vite DEV and left #root
+        # blank for minutes under pass@5 concurrency.
+        local.configure_task_environment(["gate-subscription-card-mint-admin-bypass"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+        assert local.needs_frontend_tunnel(["gate-subscription-card-mint-admin-bypass"])
+
+
+def test_public_tunnel_benchmarks_enable_bundled_frontend_by_default():
+    """Bundling follows needs_public_tunnel — not a hand-maintained allowlist."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    # browser-agent needs a public tunnel but is not a /test_payment task.
+    assert local.needs_public_tunnel(["browser-agent"]) is True
+    assert local.needs_frontend_tunnel(["browser-agent"]) is False
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        local.configure_task_environment(["browser-agent"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ["BENCHMARK_FRONTEND_URL"] = "https://example.test"
+        local.configure_task_environment(["browser-agent"])
+        assert "BENCHMARK_BUNDLED_FRONTEND" not in os.environ
+
 
 def test_benchmark_bundled_frontend_build_has_cloud_heap_budget():
     """Cloud build hosts default near 2GB old-space, below the frontend bundle need."""
@@ -859,6 +895,7 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         "SEED_ALLOW_MISSING_GPT_CODE",
         "AGENTCARD_ONBOARDING_RETURN_URL",
         "BENCHMARK_AGENT_PAYMENT_USER_ID",
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH",
     )
     with patch.dict(os.environ, {}, clear=False):
         for key in keys:
@@ -868,21 +905,22 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
         assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
         assert os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
         assert (
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
             == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
         )
 
 
-def test_payment_benchmark_seeds_non_admin_fixture_identity():
-    """Stripe lifecycle tasks must not inherit the admin operator's no-charge semantics."""
+def test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path():
+    """Sandbox lifecycle benches run as the admin account and force the charged mint path."""
     import os
     from unittest.mock import patch
 
     from benchmarks import local
     from benchmarks import run_benchmark as bench
 
-    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID != local.BENCHMARK_USER_ID
+    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID == local.BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_BENCHMARK_USER_ID == local.AGENT_PAYMENT_BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_SANDBOX_TASK_NAMES == local.AGENT_PAYMENT_TASK_NAMES
 
@@ -894,6 +932,11 @@ def test_payment_benchmark_seeds_non_admin_fixture_identity():
 
     command = run.call_args.args[0]
     assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH", None)
+        local.configure_task_environment(["agent-payment-test-shop"])
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
+        assert os.environ[local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
 
 
 async def test_agentcard_setup_targets_effective_benchmark_user():
@@ -1041,6 +1084,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
+    assert "export BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1" in helper
+    assert "1f85ff25-6e29-4c1b-8739-f917bd101a30" in helper
     assert "DATABASE_URL=" in helper
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
     assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
@@ -1058,8 +1103,12 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in import_block, (
         "setup-benchmark-payment.ts must import BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
     )
-    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in fixture
-    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in fixture
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in import_block
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID" in import_block
+    assert "benchmarkPaymentIdentity" in import_block
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in fixture
+    assert "assertDedicatedBenchmarkUser(userId, mode)" in fixture
     assert "pg_advisory_xact_lock" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "await prisma.$transaction" in fixture
@@ -1096,15 +1145,15 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_AGENTCARD_ORG_ID" in dotenv_helper
 
 
-def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
-    """The four AgentCard lifecycle benchmarks must run as the NON-ADMIN payment fixture user.
+def test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path():
+    """Sandbox AgentCard lifecycle benches run as the default admin account.
 
-    `resolveAndIssuePurchaseCard` routes ADMIN_USER_IDS to `issueAdminCompanyCard`, which mints a
-    company-funded card and never authorizes a personal Stripe hold. Every one of these tasks
-    asserts `expected_payment_lifecycle.stripeHold`, so running them as the default (admin)
-    benchmark user makes that assertion unreachable by construction. Three places must agree on
-    the identity — the harness run-user override, the local stack's fixture seeding, and the
-    back-end constant the seeding script and back-end blackbox share — so pin all three here.
+    Credit checks use the admin unlimited path so the agent is not gated at
+    `gate:subscription`. `BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH` (honored only
+    when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+    `resolveAndIssuePurchaseCard` onto `chargeAndIssueCard` so stripeHold /
+    payment_approval stay reachable. The disposable `…106` identity remains
+    the non-admin blackbox fixture (`BENCHMARK_PAYMENT_LIFECYCLE_USER_ID`).
     """
     import re
 
@@ -1118,27 +1167,40 @@ def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
 
     repo_root = Path(__file__).resolve().parents[3]
     config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts)
-    assert match, "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID =\s*'([^']+)'",
+        config_ts,
+    )
+    assert match, (
+        "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID"
+    )
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_USER_ID, (
         "benchmark payment identity drifted between the harness and the back-end: "
         f"{AGENT_PAYMENT_LIFECYCLE_USER_ID} vs {match.group(1)}"
     )
+    assert "function benchmarkForceCustomerPurchasePath()" in config_ts
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in config_ts
+    disposable = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts
+    )
+    assert disposable, "back-end purchases/config.ts must keep BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    assert disposable.group(1) == "00000000-0000-4000-8000-000000000106"
+    assert disposable.group(1) != AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_LIFECYCLE_USER_ID == AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_TASK_NAMES == AGENT_PAYMENT_LIFECYCLE_TASK_NAMES
-    # Never the default (admin) benchmark user, and never a hardcoded ADMIN_USER_IDS entry.
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID != USER_ID
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID == USER_ID
     admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID not in admin_ts
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID in admin_ts
 
     for name in sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES):
         task = get_task_by_name(name)
         assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
         assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
-            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding path can produce"
+            f"{name} asserts a captured Stripe hold, which the forced customer path must produce"
         )
         assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
         assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
+        assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in task.environment["context_notes"]
 
 
 def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
@@ -1237,11 +1299,39 @@ def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
         local.configure_task_environment([local.ADMIN_BYPASS_TASK_NAME])
         assert os.environ["ADMIN_USER_IDS_EXTRA"] == local.ADMIN_BYPASS_USER_ID
 
-    # Only that task opts in; the lifecycle tasks must stay NON-admin on the same stack.
+    # Only that task opts in; lifecycle benches are already hardcoded admins and must not get EXTRA.
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
         local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
         assert os.environ.get("ADMIN_USER_IDS_EXTRA", "") == ""
+
+
+def test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard():
+    """Depleted purchase-subscription cleanup deletes integrations; admin company_flow mint needs one.
+
+    Observed 2026-08-20: `gate-subscription-card-mint-admin-bypass` reached
+    `issueAdminCompanyCard` (ADMIN_USER_IDS_EXTRA worked) then AgentCardRoutingProvider threw
+    `cardholder_onboarding_required` because the gate fixture left zero integrations for the
+    synthetic admin. The fixture must re-seed an org-managed agentcard row after cleanup,
+    using a KYC-ready cardholder (prefer andy@roselabs.ai, else agentcard-benchmark@).
+    """
+    from pathlib import Path
+
+    from benchmarks.run_benchmark import ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+
+    root = Path(__file__).resolve().parents[3]
+    fixture = (root / "back-end" / "scripts" / "gate-benchmark-fixture.ts").read_text()
+    float_src = (
+        root / "back-end" / "src" / "providers" / "agentcard" / "benchmark-float.ts"
+    ).read_text()
+    assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID in fixture
+    assert "seedOrgManagedAgentCardForUser" in fixture
+    assert "resolveBenchmarkCardholderId" in fixture
+    assert "ensureBenchmarkOrgCardholder" in fixture
+    assert "orgManaged: true" in fixture
+    assert "agentcard_org_cardholder_id" in fixture
+    assert "andy@roselabs.ai" in float_src
+    assert "agentcard-benchmark@roselabs.ai" in float_src
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -2175,6 +2265,51 @@ def test_agent_payment_accepts_current_payment_confirmation_schema_key():
     assert "Aurora Notebook" in blob
 
 
+def test_agent_payment_accepts_grounded_finished_browser_text_without_structured_metadata():
+    """A completed browser result remains evidence when its structured metadata is absent."""
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
+
+    browser_result = {
+        "role": "TOOL",
+        "message": (
+            "Checkout complete on the Rose Labs Test Payment page.\n"
+            "Order confirmation ID: tp_74fcd5b4\n"
+            "Total amount paid: 43.96"
+        ),
+        "metadata": {
+            "action_type": "task_complete",
+            "title": "Browser automation complete",
+            "toolName": "spawn_browser_agent",
+            "toolStatus": "FINISHED",
+        },
+    }
+
+    blob = _extract_agent_payment_output_blob({"messages": [browser_result]})
+    assert "tp_74fcd5b4" in blob
+
+    invalid_terminal_markers = (
+        {**browser_result, "role": "ASSISTANT"},
+        {
+            **browser_result,
+            "metadata": {**browser_result["metadata"], "toolName": "spawn_agent"},
+        },
+        {
+            **browser_result,
+            "metadata": {**browser_result["metadata"], "toolStatus": "IN_PROGRESS"},
+        },
+        {
+            **browser_result,
+            "metadata": {
+                key: value
+                for key, value in browser_result["metadata"].items()
+                if key != "action_type"
+            },
+        },
+    )
+    for invalid_result in invalid_terminal_markers:
+        assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
+
+
 def test_production_payment_lifecycle_refuses_sandbox_target():
     import pytest
 
@@ -3046,6 +3181,432 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors():
+    """Host-pin evaluate refusals may ERROR then continue to write_lock; do not fail closed.
+
+    Local repro: browser-doordash-usb-c-cable agent
+    b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached Place Order write_lock after
+    call_F5UFL3phdf5e1hNqYAizEq1T evaluate pin-guard ERROR, then failed only on
+    no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": (
+                    "Refusing evaluate that would navigate away from pinned host "
+                    "'www.doordash.com'. Current page URL: "
+                    "https://www.doordash.com/consumer/checkout/?lat=37.79184297658503"
+                    "&lng=-122.39233201369643&order_cart_id=8cb87c3b-a1d2-4eb1-a381-6356e100cb19"
+                    "&overridePageType=nv_checkout. Use input_text/click on this page "
+                    "instead of location/history/window.open scripts."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_F5UFL3phdf5e1hNqYAizEq1T",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "toolCallId": "call_LZiLVA70u6O8RU855bnoqaZ5",
+                    "title": 'Clicked <button "Place Order\\n$21.30">',
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_terminal = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Browser crashed while evaluating page state",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_real_failure",
+                    "title": "evaluate",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_terminal) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, still_terminal)[0] is False
+
+def test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment():
+    """Stale DOM index ERRORs recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    fdd449b5-2288-4890-b001-dfae973097a6 reached grounded payment_approval after
+    spawn_browser_agent ERROR "Element with index 0 not found" (title Scrolled down
+    600px), then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_Zp8HUD74TFWqfl2xUnbDeHXg",
+                    "title": "Scrolled down 600px",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+def test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment():
+    """Antibot pinned-host escape refusals recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    cf706f38-081a-4210-81a7-0894433babcb reached grounded payment_approval ($95.94)
+    after multiple spawn_browser_agent ERRORs refusing close_tab/switch_tab/off-host
+    click while pinned on www.google.com, then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Refusing to leave pinned page host 'www.google.com'. "
+                    "Current page URL: https://www.google.com/sorry/index?continue=..."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_wL49vzmazTALcV6B9QsYJS40",
+                    "title": "close_tab",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Refusing click that navigates off pinned host 'www.google.com' "
+                    "via 'https://www.amctheatres.com/'."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_9yvvvs5tlkaI5gnht72jcYim",
+                    "title": 'Clicked <a "AMC Theatres - movie times, mo">',
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+def test_no_tool_failures_counts_unrecovered_pinned_host_refusal():
+    """Pinned-host refusals with no later browser recovery still fail closed."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Refusing to leave pinned page host 'www.google.com'. Current page URL: https://www.google.com/.",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_pin",
+                    "title": "close_tab",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "spawn_browser_agent call_terminal_pin status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
+
+def test_no_tool_failures_ignores_recoverable_evaluate_uncaught_before_payment():
+    """Page-evaluate Uncaught ERRORs recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    482d6aa2-90f0-4173-95a4-f51bfbce2055 reached grounded payment_approval ($89.94)
+    after spawn_browser_agent ERROR message "Uncaught" (title evaluate), then failed
+    only on no_tool_failures (pass@k=5 run 20260821_211830, 4/5).
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Uncaught",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_O8B2G1YRpMDNojCZ8kTMhUs8",
+                    "title": "evaluate",
+                    "error": True,
+                    "steps_taken": 27,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "goto",
+                    "toolCallId": "call_6RtvbC0A0pYse7xd4b99Nfly",
+                    "steps_taken": 28,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_Pla3gjNQE1KQgwl2eOvtbJ55",
+                    "title": "Payment card requested ($89.94)",
+                    "steps_taken": 31,
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+def test_no_tool_failures_counts_unrecovered_evaluate_uncaught():
+    """Evaluate Uncaught with no later browser recovery still fails closed."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Uncaught TypeError: Cannot read properties of null",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_eval",
+                    "title": "evaluate",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "spawn_browser_agent call_terminal_eval status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
+
+def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
+    """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
+
+    Local repro: browser-agent-amazon-cookie-payment agent
+    b87b27c5-a055-41bf-ab63-8d2e90547f04 reached a grounded Amazon purchase write_lock
+    after `Cannot humanize input_text … no coordinates available` (CDP: no node for
+    backend id 87012), then failed only on no_tool_failures.
+
+    Outcome-proof agent 3cb17215-4a2a-4a13-8afb-52d087da0e27 showed the same class on
+    click (`Cannot humanize click …`); live GET payloads carry the body in `text`,
+    while archived transcripts remap to `message` — both shapes must classify.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                # Live agent GET shape (API field name).
+                "text": "Cannot humanize input_text for element index 87012: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": 'Typed \'[encrypted_data]\' into <input name="password">',
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_4CoEgNcqTgih86rhKhCOCU88",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "Cannot humanize click for element index 91731: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": "Clicked <input #signInSubmit>",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_u8k10geKSNi8U0RrsOGEM1Dr",
+                },
+            },
+            {
+                "role": "TOOL",
+                # Archived run-JSON shape after extract_message_transcript.
+                "message": "No node found for given backend id",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_stale_backend_node",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "write_lock",
+                    "toolCallId": "call_write_lock_ok",
+                    "title": "Purchase write lock requested",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_fails = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Kernel session crashed mid-checkout",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "toolCallId": "call_real_failure",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_fails) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
+
+def test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field():
+    """Live agent API exposes body as `text`; ignore must not require artifact `message`.
+
+    Local repro: browser-imax-group-tickets agent
+    00479d10-d10a-46d9-8103-631bf8586ffa reached payment_approval after the same
+    Element with index 0 not found ERROR, but live evaluation still failed
+    no_tool_failures because `_tool_runtime_failures` only read `message` while
+    GET /api/agents/:id returns `text`.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_7LpBdNsmsuxr9qlZcJNKey7Q",
+                    "title": "Scrolled down 450px",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card_api",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
+    """A terminal unrecovered DOM index miss remains a grounded tool failure."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_index_miss",
+                    "title": "Scrolled down 600px",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    failures = _tool_runtime_failures(data)
+    assert failures == ["spawn_browser_agent call_terminal_index_miss status=ERROR"]
+    passed, reason = _run_declared_static_check(evaluator, data)
+    assert passed is False
+    assert "tool failure" in reason.lower()
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -3143,7 +3704,6 @@ def test_completion_summary_and_sms_static_checks_are_fail_closed():
     assert passed is False
     assert "exactly 1" in reason
 
-
 def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
     """The incident benchmark owns deterministic summary and SMS regressions."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -3226,20 +3786,26 @@ async def test_declared_evaluator_hydrates_completion_sms_receipt():
     assert results[0]["passed"] is True
     assert data["_benchmark"]["completion_sms_events"][0]["path"] == path
 
-
-def test_doordash_catalog_requires_single_clean_completed_browser_run():
-    """DoorDash combines deterministic runtime invariants with product semantics."""
+def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
+    """DoorDash stages checkout then stops at an unresolved place-order write lock."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-doordash-usb-c-cable")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
     assert task.prompt.endswith("Complete checkout.")
-    assert task.approval_handling == "auto_approve"
+    assert task.approval_handling == "ignore"
     assert task.expected_approval_count == 1
+    assert task.expected_attention_kind == "write_lock"
     assert task.expected_attention_kinds == []
-    assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
+    assert task.expected_attention_kind_any_of == []
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
+    assert task.environment["context_notes"] == (
+        "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and "
+        "delivery timing. The runner treats the final place-order write lock as completion, leaves "
+        "that request unresolved, and does not place the order. The task may exercise guest "
+        "checkout and does not require an injected cookie bundle."
+    )
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -3248,12 +3814,34 @@ def test_doordash_catalog_requires_single_clean_completed_browser_run():
     assert static_types == {
         "no_tool_failures",
         "browser_agent_session_count",
-        "agent_status",
         "approval_request_count",
+        "approval_request_details",
     }
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["USB-C"]
+    assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "write lock" in runtime_criteria
+    assert "unresolved" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("usb-c to usb-c", "6 feet", "60w", "$30", "earliest"):
+    for requirement in (
+        "usb-c to usb-c",
+        "6 feet",
+        "60w",
+        "$30",
+        "san francisco",
+        "unresolved",
+        "not placed",
+    ):
         assert requirement in semantic_criteria
+    assert "earliest available delivery option" not in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("payment-card approval", "approval of the write lock", "order confirmation"):
+        assert failure in judge_prompt
+    assert "write-lock attention request itself is valid grounding" in judge_prompt
+    assert "do not fail solely because the write-lock shipping line does not literally say earliest" in judge_prompt
 
 
 def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
@@ -3824,8 +4412,8 @@ async def test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_a
     assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
 
 
-async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
-    """DoorDash accepts either supported checkout gate without requiring a second request."""
+async def test_doordash_poll_stops_at_write_lock_without_resolving_it():
+    """DoorDash completion is one unresolved place-order write lock; never auto-approve."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     write_lock = {
@@ -3834,6 +4422,11 @@ async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
         "question": "Approve the $17.42 DoorDash order?",
         "metadata": {"requestUserApproval": {"writePermission": True}},
     }
+    payment = {
+        "id": "doordash-payment",
+        "agentId": "agent-doordash",
+        "metadata": {"requestPaymentCard": {}},
+    }
 
     (data, triggered, resolved, failure), responses = await _run_attention_poll(
         get_task_by_name("browser-doordash-usb-c-cable"),
@@ -3841,13 +4434,19 @@ async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
     )
 
     assert failure is None
-    assert (triggered, resolved) == (1, 1)
-    assert responses == [("doordash-write-lock", "approved")]
+    assert (triggered, resolved) == (1, 0)
+    assert responses == []
     assert data["_benchmark"]["attention_request_kind_seen"] == "write_lock"
-    assert data["_benchmark"]["expected_attention_kind_any_of"] == [
-        "payment_approval",
-        "write_lock",
-    ]
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "write_lock"
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        get_task_by_name("browser-doordash-usb-c-cable"),
+        [payment],
+    )
+    assert failure == "Expected attention kind write_lock, observed payment_approval"
+    assert data["_benchmark"]["unexpected_attention_kind"] == "payment_approval"
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
 
 
 async def test_instacart_proposed_checkout_boundary_accepts_exactly_one_supported_kind():
@@ -3910,7 +4509,8 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     expecting a bare write_lock could never be satisfied. Rather than requiring
     both approvals in order — which would mean the benchmark actually buys three
     tickets every run — the task now terminates at exactly one unresolved
-    payment approval, and the judge owns what that approval must say.
+    payment approval. Pass criteria are static_check only (same shape as
+    browser-event-ticket); no LLM adjacency/earliest-showtime judge.
     """
     from benchmarks.benchmark_tasks import get_task_by_name
 
@@ -3923,17 +4523,57 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     assert task.success_on_payment_card_request is True
     assert getattr(task, "expected_attention_kinds", None) in (None, [], ["payment_approval"])
 
-    semantic = next(e for e in task.evaluators if e["method"] != "static_check")
-    criteria = " ".join(semantic["criteria"]).lower()
-    # Approval contents stay judge-owned, never substring-matched.
-    static_types = {c["type"] for e in task.evaluators if e["method"] == "static_check" for c in e["checks"]}
+    assert [e["method"] for e in task.evaluators] == ["static_check"]
+    assert not any(e.get("id") == "imax-group-ticket-adjacency-semantics" for e in task.evaluators)
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    static_types = {c["type"] for c in static["checks"]}
     assert "approval_request_details" not in static_types
-    for required in ("venue", "date", "showtime", "seat", "total amount"):
+    # Payment-terminal stop leaves the root ACTIVE awaiting ignored approval —
+    # requiring COMPLETED fails closed after a grounded payment_approval (agent
+    # 5bcb4a80-9c0e-4521-ab9a-a7ae0e471181). Align with browser-event-ticket.
+    assert "agent_status" not in static_types
+    assert any(
+        "unresolved payment-card approval" in line.lower() for line in static.get("criteria", [])
+    )
+    criteria = " ".join(static.get("criteria", [])).lower()
+    for required in ("metreon", "date", "showtime", "seat", "total amount"):
         assert required in criteria
-    assert "unresolved payment approval" in criteria
 
-    prompt = semantic["judge_prompt"].lower()
-    assert "do not require or accept an approved charge or completed purchase" in prompt
+
+def test_imax_runtime_contract_allows_active_after_payment_approval():
+    """Declared static checks must not require COMPLETED on payment-terminal stop.
+
+    Local repro: browser-imax-group-tickets agent
+    5bcb4a80-9c0e-4521-ab9a-a7ae0e471181 reached payment_approval (~$95.94) with
+    no tool failures, then failed only on agent_status ACTIVE vs COMPLETED.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("browser-imax-group-tickets")
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    data = {
+        "agent": {"status": "ACTIVE", "progress": 0.01},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment",
+                    "title": "Payment card requested ($95.94)",
+                },
+            }
+        ],
+        "_benchmark": {"approvals_triggered": 1},
+    }
+    assert "agent_status" not in {c["type"] for c in static["checks"]}
+    assert _run_declared_static_check(task, static, data) == (
+        True,
+        "All declared static checks passed",
+    )
 
 async def test_invalid_payment_receipt_still_records_typed_attention_observation():
     """Receipt validation failures must retain the payment attention that carried them."""
@@ -4385,15 +5025,17 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     import benchmarks.run_benchmark as bench
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
     raised = False
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         # Mirror the real signatures: _apply_live_fixture calls
-        # _sync_compute_tokens(tolerate_gpt_code_unavailable=True) and
+        # _sync_compute_tokens → _sync_email_credentials →
         # _sync_browser_credentials(ctx.cookie_domains).
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         bench._sync_browser_credentials = lambda *_a, **_k: False
         bench._apply_live_fixture(
             bench.LiveFixtureContext(
@@ -4406,6 +5048,7 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
         raised = "browser auth" in str(exc).lower()
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         if original_mode is None:
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
@@ -4500,6 +5143,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     }
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_sql = bench._run_local_victoria_sql
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
@@ -4527,6 +5171,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         # The sync COMMAND succeeds — exactly the state that misreported the outage.
         bench._sync_browser_credentials = lambda *_a, **_k: True
         bench._run_local_victoria_sql = fake_sql
@@ -4577,6 +5222,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
         assert sql_calls == []
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         bench._run_local_victoria_sql = original_sql
         if original_mode is None:
@@ -4622,6 +5268,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
     with (
         patch.object(bench, "_is_simulate_mode", return_value=False),
         patch.object(bench, "_sync_compute_tokens", return_value=True),
+        patch.object(bench, "_sync_email_credentials", return_value=True),
         patch.object(bench, "_sync_browser_credentials", side_effect=fake_sync_browser_credentials),
         patch.object(bench, "_live_cookie_domain_credential_summary", side_effect=fake_credential_summary),
     ):
@@ -5387,7 +6034,7 @@ def test_agent_sms_benchmark_prepares_phone_only_agentphone_sender():
 
 
 def test_minted_x_benchmark_uses_live_x_default_target():
-    """The X minted-account benchmark points at the real site, not the local Uber fixture."""
+    """The X Hello World benchmark points at live X with write-lock grading, not mint signup."""
     from benchmarks.benchmark_tasks import get_task_by_name
     import benchmarks.run_benchmark as bench
 
@@ -5396,22 +6043,125 @@ def test_minted_x_benchmark_uses_live_x_default_target():
     assert task.name in bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
     assert task.prompt == "Make a post on X.com that says, Hello World"
     assert bench.MINTED_AGENT_ACCOUNT_X_POST_GOAL == task.prompt
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_approval_count == 1
+    assert task.min_steps == {"browser": 5}
+    assert task.enforce_declared_evaluators is True
+    assert task.environment["live_fixtures"] == ["live"]
+    assert task.environment["live_cookie_domains"] == ["x.com"]
+    assert task.environment["required_injectable_cookie_domains"] == ["x.com"]
     assert bench._default_minted_target_url("http://localhost:56151", task.name) == "https://x.com"
     assert bench._auth_realm_from_target_url("https://x.com") == "x.com"
     assert bench._site_label_from_realm("x.com") == "X"
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {"approval_request_count", "approval_request_details"}
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Hello World", "Public", "x.com", "on X"]
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
 
 
-def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
-    """X benchmark must not treat a minted row alone as account-creation proof."""
+def test_minted_x_live_auth_write_lock_contract_ignores_mint_and_phone_blocker():
+    """Live X pass grading requires write-lock success + Hello World evidence, not MintedAccount."""
     import benchmarks.run_benchmark as bench
 
-    blocker = "X forced phone auth. Final DOM showed: An unexpected error occurred. Please try again."
-    success = "Account creation completed and the account is signed in on the home timeline."
+    success_with_instruction = (
+        bench._x_post_prompt()
+        + "\n\nStatus: posted. Exact text: Hello World. "
+        + "Post URL: https://x.com/rose_labs_/status/2090546285698801794. "
+        + "No blocker. The final X post page visibly shows the published post."
+    )
+    # Instruction text may still mention historical phone-auth wording in older dumps;
+    # the live-auth grader must not fail the run for MintedAccount / phone-blocker.
+    passed, failures = bench._grade_live_x_hello_world_post(
+        post_passed=True,
+        post_failure_reason=None,
+        post_status="COMPLETED",
+        post_text=success_with_instruction,
+    )
+    assert passed is True
+    assert failures == []
 
-    assert bench._x_signup_has_terminal_phone_blocker(blocker) is True
-    assert bench._x_signup_has_account_creation_evidence(blocker) is False
-    assert bench._x_signup_has_terminal_phone_blocker(success) is False
-    assert bench._x_signup_has_account_creation_evidence(success) is True
+    no_evidence_passed, no_evidence_failures = bench._grade_live_x_hello_world_post(
+        post_passed=True,
+        post_failure_reason=None,
+        post_status="COMPLETED",
+        post_text="Hello World drafted but never submitted",
+    )
+    assert no_evidence_passed is False
+    assert any("grounded evidence" in part for part in no_evidence_failures)
+
+    write_lock_failed, write_lock_failures = bench._grade_live_x_hello_world_post(
+        post_passed=False,
+        post_failure_reason="Expected approval requests but none were triggered",
+        post_status="FAILED",
+        post_text=success_with_instruction,
+    )
+    assert write_lock_failed is False
+    assert any("post failed" in part for part in write_lock_failures)
+
+
+def test_minted_x_write_lock_notification_requires_hello_world_public_destination():
+    """Static check rejects write locks that omit Hello World / Public / x.com / on X."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {"type": "approval_request_count", "value": 1},
+            {
+                "type": "approval_request_details",
+                "required_strings": ["Hello World", "Public", "x.com", "on X"],
+            },
+        ]
+    }
+    good = {
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "metadata": {
+                        "writePermission": True,
+                        "writeLockNotification": {
+                            "action": "post publicly",
+                            "service": {"url": "https://x.com/compose/post", "name": "X", "domain": "x.com"},
+                            "social_post": {
+                                "body": "Hello World",
+                                "audience": "Public",
+                                "destination": "@rose_labs_ on X",
+                            },
+                            "trigger_type": "social_post",
+                        },
+                    }
+                }
+            ],
+        }
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    missing_destination = {
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "metadata": {
+                        "writePermission": True,
+                        "writeLockNotification": {
+                            "social_post": {"body": "Hello World", "audience": "Public"},
+                            "service": {"name": "X", "domain": "x.com"},
+                        },
+                    }
+                }
+            ],
+        }
+    }
+    passed, reason = _run_declared_static_check(evaluator, missing_destination)
+    assert passed is False
+    assert "on X" in reason
 
 
 def test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile():
@@ -5593,17 +6343,21 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
         environment = {"live_fixtures": ["live"]}
 
     setup_timeline = []
+    setup_started = threading.Event()
+    setup_release = threading.Event()
 
     def blocking_applier(_ctx):
         setup_timeline.append("setup-start")
-        time.sleep(0.1)
+        setup_started.set()
+        assert setup_release.wait(timeout=2), "parallel heartbeat could not release fixture setup"
         setup_timeline.append("setup-end")
         return {"fixture": "live"}
 
     async def setup_probe():
         async def heartbeat():
-            await asyncio.sleep(0.02)
+            await asyncio.to_thread(setup_started.wait, 2)
             setup_timeline.append("parallel-tick")
+            setup_release.set()
 
         with (
             patch.dict(bench.LIVE_FIXTURE_APPLIERS, {"live": blocking_applier}),
@@ -5619,6 +6373,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     assert setup_timeline.index("parallel-tick") < setup_timeline.index("setup-end")
 
     restore_timeline = []
+    restore_started = threading.Event()
+    restore_release = threading.Event()
     manifest = {
         "scenario": "fresh_browser_state",
         "fixture": "live",
@@ -5627,7 +6383,8 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
     def blocking_restore(_manifest, *, label):
         assert label == "fresh browser state"
         restore_timeline.append("restore-start")
-        time.sleep(0.1)
+        restore_started.set()
+        assert restore_release.wait(timeout=2), "parallel heartbeat could not release fixture restore"
         restore_timeline.append("restore-end")
 
     async def restore_probe():
@@ -5635,8 +6392,9 @@ async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
             await bench._restore_live_fixture_scenarios_async([manifest])
 
         async def heartbeat():
-            await asyncio.sleep(0.02)
+            await asyncio.to_thread(restore_started.wait, 2)
             restore_timeline.append("parallel-tick")
+            restore_release.set()
 
         with patch.object(bench, "_restore_isolated_browser_state_scenario", blocking_restore):
             await asyncio.gather(restore(), heartbeat())
@@ -5763,17 +6521,45 @@ def test_anon_benchmark_mode_disables_saved_auth_material():
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_auth
 
 
-def test_x_post_prompt_keeps_goal_and_prefers_email_auth():
-    """Fresh X benchmark profiles need explicit guidance away from the fragile phone-first path."""
+def test_minted_x_reuses_live_auth_by_default():
+    """Live X Hello World keeps synced cookies unless BENCHMARK_MINTED_CLEAR_EXISTING_AUTH is set."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    previous = os.environ.get("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    try:
+        os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        assert bench._minted_x_clear_existing_auth_enabled() is False
+        # Non-X minted realms still clear by default.
+        assert bench._minted_clear_existing_auth_enabled() is True
+
+        os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "true"
+        assert bench._minted_x_clear_existing_auth_enabled() is True
+        assert bench._minted_clear_existing_auth_enabled() is True
+
+        os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "false"
+        assert bench._minted_x_clear_existing_auth_enabled() is False
+        assert bench._minted_clear_existing_auth_enabled() is False
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        else:
+            os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = previous
+
+
+def test_x_post_prompt_reuses_live_session_without_mint_signup():
+    """X Hello World prompt steers toward the synced session, not MintedAccount signup."""
     import benchmarks.run_benchmark as bench
 
     prompt = bench._x_post_prompt()
 
     assert prompt.startswith("Make a post on X.com that says, Hello World")
-    assert "minted email" in prompt
-    assert "Use email instead" in prompt
-    assert "Do not choose the initial 'Continue with phone'" in prompt
-    assert "terminal phone-auth blocker" in prompt
+    assert "already signed-in X session" in prompt
+    assert "Do not create a new X account" in prompt
+    assert "minted email" not in prompt
+    assert "terminal phone-auth blocker" not in prompt
+    assert "Continue with phone" not in prompt
 
 
 def test_browser_agent_cookie_bundle_bootstrap_is_local_only():
@@ -6674,16 +7460,23 @@ async def test_claude_code_preflight_uses_runtime_credential_route():
 
 
 async def test_claude_code_preflight_rejects_generic_claude_compute_token():
-    """A generic Claude compute token cannot prove Claude Code session credentials exist."""
+    """A generic Claude compute token cannot prove Claude Code session credentials exist.
+
+    After the OAuth credential route 404s, preflight still probes the funded
+    Anthropic/OpenRouter fallback via anthropic-key/cooldown — rejection requires
+    that probe to report neither a clear shared key nor OpenRouter.
+    """
     import benchmarks.run_benchmark as bench
 
     calls = []
 
     class FakeResponse:
-        status_code = 404
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
 
         def json(self):
-            return {"error": "Claude Code credentials not found"}
+            return self._body
 
     class FakeClient:
         async def __aenter__(self):
@@ -6694,7 +7487,14 @@ async def test_claude_code_preflight_rejects_generic_claude_compute_token():
 
         async def get(self, url, *, headers, timeout):
             calls.append((url, headers, timeout))
-            return FakeResponse()
+            if url.endswith("/api/integrations/claude-code/credentials/token"):
+                return FakeResponse(404, {"error": "Claude Code credentials not found"})
+            if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
+                return FakeResponse(
+                    200,
+                    {"configured": False, "onCooldown": False, "openrouterConfigured": False},
+                )
+            raise AssertionError(f"unexpected URL {url}")
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
@@ -6716,7 +7516,12 @@ async def test_claude_code_preflight_rejects_generic_claude_compute_token():
             "http://localhost:55120/api/integrations/claude-code/credentials/token",
             {"X-API-Key": "test-key"},
             10.0,
-        )
+        ),
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        ),
     ]
 
 
@@ -6980,6 +7785,63 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.44."))
     assert passed is False
     assert "ratchet" in reason.lower()
+
+
+def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
+    """Regex pattern order must not let a prompt example replace the grounded result.
+
+    Browser task instructions contain examples such as ``0.85 / 1.0`` followed by
+    ``risk score``. The evaluator used to append all forward-regex matches and then all
+    reverse-regex matches, so that example became the last score even though the
+    terminal browser row carried a grounded structured response.
+    """
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Task instructions: record the score exactly as shown, for example "
+                    '"0.12", "12", "0.85 / 1.0", "risk score: 42".'
+                ),
+                "created_at": "2026-08-21T01:49:49.633Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_started",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                    "Clicked the checkbox mode verification control. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                    "Extracted Output: Risk Score: 0.09."
+                ),
+                "created_at": "2026-08-21T01:51:52.088Z",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "structured_response": {
+                        "risk_score": "0.09",
+                        "checkbox_passed": True,
+                        "invisible_form_submitted": True,
+                        "verdict_text": "Verified!; Form submission allowed!",
+                    },
+                },
+            },
+        ]
+    }
+
+    assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
+
+    data["messages"][1]["metadata"]["structured_response"]["risk_score"] = "0.91"
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "structured output risk score 0.910 exceeds ratchet" in reason
 
 
 def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded():
@@ -10652,6 +11514,26 @@ def test_admin_bypass_card_mint_variant_wiring():
     assert "expected_gate" not in admin_checks
     assert "expected_payment_receipt" in admin_checks
 
+    # `true` must validate without AttributeError (harness used to crash on `.get`).
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    admin_req = {
+        "metadata": {
+            "requestPaymentCard": {
+                "merchant": "Rose Labs Test Payment",
+                "currency": "USD",
+                "subtotalCents": 3600,
+                "totalCents": 4396,
+                "lineItems": [],
+                "fees": [],
+            }
+        }
+    }
+    assert _validate_payment_receipt(admin, admin_req, messages=[]) is None
+    assert "missing requestPaymentCard metadata" in (
+        _validate_payment_receipt(admin, {"metadata": {}}, messages=[]) or ""
+    )
+
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
     """The parallel search smoke should exercise execute-phase explore fanout."""
@@ -11465,6 +12347,7 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
     assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
     assert get_task_by_name("browser-smoke").min_steps == {"browser": 1}
+    assert get_task_by_name("cache-coverage").min_steps == {"browser": 2}
     assert get_task_by_name("chat-mode").min_steps == {}
 
     base = {"name": "min-steps-contract", "bench": "rose-bench"}
@@ -11529,6 +12412,158 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert counts == {"browser": {"browser-task": 1}}
     assert task.min_steps == {"browser": 1}
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
+    """cache-coverage's example.com heading read is goto+evaluate; default min_steps=5 is wrong."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("cache-coverage")
+    browser_id = "4eaa7d1f-fade-4db5-9fff-1a6bb9ab6891"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_browser_agent",
+                        "type": "browser",
+                        "tool_call_id": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "goto",
+                "steps_taken": 0,
+                "toolStatus": "FINISHED",
+                "title": "Navigated → https://example.com",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "toolu_01Pv8PTgDN1gpibr4Uq98HRc",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "evaluate",
+                "steps_taken": 1,
+                "toolStatus": "FINISHED",
+                "title": "evaluate",
+                "text": "Executed JS, result: Example Domain",
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+    assert (
+        _validate_agent_class_min_steps({"browser": 5}, counts)
+        == (
+            f"Browser agent {browser_id} recorded 2 trajectory step(s); "
+            "expected at least 5 per browser agent"
+        )
+    )
+
+
+def test_live_fixture_refreshes_email_credentials_before_browser_auth():
+    """cache-coverage message_person needs from_email; live overlay must sync email rows."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    calls: list[str] = []
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: calls.append("compute") or True
+        bench._sync_email_credentials = lambda: calls.append("email") or True
+        bench._sync_browser_credentials = lambda *_a, **_k: calls.append("browser") or True
+        manifest = bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert calls == ["compute", "email", "browser"]
+    assert manifest == {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
+
+
+def test_live_fixture_fails_closed_when_email_credentials_refresh_fails():
+    """A frozen dump without usable Gmail tokens must abort before the agent runs."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: False
+        bench._sync_browser_credentials = lambda *_a, **_k: True
+        bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "email credentials" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "live fixture must fail closed when email credential refresh fails"
+
+
+def test_message_person_tasks_refresh_email_credentials_in_local_preflight():
+    """Local runs with message_person must overlay email creds after compute tokens."""
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("cache-coverage")
+    assert "message_person" in task.expected_tools
+    source = inspect.getsource(bench.main_async)
+    assert "_sync_email_credentials" in source
+    assert 'any("message_person" in (t.expected_tools or []) for t in tasks)' in source
 
 
 def test_payment_abandonment_accepts_captured_two_step_trajectory():
@@ -13224,8 +14259,12 @@ async def run_all_tests():
         test_minted_x_benchmark_uses_live_x_default_target,
     )
     r.record(
-        "minted_x_signup_evidence_terminal_blocker",
-        test_minted_x_signup_evidence_rejects_terminal_phone_blocker,
+        "minted_x_live_auth_write_lock_contract",
+        test_minted_x_live_auth_write_lock_contract_ignores_mint_and_phone_blocker,
+    )
+    r.record(
+        "minted_x_write_lock_notification_strings",
+        test_minted_x_write_lock_notification_requires_hello_world_public_destination,
     )
     r.record(
         "amazon_passkey_scenario_isolation",
@@ -13335,6 +14374,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_biometrics_evaluator",
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
+    )
+    r.record(
+        "webdecoy_biometrics_grounded_result_precedence",
+        test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples,
     )
     r.record(
         "webdecoy_biometrics_exact_network_score",
@@ -13635,6 +14678,10 @@ async def run_all_tests():
         test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start,
     )
     r.record(
+        "public_tunnel_benchmark_bundled_frontend_default",
+        test_public_tunnel_benchmarks_enable_bundled_frontend_by_default,
+    )
+    r.record(
         "benchmark_bundled_frontend_cloud_heap_budget",
         test_benchmark_bundled_frontend_build_has_cloud_heap_budget,
     )
@@ -13643,8 +14690,8 @@ async def run_all_tests():
         test_payment_benchmark_preserves_lifecycle_stack_contract,
     )
     r.record(
-        "payment_benchmark_non_admin_fixture_identity",
-        test_payment_benchmark_seeds_non_admin_fixture_identity,
+        "payment_benchmark_admin_run_user_forced_customer_path",
+        test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path,
     )
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
@@ -13667,8 +14714,8 @@ async def run_all_tests():
         test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
     )
     r.record(
-        "agent_payment_lifecycle_user_is_non_admin",
-        test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user,
+        "agent_payment_lifecycle_user_is_admin_with_forced_customer_path",
+        test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path,
     )
     r.record(
         "production_payment_lifecycle_user_is_non_admin",
@@ -13677,6 +14724,10 @@ async def run_all_tests():
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",
         test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
+    )
+    r.record(
+        "admin_bypass_gate_fixture_reseeds_org_managed_agentcard",
+        test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard,
     )
     r.record(
         "success_on_payment_card_request",
@@ -13771,6 +14822,10 @@ async def run_all_tests():
         test_agent_payment_accepts_current_payment_confirmation_schema_key,
     )
     r.record(
+        "agent_payment_grounded_finished_browser_text",
+        test_agent_payment_accepts_grounded_finished_browser_text_without_structured_metadata,
+    )
+    r.record(
         "production_payment_rejects_sandbox_target",
         test_production_payment_lifecycle_refuses_sandbox_target,
     )
@@ -13858,6 +14913,42 @@ async def run_all_tests():
         "declared_static_no_tool_failures_ignores_challenge_recovery",
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
     )
+    r.record(
+        "declared_static_no_tool_failures_ignores_navigation_pin_guard",
+        test_no_tool_failures_ignores_intermediate_navigation_pin_guard_errors,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_element_index_miss",
+        test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_pinned_host_refusal",
+        test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_pinned_host_refusal",
+        test_no_tool_failures_counts_unrecovered_pinned_host_refusal,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_evaluate_uncaught",
+        test_no_tool_failures_ignores_recoverable_evaluate_uncaught_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_evaluate_uncaught",
+        test_no_tool_failures_counts_unrecovered_evaluate_uncaught,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",
+        test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field,
+    )
+    r.record(
+        "declared_static_no_tool_failures_rejects_unrecovered_element_index_miss",
+        test_no_tool_failures_still_rejects_unrecovered_element_index_miss,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_stale_dom_node",
+        test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
+    )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
         test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_approval,
@@ -13875,8 +14966,8 @@ async def run_all_tests():
         test_declared_evaluator_hydrates_completion_sms_receipt,
     )
     r.record(
-        "doordash_single_clean_completed_browser_run",
-        test_doordash_catalog_requires_single_clean_completed_browser_run,
+        "doordash_unresolved_place_order_write_lock_catalog",
+        test_doordash_catalog_stops_at_unresolved_place_order_write_lock,
     )
     r.record(
         "uber_normal_single_browser_task",
@@ -13915,8 +15006,8 @@ async def run_all_tests():
         test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it,
     )
     await r.record_async(
-        "doordash_single_write_lock_checkout_approval",
-        test_doordash_poll_accepts_single_write_lock_as_checkout_approval,
+        "doordash_write_lock_stops_without_resolving",
+        test_doordash_poll_stops_at_write_lock_without_resolving_it,
     )
     await r.record_async(
         "instacart_exactly_one_supported_checkout_boundary",
@@ -13925,6 +15016,10 @@ async def run_all_tests():
     await r.record_async(
         "imax_payment_then_purchase_write_lock",
         test_imax_poll_requires_payment_then_purchase_write_lock,
+    )
+    r.record(
+        "imax_runtime_contract_allows_active_after_payment",
+        test_imax_runtime_contract_allows_active_after_payment_approval,
     )
     await r.record_async(
         "invalid_payment_receipt_records_attention",
@@ -14030,6 +15125,22 @@ async def run_all_tests():
         test_browser_smoke_accepts_captured_single_step_trajectory,
     )
     r.record(
+        "cache_coverage_two_step_browser_trajectory",
+        test_cache_coverage_accepts_captured_two_step_browser_trajectory,
+    )
+    r.record(
+        "live_fixture_refreshes_email_credentials",
+        test_live_fixture_refreshes_email_credentials_before_browser_auth,
+    )
+    r.record(
+        "live_fixture_fails_closed_email_credentials",
+        test_live_fixture_fails_closed_when_email_credentials_refresh_fails,
+    )
+    r.record(
+        "message_person_tasks_refresh_email_credentials",
+        test_message_person_tasks_refresh_email_credentials_in_local_preflight,
+    )
+    r.record(
         "payment_abandonment_two_step_trajectory",
         test_payment_abandonment_accepts_captured_two_step_trajectory,
     )
@@ -14123,7 +15234,14 @@ async def run_all_tests():
         "benchmark_sms_source_override_updates_local_agent_source",
         test_benchmark_sms_source_override_updates_local_agent_source,
     )
-    r.record("x_post_prompt_keeps_goal_and_prefers_email_auth", test_x_post_prompt_keeps_goal_and_prefers_email_auth)
+    r.record(
+        "x_post_prompt_reuses_live_session_without_mint_signup",
+        test_x_post_prompt_reuses_live_session_without_mint_signup,
+    )
+    r.record(
+        "minted_x_reuses_live_auth_by_default",
+        test_minted_x_reuses_live_auth_by_default,
+    )
     r.record("prompt_user_denial_uses_rejection_sentinel", test_prompt_user_denial_uses_rejection_sentinel)
     r.record("keep_agents_env_preserves_successes_and_failures", test_keep_agents_env_preserves_successes_and_failures)
     r.record("local_services_manifest_reports_anon_capability", test_local_services_manifest_reports_anon_capability)

@@ -1269,6 +1269,7 @@ class AgentWorkflow:
                         [self.fast_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
+                        True,
                     ],
                     start_to_close_timeout=timedelta(seconds=90),
                     retry_policy=RetryPolicy(maximum_attempts=3),

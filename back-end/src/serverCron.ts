@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { runAgentCardOrgWalletMonitor } from './providers/agentcard/org-wallet-monitor';
+import { runCoinbaseFloatReplenishJob } from './providers/brex/replenish';
 import { createLogger } from './providers/logger';
 import {
   abandonStaleFundingPending,
@@ -19,6 +20,49 @@ import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaid
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
+import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
+
+function scheduleTerminalBrowserReleaseReconcile(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_TERMINAL_BROWSER_RELEASE_RECONCILE === '1') {
+    cronLog.info('Terminal browser release reconcile disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_TERMINAL_BROWSER_RELEASE_RECONCILE',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) {
+      cronLog.info('Terminal browser release reconcile already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
+    runTerminalAgentBrowserReleaseReconcileWithLease({
+      batchSize: 100,
+      deadlineAtMs: Date.now() + 50_000,
+    })
+      .then(({ acquired, summary }) => {
+        if (!acquired) {
+          cronLog.info('Terminal browser release reconcile lease held by another replica');
+          return;
+        }
+        if (summary.discovered > 0) {
+          cronLog.info('Terminal browser release reconcile summary', { ...summary });
+        }
+      })
+      .catch((error) => {
+        cronLog.error('Terminal browser release reconcile failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  cron.schedule('* * * * *', run);
+  cronLog.info('Terminal browser release reconcile scheduled (every minute)');
+}
 
 function scheduleWorkflowLivenessReconcile(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
@@ -213,6 +257,40 @@ function scheduleAgentCardOrgWalletMonitor(): void {
   cronLog.info('AgentCard org-wallet monitor scheduled (every minute)');
 }
 
+/**
+ * Replenish the Coinbase USDC float from Brex. Hourly, not per-minute: the transfer is an ACH that
+ * settles over days, and the job's own settlement-window lock already prevents stacking.
+ */
+function scheduleCoinbaseFloatReplenish(): void {
+  const cronLog = createLogger('Cron');
+  if (process.env.COINBASE_FLOAT_REPLENISH_ENABLED !== '1') {
+    cronLog.info('Coinbase float replenish disabled (COINBASE_FLOAT_REPLENISH_ENABLED != 1)');
+    return;
+  }
+  let replenishRunning = false;
+  const runReplenish = () => {
+    if (replenishRunning) {
+      cronLog.info('Coinbase float replenish already running; skipping overlapping tick');
+      return;
+    }
+    replenishRunning = true;
+    runCoinbaseFloatReplenishJob()
+      .then((result) => {
+        cronLog.info('Coinbase float replenish evaluated', { status: result.status });
+      })
+      .catch((err) => {
+        cronLog.error('Coinbase float replenish error', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        replenishRunning = false;
+      });
+  };
+  cron.schedule('0 * * * *', runReplenish);
+  cronLog.info('Coinbase float replenish scheduled (hourly)');
+}
+
 function scheduleProactiveSmsOutreach(isProduction: boolean): void {
   if (!isProduction || process.env.DISABLE_PROACTIVE_SMS === '1') {
     createLogger('Cron').info('Proactive SMS outreach disabled', {
@@ -251,9 +329,11 @@ function scheduleProactiveSmsOutreach(isProduction: boolean): void {
 export function registerCronJobs(isProduction: boolean): void {
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);
+  scheduleTerminalBrowserReleaseReconcile(isProduction);
   scheduleGmailSync();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();
+  scheduleCoinbaseFloatReplenish();
   scheduleProactiveSmsOutreach(isProduction);
 }

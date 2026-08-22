@@ -10,6 +10,12 @@ import {
   ParsedEmail,
 } from './gmailParser';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
+import {
+  classifyEmailAuthFailure,
+  markCredentialFailure,
+  markCredentialHealthy,
+  type EmailAuthFailure,
+} from './emailCredentialHealth';
 
 const log = createLogger('GmailSync');
 
@@ -34,13 +40,19 @@ interface IntegrationConfig {
  */
 async function refreshGoogleAccessToken(
   refreshToken: string
-): Promise<{ accessToken: string; expiresAt: Date } | null> {
+): Promise<
+  { ok: true; accessToken: string; expiresAt: Date } | { ok: false; failure: EmailAuthFailure }
+> {
   const clientId = process.env.GMAIL_WEB_CLIENT_ID;
   const clientSecret = process.env.GMAIL_WEB_CLIENT_SECRET;
 
   if (!clientId) {
     log.error('Missing GMAIL_WEB_CLIENT_ID');
-    return null;
+    // Our misconfiguration, not the user's. Never ask them to reconnect for this.
+    return {
+      ok: false,
+      failure: { state: 'sync_failed', reason: 'Email sync is misconfigured on our side.' },
+    };
   }
 
   try {
@@ -63,7 +75,10 @@ async function refreshGoogleAccessToken(
         status: response.status,
         body: logTruncate(errorText),
       });
-      return null;
+      return {
+        ok: false,
+        failure: classifyEmailAuthFailure({ status: response.status, body: errorText }),
+      };
     }
 
     const json = (await response.json()) as {
@@ -72,12 +87,17 @@ async function refreshGoogleAccessToken(
     };
 
     return {
+      ok: true,
       accessToken: json.access_token,
       expiresAt: new Date(Date.now() + json.expires_in * 1000),
     };
   } catch (error) {
     log.error('Error refreshing token', { error: error instanceof Error ? error.message : error });
-    return null;
+    // Network/DNS failure: transient by construction.
+    return {
+      ok: false,
+      failure: { state: 'sync_failed', reason: 'Could not reach Google. Will retry.' },
+    };
   }
 }
 
@@ -102,22 +122,30 @@ export async function getValidAccessToken(credential: {
   // Need to refresh
   if (!credential.refreshToken) {
     log.error('No refresh token available');
+    await markCredentialFailure(credential.id, {
+      state: 'needs_reconnect',
+      reason: 'This account has no saved refresh token. Reconnect it to restore access.',
+    });
     return null;
   }
 
   log.info('Refreshing expired access token...');
   const refreshed = await refreshGoogleAccessToken(credential.refreshToken);
 
-  if (!refreshed) {
+  if (!refreshed.ok) {
+    await markCredentialFailure(credential.id, refreshed.failure);
     return null;
   }
 
-  // Update credential in database
+  // Update credential in database, clearing any prior failure: a successful
+  // refresh is the authoritative signal that the account is healthy again.
   await prisma.emailIntegrationCredential.update({
     where: { id: credential.id },
     data: {
       accessToken: refreshed.accessToken,
       expiresAt: refreshed.expiresAt,
+      state: 'connected',
+      lastErrorReason: null,
     },
   });
 
@@ -472,6 +500,11 @@ async function syncGmailForUser(
     },
   });
 
+  // A completed sync clears any prior failure. getValidAccessToken only clears
+  // it when it actually refreshed; a credential whose access token was still
+  // valid would otherwise stay marked failed from an earlier transient error.
+  await markCredentialHealthy(credential.id);
+
   log.info('Sync complete', {
     credentialEmail,
     newContacts: contactCount,
@@ -513,10 +546,23 @@ export async function runGmailSyncJob(): Promise<void> {
   let failCount = 0;
 
   for (const integration of dueIntegrations) {
-    const validCredentials = integration.emailCredentials.filter((c) => c.refreshToken);
+    // Skip credentials the user must re-consent to. Their refresh token is gone,
+    // so retrying is a guaranteed 400 from Google every cron tick -- pure noise
+    // that also kept the whole integration pinned to SYNC_FAILED and starved the
+    // healthy accounts sharing this row of a CONNECTED status.
+    const allCredentials = integration.emailCredentials.filter((c) => c.refreshToken);
+    const validCredentials = allCredentials.filter((c) => c.state !== 'needs_reconnect');
+    const needsReconnectCount = allCredentials.length - validCredentials.length;
+
+    if (needsReconnectCount > 0) {
+      log.info('Skipping credentials awaiting reconnection', {
+        integrationId: integration.id,
+        count: needsReconnectCount,
+      });
+    }
 
     if (validCredentials.length === 0) {
-      log.info('Skipping integration - no valid credentials', { integrationId: integration.id });
+      log.info('Skipping integration - no syncable credentials', { integrationId: integration.id });
       continue;
     }
 

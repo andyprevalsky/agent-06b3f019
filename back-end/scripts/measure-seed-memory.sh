@@ -35,9 +35,15 @@ TARGET_DB="victoria_seedmem_tgt_$$"
 # does not depend on outbound reachability to prod (all .env hosts were
 # TCP-closed on 2026-07-29 and every run died in ~4s).
 DUMP="$(ls -t ../.context/benchmarks/seed-cache/*.dump 2>/dev/null | head -1)"
-OUT_DIR="${SEED_MEM_OUT_DIR:-../.context/seed-mem}"
+# Default to a PID-scoped directory so two concurrent /deploy worktrees (or a
+# controller + worker both hitting Step 4r) cannot append into one shared
+# summary.txt and poison `len(peaks) != requested_runs` (observed: interleaved
+# run lines → "got 9" after five real cold seeds).
+OUT_DIR="${SEED_MEM_OUT_DIR:-../.context/seed-mem-$$}"
 mkdir -p "$OUT_DIR"
-SUMMARY="$OUT_DIR/summary.txt"
+# Per-PID summary so concurrent /deploy (or overlapping measure runs) cannot
+# interleave "run N: ok ..." lines into one file and fail the exact-count gate.
+SUMMARY="$OUT_DIR/summary-$$.txt"
 : > "$SUMMARY"
 
 if [ -n "$ENFORCE_BUDGET" ] && [ "$ENFORCE_BUDGET" != "--enforce-budget" ]; then
@@ -56,7 +62,10 @@ cleanup() {
     if $USE_SYSTEM_PG; then
         PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$TARGET_DB" >/dev/null 2>&1 || true
     else
-        docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+        # postgres declares /var/lib/postgresql/data as a VOLUME, so every
+        # throwaway container gets an anonymous volume. Remove it with the
+        # container or repeated cold runs leak gigabytes onto the deploy host.
+        docker rm -fv "$CONTAINER" >/dev/null 2>&1 || true
     fi
 }
 cleanup_all() {
@@ -64,7 +73,7 @@ cleanup_all() {
     if $USE_SYSTEM_PG; then
         PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$SRC_DB" >/dev/null 2>&1 || true
     else
-        docker rm -f "$SRC_CONTAINER" >/dev/null 2>&1 || true
+        docker rm -fv "$SRC_CONTAINER" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup_all EXIT INT TERM
@@ -116,7 +125,7 @@ if $USE_SYSTEM_PG; then
     [ "${SRC_ROWS:-0}" -gt 0 ] || { echo "❌ source restore produced no Cookie rows for seed user — measurement would be meaningless" | tee -a "$SUMMARY"; exit 1; }
     export SEED_REMOTE_DATABASE_URL="postgresql://postgres:postgres@localhost:5432/$SRC_DB"
 else
-    docker rm -f "$SRC_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -fv "$SRC_CONTAINER" >/dev/null 2>&1 || true
     if [ "$SRC_PORT_REQUESTED" = 0 ]; then
         SRC_PORT_MAPPING="127.0.0.1::5432"
     else
@@ -200,6 +209,10 @@ else
         fi
         echo "   pg_restore reported only role/extension noise (exit $SRC_RESTORE_STATUS)" | tee -a "$SUMMARY"
     fi
+    # The script intentionally started without errexit so each measured seed's
+    # status can be captured and reported below. The restore probe enables it
+    # only around its classifier; restore that original mode before measuring.
+    set +e
     # Cookie is the fidelity-critical table the gate fingerprints below. Canonical
     # base dumps can have empty MessageRecord (messages still live in Message), so
     # Cookie (for the seeded DEV user) is the durable "dump is non-empty" probe.

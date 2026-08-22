@@ -47,10 +47,9 @@ export function buildStoredRootCostTelemetry(
       const value = item as Record<string, unknown>;
       const next = {
         kind: stringValue(value.type, 'unknown'),
-        model: stringValue(
-          value.model,
-          CHAT_ONLY_TOOL_NAME_SET.has(row.toolName) ? 'zai-glm-4.7' : 'unknown'
-        ),
+        // Do not invent a billable model for model-less chat rows in archived
+        // telemetry — cutover-aware pricing belongs in live SQL (costRepo).
+        model: stringValue(value.model, 'unknown'),
         fromFastCache: value.from_fast_cache === true,
         tokensIn: finiteNumber(value.tokens_in),
         cacheReadInputTokens: finiteNumber(value.cache_read_input_tokens),

@@ -87,7 +87,7 @@ async function proxyLocationForAgent(agentId: string | null): Promise<ProxyGeoLo
 
 async function fingerprintUserAgent(userId: string): Promise<string | undefined> {
   const fingerprint = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
   });
   const fp = (fingerprint?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
   return hasValue(fp?.navigator?.userAgent) ? fp.navigator.userAgent : undefined;
