@@ -6,7 +6,7 @@ surface: agents
 component: spawn-browser-agent-v3
 classification: model-intelligence-limitation
 problem_class: model-intelligence-limitation
-first_bad_boundary: agents/providers/rose/browser_use.py Safety Rules — browser LLM calls send_message_to_user after one showWaiverCheck click instead of double-clicking showWaiverCheck and Accept like passing trajectories, triggering session_paused before request_payment_card
+first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py send_message_to_user handler — browser LLM called send_message_to_user after one showWaiverCheck click instead of double-clicking showWaiverCheck and Accept, triggering session_paused before request_payment_card (tool removed in 2f8b65bb2)
 symptoms:
   - 'Browser Session Paused'
   - 'I cannot sign a legal waiver on your behalf'
@@ -23,7 +23,7 @@ sources:
   - agent e61ae529-5f46-40db-b8d4-c2410a8415e4
   - fleet run 20260822_160440 (post scroll-index + checkout-as-guest prompt fix)
 repro: agents/tests/blackbox/benchmark.blackbox.py — test_alchemy_k5_waiver_pause_terminal_fails_payment_contract, test_alchemy_k5_write_lock_phone_call_fails_payment_contract, test_alchemy_k5_double_spawn_browser_exceeds_root_tool_count
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -90,20 +90,20 @@ cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py be
 
 ## Solution
 
-**Proposed (not yet implemented):** Clarify Momence/venue waiver handling in
-`agents/providers/rose/browser_use.py` Safety Rules:
-
-- After `showWaiverCheck`, click **Accept** to proceed when visible; do not call
-  `send_message_to_user` for canvas signature when Accept completes guest checkout
-  acknowledgment (same class as TOS checkboxes).
-- Optionally tighten `send_message_to_user` tool description with the same guard.
+**Implemented:** Removed `send_message_to_user` from the browser agent tool surface
+(commit `2f8b65bb2`). The browser can no longer hard-pause mid-checkout via
+`session_paused`; waiver handling now follows the same path as passing trajectories
+(double-click `showWaiverCheck`, click **Accept**, then `request_payment_card`).
+Root-agent `send_message_to_user` is unchanged.
 
 Root-agent recovery (do not spawn second browser or phone-call approval when browser
 paused mid-checkout with payment still pending) is a separate downstream hardening
-item; fixing the browser waiver path is the primary causal fix.
+item; removing the browser pause tool eliminates the waiver-pause failure mode.
 
-Outcome proof pending: unchanged `scripts/run-bench browser-alchemy-springs-sauna` ×5
-with 5/5 after prompt fix.
+**Outcome proof:** `bash scripts/run-bench --local browser-alchemy-springs-sauna` ×5
+→ **5/5** (run `20260822_164047`, `a1c859b5-90cb-4cad-8af2-13fe339966bd`, ports
+3201/3202). No `session_paused` or browser `send_message_to_user` in transcripts;
+all five reached `payment_approval` ($50.65).
 
 ## Human feedback
 
@@ -111,6 +111,7 @@ None recorded.
 
 ## Reusable lesson
 
-On Momence waiver checkout, double-click `showWaiverCheck` and click **Accept** —
-never pause with `send_message_to_user` for canvas signature when Accept is visible;
-treat waiver acknowledgment like a TOS checkbox, not a notarized signature.
+Do not expose `send_message_to_user` on the browser agent: it hard-pauses checkout
+and invites waiver/auth misclassification. On Momence waiver checkout, double-click
+`showWaiverCheck` and click **Accept** — treat waiver acknowledgment like a TOS
+checkbox, not a notarized signature.
