@@ -21,7 +21,11 @@ from urllib.parse import urlparse
 import structlog
 from PIL import Image
 
-from browser_tools.schemas import RequestPaymentCardBrowserTool, normalize_browser_wait_ms
+from browser_tools.schemas import (
+    RequestPaymentCardBrowserTool,
+    normalize_browser_wait_ms,
+    normalize_evaluate_timeout_seconds,
+)
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 from domains.spawn_browser_agent_v3.service_crypto import (
     PAYMENT_CARD_SECRET_REFS,
@@ -1019,20 +1023,39 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
+        timeout_s = normalize_evaluate_timeout_seconds(context.params.get("timeout"))
         fingerprint = _evaluate_code_fingerprint(code)
         logger.info(
             "Browser evaluate starting",
             session_id=context.session_id,
+            timeout_s=timeout_s,
             **fingerprint,
         )
         started = time_module.monotonic()
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         session_acquire_ms = round((time_module.monotonic() - started) * 1000)
         eval_started = time_module.monotonic()
-        result = await cdp_session.cdp_client.send.Runtime.evaluate(
-            params={"expression": code, "returnByValue": True, "awaitPromise": True},
-            session_id=cdp_session.session_id,
-        )
+        try:
+            result = await asyncio.wait_for(
+                cdp_session.cdp_client.send.Runtime.evaluate(
+                    params={"expression": code, "returnByValue": True, "awaitPromise": True},
+                    session_id=cdp_session.session_id,
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            eval_ms = round((time_module.monotonic() - eval_started) * 1000)
+            logger.warning(
+                "Browser evaluate timed out waiting for Runtime.evaluate",
+                session_id=context.session_id,
+                session_acquire_ms=session_acquire_ms,
+                eval_ms=eval_ms,
+                timeout_s=timeout_s,
+                **fingerprint,
+            )
+            # Propagate so the outer supervisor classify + hard-recover path
+            # runs instead of burning the full action budget on a wedged CDP.
+            raise
         eval_ms = round((time_module.monotonic() - eval_started) * 1000)
         value = result.get("result", {}).get("value")
         # CDP returns exceptionDetails when the expression throws; surface that
@@ -1050,6 +1073,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
                 session_id=context.session_id,
                 session_acquire_ms=session_acquire_ms,
                 eval_ms=eval_ms,
+                timeout_s=timeout_s,
                 error=error_text[:200],
                 **fingerprint,
             )
@@ -1057,7 +1081,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
                 dom_service=context.dom_service,
                 action="evaluate",
                 thinking=context.thinking,
-                params={"code": code},
+                params={"code": code, "timeout": timeout_s},
                 result={"success": False, "error": error_text},
             )
             return {"success": False, "error": error_text, "value": value}
@@ -1066,6 +1090,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             session_id=context.session_id,
             session_acquire_ms=session_acquire_ms,
             eval_ms=eval_ms,
+            timeout_s=timeout_s,
             cdp_session_id=getattr(cdp_session, "session_id", None),
             **fingerprint,
         )
@@ -1073,7 +1098,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
             dom_service=context.dom_service,
             action="evaluate",
             thinking=context.thinking,
-            params={"code": code},
+            params={"code": code, "timeout": timeout_s},
             result={"success": True, "value": value},
         )
         return {"success": True, "message": f"Executed JS, result: {value}", "value": value}

@@ -9743,6 +9743,92 @@ async def test_execute_action_evaluate():
     assert out["success"] is True
     assert out["value"] == 42
 
+
+def test_normalize_evaluate_timeout_seconds_default_and_clamp():
+    from browser_tools.schemas import (
+        EVALUATE_TIMEOUT_SECONDS_DEFAULT,
+        EVALUATE_TIMEOUT_SECONDS_MAX,
+        EvaluateTool,
+        normalize_evaluate_timeout_seconds,
+    )
+
+    assert normalize_evaluate_timeout_seconds(None) == EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    assert normalize_evaluate_timeout_seconds(30) == 30.0
+    assert normalize_evaluate_timeout_seconds(90) == EVALUATE_TIMEOUT_SECONDS_MAX
+    assert normalize_evaluate_timeout_seconds(0) == EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    assert normalize_evaluate_timeout_seconds(-5) == EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    # Schema rejects > max so the LLM gets a validation error, not a silent clamp.
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        EvaluateTool(tool="evaluate", code="1+1", timeout=90)
+    parsed = EvaluateTool(tool="evaluate", code="1+1", timeout=45)
+    assert parsed.timeout == 45.0
+    omitted = EvaluateTool(tool="evaluate", code="1+1")
+    assert omitted.timeout is None
+
+
+async def test_execute_action_evaluate_honors_llm_timeout():
+    """Hanging Runtime.evaluate fails at the LLM-set bound, not the 330s outer cap."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    async def _hang(*_args, **_kwargs):
+        await asyncio.Future()
+
+    dom = MagicMock()
+    session = MagicMock()
+    cdp = MagicMock()
+    cdp.session_id = "sid"
+    cdp.cdp_client.send.Runtime.evaluate = _hang
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
+    dom.session = session
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    t0 = time_module.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        await execute_action(
+            dom,
+            ah,
+            {"action": "evaluate", "params": {"code": "while(1){}", "timeout": 1}},
+        )
+    elapsed = time_module.monotonic() - t0
+    assert 0.8 <= elapsed < 5.0, f"expected ~1s LLM timeout, got {elapsed:.2f}s"
+
+
+async def test_execute_action_evaluate_default_timeout_bounds_hang():
+    """Omitting timeout still bounds hanging CDP evaluate (never unbounded)."""
+    from browser_tools.schemas import EVALUATE_TIMEOUT_SECONDS_DEFAULT
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    async def _hang(*_args, **_kwargs):
+        await asyncio.Future()
+
+    dom = MagicMock()
+    session = MagicMock()
+    cdp = MagicMock()
+    cdp.session_id = "sid"
+    cdp.cdp_client.send.Runtime.evaluate = _hang
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp)
+    dom.session = session
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    # Patch default down so the blackbox stays fast while still proving a bound exists.
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions.normalize_evaluate_timeout_seconds",
+        side_effect=lambda value, **_kw: 0.5 if value is None else float(value),
+    ):
+        t0 = time_module.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await execute_action(dom, ah, {"action": "evaluate", "params": {"code": "1+1"}})
+        elapsed = time_module.monotonic() - t0
+    assert 0.4 <= elapsed < 3.0, f"expected patched default bound, got {elapsed:.2f}s"
+    assert EVALUATE_TIMEOUT_SECONDS_DEFAULT <= 60.0
+
+
 async def test_execute_action_open_new_tab():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -17614,6 +17700,18 @@ async def run_all_tests():
         test_execute_action_select_dropdown_with_element,
     )
     await r.record_async("execute_action_evaluate", test_execute_action_evaluate)
+    r.record(
+        "normalize_evaluate_timeout_seconds_default_and_clamp",
+        test_normalize_evaluate_timeout_seconds_default_and_clamp,
+    )
+    await r.record_async(
+        "execute_action_evaluate_honors_llm_timeout",
+        test_execute_action_evaluate_honors_llm_timeout,
+    )
+    await r.record_async(
+        "execute_action_evaluate_default_timeout_bounds_hang",
+        test_execute_action_evaluate_default_timeout_bounds_hang,
+    )
     await r.record_async(
         "alchemy_evaluate_js_completes_on_healthy_canvas",
         test_alchemy_evaluate_js_completes_on_healthy_canvas,

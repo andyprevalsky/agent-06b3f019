@@ -7,6 +7,7 @@ INDEX-BASED APPROACH: Elements are referenced by their index in the DOM tree.
 The DOM tree is serialized with indices like [1] button "Submit", [2] input[type=text], etc.
 """
 
+import math
 from typing import Any, Dict, List, Literal, Optional, Type
 
 from pydantic import AliasChoices, BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
@@ -22,6 +23,11 @@ from utils.user_facing_writing_prompt import user_facing_text_description
 
 MAX_BROWSER_WAIT_MS = 60_000
 
+# Runtime.evaluate can hang forever on a frozen renderer (Momence Konva waiver).
+# Bound every evaluate; the LLM may raise the bound up to this cap.
+EVALUATE_TIMEOUT_SECONDS_DEFAULT = 15.0
+EVALUATE_TIMEOUT_SECONDS_MAX = 60.0
+
 
 def normalize_browser_wait_ms(value: Any, *, default: int = 1000) -> int:
     """Normalize raw LLM tool arguments before they reach any wait executor."""
@@ -30,6 +36,20 @@ def normalize_browser_wait_ms(value: Any, *, default: int = 1000) -> int:
         return min(MAX_BROWSER_WAIT_MS, max(0, int(float(candidate))))
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("wait time_ms must be numeric") from exc
+
+
+def normalize_evaluate_timeout_seconds(
+    value: Any, *, default: float = EVALUATE_TIMEOUT_SECONDS_DEFAULT
+) -> float:
+    """Normalize evaluate timeout seconds; omit → default, never above max."""
+    candidate = default if value is None else value
+    try:
+        timeout = float(candidate)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("evaluate timeout must be numeric") from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        return float(default)
+    return min(EVALUATE_TIMEOUT_SECONDS_MAX, timeout)
 
 
 # ============================================================================
@@ -153,6 +173,16 @@ class EvaluateTool(BaseModel):
 
     tool: Literal["evaluate"]
     code: str = Field(description="JavaScript code to execute. Returns the result of the expression.")
+    timeout: Optional[float] = Field(
+        default=None,
+        ge=0.1,
+        le=EVALUATE_TIMEOUT_SECONDS_MAX,
+        description=(
+            "Max seconds to wait for the expression (including awaited promises). "
+            f"Omit for the default ({EVALUATE_TIMEOUT_SECONDS_DEFAULT:g}s). "
+            f"Hard cap is {EVALUATE_TIMEOUT_SECONDS_MAX:g}s — do not set higher."
+        ),
+    )
 
 
 # ============================================================================
@@ -870,6 +900,11 @@ __all__ = [
     "SelectDropdownTool",
     # JavaScript
     "EvaluateTool",
+    "EVALUATE_TIMEOUT_SECONDS_DEFAULT",
+    "EVALUATE_TIMEOUT_SECONDS_MAX",
+    "normalize_evaluate_timeout_seconds",
+    "normalize_browser_wait_ms",
+    "MAX_BROWSER_WAIT_MS",
     # Navigation
     "GotoTool",
     "NavbackTool",

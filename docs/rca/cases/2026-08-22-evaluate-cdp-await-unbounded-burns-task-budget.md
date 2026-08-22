@@ -26,8 +26,8 @@ tags:
 sources:
   - agent 9fb21e4f-6693-472b-b625-e59597569c11
   - fleet run 20260822_041522_browser-alchemy-springs-sauna
-repro: none-recorded
-status: open
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_execute_action_evaluate_honors_llm_timeout
+status: fixed
 ---
 
 ## Problem
@@ -63,30 +63,28 @@ Critical path:
 4. Outer supervisor waits full 330s, then classify + hard recover (works).
 5. `goto_resume_url` reloads empty form; ~60s left → timeout, no payment.
 
-Local owning-boundary repro (hanging CDP evaluate under short outer wait_for):
-
-```bash
-python3 /opt/cursor/artifacts/evaluate_cdp_unbounded_repro.py
-```
-
-Measured: `PRE_FIX_FAIL: evaluate hung until outer wait_for (0.80s) — no inner CDP bound`.
+Owning-boundary blackbox: hanging CDP evaluate under
+`test_execute_action_evaluate_honors_llm_timeout` /
+`test_execute_action_evaluate_default_timeout_bounds_hang`.
 
 ## Solution
 
-Pending approval. Bound `Runtime.evaluate` with `asyncio.wait_for` (dedicated
-`EVALUATE_RUNTIME_TIMEOUT_SECONDS`, ≪ 330s, e.g. 45–60s). On timeout, let
-`TimeoutError` propagate so the existing outer classify + hard-recover path runs
-immediately. Cement blackbox: hanging evaluate fails/recovers within the inner
-bound. Do not raise the 900s task cap.
+LLM-settable `timeout` on `EvaluateTool` (seconds, max 60). Default **15s** when
+omitted. `service_actions` wraps `Runtime.evaluate` in `asyncio.wait_for` with
+`normalize_evaluate_timeout_seconds` (clamps >60 at runtime; schema `le=60`
+rejects invalid model output). On timeout, re-raise `TimeoutError` so the
+existing outer classify + hard-recover path runs immediately — without burning
+the full 330s action budget. Do **not** raise the 330s action or 900s task caps.
 
 10k-agent: O(1) timer per evaluate; no new fan-in.
 
 ## Human feedback
 
-None recorded.
+Approved with edit: make the bound an LLM-settable timeout, max 60s
+(`rca-evaluate-cdp-inner-timeout-20260822`).
 
 ## Reusable lesson
 
 Hard recover after a frozen evaluate is not enough if `Runtime.evaluate` itself
-is unbounded — bound the CDP await so classify+recycle can run before the task
-budget is gone.
+is unbounded — bound the CDP await (LLM-tunable, hard-capped) so
+classify+recycle can run before the task budget is gone.
