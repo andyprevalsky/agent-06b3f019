@@ -72,6 +72,61 @@ interface SteelCaptchaStatusLike {
   lastUpdated?: number;
 }
 
+const STEEL_SUCCESS_STATUSES = new Set(['solved']);
+const STEEL_FAILURE_STATUSES = new Set([
+  'failed_to_solve',
+  'validation_failed',
+  'failed_to_detect',
+]);
+
+/** Map Steel task status → Kernel-aligned terminal status (success|failure). */
+function normalizeSteelTaskStatus(status: string): 'success' | 'failure' | null {
+  const normalized = status.toLowerCase();
+  if (STEEL_SUCCESS_STATUSES.has(normalized)) return 'success';
+  if (STEEL_FAILURE_STATUSES.has(normalized)) return 'failure';
+  return null;
+}
+
+function steelTaskTimestampMs(task: Record<string, unknown>, pageLastUpdated?: number): number {
+  for (const key of ['solveTime', 'failureTime', 'lastUpdated', 'created'] as const) {
+    const value = task[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  }
+  return typeof pageLastUpdated === 'number' && Number.isFinite(pageLastUpdated)
+    ? pageLastUpdated
+    : 0;
+}
+
+/** Latest terminal Steel task across pages, normalized into CaptchaTerminalOutcome. */
+export function extractSteelLatestOutcome(
+  statuses: SteelCaptchaStatusLike[]
+): CaptchaTerminalOutcome | null {
+  let best: CaptchaTerminalOutcome | null = null;
+  let bestTs = -1;
+  for (const status of statuses) {
+    const host = telemetryHostname(status.url);
+    for (const raw of status.tasks) {
+      if (!isRecord(raw)) continue;
+      const taskStatus = typeof raw.status === 'string' ? raw.status : '';
+      const normalized = normalizeSteelTaskStatus(taskStatus);
+      if (normalized === null) continue;
+      const tsMs = steelTaskTimestampMs(raw, status.lastUpdated);
+      if (tsMs < bestTs) continue;
+      bestTs = tsMs;
+      best = {
+        status: normalized,
+        captchaType: typeof raw.type === 'string' ? raw.type : null,
+        durationMs: typeof raw.totalDuration === 'number' ? raw.totalDuration : null,
+        errorCode: typeof raw.error === 'string' ? raw.error : null,
+        websiteHost: host.length > 0 ? host : null,
+        // Steel timestamps are ms; Kernel uses micros — normalize to micros.
+        timestampMicros: tsMs > 0 ? tsMs * 1000 : null,
+      };
+    }
+  }
+  return best;
+}
+
 /** Kernel only records CAPTCHA outcomes when browser telemetry is explicit. */
 export function kernelCaptchaTelemetryConfig(): KernelCaptchaTelemetryConfig {
   return { enabled: true, browser: { captcha: { enabled: true } } };
@@ -126,6 +181,6 @@ export function summarizeSteelCaptchaStatus(
       0
     ),
     pages,
-    latestOutcome: null,
+    latestOutcome: extractSteelLatestOutcome(statuses),
   };
 }

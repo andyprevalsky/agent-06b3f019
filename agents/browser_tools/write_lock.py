@@ -213,6 +213,12 @@ PURCHASE_BUTTON_PHRASES = [
     "proceed to pay",
     "checkout now",
     "complete checkout",
+]
+
+# Return/refund confirmation phrases are a separate irreversible gate from purchase.
+# Bundling them under purchase forced purchase-shaped notification metadata that
+# return pages cannot satisfy (no PDP rating / product_url).
+RETURN_BUTTON_PHRASES = [
     "confirm your return",
     "confirm return",
     "complete return",
@@ -237,6 +243,58 @@ PURCHASE_CONSENT_PROSE_PATTERNS = [
 def normalize_write_lock_text(text: str) -> str:
     """Normalize text for write-lock phrase matching."""
     return re.sub(r"\s+", "", text or "").lower()
+
+
+_DOM_IDENTIFIER_SIGNAL = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def is_dom_identifier_write_lock_signal(signal: str) -> bool:
+    """Return True for CSS-like id/name tokens that are not user-visible labels.
+
+    Fandango checkout (2026-08-20 agent 1c3003ef): clicking the email sign-in
+    input ``#buynow-email-si`` joined the machine id into the write-lock signal.
+    After whitespace stripping, phrase ``buy now`` matched inside ``buynow-…``
+    and forced a purchase write lock before ``request_payment_card``.
+    """
+    text = (signal or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    if "-" not in text and "_" not in text:
+        return False
+    return bool(_DOM_IDENTIFIER_SIGNAL.fullmatch(text))
+
+
+_SUBMIT_INPUT_TYPES = frozenset({"submit", "button", "image"})
+
+
+def is_click_write_lock_eligible_control(element: Any) -> bool:
+    """Return whether a click target may raise a click write-lock approval.
+
+    Andy (2026-08-21): plain inputs never trigger click write locks — only
+    buttons / form submits. Payment-field typing stays on the separate
+    ``input_text`` path. Coordinate clicks (``element is None``) keep using
+    text heuristics.
+    """
+    if element is None:
+        return True
+
+    tag = str(
+        getattr(element, "tag_name", "") or getattr(element, "node_name", "") or ""
+    ).strip().lower()
+    # Missing / mock tags are not form-field exclusions.
+    if not tag or tag.startswith("<") or "magicmock" in tag:
+        return True
+
+    attrs = getattr(element, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+    input_type = str(attrs.get("type") or "").strip().lower()
+
+    if tag in {"textarea", "select", "option"}:
+        return False
+    if tag == "input":
+        return input_type in _SUBMIT_INPUT_TYPES
+    return True
 
 
 def is_social_domain(url: str) -> bool:
@@ -408,6 +466,11 @@ def is_purchase_button(element_text: str) -> bool:
     # exclusion only within the same signal that carries a purchase phrase so
     # "Terms of Service" in one signal cannot veto "Buy Now" in another.
     for signal in element_text.split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            logger.debug(
+                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label"
+            )
+            continue
         text_lower = normalize_write_lock_text(signal)
         if not text_lower:
             continue
@@ -425,6 +488,27 @@ def is_purchase_button(element_text: str) -> bool:
                 logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
                 return True
 
+    return False
+
+
+def is_return_button(element_text: str) -> bool:
+    """Check if element text indicates a return/refund confirmation control."""
+    if not element_text:
+        return False
+
+    for signal in element_text.split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            logger.debug(
+                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a return label"
+            )
+            continue
+        text_lower = normalize_write_lock_text(signal)
+        if not text_lower:
+            continue
+        for phrase in RETURN_BUTTON_PHRASES:
+            if normalize_write_lock_text(phrase) in text_lower:
+                logger.debug(f"Element text '{signal[:80]}' matched return pattern: {phrase}")
+                return True
     return False
 
 
@@ -548,7 +632,7 @@ def get_write_lock_approval_question(
     """Generate an approval question for a write lock violation.
 
     Args:
-        action_type: "payment", "purchase", "social_post", or "email_send"
+        action_type: "payment", "purchase", "return", "social_post", or "email_send"
         url: Current page URL
         element_text: Text of the element being interacted with
         field_description: Description of the field (for payment)
@@ -570,6 +654,14 @@ def get_write_lock_approval_question(
             f"**Purchase Detected**\n\n"
             f"{system_name} wants to place an order on **{domain}**.\n\n"
             f"**Button:** {element_text or 'Place order'}\n"
+            f"**Page:** {url}"
+        )
+    elif action_type == "return":
+        domain = urlparse(url).netloc if url else "unknown"
+        return (
+            f"**Return Detected**\n\n"
+            f"{system_name} wants to confirm a return on **{domain}**.\n\n"
+            f"**Button:** {element_text or 'Confirm return'}\n"
             f"**Page:** {url}"
         )
     elif action_type == "social_post":

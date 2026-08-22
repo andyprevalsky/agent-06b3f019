@@ -70,7 +70,8 @@ async function main(): Promise<void> {
   assert.deepEqual(cleared, ['purchase-1']);
 
   // A purchase that loses the atomic claim (already reserved by a concurrent settlement) is skipped
-  // and never charged.
+  // and never charged. When nothing is CLEARED yet, settlement must 404 — not fall through to the
+  // real Prisma CLEARED lookup (which under parallel coverage can see another suite's purchases).
   const skippedCharges: Array<Record<string, unknown>> = [];
   await assert.rejects(
     () =>
@@ -90,6 +91,7 @@ async function main(): Promise<void> {
               stripePaymentIntentId: 'pi_hold_race',
             },
           ],
+          findClearedPurchasesByTotal: async () => [],
           getCardPan: async () => '4242424242420640',
           claimHeldPurchaseForCharge: async () => false,
           testCharge: async (input) => {
@@ -189,10 +191,95 @@ async function main(): Promise<void> {
         },
         {
           findHeldPurchasesByTotal: async () => [],
+          findClearedPurchasesByTotal: async () => [],
         }
       ),
     (error: unknown) => error instanceof AgentCardSandboxSettlementError && error.statusCode === 404
   );
+
+  // REGRESSION (gate-subscription-card-mint-admin-bypass): after the first confirm CLEARs the
+  // purchase, a browser agent that loses the confirmation UI and re-clicks Pay must replay the
+  // settled result — never 404 into confirmTestPayment's raw-PAN Stripe fallthrough (PCI 500).
+  {
+    const replayCharges: Array<Record<string, unknown>> = [];
+    const replay = await settleAgentCardSandboxPayment(
+      {
+        cardNumber: '4242424242424412',
+        amountCents: 4396,
+        merchant: 'Rose Labs Test Payment',
+      },
+      {
+        findHeldPurchasesByTotal: async () => [],
+        findClearedPurchasesByTotal: async () => [
+          {
+            id: 'purchase-already-cleared',
+            userId: ADMIN_USER_ID,
+            agentId: 'agent-replay',
+            cardId: 'card-4412',
+            stripePaymentIntentId: null,
+          },
+        ],
+        getCardPan: async () => '4242424242424412',
+        claimHeldPurchaseForCharge: async () => {
+          throw new Error('CLEARED replay must not claim');
+        },
+        testCharge: async (input) => {
+          replayCharges.push(input);
+          return {};
+        },
+        markPurchaseCleared: async () => {
+          throw new Error('CLEARED replay must not clear again');
+        },
+      }
+    );
+    assert.deepEqual(replay, {
+      purchaseId: 'purchase-already-cleared',
+      cardId: 'card-4412',
+      stripePaymentIntentId: null,
+    });
+    assert.deepEqual(replayCharges, [], 'CLEARED replay must not re-charge');
+  }
+
+  // Lost HELD claim that a concurrent settler already CLEARED must still replay, not 404.
+  {
+    const concurrentReplay = await settleAgentCardSandboxPayment(
+      {
+        cardNumber: '4242424242420640',
+        amountCents: 4396,
+        merchant: 'Rose Labs Test Payment',
+      },
+      {
+        findHeldPurchasesByTotal: async () => [
+          {
+            id: 'purchase-race-cleared',
+            userId: 'user-1',
+            agentId: null,
+            cardId: 'card-race-cleared',
+            stripePaymentIntentId: 'pi_hold_race_cleared',
+          },
+        ],
+        findClearedPurchasesByTotal: async () => [
+          {
+            id: 'purchase-race-cleared',
+            userId: 'user-1',
+            agentId: null,
+            cardId: 'card-race-cleared',
+            stripePaymentIntentId: 'pi_hold_race_cleared',
+          },
+        ],
+        getCardPan: async () => '4242424242420640',
+        claimHeldPurchaseForCharge: async () => false,
+        testCharge: async () => {
+          throw new Error('lost claim must not charge');
+        },
+      }
+    );
+    assert.deepEqual(concurrentReplay, {
+      purchaseId: 'purchase-race-cleared',
+      cardId: 'card-race-cleared',
+      stripePaymentIntentId: 'pi_hold_race_cleared',
+    });
+  }
 
   await assert.rejects(
     () =>

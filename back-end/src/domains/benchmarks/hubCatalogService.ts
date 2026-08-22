@@ -1,19 +1,14 @@
 /**
- * Benchmark Hub catalog: SQL-backed task definitions (seeded from tasks.json,
- * DB wins after seeding), per-task attempt stats, and validated metadata edits.
+ * Benchmark Hub catalog: task definitions from tasks.json (git source of truth),
+ * per-task attempt stats, and read-only hub surface (no metadata edits).
  */
 
 import { z } from 'zod';
-import { readTaskAttempts } from './config';
+import { readTaskAttempts, tasksFileUpdatedAtIso } from './config';
+import { readCatalogTasks } from './catalog';
 import * as hubStore from '../../providers/benchmarkHubStore';
-import * as repo from './repo';
-import { refreshTasksFromDb } from './hubCatalogSeed';
 
-export {
-  seedBenchmarkTasks,
-  ensureBenchmarkTasksSeeded,
-  refreshTasksFromDb,
-} from './hubCatalogSeed';
+export { seedBenchmarkTasks, ensureBenchmarkTasksSeeded } from './hubCatalogSeed';
 
 export interface TaskStats {
   attempts: number;
@@ -133,7 +128,7 @@ function deriveTaskGroup(status: string | null, bench: string | null, tags: stri
 /**
  * The Benchmarks page groups off the stored `group` label (tasks.json →
  * definition.group). Derivation is only the fallback for tasks that carry no
- * explicit label (e.g. freshly hub-created rows before an export).
+ * explicit label.
  */
 function resolveTaskGroup(
   storedGroup: unknown,
@@ -164,50 +159,61 @@ export interface CatalogTask {
   stats: TaskStats | null;
 }
 
-function toCatalogTask(
-  row: Awaited<ReturnType<typeof repo.findAllTasks>>[number],
-  stats: Map<string, TaskStats>
-): CatalogTask {
-  const definition = (row.definition ?? {}) as Record<string, unknown>;
-  const env = (row.environment ?? {}) as Record<string, unknown>;
+function toCatalogTask(task: Record<string, unknown>, stats: Map<string, TaskStats>): CatalogTask {
+  const name = task.name as string;
+  const env = (task.environment ?? {}) as Record<string, unknown>;
+  const tags = Array.isArray(task.tags)
+    ? (task.tags as unknown[]).filter((t): t is string => typeof t === 'string')
+    : [];
+  const status = typeof task.status === 'string' ? task.status : null;
+  const bench = typeof task.bench === 'string' ? task.bench : null;
   const worldModelMode =
     typeof env.mode === 'string'
       ? env.mode
-      : typeof definition.world_model_mode === 'string'
-        ? definition.world_model_mode
+      : typeof task.world_model_mode === 'string'
+        ? task.world_model_mode
         : null;
   return {
-    name: row.name,
-    title: row.title,
+    name,
+    title: typeof task.title === 'string' ? task.title : null,
     description:
-      typeof definition.description === 'string' && definition.description !== ''
-        ? definition.description
-        : null,
-    prompt: row.prompt,
-    status: row.status,
-    bench: row.bench,
-    group: resolveTaskGroup(definition.group, row.status, row.bench, row.tags),
-    tags: row.tags,
-    timeout_seconds: row.timeoutSeconds,
-    price_limit_cents: row.priceLimitCents,
-    expected_tools: row.expectedTools,
-    min_agent_count: row.minAgentCount,
-    is_chat_mode: row.isChatMode,
+      typeof task.description === 'string' && task.description !== '' ? task.description : null,
+    prompt: task.prompt as string,
+    status,
+    bench,
+    group: resolveTaskGroup(task.group, status, bench, tags),
+    tags,
+    timeout_seconds: typeof task.timeout_seconds === 'number' ? task.timeout_seconds : null,
+    price_limit_cents: typeof task.price_limit_cents === 'number' ? task.price_limit_cents : null,
+    expected_tools: Array.isArray(task.expected_tools)
+      ? (task.expected_tools as unknown[]).filter((t): t is string => typeof t === 'string')
+      : [],
+    min_agent_count: typeof task.min_agent_count === 'number' ? task.min_agent_count : null,
+    is_chat_mode: task.is_chat_mode === true,
     world_model_mode: worldModelMode,
-    updated_at: row.updatedAt.toISOString(),
-    updated_by: row.updatedBy,
-    stats: stats.get(row.name) ?? null,
+    updated_at: tasksFileUpdatedAtIso(),
+    updated_by: null,
+    stats: stats.get(name) ?? null,
   };
 }
 
-/** The hub catalog: every task from the DB, joined with attempt stats. */
-export async function getCatalog(): Promise<CatalogTask[]> {
-  const [allRows, stats] = await Promise.all([repo.findAllTasks(), computeTaskStats()]);
-  // Retired tasks exist only for history integrity — invisible in the hub.
-  const rows = allRows.filter((row) => row.status !== 'retired');
-  return rows.map((row) => toCatalogTask(row, stats));
+/** Visible benchmark tasks from tasks.json (retired entries excluded). */
+function getVisibleFileTasks(): Record<string, unknown>[] {
+  return readCatalogTasks()
+    .filter((task) => (task as { status?: unknown }).status !== 'retired')
+    .map((task) => task as Record<string, unknown>);
 }
 
+/** The hub catalog: every task from tasks.json, joined with attempt stats. */
+export async function getCatalog(): Promise<CatalogTask[]> {
+  const [tasks, stats] = await Promise.all([
+    Promise.resolve(getVisibleFileTasks()),
+    computeTaskStats(),
+  ]);
+  return tasks.map((task) => toCatalogTask(task, stats));
+}
+
+/** Retained for route validation tests; hub task edits are disabled. */
 export const taskEditSchema = z
   .object({
     title: z.string().min(1).max(200).optional(),
@@ -228,76 +234,8 @@ export type TaskEdit = z.infer<typeof taskEditSchema>;
 
 export class TaskNotFoundError extends Error {}
 
-/**
- * Apply a validated metadata edit to a task: columns AND the stored
- * definition JSON stay in sync (the definition is what runners execute after
- * the poller exports the catalog back to tasks.json).
- */
-export async function patchTask(
-  name: string,
-  edit: TaskEdit,
-  editedBy: string
-): Promise<CatalogTask> {
-  const row = await repo.findTaskByName(name);
-  if (!row) throw new TaskNotFoundError(name);
-  const definition = { ...((row.definition ?? {}) as Record<string, unknown>) };
-  const data: repo.BenchmarkTaskUpdate = { updatedBy: editedBy };
-
-  if (edit.title !== undefined) {
-    data.title = edit.title;
-    definition.title = edit.title;
+export class TaskEditsDisabledError extends Error {
+  constructor() {
+    super('Benchmark task definitions are read-only; edit agents/benchmarks/tasks.json');
   }
-  if (edit.description !== undefined) {
-    // The catalog contract forbids empty descriptions — clearing removes the key.
-    if (edit.description === '') delete definition.description;
-    else definition.description = edit.description;
-  }
-  if (edit.prompt !== undefined) {
-    data.prompt = edit.prompt;
-    definition.prompt = edit.prompt;
-  }
-  if (edit.tags !== undefined) {
-    data.tags = edit.tags;
-    definition.tags = edit.tags;
-  }
-  if (edit.status !== undefined) {
-    data.status = edit.status;
-    if (edit.status === null) delete definition.status;
-    else definition.status = edit.status;
-  }
-  if (edit.bench !== undefined) {
-    data.bench = edit.bench;
-    definition.bench = edit.bench;
-  }
-  if (edit.timeout_seconds !== undefined) {
-    data.timeoutSeconds = edit.timeout_seconds;
-    definition.timeout_seconds = edit.timeout_seconds;
-  }
-  if (edit.price_limit_cents !== undefined) {
-    data.priceLimitCents = edit.price_limit_cents;
-    definition.price_limit_cents = edit.price_limit_cents;
-  }
-  if (edit.expected_tools !== undefined) {
-    data.expectedTools = edit.expected_tools;
-    definition.expected_tools = edit.expected_tools;
-  }
-  if (edit.min_agent_count !== undefined) {
-    data.minAgentCount = edit.min_agent_count;
-    if (edit.min_agent_count === null) delete definition.min_agent_count;
-    else definition.min_agent_count = edit.min_agent_count;
-  }
-  if (edit.is_chat_mode !== undefined) {
-    data.isChatMode = edit.is_chat_mode;
-    definition.is_chat_mode = edit.is_chat_mode;
-  }
-  data.definition = definition as repo.JsonInput;
-
-  await repo.updateTask(name, data);
-  await refreshTasksFromDb();
-  // Map the row directly rather than searching getCatalog(): an edit that sets
-  // status=retired removes the task from the catalog view, and the write must
-  // still return the updated task instead of a spurious not-found.
-  const [updated, stats] = await Promise.all([repo.findTaskByName(name), computeTaskStats()]);
-  if (!updated) throw new TaskNotFoundError(name);
-  return toCatalogTask(updated, stats);
 }

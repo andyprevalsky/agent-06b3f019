@@ -1590,7 +1590,7 @@
   {
     "name": "browser-doordash-usb-c-cable",
     "title": "DoorDash USB-C Cable Delivery",
-    "description": "Buy a constrained electronics item through rapid local retail delivery.",
+    "description": "Stage a constrained DoorDash electronics checkout and stop at the unresolved place-order write lock.",
     "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -1608,12 +1608,9 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kind_any_of": [
-      "payment_approval",
-      "write_lock"
-    ],
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1637,7 +1634,7 @@
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, delivery timing, and one auto-approved checkout boundary. The task may exercise guest checkout and does not require an injected cookie bundle.",
+      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and delivery timing. The runner treats the final place-order write lock as completion, leaves that request unresolved, and does not place the order. The task may exercise guest checkout and does not require an injected cookie bundle.",
       "live_cookie_domains": [
         "doordash.com"
       ]
@@ -1649,7 +1646,8 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved attention request"
+          "Exactly one final DoorDash place-order write lock is triggered and left unresolved",
+          "The approval request identifies a USB-C cable and its price"
         ],
         "checks": [
           {
@@ -1661,12 +1659,15 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "approval_request_count",
             "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "USB-C"
+            ],
+            "require_amount": true
           }
         ]
       },
@@ -1676,9 +1677,11 @@
         "criteria": [
           "The selected item is one USB-C to USB-C cable at least 6 feet long with at least 60W charging support",
           "The selected item costs no more than $30 before taxes and fees and is not an adapter, multi-pack, USB-A cable, or attached charger",
-          "The agent reaches the payment/write-lock or completed checkout with the earliest available delivery"
+          "Delivery is to the saved San Francisco address with a grounded delivery window from the write-lock or checkout transcript",
+          "The final Place order or Pay action triggers exactly one unresolved write_lock request",
+          "The order is not placed and no order confirmation is produced"
         ],
-        "judge_prompt": "Review product details, cart evidence, and attention requests. Pass only when every connector, length, wattage, quantity, price, exclusion, and delivery constraint is grounded in the transcript."
+        "judge_prompt": "Pass only when grounded evidence shows one USB-C to USB-C cable that is at least 6 feet long, supports at least 60W, costs no more than $30 before taxes and fees, excludes adapter/multi-pack/USB-A/attached-charger items, delivers to the saved San Francisco address with a delivery window, and stops at exactly one unresolved final DoorDash place-order write lock. The write-lock attention request itself is valid grounding for item, price, quantity, address, and delivery facts. Prefer the earliest available delivery when the transcript shows a choice, but do not fail solely because the write-lock shipping line does not literally say earliest. Fail for authentication assistance, payment-card approval, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1945,8 +1948,8 @@
   {
     "name": "browser-event-ticket",
     "title": "AMC Movie Ticket with Seat Selection",
-    "description": "Buy a time-slotted entertainment ticket that requires format and seat selection.",
-    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest standard-format, non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
+    "description": "Buy a time-slotted entertainment ticket that requires seat selection.",
+    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for next week's Friday. Choose a movie starting between 7:00 PM and 9:00 PM, select an available seat, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1997,7 +2000,7 @@
     },
     "success_on_payment_card_request": true,
     "expected_tool_counts": {
-      "spawn_agent": 1
+      "spawn_browser_agent": 1
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
@@ -2019,7 +2022,7 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue (AMC Metreon 16), next week's Friday, time window, price cap, and no-add-on constraints. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge. Semantic venue proof is soft: AMC Theatres checkout consistent with the Metreon goal is enough.",
       "live_cookie_domains": [
         "amctheatres.com"
       ]
@@ -2032,7 +2035,7 @@
           "No tool call fails",
           "Exactly one browser-agent session is used",
           "The run stops after exactly one unresolved payment-card approval on the grounded AMC Theatres checkout",
-          "The approval identifies AMC Metreon 16, the date, showtime, seat assignment, and total amount"
+          "The approval identifies the date, showtime, seat assignment, and total amount (venue may be grounded via Metreon theatre URL rather than approval text)"
         ],
         "checks": [
           {
@@ -2056,12 +2059,13 @@
         "id": "movie-ticket-seat-selection-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The pending payment approval is for one adult at AMC Metreon 16 this Friday for the earliest qualifying non-horror standard-format show between 7:00 PM and 9:00 PM",
-          "Grounded showtime and seat-map evidence shows the selected show is earliest and the selected available seat is closest to the horizontal and vertical center; the ticket price is under $30 before fees",
-          "No concessions, memberships, donations, or upgrades are added, and the single approval identifies the movie, venue, date, showtime, seat, and total amount",
+          "The pending payment approval is for one adult AMC ticket on next week's Friday for a show starting between 7:00 PM and 9:00 PM on amctheatres.com",
+          "Venue is satisfied by an AMC Theatres / amctheatres.com checkout consistent with the Metreon goal (spawn start_url, goal text, theatre URL, or page chrome may name Metreon; none of these is required if the approval is clearly AMC on amctheatres.com for that goal)",
+          "The selected seat is available and the ticket price is under $30 before fees",
+          "No concessions, memberships, donations, or upgrades are added, and the single approval identifies the movie, date, showtime, seat, and total amount",
           "The trajectory ends at exactly one unresolved payment approval grounded to amctheatres.com; the harness does not approve it, and a generic write-lock is not success"
         ],
-        "judge_prompt": "Review the full showtime, format, genre, seat-map, cart, browser, and pending payment evidence. Pass only if every selection and exclusion is grounded and one unresolved payment approval is tied to the AMC Theatres checkout. Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
+        "judge_prompt": "Review the showtime, cart, browser, and pending payment evidence. Pass only if the show is on next week's Friday in the 7:00 PM–9:00 PM window, the seat is available, the ticket is under $30 before fees, no add-ons were added, and one unresolved payment approval is tied to an AMC Theatres / amctheatres.com checkout. Do not force hard Metreon theatre proof: do not fail solely because browser page text lacks Metreon, because the approval merchant says AMC Theatres without Metreon, or because start_url/theatre URL evidence is missing when the run is otherwise a grounded AMC Metreon ticket purchase. Accept spawn start_url, goal text, or amc-metreon-16 URLs as optional supporting venue evidence when present. Do not require genre/non-horror filtering, earliest-showtime ranking, seat-map center geometry, or a specific projection format (standard/IMAX/Dolby/LASER/etc.). Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2110,13 +2114,13 @@
       ],
       "services": [
         "amctheatres.com",
-        "write_lock"
+        "request_payment_card"
       ],
       "secrets": [],
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase.",
+      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
       "live_cookie_domains": [
         "amctheatres.com"
       ]
@@ -2128,7 +2132,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
+          "The run stops after exactly one unresolved payment-card approval on the grounded AMC Theatres checkout",
           "The approval identifies AMC Metreon 16, the date, showtime, all three seat assignments, and total amount"
         ],
         "checks": [
@@ -2141,25 +2145,10 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "approval_request_count",
             "value": 1
           }
         ]
-      },
-      {
-        "id": "imax-group-ticket-adjacency-semantics",
-        "method": "single_turn_llm_judge",
-        "criteria": [
-          "The staged purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
-          "Grounded showtime and seat-map evidence shows the selected show is the earliest qualifying premium-format show remaining tonight and all 3 selected seats are available and directly adjacent in the same row",
-          "Each ticket price is under $35 before fees, and no concessions, memberships, donations, insurance, or upgrades are added",
-          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory stops at exactly one unresolved payment approval grounded to the AMC checkout"
-        ],
-        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are staged with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, and the run stops at exactly one unresolved payment approval that identifies the venue, date, showtime, all three seats, and total amount. Do not require or accept an approved charge or completed purchase. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2174,7 +2163,7 @@
   {
     "name": "browser-amazon-return",
     "title": "Amazon Return and Refund Initiation",
-    "description": "Exercise the post-purchase lifecycle by initiating a return with refund-method and drop-off constraints.",
+    "description": "Reach the Amazon return confirmation write lock with a grounded refund and drop-off approval request; leave it unresolved.",
     "prompt": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. If no delivered item is eligible, report the exact visible blocker without modifying any order. Otherwise, complete the return.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -2192,13 +2181,14 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kinds": [
-      "write_lock"
-    ],
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
+    },
+    "min_steps": {
+      "browser": 5
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
@@ -2222,7 +2212,7 @@
       "live_targets": [
         "https://www.amazon.com/gp/your-account/order-history"
       ],
-      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation.",
+      "context_notes": "Live Amazon order history with synced account authentication. Success is exactly one unresolved return write-lock approval that identifies the item, refund amount, original payment method, and drop-off. The runner leaves that request unresolved and does not submit the return.",
       "live_cookie_domains": [
         "amazon.com"
       ],
@@ -2237,8 +2227,8 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
-          "The approval identifies the return, original payment method, selected drop-off, and refund amount"
+          "Exactly one Amazon return write lock is triggered and left unresolved",
+          "The approval request identifies the return, refund amount, original payment method, and selected drop-off"
         ],
         "checks": [
           {
@@ -2250,25 +2240,28 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "approval_request_count",
             "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "return"
+            ],
+            "require_amount": true
           }
         ]
       },
       {
-        "id": "amazon-return-completion-semantics",
+        "id": "amazon-return-write-lock-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The agent chooses the most recent delivered eligible physical item and excludes digital content, groceries, gift cards, and final-sale items",
-          "The return uses the original payment method and the nearest free no-box/no-label drop-off when offered",
-          "The single approval identifies the specific item, refund amount, original payment method, and selected drop-off",
-          "The trajectory shows the return completed after approval and reaches a grounded return confirmation with the applicable drop-off instructions, QR code, or return authorization; a write-lock alone is not completion"
+          "The pending write-lock approval is for returning an eligible delivered physical item (not digital content, groceries, gift cards, or final-sale)",
+          "The approval identifies the specific item, refund amount, original payment method, and selected free no-box/no-label drop-off when offered",
+          "Exactly one unresolved return write_lock request is emitted",
+          "The harness does not approve the write lock, and the return is not submitted or confirmed"
         ],
-        "judge_prompt": "Review the full order-history, eligibility, refund, drop-off, browser, and attention evidence. Pass only if the most recent eligible item and all post-purchase constraints are grounded, the approval is complete, and the return reaches final confirmation after approval. No eligible order is a benchmark failure."
+        "judge_prompt": "Review the browser/tool trajectory and the pending write-lock approval. Pass only when grounded evidence shows exactly one unresolved Amazon return write-lock whose approval copy identifies the item, refund amount, original payment method, and drop-off (when a free no-box/no-label option was offered). Treat the pending approval payload as sufficient grounding for those fields — do NOT fail for missing order-history DOM dumps, screenshot OCR, or a separate 'nearest drop-off' comparison dump. Fail for authentication assistance, approval of the write lock, a submitted/confirmed return (RMA/confirmation page after approval), or an approval missing item/amount/payment method/drop-off."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2377,7 +2370,8 @@
   },
   {
     "name": "minted-agent-accounts-x",
-    "title": "Minted Agent Accounts X",
+    "title": "Live X Hello World Write Lock",
+    "description": "Post Hello World on X using live synced browser auth and grade exactly one social-post write lock.",
     "prompt": "Make a post on X.com that says, Hello World",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
@@ -2393,10 +2387,76 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "write_lock",
+    "min_steps": {
+      "browser": 5
+    },
     "start_phase": "execute",
     "bench": "pipeline-e2e",
-    "group": "daily"
+    "group": "daily",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "x.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://x.com"
+      ],
+      "context_notes": "Live X via synced-prod browser auth. Reuses the signed-in CookieBundle; grades exactly one social-post write lock whose notification covers Hello World / X / Public / destination. Does not require MintedAccount creation or phone-auth grading.",
+      "live_cookie_domains": [
+        "x.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "x.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "minted-x-write-lock-contract",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one write_lock approval is triggered for the X post",
+          "The write-lock notification identifies Hello World, X, Public audience, and the destination account"
+        ],
+        "checks": [
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Hello World",
+              "Public",
+              "x.com",
+              "on X"
+            ]
+          }
+        ]
+      },
+      {
+        "id": "minted-x-notification-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Exactly one write_lock request is raised for posting Hello World on X",
+          "The writeLockNotification is a social_post with body Hello World, Public audience, service X/x.com, and a destination on X",
+          "The trajectory reuses live signed-in X auth rather than creating a MintedAccount"
+        ],
+        "judge_prompt": "Pass only when browser/tool evidence shows exactly one social-post write lock for posting Hello World publicly on X, the notification names X/x.com plus a destination on X, and the agent used an already signed-in session. Fail if MintedAccount signup or phone-auth recovery is required for success, if zero or multiple write locks fire, or if the notification body/audience/service/destination is wrong."
+      }
+    ],
+    "enforce_declared_evaluators": true
   },
   {
     "name": "browser-indeed-account-create",
@@ -2634,7 +2694,7 @@
   {
     "name": "agent-payment-test-shop",
     "title": "Agent Payment Test Shop",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. The checkout merchant is Rose Labs Test Payment. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -4851,5 +4911,78 @@
     "source": [
       "prod SMS thread +19729777432 2026-07-27T20:50Z; local bench run 2026-07-28 where the supervisor reported the closure and spawned an ordering agent anyway"
     ]
+  },
+  {
+    "name": "browser-agent-amazon-mx-buy-under-5-usd",
+    "title": "Amazon Mexico Sub-$5 Purchase (Tamara)",
+    "description": "Replays prod agent e36c8759 verbatim: an open-ended sub-$5 Amazon purchase for the Mexico-based user, which routed to amazon.com.mx and wedged behind Chrome's native 'No passkeys available' modal on /ap/signin.",
+    "prompt": "Buy me something for < 5$ from amazon, u pick",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "purchase",
+      "passkey"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_browser_provider": "kernel",
+    "browser_auth_realm": "amazon.com.mx",
+    "start_phase": "plan",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live-tamy-identity"
+      ],
+      "services": [
+        "amazon.com.mx",
+        "kernel"
+      ],
+      "secrets": [
+        "amazon_passkey"
+      ],
+      "live_targets": [
+        "https://www.amazon.com.mx"
+      ],
+      "context_notes": "Runs as Tamy's Mexico-based production identity. The live-tamy-identity fixture is a complete live overlay: it seeds her User row and refreshes her current browser context, profiles, cookies/storage, passwords, passkeys, CookieBundles, and Steel session markers for amazon.com.mx and amazon.com, while also refreshing shared compute tokens. The base image predates her account, so without this fixture browser-session init fails on AgentIdentity_userId_fkey before an agent exists. The regression under test is browser-process UI: Chrome can raise a native passkey chooser even while target-scoped virtual-authenticator readback is healthy, so the harness must retain a provider-level input path that can dismiss it.",
+      "live_cookie_domains": [
+        "amazon.com.mx",
+        "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com.mx",
+        "amazon.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "amazon-mx-purchase-not-wedged-on-native-ui",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The browser agent reached an authenticated amazon.com.mx state",
+          "The run did not end in request_user_assistance_for_authentication",
+          "The transcript shows no repeated no-op retyping of the password on /ap/signin",
+          "An order under US$5 was placed, or a specific non-authentication blocker is reported"
+        ],
+        "judge_prompt": "You are grading a browser agent that was asked to buy any item under US$5 from Amazon for a Mexico-based user. The known regression is that the agent reaches https://www.amazon.com.mx/ap/signin, triggers a WebAuthn ceremony, and wedges behind Chrome's native 'No passkeys available' modal: it then repeats clicks, Enter presses and password retypes that never reach the page, and finally emits request_user_assistance_for_authentication.\n\nPASS only if BOTH hold:\n1. The agent got past Amazon sign-in — the transcript shows an authenticated amazon.com.mx state (account greeting, cart, or checkout), OR the passkey/password sign-in visibly succeeded.\n2. The run did NOT end by asking the user for authentication assistance, and does NOT contain a stretch of three or more consecutive interactions with the sign-in form that produce no page-state change.\n\nIf sign-in succeeded but the order was blocked for an unrelated, clearly reported reason (item unavailable, price above US$5, payment declined, shipping restriction), still PASS and say so. FAIL if the agent never authenticated, or wedged on the native passkey modal, or asked the user to sign in."
+      }
+    ],
+    "source": [
+      "agent e36c8759-bc6b-473a-a817-5b9c3a804acf",
+      "rca:2026-08-19-browser-native-ui-observable-but-not-actionable"
+    ],
+    "status": "ready",
+    "bench": "rose-bench",
+    "group": "rose-bench",
+    "runner": "agent"
   }
 ]

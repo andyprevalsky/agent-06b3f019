@@ -1919,7 +1919,6 @@ if [ "$MODE" = "refresh-wmh" ]; then
         exit 1
     fi
     warm_source_fetch_ref "$mid" "$EXPECTED_WMH_REF" || exit 1
-
     echo ""
     echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
     # Decode secrets into the checkout .env, mirror deps if needed, then run the
@@ -2638,7 +2637,9 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # dashboard mirror. Use a separate report-only URL so dashboard deep links can
     # still point at the local mirror without poisoning {frontend_url}.
     _envargs+=(--env "BENCHMARK_FRONTEND_URL=")
-    [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_REPORT_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
+    # Report-card / RCA agent links must outlive the ephemeral dashboard mirror.
+    # Always-on prod viewer rehydrates archived runs via findAgentAcrossRuns.
+    [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_REPORT_FRONTEND_URL=https://roselabs.ai" )
     # The boot script lives on the /data volume (staged into the snapshot). flyctl
     # --command word-splits, so only a simple `bash <path>` works (an inline shell
     # pipeline is lost) — hence a staged file, not an inline base64 command.
@@ -2839,9 +2840,9 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export BENCHMARK_VM_USD_PER_HOUR=$(printf '%q' "$VM_USD_PER_HOUR")"
     echo "unset BENCHMARK_FRONTEND_URL"
     if [ "$DASHBOARD" = "1" ]; then
-        # Carries the agent-id into the report card; the local mirror rewrites the
-        # host to the dashboard's /open-agent redirect, so the value is only a base.
-        echo "export BENCHMARK_REPORT_FRONTEND_URL=$(printf '%q' "http://localhost:$LOCAL_DASH_PORT")"
+        # Persistent FE deep links for report cards / RCA evidence. The local
+        # dashboard mirror is for live monitoring only and dies with the stack.
+        echo "export BENCHMARK_REPORT_FRONTEND_URL=$(printf '%q' "https://roselabs.ai")"
     else
         echo "unset BENCHMARK_REPORT_FRONTEND_URL"
     fi

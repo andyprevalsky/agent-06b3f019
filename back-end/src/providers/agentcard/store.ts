@@ -140,16 +140,63 @@ export async function saveOrgOnboardingConfig(
   await repo.saveIntegrationConfig(userId, config, false);
 }
 
-export async function saveOrgCardholderId(userId: string, cardholderId: string): Promise<void> {
-  const existing = configRecord(await repo.findTokenConfig(userId));
-  delete existing.onboardingSessionId;
-  delete existing.onboardingSetupUrl;
-  delete existing.onboardingExpiresAt;
-  await repo.saveIntegrationConfig(
+export class AgentCardCardholderConflictError extends Error {
+  readonly cardholderId: string;
+  readonly ownerUserId: string;
+
+  constructor(cardholderId: string, ownerUserId: string, userId: string) {
+    super(
+      `AgentCard cardholder ${cardholderId} is already bound to user ${ownerUserId}; ` +
+        `refusing to also bind it to ${userId}`
+    );
+    this.name = 'AgentCardCardholderConflictError';
+    this.cardholderId = cardholderId;
+    this.ownerUserId = ownerUserId;
+  }
+}
+
+/**
+ * Bind a user to an org-managed cardholder, enforcing 1 user : 1 cardholder : 1 wallet.
+ *
+ * A cardholder owns a funding wallet and issues MANY cards from it (one per purchase). Binding a
+ * second user to the same cardholder makes those users share one wallet and spend each other's
+ * funds. That is exactly how a benchmark fixture user ended up bound to a live cardholder in
+ * prod, so this refuses rather than silently overwriting.
+ */
+export interface SaveOrgCardholderDeps {
+  bindCardholderExclusively: (
+    userId: string,
+    cardholderId: string,
+    buildConfig: (existing: unknown | undefined) => Prisma.InputJsonObject
+  ) => Promise<{ conflictingUserId?: string }>;
+}
+
+/**
+ * The ownership check and the write happen inside ONE advisory-locked transaction
+ * (`repo.bindCardholderExclusively`). Doing the check here and the write separately would let two
+ * concurrent calls for different users both see "unowned" and both bind — the exact commingled
+ * wallet this guard exists to prevent, and one no unique index can catch afterwards because the
+ * binding lives in a JSON column.
+ */
+export async function saveOrgCardholderId(
+  userId: string,
+  cardholderId: string,
+  deps: SaveOrgCardholderDeps = repo
+): Promise<void> {
+  const { conflictingUserId } = await deps.bindCardholderExclusively(
     userId,
-    { ...existing, orgManaged: true, cardholderId } as Prisma.InputJsonObject,
-    true
+    cardholderId,
+    (existing) => {
+      const config = configRecord(existing);
+      delete config.onboardingSessionId;
+      delete config.onboardingSetupUrl;
+      delete config.onboardingExpiresAt;
+      return { ...config, orgManaged: true, cardholderId } as Prisma.InputJsonObject;
+    }
   );
+  if (conflictingUserId !== undefined) {
+    throw new AgentCardCardholderConflictError(cardholderId, conflictingUserId, userId);
+  }
 }
 
 export async function clearUserToken(userId: string): Promise<void> {

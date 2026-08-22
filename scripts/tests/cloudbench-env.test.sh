@@ -658,6 +658,11 @@ fi
 
 # Warm-source fleet gate: transitional donor states must wait for stopped, not
 # abort (observed: state=started / replacing → immediate fleet INFRA fail).
+printf 'started\nreplacing\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-0 3 0 ||
+  fail "warm source wait must tolerate started→replacing→stopped"
+[ ! -s "$machine_states" ] || fail "started→replacing→stopped wait must consume the sequence"
+
 printf 'replacing\nstopping\nstopped\n' > "$machine_states"
 cloudbench_wait_machine_stopped read_machine_state warm-1 5 0 ||
   fail "warm source wait must tolerate replacing→stopping→stopped"
@@ -824,8 +829,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   "refresh-deps SSH sync must use cloudbench-fetch-ref.sh with a controller token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' \
-  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"
-require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
@@ -1586,7 +1590,6 @@ if elapsed > 8 or elapsed < 1.5:
     raise SystemExit(f"_with_timeout wall {elapsed:.1f}s not ~2s")
 print("ssh_exec controller-side timeout contract ok")
 PY
-
 # An unprovisioned worktree (plain `git worktree add`, no credentials copied)
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
@@ -1679,6 +1682,17 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'return "$sync_rc"' \
   "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
+
+# Branch collateral (image-handling I-01): stripped PATH must fail closed.
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'npx not found on PATH; cannot verify the cloud-guest seed dump' \
+  "fleet seed-dump probe must fail closed with a clear npx PATH error"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '.nvm/versions/node' \
+  "fleet seed-dump probe must restore nvm npx onto PATH when stripped"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'Never stop the warm machine ourselves' \
+  "fleet must wait for warm stop without stopping a sibling-owned warm source"
 
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
 # (cloudbench-multi scenario 14) and cement ordering vs the production-only

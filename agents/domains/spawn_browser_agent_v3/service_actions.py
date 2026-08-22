@@ -9,8 +9,10 @@ import asyncio
 import base64
 import hashlib
 import inspect
+import ipaddress
 import json
 import re
+import socket
 import time as time_module
 from contextlib import suppress
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
+import httpx
 import structlog
 from PIL import Image
 
@@ -44,6 +47,14 @@ logger = structlog.get_logger()
 
 STEEL_COMPUTER_SCREENSHOT_WIDTH = 1288
 STEEL_COMPUTER_SCREENSHOT_HEIGHT = 891
+# Actions after which a page can start a WebAuthn ceremony: focusing or typing
+# into an account field triggers conditional UI, clicking activates a
+# "sign in with a passkey" control, and a navigation can land straight on a
+# sign-in page that invokes WebAuthn on load.
+_CEREMONY_CAPABLE_ACTIONS = frozenset(
+    {"click", "input_text", "press_key", "goto", "navback", "switch_tab", "open_new_tab"}
+)
+
 STEEL_VIEWPORT_CROP_X = 4
 STEEL_VIEWPORT_CROP_Y = 87
 STEEL_VIEWPORT_CROP_WIDTH = 1283
@@ -72,6 +83,11 @@ _API_SURFACE_PATHS = frozenset(
         "/ping",
     }
 )
+_NUMERIC_IPV4_HOST_RE = re.compile(
+    r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
+    re.IGNORECASE,
+)
+_PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES = frozenset({400, 401, 403, 404})
 
 
 def url_looks_like_api_surface(url: str) -> bool:
@@ -94,6 +110,30 @@ def url_looks_like_api_surface(url: str) -> bool:
     if path in {"/v1", "/v2", "/v3", "/v4"}:
         return True
     return False
+
+
+def _kernel_computer_key(key: str) -> str:
+    """Translate Playwright-style key names to Kernel/xdotool key symbols."""
+    aliases = {
+        "control": "Ctrl",
+        "ctrl": "Ctrl",
+        "meta": "Super",
+        "command": "Super",
+        "cmd": "Super",
+        "enter": "Return",
+        "arrowup": "Up",
+        "arrowdown": "Down",
+        "arrowleft": "Left",
+        "arrowright": "Right",
+        "backspace": "BackSpace",
+        "del": "Delete",
+        "pageup": "Prior",
+        "pagedown": "Next",
+        "tab": "Tab",
+        "escape": "Escape",
+        "esc": "Escape",
+    }
+    return "+".join(aliases.get(part.strip().lower(), part.strip()) for part in key.split("+"))
 
 
 # ========================================
@@ -201,6 +241,90 @@ def get_domain_from_url(url: str) -> str:
         return domain
     except Exception:
         return ""
+
+
+_BLANK_SPA_MOUNT_DIAGNOSTICS_JS = """() => {
+    const scripts = Array.from(document.scripts).map((el) => ({
+        type: el.type || '',
+        src: el.src || '',
+        async: !!el.async,
+        defer: !!el.defer,
+        hasContent: !!(el.textContent || '').trim(),
+    }));
+    const preloads = Array.from(document.querySelectorAll('link[rel="preload"]')).map((el) => ({
+        as: el.getAttribute('as') || '',
+        href: el.href || '',
+    }));
+    const resources = (performance.getEntriesByType('resource') || []).map((entry) => ({
+        name: entry.name,
+        initiatorType: entry.initiatorType,
+        transferSize: entry.transferSize,
+        encodedBodySize: entry.encodedBodySize,
+        durationMs: Math.round(entry.duration),
+        responseEndMs: Math.round(entry.responseEnd),
+    }));
+    const scriptResources = resources.filter(
+        (entry) =>
+            entry.initiatorType === 'script' ||
+            /\\.(m?js)(\\?|$)/i.test(entry.name) ||
+            entry.name.includes('/src/main.') ||
+            entry.name.includes('/@vite/') ||
+            entry.name.includes('/node_modules/'),
+    );
+    const preloadResources = resources.filter((entry) =>
+        preloads.some((preload) => preload.href && entry.name.startsWith(preload.href.split('?')[0])),
+    );
+    const mainScript = scripts.find((script) => script.src.includes('/src/main.')) || null;
+    const mainResource =
+        scriptResources.find((entry) => entry.name.includes('/src/main.')) ||
+        resources.find((entry) => entry.name.includes('/src/main.')) ||
+        null;
+    return {
+        href: location.href,
+        readyState: document.readyState,
+        rootChildren: (document.getElementById('root') || {}).children
+            ? document.getElementById('root').children.length
+            : -1,
+        scriptCount: scripts.length,
+        scripts,
+        preloadCount: preloads.length,
+        preloads,
+        resourceCount: resources.length,
+        scriptResourceCount: scriptResources.length,
+        scriptResources: scriptResources.slice(0, 40),
+        preloadResources: preloadResources.slice(0, 20),
+        mainScript,
+        mainResource,
+        largestPreloadBytes: preloadResources.reduce(
+            (max, entry) => Math.max(max, entry.transferSize || entry.encodedBodySize || 0),
+            0,
+        ),
+    };
+}"""
+
+
+async def _diagnose_blank_spa_mount(page: Any, *, url: str, phase: str) -> Dict[str, Any]:
+    """Capture script/preload/performance evidence when a SPA shell stays empty."""
+    evaluate = getattr(page, "evaluate", None)
+    if not evaluate:
+        return {"phase": phase, "url": url, "reason": "no_page_evaluate"}
+    try:
+        result = evaluate(_BLANK_SPA_MOUNT_DIAGNOSTICS_JS)
+        if inspect.isawaitable(result):
+            result = await result
+        if isinstance(result, str):
+            with suppress(Exception):
+                result = json.loads(result)
+        diagnostics = result if isinstance(result, dict) else {"raw": result}
+    except Exception as exc:
+        diagnostics = {"phase": phase, "url": url, "error": str(exc)}
+    logger.warning(
+        "Blank SPA mount diagnostics",
+        url=url,
+        phase=phase,
+        diagnostics=diagnostics,
+    )
+    return diagnostics
 
 
 async def _wait_for_navigation_content(page: Any, deadline: float) -> Dict[str, Any]:
@@ -312,6 +436,7 @@ async def wait_for_navigation_ready(
         logger.warning("Navigation stayed on an empty loading document; reloading once", url=url, state=state)
     else:
         logger.warning("Navigation produced blank SPA shell; reloading once", url=url, state=state)
+        await _diagnose_blank_spa_mount(page, url=url, phase="before_reload")
     try:
         goto = getattr(page, "goto", None)
         reload_page = getattr(page, "reload", None)
@@ -330,6 +455,9 @@ async def wait_for_navigation_ready(
     second = await _wait_for_navigation_content(page, time_module.monotonic() + timeout_seconds)
     if not second.get("ready"):
         logger.warning("Page still lacked usable content after reload", url=url, state=second.get("state"))
+        second_state = second.get("state") if isinstance(second.get("state"), dict) else {}
+        if second_state.get("blankSpaShell") or stuck_loading_shell:
+            await _diagnose_blank_spa_mount(page, url=url, phase="after_reload")
     return second
 
 
@@ -519,6 +647,7 @@ class _ActionContext:
     element: Any
     available_file_paths: Optional[Dict[str, str]]
     session_id: Optional[str]
+    user_id: str
     config: Any
     humanizer: Optional[BrowserHumanizer]
     secret_refs: Optional[Dict[str, str]]
@@ -552,20 +681,61 @@ async def _refuse_navigation(
     return result
 
 
+def _non_public_navigation_reason(url: str) -> Optional[str]:
+    """Explain why a URL is not safe for browser navigation, if applicable."""
+    if url == "about:blank":
+        return None
+
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return "the URL is malformed"
+
+    if parsed.scheme not in {"http", "https"}:
+        return "only public HTTP(S) pages may be opened"
+    if not host:
+        return "the URL has no hostname"
+
+    normalized_host = host.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        return "localhost pages are not allowed"
+
+    address = None
+    try:
+        address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        # inet_aton recognizes legacy numeric IPv4 forms such as 127.1,
+        # 2130706433, and 0x7f000001 that urlparse leaves looking like names.
+        if _NUMERIC_IPV4_HOST_RE.fullmatch(normalized_host):
+            try:
+                address = ipaddress.ip_address(socket.inet_aton(normalized_host))
+            except (OSError, ValueError):
+                return "the numeric hostname is malformed"
+
+    if address is not None and not address.is_global:
+        return f"the destination address {address} is not public"
+    return None
+
+
 def _navigation_guard_error(
     context: _ActionContext,
     *,
     action: str,
     target_url: Optional[str] = None,
 ) -> Optional[str]:
-    """Refuse navigation to API/non-document URL shapes only.
+    """Refuse non-public destinations and API/non-document URL shapes.
 
     Host pinning (recovery / cross-origin handoff) was removed: it trapped
     legitimate merchant → third-party order flows (e.g. bluebottlecoffee.com →
     order.online) after challenge recovery on the merchant host.
     """
-    del action  # kept for call-site stability
-    if target_url and url_looks_like_api_surface(target_url):
+    navigation_url = _normalize_goto_url(target_url) if action == "goto" else target_url
+    if target_url:
+        unsafe_reason = _non_public_navigation_reason(navigation_url or target_url)
+        if unsafe_reason:
+            return f"Refusing unsafe navigation to {target_url!r}: {unsafe_reason}."
+    if navigation_url and url_looks_like_api_surface(navigation_url):
         return (
             f"Refusing navigation to API/non-document URL {target_url!r}. "
             "Network request hosts are not pages — stay on the current document "
@@ -579,6 +749,19 @@ def _normalize_scroll_index(index: Optional[int]) -> Optional[int]:
     if index == 0:
         return None
     return index
+
+
+_EXPLICIT_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_BARE_HOST_PORT_RE = re.compile(r"^(?:\[[^\]]+\]|[A-Za-z0-9.-]+):[0-9]+(?:[/?#]|$)")
+
+
+def _normalize_goto_url(url: Optional[str]) -> Optional[str]:
+    """Add HTTPS to bare hosts while preserving explicit schemes for rejection."""
+    if not url or url.startswith(("http://", "https://", "about:", "file:")):
+        return url
+    if _EXPLICIT_URL_SCHEME_RE.match(url) and not _BARE_HOST_PORT_RE.match(url):
+        return url
+    return f"https://{url}"
 
 
 _INTERACTION_ACTIONS = {
@@ -738,7 +921,35 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
-        if context.humanizer:
+        provider_pressed = False
+        if context.config is not None and context.session_id and context.user_id.strip():
+            from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
+
+            # Fall back only when the provider reports unsupported input or the
+            # backend explicitly rejects the request before provider execution.
+            # A timeout, transport error, or 5xx is ambiguous: the key may already
+            # have executed, and replaying Enter through CDP could submit twice.
+            try:
+                provider_pressed = await press_browser_computer_key(
+                    context.config,
+                    context.session_id,
+                    context.user_id,
+                    _kernel_computer_key(str(key)),
+                )
+            except httpx.HTTPStatusError as error:
+                if (
+                    error.response.status_code
+                    not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES
+                ):
+                    raise
+                logger.info(
+                    "Provider computer input rejected before execution; falling back",
+                    key=key,
+                    status=error.response.status_code,
+                )
+        if provider_pressed:
+            logger.info("Pressed key through provider computer input", key=key)
+        elif context.humanizer:
             await context.humanizer.press_key(key)
         else:
             logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
@@ -1205,6 +1416,16 @@ async def execute_action(
             index = params.get("index")
         index = _normalize_scroll_index(index)
 
+    # Anything that can make a relying party call navigator.credentials.get must
+    # run against a target whose native WebAuthn UI is suppressed and whose
+    # virtual authenticator holds our passkeys. Chrome scopes both per target, so
+    # arming at connect (or at step start) strands them the moment the agent
+    # follows a link into a new tab — which is how a real run ended up wedged
+    # behind Chrome's own "No passkeys available" modal, a surface no CDP input
+    # can reach. Arming here is idempotent and costs one round trip.
+    if action_name in _CEREMONY_CAPABLE_ACTIONS:
+        await dom_service.ensure_browser_overlays_suppressed()
+
     try:
         element = None
         if index is not None:
@@ -1224,6 +1445,7 @@ async def execute_action(
             element=element,
             available_file_paths=available_file_paths,
             session_id=session_id,
+            user_id=user_id,
             config=config,
             humanizer=humanizer,
             secret_refs=secret_refs,
@@ -1893,6 +2115,82 @@ async def _resolve_payment_ref_coordinates(
     return None
 
 
+_PASSWORD_FIELD_LOCATE_JS = """
+(hint) => {
+    const candidates = Array.from(document.querySelectorAll(
+        'input[type="password"], input[name="password"], input[autocomplete="current-password"], input[autocomplete="new-password"]'
+    ));
+    const matchesHint = (el) => {
+        if (!hint || typeof hint !== 'object') return false;
+        for (const attr of ['id', 'name', 'autocomplete']) {
+            const want = hint[attr];
+            if (want && el.getAttribute(attr) === want) return true;
+        }
+        return false;
+    };
+    const ordered = hint
+        ? [...candidates.filter(matchesHint), ...candidates.filter((el) => !matchesHint(el))]
+        : candidates;
+    for (const el of ordered) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            continue;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) continue;
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const after = el.getBoundingClientRect();
+        if (after.width < 2 || after.height < 2) continue;
+        return {
+            x: Math.round(after.left + after.width / 2),
+            y: Math.round(after.top + after.height / 2),
+            selector: el.id
+                ? ('#' + el.id)
+                : (el.getAttribute('name') ? ('input[name="' + el.getAttribute('name') + '"]') : 'input[type="password"]'),
+        };
+    }
+    return null;
+}
+"""
+
+
+async def _resolve_password_field_coordinates(
+    session: Any,
+    *,
+    input_page: Any = None,
+    field_hint: Optional[Dict[str, str]] = None,
+) -> Optional[tuple[int, int]]:
+    """Resolve coordinates for a visible password input when the indexed node has no rect.
+
+    Account-switch / sign-in transitions often leave the LLM's password index
+    without a bounding box even though a visible ``input[type=password]`` is on
+    the page. Mirror the payment semantic-locate path so humanized typing can
+    continue without falling back to TypeTextEvent.
+
+    When ``field_hint`` carries id/name/autocomplete from the indexed element,
+    prefer that match before the first visible password field so multi-password
+    pages (change-password, sign-in + register) do not type into the wrong input.
+    """
+    if not session:
+        return None
+    hint_payload = field_hint if isinstance(field_hint, dict) and field_hint else None
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(
+            target, _PASSWORD_FIELD_LOCATE_JS, hint_payload
+        )
+        if not result:
+            continue
+        if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
+            logger.debug(
+                "Resolved password field coordinates",
+                target=label,
+                selector=result.get("selector"),
+                matched_hint=bool(hint_payload),
+            )
+            return int(result["x"]), int(result["y"])
+    return None
+
+
 _PAYMENT_METHOD_EXPAND_JS = """
 (_unused) => {
     const pattern = /\\b(card|credit|debit|pay with card|card information|payment method)\\b/i;
@@ -2355,11 +2653,23 @@ async def _click_write_lock_result(
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
+        is_click_write_lock_eligible_control,
         is_email_send_button,
         is_purchase_button,
+        is_return_button,
         is_social_domain,
         is_submit_button,
     )
+
+    # Andy (2026-08-21): never raise click write locks on plain inputs /
+    # textarea / select — only buttons and form submits.
+    if element is not None and not is_click_write_lock_eligible_control(element):
+        logger.info(
+            "Write lock skipped: click target is not a button or form submit",
+            tag=getattr(element, "tag_name", None) or getattr(element, "node_name", None),
+            url=current_url[:80] if current_url else None,
+        )
+        return None
 
     coordinate_click = element is None
     if coordinate_click:
@@ -2396,6 +2706,7 @@ async def _click_write_lock_result(
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
         ("email_send", is_email_send_button(element_text), "email send"),
+        ("return", is_return_button(element_text), "return confirmation"),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""
@@ -2733,6 +3044,21 @@ async def _execute_indexed_input_text(
             secret_ref_name or "",
             input_page=_humanizer_input_page(humanizer),
         )
+    is_password_credential = bool(
+        credential_ref and str(credential_ref.get("kind") or "") == "password"
+    )
+    if humanizer and not coord_tuple and is_password_credential:
+        attrs = getattr(element, "attributes", None) or {}
+        field_hint = {
+            key: str(attrs[key])
+            for key in ("id", "name", "autocomplete")
+            if attrs.get(key)
+        }
+        coord_tuple = await _resolve_password_field_coordinates(
+            session,
+            input_page=_humanizer_input_page(humanizer),
+            field_hint=field_hint or None,
+        )
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
     asyncio.create_task(session.highlight_interaction_element(element))
 
@@ -3003,9 +3329,9 @@ async def _execute_goto(
     """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
 
-    url = params.get("url", "")
-    if url and not url.startswith(("http://", "https://", "about:", "file:")):
-        url = f"https://{url}"
+    original_url = params.get("url", "")
+    url = _normalize_goto_url(original_url) or ""
+    if url != original_url:
         logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
     credential_summary = None
     target_auth_realm = auth_realm_from_url(url)

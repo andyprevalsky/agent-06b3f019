@@ -492,6 +492,92 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS > BROWSER_STATE_REQUEST_TIMEOUT_SECONDS
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
+
+def test_browser_use_upstream_still_hardcodes_page_navigate_20s():
+    """Canary: browser-use still hardcodes Page.navigate wait at 20s.
+
+    When upstream honors TIMEOUT_NavigateToUrlEvent, delete
+    ``browser_use_patches.apply_browser_use_navigate_timeout_patch``.
+    """
+    import browser_use.browser.session as browser_session_mod
+
+    source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    assert "nav_timeout = 20.0" in source, (
+        "browser-use no longer hardcodes nav_timeout=20.0; remove the Rose "
+        "navigate-timeout patch if TIMEOUT_NavigateToUrlEvent is honored"
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config():
+    """Owning boundary for browser-event-ticket AMC start_url tool ERROR.
+
+    browser-use ``_navigate_and_wait`` passes ``timeout=20.0`` to
+    ``asyncio.wait_for`` around CDP ``Page.navigate``. Our config sets
+    ``TIMEOUT_NavigateToUrlEvent=300``, but that env never reaches this wait.
+    Without the Rose patch the wait budget stays 20.0s — heavy AMC showtimes
+    pages time out, spawn_browser returns tool ERROR, and the root agent
+    re-spawns on Fandango (merchant mismatch).
+    """
+    from browser_use.browser.session import BrowserSession
+
+    from domains.spawn_browser_agent_v3 import browser_use_patches as patches
+    from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+    assert NAVIGATE_TO_URL_TIMEOUT_SECONDS > patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS
+    assert patches.page_navigate_timeout_seconds() == float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)
+
+    seen_timeouts: list[float | None] = []
+    true_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout=None, **kwargs):
+        seen_timeouts.append(timeout)
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        return {"ok": True}
+
+    async def upstream_like_navigate(self, *args, **kwargs):
+        async def page_navigate_rpc():
+            return {"frameId": "1"}
+
+        # Exact upstream hardcode shape (session.py: nav_timeout = 20.0).
+        return await asyncio.wait_for(
+            page_navigate_rpc(),
+            timeout=patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS,
+        )
+
+    previous_navigate = BrowserSession._navigate_and_wait
+    previous_patched = getattr(BrowserSession, patches._PATCHED_ATTR, False)
+    setattr(BrowserSession, patches._PATCHED_ATTR, False)
+    BrowserSession._navigate_and_wait = upstream_like_navigate
+
+    # Pre-fix (unpatched): wait_for must still see the hardcoded 20.0s budget.
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        await upstream_like_navigate(MagicMock())
+        assert seen_timeouts == [patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS], (
+            "unpatched Page.navigate wait_for budget must be upstream 20.0s; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+
+    seen_timeouts.clear()
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        assert patches.apply_browser_use_navigate_timeout_patch() is True
+        await BrowserSession._navigate_and_wait(MagicMock())
+        assert seen_timeouts == [float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)], (
+            "patched Page.navigate wait_for budget must equal "
+            f"NAVIGATE_TO_URL_TIMEOUT_SECONDS={NAVIGATE_TO_URL_TIMEOUT_SECONDS}; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+        BrowserSession._navigate_and_wait = previous_navigate
+        setattr(BrowserSession, patches._PATCHED_ATTR, previous_patched)
+
+
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
         append_completion_evidence,
@@ -7790,6 +7876,7 @@ async def test_execute_action_element_not_found():
     dom = MagicMock()
     dom.session = MagicMock()
     dom.selector_map = {}
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     ah = MagicMock()
     ah.record_action = AsyncMock()
     out = await execute_action(dom, ah, {"action": "click", "index": 5})
@@ -9356,6 +9443,7 @@ async def test_execute_action_click_no_element_no_coords():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9395,6 +9483,7 @@ async def test_execute_action_switch_tab_missing_id():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9406,6 +9495,7 @@ async def test_execute_action_press_key_with_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9421,6 +9511,213 @@ async def test_execute_action_press_key_with_humanizer():
     assert out == {"success": True, "message": ""}
     hu.press_key.assert_awaited_once_with("Enter")
     ah.record_action.assert_awaited()
+
+
+async def test_execute_action_press_key_prefers_provider_computer_input():
+    """Kernel-level input can dismiss browser chrome that CDP cannot reach."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(return_value=True)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Control+Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out == {"success": True, "message": ""}
+        repo.press_browser_computer_key.assert_awaited_once_with(
+            config,
+            "kernel-session",
+            "owner-user",
+            "Ctrl+Return",
+        )
+        hu.press_key.assert_not_awaited()
+    finally:
+        repo.press_browser_computer_key = original
+
+
+def test_kernel_computer_key_maps_playwright_names_to_x11_keysyms():
+    from domains.spawn_browser_agent_v3.service_actions import _kernel_computer_key
+
+    assert _kernel_computer_key("Backspace") == "BackSpace"
+    assert _kernel_computer_key("Del") == "Delete"
+    assert _kernel_computer_key("PageUp") == "Prior"
+    assert _kernel_computer_key("PageDown") == "Next"
+    assert _kernel_computer_key("Control+Shift+PageUp") == "Ctrl+Shift+Prior"
+    assert _kernel_computer_key("Shift+Alt+tab") == "Shift+Alt+Tab"
+
+
+async def test_execute_action_press_key_without_user_skips_provider_input():
+    """Provider input requires the owner identity used by the backend route."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock()
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+        )
+
+        assert out == {"success": True, "message": ""}
+        repo.press_browser_computer_key.assert_not_awaited()
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_pre_execution_rejection_falls_back():
+    """An explicit backend rejection proves the provider did not press the key."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    rejection = httpx.HTTPStatusError(
+        "invalid key",
+        request=request,
+        response=httpx.Response(400, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=rejection)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Tab"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out == {"success": True, "message": ""}
+        hu.press_key.assert_awaited_once_with("Tab")
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_provider_server_error_does_not_replay():
+    """A provider 5xx is ambiguous and must not be replayed through CDP."""
+    import httpx
+
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    request = httpx.Request("POST", "http://backend/computer/press-key")
+    failure = httpx.HTTPStatusError(
+        "provider failure",
+        request=request,
+        response=httpx.Response(500, request=request),
+    )
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=failure)
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out["success"] is False
+        assert "provider failure" in out["error"]
+        hu.press_key.assert_not_awaited()
+        ah.record_action.assert_awaited_once()
+    finally:
+        repo.press_browser_computer_key = original
+
+
+async def test_execute_action_press_key_ambiguous_provider_failure_does_not_replay():
+    """A lost provider response cannot safely fall back and send Enter twice."""
+    from domains.spawn_browser_agent_v3 import repo
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    original = repo.press_browser_computer_key
+    repo.press_browser_computer_key = AsyncMock(side_effect=TimeoutError("response lost"))
+    try:
+        dom = MagicMock()
+        dom.ensure_browser_overlays_suppressed = AsyncMock()
+        dom.session = MagicMock()
+        dom.selector_map = {}
+        ah = MagicMock()
+        ah.record_action = AsyncMock()
+        hu = MagicMock()
+        hu.press_key = AsyncMock()
+        config = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="test"))
+
+        out = await execute_action(
+            dom,
+            ah,
+            {"action": "press_key", "params": {"key": "Enter"}},
+            humanizer=hu,
+            config=config,
+            session_id="kernel-session",
+            user_id="owner-user",
+        )
+
+        assert out["success"] is False
+        assert "response lost" in out["error"]
+        hu.press_key.assert_not_awaited()
+        ah.record_action.assert_awaited_once()
+    finally:
+        repo.press_browser_computer_key = original
 
 async def test_execute_action_scroll_with_humanizer_down():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -9540,6 +9837,7 @@ async def test_execute_action_goto_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9556,6 +9854,7 @@ async def test_execute_action_click_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {3: MagicMock()}
     ah = MagicMock()
@@ -9572,6 +9871,7 @@ async def test_execute_action_input_text_delegates():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {1: MagicMock()}
     ah = MagicMock()
@@ -9606,6 +9906,7 @@ async def test_execute_action_exception_catches():
     from domains.spawn_browser_agent_v3 import service_actions
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = MagicMock()
     dom.selector_map = {2: MagicMock()}
     ah = MagicMock()
@@ -9659,6 +9960,7 @@ async def test_execute_action_press_key_no_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9687,6 +9989,7 @@ async def test_execute_action_navback():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -9876,6 +10179,7 @@ async def test_execute_action_open_new_tab():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_focused_target = MagicMock(return_value=SimpleNamespace(target_id="abcd1234"))
     dom.session = session
@@ -9953,6 +10257,7 @@ async def test_execute_action_switch_tab_found():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_tabs = AsyncMock(
         return_value=[
@@ -9971,6 +10276,7 @@ async def test_execute_action_switch_tab_not_found():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     session = _fake_session_with_event_bus()
     session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="xxxxxxxxAAAA", title="t", url="u")])
     dom.session = session
@@ -10972,7 +11278,7 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     dom = DOMService(cdp_url="")
     dom._session = _FakeSession()
 
-    await dom._suppress_browser_overlays()
+    await dom.ensure_browser_overlays_suppressed()
     await dom.inject_passkeys(
         [
             {
@@ -10985,11 +11291,10 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
         ]
     )
 
-    assert webauthn.enable.await_count == 2
-    assert webauthn.enable.await_args_list == [
-        call(params={"enableUI": False}, session_id="cdp-session"),
-        call(params={"enableUI": False}, session_id="cdp-session"),
-    ]
+    assert webauthn.enable.await_count == 1
+    webauthn.enable.assert_awaited_once_with(
+        params={"enableUI": False}, session_id="cdp-session"
+    )
     webauthn.addVirtualAuthenticator.assert_awaited_once()
     webauthn.addCredential.assert_awaited_once()
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
@@ -11069,7 +11374,7 @@ async def test_dom_service_passkeys_follow_focus_target_for_sso_transition():
 
     dom = DOMService(cdp_url="")
     dom._session = _FakeSession()
-    await dom._suppress_browser_overlays()
+    await dom.ensure_browser_overlays_suppressed()
     assert await dom.inject_passkeys([amazon]) == 1
 
     dom._session.agent_focus_target_id = "google-target"
@@ -11414,7 +11719,7 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -11461,7 +11766,7 @@ async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_in
         )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -11493,16 +11798,20 @@ def test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text():
 
 def test_write_lock_purchase_button_detects_order_controls():
     """Final transaction buttons are gated; cart, checkout, and return navigation are not."""
-    from browser_tools.write_lock import is_purchase_button
+    from browser_tools.write_lock import is_purchase_button, is_return_button
 
     assert is_purchase_button("Buy Now")
     assert is_purchase_button("Place your order")
-    assert is_purchase_button("Confirm your return")
-    assert is_purchase_button("Submit return request")
+    assert not is_purchase_button("Confirm your return")
+    assert not is_purchase_button("Submit return")
+    assert is_return_button("Confirm your return")
+    assert is_return_button("Submit return")
+    assert not is_return_button("Buy Now")
     assert not is_purchase_button("Add to Cart")
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
+    assert not is_return_button("Return to your orders")
 
 
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
@@ -11532,6 +11841,144 @@ def test_write_lock_purchase_button_excludes_terms_consent_prose():
     # a real purchase phrase in another.
     assert is_purchase_button("Terms of Service\nBuy Now")
     assert is_purchase_button("Buy Now\nPrivacy Policy")
+
+
+def test_write_lock_purchase_button_excludes_buynow_dom_identifiers():
+    """Machine ids containing buynow must not trip the purchase write lock.
+
+    Fandango IMAX checkout (2026-08-20 agent 1c3003ef): clicking the email
+    sign-in input ``#buynow-email-si`` joined that id into the write-lock
+    signal. Whitespace-stripped matching turned phrase ``buy now`` into a
+    substring of ``buynow-email-si``, forced a purchase write_lock, and the
+    browser-imax-group-tickets harness observed write_lock instead of
+    payment_approval. Real Buy Now labels stay locked; a co-located id must
+    not veto them.
+    """
+    from browser_tools.write_lock import (
+        is_dom_identifier_write_lock_signal,
+        is_purchase_button,
+    )
+
+    assert is_dom_identifier_write_lock_signal("buynow-email-si")
+    assert is_dom_identifier_write_lock_signal("place_order_btn")
+    assert not is_dom_identifier_write_lock_signal("Buy Now")
+    assert not is_dom_identifier_write_lock_signal("buynow")
+
+    assert not is_purchase_button("buynow-email-si")
+    assert not is_purchase_button("buynow-email-si\nEmail")
+    assert not is_purchase_button("input\nbuynow-email-si")
+    assert is_purchase_button("Buy Now")
+    assert is_purchase_button("buynow-email-si\nBuy Now")
+
+
+def test_click_write_lock_eligible_only_buttons_and_form_submits():
+    """Plain inputs never raise click write locks — only buttons / form submits.
+
+    Andy (2026-08-21) on H-01: an email/text input must never trigger write
+    lock even if its label or id looks like Buy Now / Send. ``input
+    type=submit|button|image`` remains eligible as a form submit.
+    """
+    from types import SimpleNamespace
+
+    from browser_tools.write_lock import is_click_write_lock_eligible_control
+
+    assert is_click_write_lock_eligible_control(None) is True
+    assert is_click_write_lock_eligible_control(SimpleNamespace(tag_name="button", attributes={}))
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(node_name="INPUT", attributes={"type": "submit"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "button"})
+    )
+    assert is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="a", attributes={"role": "button"})
+    )
+
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={"type": "email", "id": "buynow-email-si"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="INPUT", attributes={"type": "text"})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="input", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="textarea", attributes={})
+    )
+    assert not is_click_write_lock_eligible_control(
+        SimpleNamespace(tag_name="select", attributes={})
+    )
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_skips_plain_email_input():
+    """Email/text inputs never return needs_write_approval even if labels match."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "email", "id": "buynow-email-si"},
+        parent_node=None,
+        get_all_children_text=lambda: "Buy Now",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="buynow-email-si\nBuy Now"),
+        ),
+        patch("browser_tools.write_lock.is_purchase_button", return_value=True),
+        patch("browser_tools.write_lock.is_email_send_button", return_value=True),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://tickets.fandango.com/checkout",
+            system_name="Rose",
+        )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_click_write_lock_result_still_locks_submit_input():
+    """Form-submit inputs remain eligible for purchase write lock."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+
+    element = SimpleNamespace(
+        tag_name="input",
+        node_name="INPUT",
+        attributes={"type": "submit"},
+        parent_node=None,
+        get_all_children_text=lambda: "Place Order",
+    )
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+            AsyncMock(return_value="Place Order"),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+            return_value="Place Order",
+        ),
+    ):
+        out = await _click_write_lock_result(
+            session=MagicMock(),
+            dom_service=MagicMock(),
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals=None,
+            current_url="https://shop.example.com/checkout",
+            system_name="Rose",
+        )
+    assert out is not None
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "purchase"
 
 
 def test_write_lock_email_send_excludes_marketing_opt_in_controls():
@@ -11826,6 +12273,7 @@ async def test_execute_press_key_send_shortcut_does_not_trigger_email_approval()
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = _fake_session_with_event_bus()
     dom.selector_map = {}
     ah = MagicMock()
@@ -11977,7 +12425,79 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
 
+async def test_execute_input_text_password_secret_ref_resolves_visible_password_coords():
+    """Password secret-ref typing must locate a visible password field when the index has no rect.
 
+    Regression for browser-amazon-return k=5 agent fbc36706: after Switch accounts →
+    account pick, indexed password coords were None and humanize refused TypeTextEvent,
+    posting toolStatus=ERROR that failed no_tool_failures even though the agent later
+    recovered to an unresolved write lock.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(return_value={})
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+    hu.input_page = None
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch.object(
+            service_actions,
+            "_resolve_password_field_coordinates",
+            AsyncMock(return_value=(44, 55)),
+        ) as resolve_password,
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=770,
+            coords=None,
+            params={"text": "pwd-ref-1"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={"pwd-ref-1": "secret-password"},
+            password_origins={"pwd-ref-1": "https://www.amazon.com"},
+            credential_refs_by_secret_ref={"pwd-ref-1": {"kind": "password", "id": "pwd-row"}},
+            current_url="https://www.amazon.com/ap/signin",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out.get("credential_ref") == {"kind": "password", "id": "pwd-row"}
+    resolve_password.assert_awaited()
+    hu.click_at_coords.assert_awaited_once_with(44, 55)
+    hu.type_text.assert_awaited_once_with("secret-password")
+    session.event_bus.dispatch.assert_not_called()
+
+async def test_resolve_password_field_coordinates_uses_visible_password_input():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        return_value={"x": 120, "y": 340, "selector": 'input[name="password"]'}
+    )
+    session = SimpleNamespace(get_current_page=AsyncMock(return_value=page))
+
+    coords = await service_actions._resolve_password_field_coordinates(session, input_page=None)
+    assert coords == (120, 340)
+    page.evaluate.assert_awaited()
+    script = page.evaluate.await_args.args[0]
+    assert 'input[type="password"]' in script
+    assert 'name="password"' in script
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -13140,6 +13660,7 @@ def test_url_looks_like_api_surface_guard():
     assert url_looks_like_api_surface("https://r.example.com/") is False
 
     ctx = _ActionContext(
+        user_id="user-1",
         dom_service=None,  # type: ignore[arg-type]
         action_history=None,  # type: ignore[arg-type]
         session=None,
@@ -13177,6 +13698,26 @@ def test_url_looks_like_api_surface_guard():
     assert _navigation_guard_error(ctx, action="navback") is None
     assert _navigation_guard_error(ctx, action="close_tab") is None
     assert _navigation_guard_error(ctx, action="open_new_tab", target_url="https://order.online/") is None
+    assert _navigation_guard_error(ctx, action="open_new_tab", target_url="about:blank") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="https://1.1.1.1/") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="order.online/menu") is None
+    assert _navigation_guard_error(ctx, action="goto", target_url="example.com:8443/cart") is None
+    for unsafe_url in (
+        "file:///etc/passwd",
+        "data:text/html,hello",
+        "javascript:alert(1)",
+        "http://localhost/",
+        "http://127.1/",
+        "http://2130706433/",
+        "http://0x7f000001/",
+        "http://10.0.0.1/",
+        "http://169.254.169.254/",
+        "http://192.0.2.1/",
+        "http://[::1]/",
+        "http://[fe80::1]/",
+        "http://[fc00::1]/",
+    ):
+        assert _navigation_guard_error(ctx, action="goto", target_url=unsafe_url) is not None
     # API surfaces still refused.
     assert (
         _navigation_guard_error(
@@ -13192,6 +13733,7 @@ async def test_execute_goto_refuses_api_surface_urls():
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -13213,6 +13755,7 @@ async def test_execute_allows_cross_origin_navigation():
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -13230,6 +13773,7 @@ async def test_execute_allows_cross_origin_navigation():
 
     # Guard-level cement for merchant → order.online (the Blue Bottle failure).
     ctx = service_actions._ActionContext(
+        user_id="user-1",
         dom_service=dom,
         action_history=ah,
         session=session,
@@ -13287,6 +13831,7 @@ async def test_execute_click_and_evaluate_allow_leave_hosts():
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
     dom.session = session
     ah = MagicMock()
     ah.record_action = AsyncMock()
@@ -13504,6 +14049,102 @@ async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
     assert out["ready"] is True
     assert page.reloads == 1
     assert page.evaluations >= 2
+
+
+async def test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload():
+    """Persistent blank SPA shells must emit script/preload mount diagnostics."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.reloads = 0
+            self.codes = []
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, code):
+            self.codes.append(code)
+            if "performance.getEntriesByType" in code:
+                return {
+                    "href": "https://x.com/test_payment",
+                    "readyState": "interactive",
+                    "rootChildren": 0,
+                    "scriptCount": 1,
+                    "scripts": [{"type": "module", "src": "https://x.com/src/main.tsx"}],
+                    "preloadCount": 2,
+                    "preloads": [
+                        {"as": "video", "href": "https://x.com/navi-features.webm"},
+                        {"as": "video", "href": "https://x.com/navi-features-hevc.mov"},
+                    ],
+                    "resourceCount": 1,
+                    "scriptResourceCount": 0,
+                    "scriptResources": [],
+                    "preloadResources": [
+                        {
+                            "name": "https://x.com/navi-features.webm",
+                            "initiatorType": "link",
+                            "transferSize": 66000000,
+                            "encodedBodySize": 66000000,
+                            "durationMs": 12000,
+                            "responseEndMs": 13000,
+                        }
+                    ],
+                    "mainScript": {"type": "module", "src": "https://x.com/src/main.tsx"},
+                    "mainResource": None,
+                    "largestPreloadBytes": 66000000,
+                }
+            return {
+                "hasAppRoot": True,
+                "appRootReady": False,
+                "plainPageReady": False,
+                "bodyTextLength": 0,
+                "rootChildren": 0,
+                "blankSpaShell": True,
+                "readyState": "interactive",
+            }
+
+        async def reload(self):
+            self.reloads += 1
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+    monotonic_time = 0.0
+    logged = []
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    def capture_warning(event, **kwargs):
+        logged.append((event, kwargs))
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+        patch.object(service_actions.logger, "warning", side_effect=capture_warning),
+    ):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/test_payment",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is False
+    assert page.reloads == 1
+    diag_events = [item for item in logged if item[0] == "Blank SPA mount diagnostics"]
+    assert len(diag_events) >= 2
+    assert any(item[1].get("phase") == "before_reload" for item in diag_events)
+    assert any(item[1].get("phase") == "after_reload" for item in diag_events)
+    after = next(item[1] for item in diag_events if item[1].get("phase") == "after_reload")
+    assert after["diagnostics"]["mainResource"] is None
+    assert after["diagnostics"]["largestPreloadBytes"] == 66000000
+    assert any("performance.getEntriesByType" in code for code in page.codes)
+
 
 async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -14031,6 +14672,115 @@ async def test_generate_write_lock_notification_payment_forks_and_renders_questi
     assert result["request_id"] == "req-pay-1"
     assert result["mode"] == "claudeAuth"
 
+
+async def test_generate_write_lock_notification_retries_once_on_schema_rejection():
+    """Return-shaped purchase-without-details must not abort the session on first try;
+    feed validation detail back and accept a corrected generic_write payload."""
+    import domains.spawn_browser_agent_v3.handler as handler
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _generate_write_lock_notification
+    from domains.spawn_browser_agent_v3.types import ClaudeTokenState
+
+    token_state = ClaudeTokenState()
+    token_state.access_token = "claude-token"
+    token_state.source = "user"
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    try:
+        validate_browser_tool_args(
+            "generate_write_lock_notification",
+            {
+                "trigger_type": "purchase",
+                "action": "confirm return",
+                "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            },
+        )
+        raise AssertionError("expected schema rejection for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        first_error = err
+
+    fixed_action = {
+        "action": "generate_write_lock_notification",
+        "params": {
+            "trigger_type": "generic_write",
+            "action": "confirm Amazon return for Carhartt beanie",
+            "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+            "media": [
+                {
+                    "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                    "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                }
+            ],
+            "generic_write": {
+                "label": "Confirm return",
+                "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+                "payload_summary": (
+                    "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                    "Return by Sep 19, 2026."
+                ),
+            },
+        },
+    }
+
+    fork_mock = AsyncMock(
+        side_effect=[
+            first_error,
+            {
+                "action": fixed_action,
+                "usage": {"input_tokens": 900, "output_tokens": 40},
+                "actual_model": "gpt-5.6-sol-gpt",
+                "request_id": "req-return-retry",
+                "mode": "gpt",
+            },
+        ]
+    )
+
+    with patch.object(handler, "_call_browser_use_with_rotation", new=fork_mock):
+        result = await _generate_write_lock_notification(
+            rose_client=SimpleNamespace(),
+            task_prompt="Return the beanie",
+            dynamic_system_context="dynamic-ctx",
+            browser_turn_messages=[{"role": "user", "content": "return"}],
+            browser_state={"url": return_url, "screenshot": None},
+            action_entries=[{"type": "click"}],
+            config=_fake_config(),
+            user_id="user-return",
+            agent_id="agent-return",
+            iteration=14,
+            token_state=token_state,
+            gpt_token="gpt-token",
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            browser_use_mode="gpt",
+            approval_type="purchase",
+            current_url=return_url,
+            trusted_page_urls=[return_url],
+            pending_action={"action": "click", "params": {"index": 58768}},
+            write_lock_result={
+                "status": "needs_write_approval",
+                "approval_type": "purchase",
+                "element_text": "Confirm your return",
+            },
+            system_name="Rose",
+            fallback_question="Approve?",
+        )
+
+    assert fork_mock.await_count == 2
+    assert fork_mock.await_args_list[0].kwargs["call_site"] == "write_lock_notification_fork_14"
+    assert fork_mock.await_args_list[1].kwargs["call_site"] == "write_lock_notification_fork_14_retry1"
+    retry_messages = fork_mock.await_args_list[1].kwargs["extra_user_messages"]
+    assert len(retry_messages) == 2
+    assert "failed" in retry_messages[1]["content"].lower()
+    assert "trigger_type" in retry_messages[1]["content"]
+    assert result["notification"]["trigger_type"] == "generic_write"
+    assert "$10.84" in result["question"]
+    assert result["request_id"] == "req-return-retry"
+
+
 async def test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool():
     """If the forked model calls anything other than generate_write_lock_notification,
     the helper raises so the caller falls back to build_payment_question rather than
@@ -14197,28 +14947,141 @@ def test_write_lock_notification_prompt_includes_media_candidates():
 
     assert "media_candidates" in prompt
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
-    assert "use only those URLs for media and item image_url" in prompt
-    assert "description under 80 characters" in prompt
-    assert "must already exist in the browser trajectory" in prompt
+    assert "### Purchases" in prompt
+    assert "### Emails / outbound messages" in prompt
+    assert "### Social posts" in prompt
+    assert "### Returns / refund confirmations" in prompt
+    assert "### Payment field entry" in prompt
+    assert "**Approval Needed**" in prompt
+    assert "Rose wants to buy one black Carhartt beanie on **Amazon**." in prompt
     assert "Visit the product page" not in prompt
 
-def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+
+def test_write_lock_notification_prompt_is_example_driven_for_all_gates():
+    """Fork prompt teaches via prescribed worked examples for every case."""
+    from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
+
+    return_prompt = _write_lock_notification_prompt(
+        approval_type="return",
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+        ),
+        pending_action={"action": "click", "params": {"index": 58768}},
+        write_lock_result={
+            "status": "needs_write_approval",
+            "approval_type": "return",
+            "element_text": "Confirm your return",
+        },
+        media_candidates=[
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+    )
+    purchase_prompt = _write_lock_notification_prompt(
+        approval_type="purchase",
+        current_url="https://www.amazon.com/checkout/spc",
+        pending_action={"action": "click", "params": {"index": 1}},
+        write_lock_result={"status": "needs_write_approval", "approval_type": "purchase"},
+    )
+
+    for needle in (
+        "### Purchases",
+        "### Emails / outbound messages",
+        "### Social posts",
+        "### Returns / refund confirmations",
+        "### Payment field entry",
+        "Notification format this produces:",
+        "Tool args example:",
+        "approval_type in Runtime evidence is a hint",
+        "Action: Confirm return",
+        "Payment secrets are not included in this message.",
+    ):
+        assert needle in return_prompt, needle
+        assert needle in purchase_prompt, needle
+    # Same example catalog; only runtime evidence differs.
+    assert return_prompt.split("Runtime evidence:")[0] == purchase_prompt.split("Runtime evidence:")[0]
+    assert "Confirm your return" in return_prompt
+    assert '"approval_type": "return"' in return_prompt or '"approval_type":"return"' in return_prompt.replace(
+        " ", ""
+    )
+
+
+def test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write():
+    """Owning-boundary red/green for the Amazon return notification schema failure."""
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _render_write_lock_notification_question
+
+    return_url = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
+    )
+    buggy_payload = {
+        "trigger_type": "purchase",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": [
+            {
+                "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
+                "alt": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            }
+        ],
+        "generic_write": {
+            "label": "Confirm return",
+            "target": "Carhartt Mens Knit Cuffed Beanie Hat, Black, One Size US",
+            "payload_summary": (
+                "Refund $10.84 to original payment method via Whole Foods Dropoff. "
+                "Return by Sep 19, 2026."
+            ),
+        },
+    }
+    try:
+        validate_browser_tool_args("generate_write_lock_notification", buggy_payload)
+        raise AssertionError("expected BrowserToolArgsValidationError for purchase without details")
+    except BrowserToolArgsValidationError as err:
+        assert "purchase details are required for a purchase approval" in err.detail
+
+    fixed_payload = {
+        "trigger_type": "generic_write",
+        "action": "confirm Amazon return for Carhartt beanie",
+        "service": {"name": "Amazon", "domain": "amazon.com", "url": return_url},
+        "media": buggy_payload["media"],
+        "generic_write": buggy_payload["generic_write"],
+    }
+    validated = validate_browser_tool_args("generate_write_lock_notification", fixed_payload)
+    assert validated["trigger_type"] == "generic_write"
+    question = _render_write_lock_notification_question(
+        validated,
+        system_name="Rose",
+        fallback_question="Approve?",
+    )
+    assert "Confirm return" in question or "confirm Amazon return" in question
+    assert "$10.84" in question
+    assert "Whole Foods" in question
+    assert "original payment" in question
+
+
+def test_purchase_write_lock_notification_failure_falls_back_for_all_gates():
     from domains.spawn_browser_agent_v3.handler import (
         PurchaseApprovalContextError,
-        PurchaseApprovalNotificationRetryableError,
         _enforce_write_lock_notification_failure_policy,
     )
 
-    with pytest.raises(PurchaseApprovalContextError):
+    # Unified policy: every gate falls through to the deterministic fallback question.
+    assert (
         _enforce_write_lock_notification_failure_policy(
             "purchase",
             PurchaseApprovalContextError("missing reviews"),
         )
-
-    with pytest.raises(PurchaseApprovalNotificationRetryableError):
-        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
-
+        is None
+    )
+    assert _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout")) is None
+    assert _enforce_write_lock_notification_failure_policy("return", ValueError("metadata unavailable")) is None
     assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
+    assert _enforce_write_lock_notification_failure_policy("email_send", ValueError("metadata unavailable")) is None
+
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
     from domains.spawn_browser_agent_v3.handler import (
@@ -15258,6 +16121,7 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
             self.selector_map = {}
             self.disconnect = AsyncMock()
+            self._captcha_poll = None
             _FakeDomService.last_instance = self
 
         async def connect(self):
@@ -15265,6 +16129,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
 
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
+
+        def start_captcha_telemetry_indicator(self, poll_phase):
+            self._captcha_poll = poll_phase
 
     class _FakeHumanizer:
         last_instance = None
@@ -17058,6 +17925,14 @@ async def run_all_tests():
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
     )
     r.record(
+        "browser_use_upstream_still_hardcodes_page_navigate_20s",
+        test_browser_use_upstream_still_hardcodes_page_navigate_20s,
+    )
+    await r.record_async(
+        "browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config",
+        test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config,
+    )
+    r.record(
         "browser_task_prompt_no_system_duplication",
         test_browser_task_prompt_does_not_duplicate_system_prompt,
     )
@@ -17700,6 +18575,30 @@ async def run_all_tests():
         test_execute_action_press_key_with_humanizer,
     )
     await r.record_async(
+        "execute_action_press_key_provider_computer",
+        test_execute_action_press_key_prefers_provider_computer_input,
+    )
+    r.record(
+        "kernel_computer_key_maps_playwright_names_to_x11_keysyms",
+        test_kernel_computer_key_maps_playwright_names_to_x11_keysyms,
+    )
+    await r.record_async(
+        "execute_action_press_key_without_user_skips_provider_input",
+        test_execute_action_press_key_without_user_skips_provider_input,
+    )
+    await r.record_async(
+        "execute_action_press_key_pre_execution_rejection_falls_back",
+        test_execute_action_press_key_pre_execution_rejection_falls_back,
+    )
+    await r.record_async(
+        "execute_action_press_key_provider_server_error_does_not_replay",
+        test_execute_action_press_key_provider_server_error_does_not_replay,
+    )
+    await r.record_async(
+        "execute_action_press_key_ambiguous_provider_failure",
+        test_execute_action_press_key_ambiguous_provider_failure_does_not_replay,
+    )
+    await r.record_async(
         "execute_action_scroll_humanizer_down",
         test_execute_action_scroll_with_humanizer_down,
     )
@@ -17877,6 +18776,22 @@ async def run_all_tests():
         test_write_lock_purchase_button_excludes_terms_consent_prose,
     )
     r.record(
+        "write_lock_purchase_button_excludes_buynow_dom_identifiers",
+        test_write_lock_purchase_button_excludes_buynow_dom_identifiers,
+    )
+    r.record(
+        "click_write_lock_eligible_only_buttons_and_form_submits",
+        test_click_write_lock_eligible_only_buttons_and_form_submits,
+    )
+    await r.record_async(
+        "click_write_lock_result_skips_plain_email_input",
+        test_click_write_lock_result_skips_plain_email_input,
+    )
+    await r.record_async(
+        "click_write_lock_result_still_locks_submit_input",
+        test_click_write_lock_result_still_locks_submit_input,
+    )
+    r.record(
         "write_lock_email_send_excludes_marketing_opt_in_controls",
         test_write_lock_email_send_excludes_marketing_opt_in_controls,
     )
@@ -17933,6 +18848,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_input_text_el_humanizer_missing_coords",
         test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback,
+    )
+    await r.record_async(
+        "execute_input_text_password_secret_ref_resolves_visible_password_coords",
+        test_execute_input_text_password_secret_ref_resolves_visible_password_coords,
+    )
+    await r.record_async(
+        "resolve_password_field_coordinates_uses_visible_password_input",
+        test_resolve_password_field_coordinates_uses_visible_password_input,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_bypasses_warning",
@@ -18046,6 +18969,10 @@ async def run_all_tests():
     await r.record_async(
         "navigation_ready_reloads_blank_spa",
         test_wait_for_navigation_ready_reloads_blank_spa_shell_once,
+    )
+    await r.record_async(
+        "navigation_ready_logs_blank_spa_mount_diagnostics",
+        test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload,
     )
     await r.record_async(
         "navigation_ready_regotos_loading_doc",
@@ -18291,6 +19218,10 @@ async def run_all_tests():
         test_generate_write_lock_notification_payment_forks_and_renders_question,
     )
     await r.record_async(
+        "generate_write_lock_notification_schema_retry",
+        test_generate_write_lock_notification_retries_once_on_schema_rejection,
+    )
+    await r.record_async(
         "generate_write_lock_notification_wrong_tool_raises",
         test_generate_write_lock_notification_raises_when_fork_calls_wrong_tool,
     )
@@ -18307,8 +19238,16 @@ async def run_all_tests():
         test_write_lock_notification_prompt_includes_media_candidates,
     )
     r.record(
-        "purchase_write_lock_notification_failure_blocks_fallback",
-        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
+        "write_lock_notification_prompt_example_driven",
+        test_write_lock_notification_prompt_is_example_driven_for_all_gates,
+    )
+    r.record(
+        "return_write_lock_notification_schema_red_green",
+        test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write,
+    )
+    r.record(
+        "purchase_write_lock_notification_failure_falls_back",
+        test_purchase_write_lock_notification_failure_falls_back_for_all_gates,
     )
     r.record(
         "normalize_write_lock_notification_media_candidate",

@@ -194,6 +194,11 @@ test('passkeys-only seed mode never enters browser state or password sync', asyn
 
 test('email-credentials-only seed mode syncs integrations and email rows then returns', async () => {
   const source = readSeedLocalSource();
+  const integrationProjectionStart = source.indexOf(
+    'const PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT = {'
+  );
+  const integrationProjectionEnd = source.indexOf('} as const;', integrationProjectionStart);
+  const integrationProjection = source.slice(integrationProjectionStart, integrationProjectionEnd);
   const flag = source.indexOf("process.argv.includes('--email-credentials-only')");
   const branch = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)');
   const integrations = source.indexOf('await syncEmailIntegrations()', branch);
@@ -225,10 +230,52 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
     'expected email-credentials-only to scope integrations to Gmail/Yahoo'
   );
   assert(
+    integrationProjection.includes('accountId: true'),
+    'expected production integration reads to preserve multi-account identity'
+  );
+  assert(
     !/await syncTable\('Integrations',\s*syncIntegrations\)/.test(
       source.slice(branch, branchReturn)
     ),
     'email-credentials-only must not call full syncIntegrations (compute-token churn)'
+  );
+  // Multi-account upserts need accountId, but the stable pre-migration projection
+  // must not select it (prod may lack the columns). findProdIntegrations probes
+  // and defaults accountId/accountEmail when absent.
+  assert(
+    source.includes('PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT') &&
+      source.includes("accountId: '', accountEmail: null"),
+    'email-credentials path must resolve accountId via findProdIntegrations defaults'
+  );
+});
+
+test('every seed mode hydrates the selected user before dependent writes', async () => {
+  const source = readSeedLocalSource();
+  const connectivity = source.indexOf('await remote.$queryRaw`SELECT 1`');
+  const identity = source.indexOf('await ensureSeedUserExists()', connectivity);
+  const computeMode = source.indexOf('if (COMPUTE_TOKENS_ONLY)', connectivity);
+  const emailMode = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)', connectivity);
+
+  assert(connectivity > 0, 'expected remote connectivity check');
+  assert(identity > connectivity, 'expected selected-user hydration after connectivity');
+  assert(identity < computeMode, 'expected selected-user hydration before compute-token writes');
+  assert(identity < emailMode, 'expected selected-user hydration before email-credential writes');
+});
+
+test('compute-token cleanup cannot delete integrations owned by unrelated local users', async () => {
+  const source = readSeedLocalSource();
+  const helperStart = source.indexOf('async function syncIntegrations()');
+  const helperEnd = source.indexOf('/** Email providers refreshed', helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert(helperStart > 0 && helperEnd > helperStart, 'expected syncIntegrations helper');
+  assert(
+    /OR:\s*\[\s*\{\s*userId:\s*SEED_USER_ID\s*\}/.test(helper),
+    'expected stale cleanup to target only the selected seed user by default'
+  );
+  assert(
+    /\{\s*userId:\s*\{\s*in:\s*poolUserIds\s*\},\s*poolingEnabled:\s*true\s*\}/.test(helper),
+    'expected stale cleanup to target only active pool owners among imported pool users'
   );
 });
 
@@ -457,12 +504,33 @@ test('compute-token sync can require GPT without requiring Claude OAuth', async 
   );
 });
 
+test('compute-token sync any-mode accepts Claude Code OR Codex', async () => {
+  const source = readSeedLocalSource();
+  const anyHelper = source.indexOf('function requireAnyComputeTokenType');
+  const anyParser = source.indexOf("value.toLowerCase() === 'any'");
+  const anyBranch = source.indexOf('if (requireAnyComputeTokenType())');
+  const eitherOk = source.indexOf('usableClaudeCodeCount > 0 || usableGptCodeCount > 0', anyBranch);
+  const eitherFailure = source.indexOf(
+    "throw new Error('No usable claude_code or gpt_code integrations after sync')",
+    anyBranch
+  );
+
+  assert(anyHelper > 0, 'expected an explicit any-mode helper');
+  assert(anyParser > 0, 'expected parseComputeTokenRequiredTypes to accept any');
+  assert(anyBranch > anyHelper, 'expected sync to branch on any-mode');
+  assert(eitherOk > anyBranch, 'expected any-mode to accept either provider');
+  assert(
+    eitherFailure > eitherOk,
+    'expected any-mode to fail only when both providers are missing'
+  );
+});
+
 test('synthetic benchmark compute access uses the isolated pool without changing ownership', async () => {
   const source = readSeedLocalSource();
   const optIn = source.indexOf('SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS');
   const helper = source.indexOf('async function poolRequiredDevComputeTokensForSyntheticUsers');
   const isolationGuard = source.indexOf('if (!ISOLATED_BENCHMARK_RUN)', helper);
-  const ownerBoundary = source.indexOf('userId: DEV_USER_ID', helper);
+  const ownerBoundary = source.indexOf('userId: SEED_USER_ID', helper);
   const requiredNames = source.indexOf('COMPUTE_TOKEN_REQUIRED_TYPES', helper);
   const poolUpdate = source.indexOf('data: { poolingEnabled: true }', helper);
   const syncCall = source.indexOf('const count = await syncIntegrations()', helper);
@@ -474,7 +542,7 @@ test('synthetic benchmark compute access uses the isolated pool without changing
   assert(optIn > 0, 'expected an explicit synthetic-user pool opt-in');
   assert(helper > optIn, 'expected a narrowly named pooling helper');
   assert(isolationGuard > helper, 'expected pooling to fail closed outside isolated benchmarks');
-  assert(ownerBoundary > helper, 'expected the integration to retain the dev-user owner');
+  assert(ownerBoundary > helper, 'expected the integration to retain the seed-user owner');
   assert(requiredNames > helper, 'expected pooling to be limited to required provider types');
   assert(poolUpdate > isolationGuard, 'expected the isolated-stack guard before the pool update');
   assert(poolUpdate > ownerBoundary, 'expected only the local pooling flag to change');
@@ -503,11 +571,18 @@ test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks',
     "process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1'"
   );
   const warning = source.indexOf('launcher-scoped non-Claude task', bypass);
-  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
+  // Both providers are inspected up-front; gpt_code must still fail closed
+  // after the Claude-only opt-out (do not short-circuit the GPT branch).
+  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()');
+  const gptFailClosed = source.indexOf(
+    "throw new Error('No usable gpt_code integrations after sync')",
+    warning
+  );
 
   assert(bypass > 0, 'expected a distinct non-Claude task opt-out');
   assert(warning > bypass, 'expected the opt-out to explain its narrow contract');
-  assert(gptInspection > warning, 'expected gpt_code validation to remain active');
+  assert(gptInspection > 0, 'expected gpt_code availability to be inspected');
+  assert(gptFailClosed > warning, 'expected gpt_code validation to remain active');
   assert(
     launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1'),
     'expected the AgentCard launcher to opt into the non-Claude task path'

@@ -156,7 +156,7 @@ test('syncPasskeyCredentials copies passkeys and never moves local signCount bac
   assert(!('id' in upserts[0].update), 'expected update not to rewrite local primary key');
 });
 
-test('syncIntegrationCredentials preserves a local id for the same user and name', async () => {
+test('syncIntegrationCredentials keeps integration primary keys local', async () => {
   const remote = {
     id: 'remote-gpt-id',
     userId: 'seed-user',
@@ -200,6 +200,8 @@ test('syncIntegrationCredentials preserves a local id for the same user and name
     'expected compound integration name selector'
   );
   assert(where.userId_name_accountId?.accountId === '', 'expected legacy account id selector');
+  const create = captured?.create as Record<string, unknown>;
+  assert(!('id' in create), 'expected create not to reuse a potentially stale remote primary key');
   const update = captured?.update as Record<string, unknown>;
   assert(!('id' in update), 'expected update not to rewrite local primary key');
 });

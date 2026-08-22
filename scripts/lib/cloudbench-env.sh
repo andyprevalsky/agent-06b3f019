@@ -857,7 +857,8 @@ cloudbench_wait_machine_startable() {
 # (started/starting/stopping/replacing/created/creating/updating/restarting)
 # are normal during concurrent maintenance; aborting immediately turns a brief
 # race into a fleet-wide INFRA failure. Wait for stopped, fail closed on
-# destroy or timeout.
+# destroy or timeout. state_reader must print the current provider state for
+# the given machine id.
 cloudbench_wait_machine_stopped() {
   local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
   local attempt state
@@ -1084,3 +1085,21 @@ cloudbench_controller_lock_release() {
 # immutable warm-volume snapshots, and mutates nothing but the machines it
 # created. The only lock a run takes is the workspace-local controller lock
 # above.
+
+cloudbench_controller_github_token_b64() {
+  local token
+  token="$(cloudbench_controller_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
+  printf '%s' "$token" | base64 | tr -d '\n'
+}
+
+cloudbench_git_auth_header_from_tokens() {
+  local controller_b64="${1:-}" machine_token="${2:-}" token=""
+  if [ -n "$controller_b64" ]; then
+    token="$(printf '%s' "$controller_b64" | base64 -d 2>/dev/null || true)"
+  fi
+  if [ -z "$token" ] && [ -n "$machine_token" ]; then
+    token="$machine_token"
+  fi
+  [ -n "$token" ] || return 1
+  printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+}

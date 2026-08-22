@@ -279,6 +279,18 @@ async def run_single_test(test: TestPrompt, timeout_override: int | None = None)
     """Run a single test and return the result."""
     if test.credential_backprop_cases:
         return await run_credential_backprop_suite(test, timeout_override)
+    if test.workflow_cutover:
+        from test_workflow_cutover import (
+            run_browser_cutover_test,
+            run_explore_cutover_test,
+        )
+
+        runner = (
+            run_browser_cutover_test
+            if test.workflow_cutover == "spawn_browser_agent"
+            else run_explore_cutover_test
+        )
+        return await runner(test, timeout_override)
 
     timeout = timeout_override or test.timeout
     try:

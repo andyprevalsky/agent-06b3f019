@@ -89,7 +89,16 @@ if (!LOCAL_URL) {
   process.exit(1);
 }
 
-const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const DEFAULT_DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+// SEED_LOCAL_USER_ID retargets the whole prod→local sync at another REAL
+// production identity, the same way SEED_COOKIE_DOMAINS scopes it to a subset
+// of domains. Benchmarks that must run as a specific person (a non-admin payer,
+// a different storefront's account) need that person's rows in the isolated DB;
+// without this every sync mode silently resolved to the dev user, so a task
+// launched with BENCHMARK_RUN_USER_ID hit
+// `Foreign key constraint violated: AgentIdentity_userId_fkey` at browser-session
+// init because the identity it ran as had no local User row at all.
+const SEED_USER_ID = process.env.SEED_LOCAL_USER_ID?.trim() || DEFAULT_DEV_USER_ID;
 // Merge production browser auth state into local by each table's natural
 // identity. Matching rows are refreshed and missing production rows are added;
 // local-only rows are deliberately preserved by normal/full sync. The explicit
@@ -120,6 +129,8 @@ const COMPUTE_TOKEN_REQUIRED_TYPES = parseComputeTokenRequiredTypes(
 const POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS =
   process.env.SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS === '1';
 const ISOLATED_BENCHMARK_RUN = process.env.BENCHMARK_ISOLATED_RUN === 'true';
+const COMPUTE_INTEGRATION_NAMES = ['claude_code', 'gpt_code'] as const;
+let activeRemotePoolIntegrationIds = new Set<string>();
 
 // SEED_COOKIE_DOMAINS scopes every domain-bearing browser-auth table to the
 // domains a benchmark task needs. Set by run_benchmark from the task's
@@ -157,7 +168,11 @@ if (requestedSeedModes.length > 1) {
 }
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
-const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
+// Pin the local URL the same way as remote. Relying on process.env.DATABASE_URL
+// at query time fails under --compute-tokens-only when Prisma re-validates
+// schema env("DATABASE_URL") and the engine no longer sees the parent-injected
+// value (AgentCard lifecycle: "Environment variable not found: DATABASE_URL").
+const local = new PrismaClient({ datasources: { db: { url: LOCAL_URL } } });
 /**
  * Deterministic ordering is what makes `skip`/`take` paging safe — without it
  * Postgres may return overlapping or missing rows across pages.
@@ -191,7 +206,7 @@ const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
-  DEV_USER_ID,
+  SEED_USER_ID,
   SEED_COOKIE_DOMAINS
 );
 
@@ -217,7 +232,7 @@ async function syncJsonbOriginTable(table: JsonbOriginTable): Promise<number> {
   return streamJsonbOrigins({
     remoteUrl: REMOTE_URL!,
     localUrl: LOCAL_URL!,
-    userId: DEV_USER_ID,
+    userId: SEED_USER_ID,
     domains: SEED_COOKIE_DOMAINS,
     table,
   });
@@ -397,6 +412,14 @@ async function findProdIntegrations(
   return rows.map((row) => ({ ...row, accountId: '', accountEmail: null }));
 }
 
+function integrationPoolIdentity(row: {
+  userId: string;
+  name: string;
+  accountId?: string | null;
+}): string {
+  return JSON.stringify([row.userId, row.name, row.accountId ?? '']);
+}
+
 // Keep production reads on the columns that existed before the newest local
 // migration. A deploy seeds from production before that migration is live, so
 // an implicit SELECT * would request the new health columns and fail with P2022.
@@ -418,12 +441,43 @@ const PROD_EMAIL_CREDENTIAL_COLUMNS = {
 } as const;
 
 async function syncIntegrations(): Promise<number> {
+  activeRemotePoolIntegrationIds.clear();
   // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
-  const userIntegrations = await findProdIntegrations({ userId: DEV_USER_ID });
+  const userIntegrations = await findProdIntegrations({ userId: SEED_USER_ID });
   const poolIntegrations = await findProdIntegrations({
     poolingEnabled: true,
-    userId: { not: DEV_USER_ID },
+    userId: { not: SEED_USER_ID },
   });
+  const previouslyPooledLocalIntegrations = await local.integration.findMany({
+    where: {
+      name: { in: [...COMPUTE_INTEGRATION_NAMES] },
+      poolingEnabled: true,
+      userId: { not: SEED_USER_ID },
+    },
+    select: { id: true, userId: true, name: true, accountId: true },
+  });
+  const previousPoolUserIds = [
+    ...new Set(previouslyPooledLocalIntegrations.map((integration) => integration.userId)),
+  ];
+  const revokedRemoteIntegrations =
+    previousPoolUserIds.length > 0
+      ? await findProdIntegrations({
+          name: { in: [...COMPUTE_INTEGRATION_NAMES] },
+          poolingEnabled: false,
+          userId: { in: previousPoolUserIds },
+        })
+      : [];
+  const revokedRemoteIdentities = new Set(revokedRemoteIntegrations.map(integrationPoolIdentity));
+  const revokedLocalIds = previouslyPooledLocalIntegrations
+    .filter((integration) => revokedRemoteIdentities.has(integrationPoolIdentity(integration)))
+    .map((integration) => integration.id);
+  if (revokedLocalIds.length > 0) {
+    const revoked = await local.integration.updateMany({
+      where: { id: { in: revokedLocalIds } },
+      data: { poolingEnabled: false },
+    });
+    console.log(`  🧹 Integrations: ${revoked.count} revoked pool token(s) disabled locally`);
+  }
   const all = [...userIntegrations, ...poolIntegrations];
   // Pool tokens reference foreign users — ensure those User records exist locally
   const poolUserIds = [...new Set(poolIntegrations.map((i) => i.userId))];
@@ -436,10 +490,12 @@ async function syncIntegrations(): Promise<number> {
   // Preserve the local id (and any dependent rows) while refreshing the
   // production credential fields.
   const syncedIds = await syncIntegrationCredentials(local.integration, all);
+  activeRemotePoolIntegrationIds = new Set(syncedIds.slice(userIntegrations.length));
   const deleted = await local.integration.deleteMany({
     where: {
-      name: { in: ['claude_code', 'gpt_code'] },
+      name: { in: [...COMPUTE_INTEGRATION_NAMES] },
       id: { notIn: syncedIds.length > 0 ? syncedIds : ['__none__'] },
+      OR: [{ userId: SEED_USER_ID }, { userId: { in: poolUserIds }, poolingEnabled: true }],
     },
   });
   if (deleted.count > 0) {
@@ -452,7 +508,7 @@ async function syncIntegrations(): Promise<number> {
 const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
 
 /**
- * Sync only Gmail/Yahoo integration rows for the dev user. Unlike
+ * Sync only Gmail/Yahoo integration rows for the selected seed user. Unlike
  * `syncIntegrations`, this never imports pool tokens and never deletes
  * `claude_code` / `gpt_code` rows — email overlay must not disturb compute
  * tokens already present in an isolated benchmark DB.
@@ -462,22 +518,23 @@ const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
  */
 async function syncEmailIntegrations(): Promise<Map<string, string>> {
   const emailIntegrations = await findProdIntegrations({
-    userId: DEV_USER_ID,
+    userId: SEED_USER_ID,
     name: { in: [...EMAIL_INTEGRATION_NAMES] },
   });
   const remoteToLocal = new Map<string, string>();
   for (const integration of emailIntegrations) {
     const { id: remoteId, ...updateData } = integration;
+    const accountId = integration.accountId ?? '';
     const synced = await local.integration.upsert({
       where: {
         userId_name_accountId: {
           userId: integration.userId,
           name: integration.name,
-          accountId: integration.accountId,
+          accountId,
         },
       },
-      create: integration,
-      update: updateData,
+      create: { ...integration, accountId },
+      update: { ...updateData, accountId },
       select: { id: true },
     });
     remoteToLocal.set(remoteId, synced.id);
@@ -509,7 +566,7 @@ function remapEmailCredentialIntegrationIds<
  */
 async function emailIntegrationIdMap(): Promise<Map<string, string>> {
   const remoteRows = await findProdIntegrations({
-    userId: DEV_USER_ID,
+    userId: SEED_USER_ID,
     name: { in: [...EMAIL_INTEGRATION_NAMES] },
   });
   const remoteToLocal = new Map<string, string>();
@@ -550,7 +607,7 @@ async function poolRequiredDevComputeTokensForSyntheticUsers(): Promise<number> 
   );
   const result = await local.integration.updateMany({
     where: {
-      userId: DEV_USER_ID,
+      userId: SEED_USER_ID,
       name: { in: requiredNames },
       status: 'CONNECTED',
     },
@@ -576,7 +633,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
       // production has not migrated yet; an implicit SELECT * would make the
       // auth-state sync fail before the migration can be exercised locally.
       const ctx = await remote.browserContext.findUnique({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: {
           id: true,
           userId: true,
@@ -588,7 +645,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
       if (!ctx) return 0;
       const { id, ...rest } = ctx;
       await local.browserContext.upsert({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         create: ctx as any,
         update: rest as any,
       });
@@ -605,11 +662,11 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
     'Browser Provider Profiles',
     async () => {
       const remoteContext = await remote.browserContext.findUnique({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: { id: true },
       });
       const localContext = await local.browserContext.findUnique({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: { id: true },
       });
       if (!remoteContext || !localContext) return 0;
@@ -647,7 +704,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
       const synced = await streamCookies({
         remoteUrl: REMOTE_URL!,
         localUrl: LOCAL_URL!,
-        userId: DEV_USER_ID,
+        userId: SEED_USER_ID,
         domains: SEED_COOKIE_DOMAINS,
       });
       if (SEED_COOKIE_DOMAINS.length > 0) {
@@ -730,13 +787,19 @@ function hasEncryptedCredentials(config: unknown): boolean {
 
 function parseComputeTokenRequiredTypes(raw: string | undefined): Set<'claude' | 'gpt'> {
   const value = raw?.trim() || 'claude,gpt';
+  // "any" = at least one of claude_code / gpt_code must be usable. Used by
+  // code-agent benchmarks (spawn_claude_code_agent selects Claude Code or
+  // Codex from whichever compute token the run actually holds).
+  if (value.toLowerCase() === 'any') {
+    return new Set<'claude' | 'gpt'>(['claude', 'gpt']);
+  }
   const types = new Set<'claude' | 'gpt'>();
   for (const part of value.split(',')) {
     const token = part.trim().toLowerCase();
     if (token === '') continue;
     if (token !== 'claude' && token !== 'gpt') {
       throw new Error(
-        `SEED_REQUIRE_COMPUTE_TOKEN_TYPES must contain only claude,gpt; received ${JSON.stringify(
+        `SEED_REQUIRE_COMPUTE_TOKEN_TYPES must contain only claude,gpt,any; received ${JSON.stringify(
           raw
         )}`
       );
@@ -749,6 +812,10 @@ function parseComputeTokenRequiredTypes(raw: string | undefined): Set<'claude' |
     );
   }
   return types;
+}
+
+function requireAnyComputeTokenType(): boolean {
+  return (process.env.SEED_REQUIRE_COMPUTE_TOKEN_TYPES || '').trim().toLowerCase() === 'any';
 }
 
 interface GptCodeAvailability {
@@ -764,6 +831,7 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   const integrations = await local.integration.findMany({
     where: { name: 'gpt_code', status: 'CONNECTED' },
     select: {
+      id: true,
       userId: true,
       poolingEnabled: true,
       config: true,
@@ -772,7 +840,8 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   });
 
   const eligible = integrations.filter((integration) => {
-    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
+    const isAvailableToBench =
+      integration.userId === SEED_USER_ID || activeRemotePoolIntegrationIds.has(integration.id);
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
   });
 
@@ -804,6 +873,7 @@ async function inspectClaudeCodeIntegrations(): Promise<ClaudeCodeAvailability> 
       status: 'CONNECTED',
     },
     select: {
+      id: true,
       userId: true,
       poolingEnabled: true,
       config: true,
@@ -812,7 +882,8 @@ async function inspectClaudeCodeIntegrations(): Promise<ClaudeCodeAvailability> 
   });
 
   const eligible = integrations.filter((integration) => {
-    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
+    const isAvailableToBench =
+      integration.userId === SEED_USER_ID || activeRemotePoolIntegrationIds.has(integration.id);
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
   });
 
@@ -841,6 +912,30 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       await poolRequiredDevComputeTokensForSyntheticUsers();
       const { usable: usableClaudeCodeCount, rateLimited: rateLimitedClaudeCodeCount } =
         await inspectClaudeCodeIntegrations();
+      const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
+        await inspectGptCodeIntegrations();
+      // Code-agent tasks accept Claude Code OR Codex (gpt_code). Fail only when
+      // neither provider is usable (rate-limited rows still proceed — same as
+      // the per-provider external-quota policy below).
+      if (requireAnyComputeTokenType()) {
+        if (usableClaudeCodeCount > 0 || usableGptCodeCount > 0) {
+          console.log(
+            `  ✅ Compute Tokens (integrations): ${count} synced, ` +
+              `${usableClaudeCodeCount} usable claude_code, ${usableGptCodeCount} usable gpt_code ` +
+              '(SEED_REQUIRE_COMPUTE_TOKEN_TYPES=any)'
+          );
+          return;
+        }
+        if (rateLimitedClaudeCodeCount > 0 || rateLimitedGptCodeCount > 0) {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable code-agent tokens ` +
+              `(claude_rate_limited=${rateLimitedClaudeCodeCount}, gpt_rate_limited=${rateLimitedGptCodeCount}) — ` +
+              'proceeding under SEED_REQUIRE_COMPUTE_TOKEN_TYPES=any; runtime surfaces quota errors'
+          );
+          return;
+        }
+        throw new Error('No usable claude_code or gpt_code integrations after sync');
+      }
       if (usableClaudeCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {
           console.warn(
@@ -880,8 +975,6 @@ async function syncComputeTokensWithRetries(): Promise<void> {
           throw new Error('No usable claude_code integrations after sync');
         }
       }
-      const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
-        await inspectGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('gpt')) {
           console.warn(
@@ -981,14 +1074,14 @@ async function syncPasskeysOnly(
       'Stale Local Passkeys',
       async () => {
         const remoteKeys = await remote.passkeyCredential.findMany({
-          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
+          where: passkeySyncWhere(SEED_USER_ID, SEED_COOKIE_DOMAINS),
           select: { rpId: true, credentialId: true },
         });
         const liveKeys = new Set(
           remoteKeys.map(({ rpId, credentialId }) => `${rpId}\u0000${credentialId}`)
         );
         const localKeys = await local.passkeyCredential.findMany({
-          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
+          where: passkeySyncWhere(SEED_USER_ID, SEED_COOKIE_DOMAINS),
           select: { id: true, rpId: true, credentialId: true },
         });
         const staleIds = localKeys
@@ -1068,14 +1161,36 @@ function throwBrowserAuthSyncFailures(failures: Error[]): void {
   );
 }
 
+/**
+ * Guarantee the identity being seeded exists locally before any user-scoped row
+ * is written.
+ *
+ * Every browser-auth table (PasskeyCredential, BrowserPassword, CookieBundle,
+ * AgentIdentity, …) carries a userId FK. The full sync happens to create the
+ * User first, but the scoped `--passkeys-only` / `--credentials-only` modes did
+ * not, so they only ever worked by accident: the dev user was already present in
+ * the base image. Any other SEED_LOCAL_USER_ID hit a FK violation — at seed time
+ * for the passkey rows, or later at `POST /api/browser-session/init`.
+ */
+async function ensureSeedUserExists(): Promise<void> {
+  const synced = await syncUserRecord(remote.user, local.user, SEED_USER_ID);
+  if (synced === 0) {
+    throw new Error(
+      `User ${SEED_USER_ID} not found in the remote database; cannot seed credentials for an identity that does not exist upstream`
+    );
+  }
+  console.log(`  ✅ Identity ${SEED_USER_ID} present locally`);
+}
+
 async function sync() {
   console.log('🔄 Syncing from production database...');
   console.log(`   Remote: ${REMOTE_URL.replace(/:[^:@]+@/, ':***@')}`);
   console.log(`   Local:  ${process.env.DATABASE_URL?.replace(/:[^:@]+@/, ':***@') ?? 'default'}`);
-  console.log(`   User:   ${DEV_USER_ID}\n`);
+  console.log(`   User:   ${SEED_USER_ID}\n`);
 
   // Verify remote connectivity
   await remote.$queryRaw`SELECT 1`;
+  await ensureSeedUserExists();
 
   if (COMPUTE_TOKENS_ONLY) {
     await syncComputeTokensWithRetries();
@@ -1111,7 +1226,7 @@ async function sync() {
     });
     await syncTable('Email Credentials', async () => {
       const creds = await remote.emailIntegrationCredential.findMany({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: PROD_EMAIL_CREDENTIAL_COLUMNS,
       });
       return upsertById(
@@ -1138,24 +1253,24 @@ async function sync() {
 
   // ── User ──
   await syncTable('User', async () => {
-    const count = await syncUserRecord(remote.user, local.user, DEV_USER_ID);
-    if (count === 0) throw new Error(`User ${DEV_USER_ID} not found in remote`);
+    const count = await syncUserRecord(remote.user, local.user, SEED_USER_ID);
+    if (count === 0) throw new Error(`User ${SEED_USER_ID} not found in remote`);
     return count;
   });
 
   // ── Credits ──
   await syncTable('Credits', async () => {
-    const credits = await remote.credit.findMany({ where: { userId: DEV_USER_ID } });
+    const credits = await remote.credit.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.credit, credits);
   });
 
   // ── Subscription ──
   await syncTable('Subscription', async () => {
-    const sub = await remote.subscription.findUnique({ where: { userId: DEV_USER_ID } });
+    const sub = await remote.subscription.findUnique({ where: { userId: SEED_USER_ID } });
     if (!sub) return 0;
     const { id, ...rest } = sub;
     await local.subscription.upsert({
-      where: { userId: DEV_USER_ID },
+      where: { userId: SEED_USER_ID },
       create: sub as any,
       update: rest as any,
     });
@@ -1168,7 +1283,7 @@ async function sync() {
   // ── Email Integration Credentials ──
   await syncTable('Email Credentials', async () => {
     const creds = await remote.emailIntegrationCredential.findMany({
-      where: { userId: DEV_USER_ID },
+      where: { userId: SEED_USER_ID },
       select: PROD_EMAIL_CREDENTIAL_COLUMNS,
     });
     const remoteToLocal = await emailIntegrationIdMap();
@@ -1185,7 +1300,7 @@ async function sync() {
     let peopleSynced = 0;
     for (let skip = 0; ; skip += PERSON_PAGE_SIZE) {
       const page = await remote.person.findMany({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         orderBy: { id: 'asc' },
         skip,
         take: PERSON_PAGE_SIZE,
@@ -1202,7 +1317,7 @@ async function sync() {
   await syncTable('Message Records', async () => {
     const personIds = (
       await remote.person.findMany({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
         select: { id: true },
       })
     ).map((p) => p.id);
@@ -1255,7 +1370,7 @@ async function sync() {
 
   // ── Rose API Keys ──
   await syncTable('Rose API Keys', async () => {
-    const keys = await remote.roseApiKey.findMany({ where: { userId: DEV_USER_ID } });
+    const keys = await remote.roseApiKey.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.roseApiKey, keys);
   });
 
@@ -1265,23 +1380,23 @@ async function sync() {
 
   // ── Goal Blueprints ──
   await syncTable('Goal Blueprints', async () => {
-    const blueprints = await remote.goalBlueprint.findMany({ where: { userId: DEV_USER_ID } });
+    const blueprints = await remote.goalBlueprint.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.goalBlueprint, blueprints);
   });
 
   // ── GitHub Repo Access ──
   await syncTable('GitHub Repos', async () => {
-    const repos = await remote.githubRepoAccess.findMany({ where: { userId: DEV_USER_ID } });
+    const repos = await remote.githubRepoAccess.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.githubRepoAccess, repos);
   });
 
   // ── SMS Session ──
   await syncTable('SMS Session', async () => {
-    const session = await remote.smsSession.findUnique({ where: { userId: DEV_USER_ID } });
+    const session = await remote.smsSession.findUnique({ where: { userId: SEED_USER_ID } });
     if (!session) return 0;
     const { id, ...rest } = session;
     await local.smsSession.upsert({
-      where: { userId: DEV_USER_ID },
+      where: { userId: SEED_USER_ID },
       create: session as any,
       update: rest as any,
     });
@@ -1290,7 +1405,7 @@ async function sync() {
 
   // ── Feedback ──
   await syncTable('Feedback', async () => {
-    const feedback = await remote.feedback.findMany({ where: { userId: DEV_USER_ID } });
+    const feedback = await remote.feedback.findMany({ where: { userId: SEED_USER_ID } });
     return upsertById(local.feedback, feedback);
   });
 

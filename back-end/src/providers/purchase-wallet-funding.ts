@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { PurchaseWalletFundingStatus, type PurchaseSpend } from '@prisma/client';
+import { recoverCardholderFunds } from './agentcard/fund-recovery';
+import { getOrgManagedCardholderId } from './agentcard/store';
 import { createLogger } from './logger';
 import * as repo from './purchase-wallet-funding-repo';
 import {
@@ -208,6 +210,34 @@ export async function beginPurchaseWalletReclaim(
 
 const inFlightPurchaseWalletReclaims = new Map<string, Promise<void>>();
 
+/**
+ * Return a cardholder's released residual to the org pool.
+ *
+ * Deliberately isolated and non-throwing — see the call site. Resolves the cardholder from the
+ * purchase's user because `recover_funds` is per-cardholder; a user with no org-managed cardholder
+ * (the static-card path) simply has nothing to recover.
+ */
+async function sweepCardholderResidualToPool(userId: string): Promise<void> {
+  try {
+    const cardholderId = await getOrgManagedCardholderId(userId);
+    if (cardholderId === undefined) return;
+    const recovery = await recoverCardholderFunds(cardholderId);
+    if (recovery.amountCents > 0) {
+      log.info('Released card funds returned to the org pool', {
+        user_id: userId,
+        cardholder_id: cardholderId,
+        amount_cents: recovery.amountCents,
+        status: recovery.status,
+      });
+    }
+  } catch (error) {
+    log.warn('Could not return released card funds to the pool; top-up sweep will retry', {
+      user_id: userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 async function performPurchaseWalletFundingReclaim(
   purchase: Pick<PurchaseSpend, 'id' | 'userId' | 'agentId' | 'totalCents'> & {
     cardId?: string | null;
@@ -288,6 +318,16 @@ async function performPurchaseWalletFundingReclaim(
       reason,
     });
     const reclaimed = await repo.markWalletFundingReclaimed(funding.id, reclaimLeaseToken, result);
+    if (reclaimed.count === 1) {
+      // The card is closed and AgentCard has released the hold — but that release lands in the
+      // CARDHOLDER's float, not the org pool, where no other user can draw on it. Pull it back
+      // now rather than waiting for the next top-up cycle to sweep it.
+      //
+      // Fire-and-forget and never throwing: the reclaim itself is the money-critical step and is
+      // already durably recorded. A recovery failure here must not undo or fail it, and the
+      // top-up's recover-before-spend remains the backstop.
+      void sweepCardholderResidualToPool(purchase.userId);
+    }
     if (reclaimed.count === 0) {
       const current = await repo.findWalletFundingByPurchaseId(purchase.id);
       // Concurrent reconcilers may both observe the provider release. The winner has already
