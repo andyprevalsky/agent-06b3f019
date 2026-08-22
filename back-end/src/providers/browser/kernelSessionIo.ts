@@ -49,16 +49,6 @@ export async function ensureKernelSessionFileDirectories(sessionId: string): Pro
   );
 }
 
-/** Ensure Kernel download/upload roots exist before CDP writes or listFiles. */
-export async function ensureKernelSessionFileDirectories(sessionId: string): Promise<void> {
-  const client = kernelClient();
-  await Promise.all(
-    FILE_DIRECTORIES.map((directory) =>
-      client.browsers.fs.createDirectory(sessionId, { path: directory }).catch(() => {})
-    )
-  );
-}
-
 export async function listKernelSessionFiles(sessionId: string): Promise<BrowserFileInfo[]> {
   const client = kernelClient();
   await ensureKernelSessionFileDirectories(sessionId);
