@@ -200,14 +200,6 @@ export async function fetchHubTasks(): Promise<HubTask[]> {
   return data.tasks;
 }
 
-export async function patchHubTask(name: string, edit: HubTaskEdit): Promise<HubTask> {
-  const data = await hubFetch<{ task: HubTask }>(`/benchmarks/tasks/${encodeURIComponent(name)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(edit),
-  });
-  return data.task;
-}
-
 export async function fetchHubRuns(): Promise<HubRun[]> {
   const data = await hubFetch<{ runs: HubRun[] }>('/benchmarks/runs');
   return data.runs;

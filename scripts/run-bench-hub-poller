@@ -8,10 +8,9 @@
 #   HUB_URL=http://localhost:3901 scripts/run-bench-hub-poller --local --once
 #
 # Loop: claim a queued run-request (atomic PATCH; double-claim loses) →
-# export the DB catalog to agents/benchmarks/tasks.json (so hub edits are what
-# the runner executes) → launch scripts/run-bench → stream live report-card
-# snapshots to POST /api/benchmarks/runs?live=1 → upload the final run bundle →
-# mark the request completed/failed with the linked run_id.
+# launch scripts/run-bench using the repository tasks.json catalog → stream live
+# report-card snapshots to POST /api/benchmarks/runs?live=1 → upload the final
+# run bundle → mark the request completed/failed with the linked run_id.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -71,66 +70,6 @@ hub() {  # hub <method> <path> [json-body]
         curl -fsS -X "$method" "$HUB_URL$path" \
             -H "X-API-Key: $BACKEND_API_KEY" -H "X-User-Id: $USER_ID"
     fi
-}
-
-export_catalog() {
-    # DB → tasks.json so hub edits are real for the runner. Postgres jsonb does
-    # NOT preserve key order, so a raw dump would churn the whole file; instead
-    # MERGE each DB definition onto the existing file entry (file key order is
-    # kept, DB values win, DB-only keys append, new tasks append at the end).
-    python3 - "$HUB_URL" <<'PY'
-import json, sys, urllib.request
-url = sys.argv[1].rstrip("/") + "/api/benchmarks"
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(url, timeout=20) as r:
-    db_tasks = json.load(r).get("tasks") or []
-if len(db_tasks) < 1:
-    print("catalog export: EMPTY response, keeping existing tasks.json", file=sys.stderr)
-    sys.exit(0)
-path = "agents/benchmarks/tasks.json"
-try:
-    file_tasks = json.load(open(path))
-except Exception:
-    file_tasks = []
-by_name = {t.get("name"): t for t in db_tasks if isinstance(t, dict)}
-
-def merge_value(file_v, db_v):
-    # Postgres jsonb sorts object keys at EVERY depth; recursively re-impose
-    # the file's key order (incl. dicts inside lists) so unchanged values
-    # round-trip byte-identical.
-    if isinstance(file_v, dict) and isinstance(db_v, dict):
-        out = {}
-        for k in file_v:
-            out[k] = merge_value(file_v[k], db_v[k]) if k in db_v else file_v[k]
-        for k, v in db_v.items():
-            if k not in out:
-                out[k] = v
-        return out
-    if isinstance(file_v, list) and isinstance(db_v, list) and len(file_v) == len(db_v):
-        return [merge_value(f, d) for f, d in zip(file_v, db_v)]
-    return db_v
-
-merged, seen, changed = [], set(), 0
-for entry in file_tasks:
-    name = entry.get("name")
-    db = by_name.get(name)
-    if db is None:
-        merged.append(entry)  # file-only task (DB unseeded?) — keep untouched
-        continue
-    seen.add(name)
-    out = merge_value(entry, db)
-    if out != entry:
-        changed += 1
-    merged.append(out)
-for name, db in by_name.items():  # brand-new tasks created in the DB
-    if name not in seen:
-        merged.append(db)
-        changed += 1
-with open(path, "w") as f:
-    json.dump(merged, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-print(f"catalog export: {len(merged)} tasks, {changed} updated from DB → {path}")
-PY
 }
 
 snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch> <artifact_root> <local_artifact_root> <task_names>
@@ -248,11 +187,7 @@ process_request() {  # process_request <request_json>
         return 0
     fi
 
-    if [ "${HUB_SKIP_CATALOG_EXPORT:-0}" = "1" ]; then
-        echo "   catalog export skipped by HUB_SKIP_CATALOG_EXPORT=1 — using repository tasks.json unchanged"
-    else
-        export_catalog || echo "   ⚠ catalog export failed — running with existing tasks.json"
-    fi
+    echo "   using repository tasks.json (catalog edits are git-only)"
 
     local hub_run_id="hub-$req_id"
     # Sub-second precision is required here. With integer seconds, a request

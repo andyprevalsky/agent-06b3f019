@@ -1,2 +1,5 @@
-// No domain-specific types — benchmark tasks are untyped JSON read from disk.
-export {};
+export class TasksUnavailableError extends Error {
+  constructor() {
+    super('Benchmark tasks unavailable');
+  }
+}

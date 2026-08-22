@@ -10,7 +10,6 @@
  *       (the app's normal chat view; benchmark agents are served through the
  *       normal agent APIs via the hub-archive fallback)
  *     run + Back ──► hub
- *   hub + task edited ──► hub (catalog row replaced in place)
  *   hub + run dispatched ──► hub (requests refetched immediately)
  *
  * Layout: stacked — Runs on top at a fixed height (internally scrollable;
@@ -108,8 +107,8 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
       <div className="pb-3">
         <h1 className="text-lg font-semibold">Benchmarks</h1>
         <p className="text-xs text-muted-foreground">
-          Eval catalog, live + past runs, and dispatch — runs execute on cloud bench machines via
-          the hub poller.
+          Eval catalog (read-only from tasks.json), live + past runs, and dispatch — runs execute on
+          cloud bench machines via the hub poller.
         </p>
       </div>
       <div className="flex-1 min-h-0 flex flex-col gap-4">
@@ -131,9 +130,6 @@ export function BenchmarksView({ onOpenAgent }: BenchmarksViewProps) {
             loading={tasksLoading}
             error={tasksError}
             onRetry={() => void loadTasks()}
-            onTaskUpdated={(updated) =>
-              setTasks((prev) => prev.map((t) => (t.name === updated.name ? updated : t)))
-            }
             onDispatched={() => void loadRuns()}
           />
         </div>
