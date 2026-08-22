@@ -89,6 +89,32 @@ def test_browser_event_ticket_omits_genre_earliest_and_seat_center():
     assert "under $30" in prompt
 
 
+def test_browser_event_ticket_accepts_url_grounded_metreon_venue():
+    """H-05: venue via amc-metreon-16 URL; do not require Metreon in approval text.
+
+    Andy: relax semantic rubric so merchant 'AMC Theatres' + Metreon theatre URL
+    passes; approval need not contain the Metreon substring.
+    """
+    import json
+    from pathlib import Path
+
+    tasks = json.loads(Path(__file__).resolve().parent.joinpath("tasks.json").read_text())
+    task = next(t for t in tasks if t["name"] == "browser-event-ticket")
+    assert "AMC Metreon 16" in task["prompt"]
+
+    semantics = next(
+        e for e in task["evaluators"] if e["id"] == "movie-ticket-seat-selection-semantics"
+    )
+    criteria_blob = " ".join(semantics["criteria"])
+    judge = semantics["judge_prompt"]
+    assert "amc-metreon-16" in criteria_blob.lower() or "theatre url" in criteria_blob.lower()
+    assert "without the Metreon substring" in criteria_blob or "without the Metreon substring" in judge
+    assert "Do not fail solely because the approval merchant" in judge
+    # Must not require approval text itself to name Metreon as the only venue proof.
+    assert "approval identifies the movie, venue, date" not in criteria_blob
+    assert "one adult at AMC Metreon 16 this Friday" not in criteria_blob
+
+
 def test_no_anthropic_smoke_price_limit_is_route_aware(monkeypatch):
     task = get_task_by_name("spawn-sub-agents")
 
