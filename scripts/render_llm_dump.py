@@ -2542,7 +2542,7 @@ def publish_dump_https(
     html_path: Path,
     *,
     agent_id: str | None = None,
-    expires_in: int = 7 * 24 * 3600,
+    expires_in: int = 63072000,  # 2y — R2/S3 presign max for durable evidence links
 ) -> str | None:
     """Upload self-contained HTML to R2 and return a presigned HTTPS GET URL.
 
