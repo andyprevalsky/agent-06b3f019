@@ -850,6 +850,52 @@ def content_key(goal: str, call_site: str, messages: Any) -> str:
     return build_key("llm", goal, f"{normalize_call_site(call_site)}:c:{sha256(canonical_messages(messages))[:32]}")
 
 
+_ATTACHMENT_PART_TYPES = frozenset({"image", "image_url"})
+
+
+def _user_message_has_attachment_context(content: Any) -> bool:
+    """True when a user turn carries inline images or explicit file_pointer metadata."""
+    if isinstance(content, str):
+        lower = content.lower()
+        return "file_pointer:" in lower or "original_filename:" in lower
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "").lower() in _ATTACHMENT_PART_TYPES:
+                return True
+            text = part.get("text")
+            if isinstance(text, str) and (
+                "file_pointer:" in text.lower() or "original_filename:" in text.lower()
+            ):
+                return True
+    return False
+
+
+def _user_attachment_context_fingerprint(messages: Any) -> str | None:
+    """Stable hash of attachment-shaping user content for position LLM keys.
+
+    Position keys deliberately ignore conversational history, but user-supplied
+    attachments (file_pointer metadata + inline images) change the correct tool
+    choice. Without this, a stale explore-first response replays after attachment
+    metadata lands in context even though original_filename is now explicit.
+    """
+    if not isinstance(messages, list):
+        return None
+
+    attachment_messages: list[Any] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if _user_message_has_attachment_context(content):
+            attachment_messages.append({"role": "user", "content": content})
+
+    if not attachment_messages:
+        return None
+    return sha256(canonical_messages(attachment_messages))[:32]
+
+
 def position_request_fingerprint(request: Any) -> str:
     """Behavior-shaping request material for trajectory replay.
 
@@ -890,6 +936,9 @@ def position_request_fingerprint(request: Any) -> str:
         "response_schema": request.get("response_schema"),
         "env_fingerprint": request.get("env_fingerprint"),
     }
+    attachment_fp = _user_attachment_context_fingerprint(messages)
+    if attachment_fp is not None:
+        material["user_attachment_context"] = attachment_fp
     return sha256(canonical_messages(material))[:32]
 
 
