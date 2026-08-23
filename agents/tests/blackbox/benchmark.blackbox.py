@@ -5034,6 +5034,62 @@ def test_hotel_double_spawn_run_artifact_fails_exact_tool_count():
     assert "expected 1, got 2" in reason
 
 
+def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
+    """Replay e6a95458: completion-oriented spawn goal ends on phone write_lock, not payment_approval."""
+    import json
+    from pathlib import Path
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    run_path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "runs"
+        / "20260822_212328_browser-hotel-booking.json"
+    )
+    payload = json.loads(run_path.read_text())
+    task_result = payload["tasks"][0]
+    messages = task_result["logs"]["messages"]
+    serialized = json.dumps(messages)
+
+    task = get_task_by_name("browser-hotel-booking")
+    harness_goal = bench._benchmark_goal_for_task(task, "http://localhost:3201")
+    assert "Complete the purchase" not in harness_goal
+    assert "request_payment_card" not in harness_goal.lower()
+
+    spawn_goal = None
+    spawn_schema_fields: list[str] = []
+    for message in messages:
+        metadata = message.get("metadata") or {}
+        for tool_call in metadata.get("tool_calls") or []:
+            if tool_call.get("tool") == "spawn_agent" and tool_call.get("type") == "browser":
+                spawn_goal = tool_call.get("goal", "")
+                schema = tool_call.get("output_schema") or {}
+                spawn_schema_fields = [field.get("name", "") for field in schema.get("fields", [])]
+                break
+        if spawn_goal:
+            break
+
+    assert spawn_goal
+    assert "Complete the purchase" in spawn_goal
+    assert "request_payment_card" not in spawn_goal.lower()
+    assert "booking_completed" in spawn_schema_fields
+    assert serialized.count("request_payment_card") == 0
+    assert "Make a phone call to +1 (800) 246-8357" in serialized
+
+    data = {
+        "agent": {"status": task_result["status"], "progress": task_result["progress_score"]},
+        "messages": messages,
+    }
+    passed, reason = evaluate_task(task, data, approvals_triggered=task_result["approvals_triggered"])
+    assert passed is False
+    assert reason == task_result["failure_reason"]
+    assert "payment_approval" in reason
+    assert "write_lock" in reason
+
+
 def test_event_ticket_catalog_stops_at_grounded_payment_approval():
     """Movie ticketing passes at a detailed, unresolved AMC card request."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -15278,6 +15334,10 @@ async def run_all_tests():
     r.record(
         "hotel_double_spawn_run_artifact_tool_count",
         test_hotel_double_spawn_run_artifact_fails_exact_tool_count,
+    )
+    r.record(
+        "hotel_e6a95458_no_payment_card_boundary",
+        test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary,
     )
     r.record(
         "event_ticket_grounded_payment_approval",
