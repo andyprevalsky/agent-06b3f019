@@ -22,8 +22,14 @@ import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
-import { computeDefaultPriceLimitCents, fetchCreditsUsage } from '@/features/terminal-component-group/hooks';
-import { createAgent, postMessage, resumeAgent, checkAndRespondToAttention } from '../api';
+import { computeDefaultPriceLimitCents } from '@/lib/priceLimitDefaults';
+import {
+  createAgent,
+  postMessage,
+  resumeAgent,
+  checkAndRespondToAttention,
+  fetchCreditsUsage,
+} from '../api';
 import type { FilePointer, AgentDetail, PendingAgentCreationInput, TerminalView } from '../types';
 
 export interface UseMessageSendingArgs {

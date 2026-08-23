@@ -33,7 +33,11 @@ export function assertExistingDescendantRequestMatches(
     ['start_phase', body.start_phase ?? null, existing.workflowStartPhase],
     ['task_queue', body.task_queue ?? null, existing.workflowTaskQueue],
     ['max_iterations', body.max_iterations ?? null, existing.workflowMaxIterations],
-    ['price_limit_cents', body.price_limit_cents ?? existing.priceLimitCents, existing.priceLimitCents],
+    [
+      'price_limit_cents',
+      body.price_limit_cents ?? existing.priceLimitCents,
+      existing.priceLimitCents,
+    ],
     ['context_gates', body.context_gates ?? null, existing.workflowContextGates],
     ['response_schema', body.response_schema ?? null, existing.responseSchema],
     [

@@ -65,11 +65,6 @@ export const DEFAULT_PENDING_PRICE_LIMIT_CENTS = 100;
 /** Fallback when an agent row has no stored limit; real agents always persist one. */
 export const DEFAULT_AGENT_PRICE_LIMIT_CENTS = 100;
 
-export {
-  computeDefaultPriceLimitCents,
-  MAX_DEFAULT_PRICE_LIMIT_CENTS,
-} from './priceLimitDefaults';
-
 /** Warning threshold (fraction of limit) that flips the cost chip to amber. */
 export const COST_WARNING_RATIO = 0.8;
 

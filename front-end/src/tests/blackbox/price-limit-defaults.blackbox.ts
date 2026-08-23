@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computeDefaultPriceLimitCents,
   MAX_DEFAULT_PRICE_LIMIT_CENTS,
-} from '@/features/terminal-component-group/priceLimitDefaults';
+} from '@/lib/priceLimitDefaults';
 
 describe('computeDefaultPriceLimitCents', () => {
   it('uses remaining credits when below the $10 cap', () => {

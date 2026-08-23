@@ -178,7 +178,6 @@ export async function createAgent(
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
-  const priceLimitCents = await resolvePriceLimitCents(userId, body.price_limit_cents);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -206,7 +205,7 @@ export async function createAgent(
     proxyCountry: proxyGeo.country,
     proxyState: proxyGeo.state,
     proxyCity: proxyGeo.city,
-    priceLimitCents,
+    priceLimitCents: await resolvePriceLimitCents(userId, body.price_limit_cents),
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
     worldModelMode: body.world_model_mode,

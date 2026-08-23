@@ -21,6 +21,36 @@ import {
   type FilePointer,
   type BlueprintFeedback,
 } from '@/lib/api';
+import { backendApiUrl } from '@/lib/backendUrl';
+import { getStoredSession } from '@/lib/supabase';
+
+export interface CreditsUsageData {
+  total: number;
+  used: number;
+  remaining: number;
+  tier: number | null;
+  upgradeOptions: Array<{
+    tier: number;
+    name: string;
+    url: string;
+  }>;
+}
+
+/** Fetch current credits usage for the authenticated user. */
+export async function fetchCreditsUsage(): Promise<CreditsUsageData | null> {
+  const session = getStoredSession();
+  if (!session) return null;
+
+  const response = await fetch(`${backendApiUrl()}/credits/usage`, {
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) return null;
+  return (await response.json()) as CreditsUsageData;
+}
 
 // ── Agent list ────────────────────────────────────────────────────────────
 
