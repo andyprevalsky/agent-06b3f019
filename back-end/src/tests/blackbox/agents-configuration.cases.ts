@@ -21,6 +21,7 @@ import {
   prisma,
   randomUUID,
 } from './agents-blackbox-harness';
+import { DEFAULT_TASK_PRICE_LIMIT_CENTS } from '../../providers/priceLimitDefaults';
 
 test('POST / — with context_gates parameter', async () => {
   const session = await createAnonymousSession('ctx-gates');
@@ -104,6 +105,26 @@ test('POST / — with price_limit_cents', async () => {
   assert(
     detail.agent.price_limit_cents === 500,
     `Expected price_limit_cents=500, got ${detail.agent.price_limit_cents}`
+  );
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — default price_limit_cents is $10', async () => {
+  const session = await createAnonymousSession('default-price-limit');
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Default price limit test',
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+
+  const detailRes = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(detailRes.status, 200, detailRes.data);
+  const detail = detailRes.data as { agent: { price_limit_cents: number | null } };
+  assert(
+    detail.agent.price_limit_cents === DEFAULT_TASK_PRICE_LIMIT_CENTS,
+    `Expected price_limit_cents=${DEFAULT_TASK_PRICE_LIMIT_CENTS}, got ${detail.agent.price_limit_cents}`
   );
   await deleteTestAgent(body.agent_id, session.user.id);
 });

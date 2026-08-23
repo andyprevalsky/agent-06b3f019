@@ -9,6 +9,7 @@ import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/ch
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
+import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
 import * as repo from './repo';
@@ -204,7 +205,7 @@ export async function createAgent(
     proxyCountry: proxyGeo.country,
     proxyState: proxyGeo.state,
     proxyCity: proxyGeo.city,
-    priceLimitCents: body.price_limit_cents,
+    priceLimitCents: resolvePriceLimitCents(body.price_limit_cents),
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
     worldModelMode: body.world_model_mode,
