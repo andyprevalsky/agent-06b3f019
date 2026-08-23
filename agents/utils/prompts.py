@@ -123,7 +123,7 @@ When using spawn_agent for a task, make sure to alias it appropriately. Raw spaw
 | spawn_general_purpose_agent_for_each | spawn_agent(type="for_each") |
 
 Do not use attempt_completion as a planned task; final completion happens after the DAG finishes.
-Use reasoning for pure analysis, synthesis, or decision steps that need no external tool call.
+Use reasoning only for pure analysis or decisions that cannot be executed by spawn_code_agent (no API/script path exists). Do NOT use reasoning for ranking, deduplication, cutoff checks, or formatting that a coding agent can run against a public API or scripted metadata fetch.
 """.strip()
 
 PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
@@ -183,7 +183,7 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
 
 # Using your tools
 
- - spawn_agent is low cost and should be used liberally, however, if you can complete the task in a few turns avoid calling spawn_agent. Each agent you spawn with type general_purpose will be an exact replica of you though, so avoid any behavior that would lead to infinite recursion. That means if the task at hand is proximate, then complete it yourself, and if you create a general-purpose agent make sure that it has meaningfully less task complexity than the task you are given.
+ - Agent cost order (cheapest first): explore << code < browser < general_purpose < for_each. Prefer the cheapest agent that can own the work. spawn_explore_agent is cheap for small scoped lookups, but fanning out many explore agents or web-search loops to rank or aggregate large public lists is high energy - use spawn_claude_code_agent for programmatic API/scripted metadata work instead. Each general_purpose agent is an exact replica of you; avoid infinite recursion by giving spawned general-purpose agents meaningfully less complexity than your task.
  - Use spawn_agent(type="for_each") when you need to complete a complex, multi-step chunk of work for each item in a set of items of size > 3. This is specifically useful when you need to create a large number of agents for optimal execution.
  - MANDATORY: When passing files to spawned agents, strictly use the type='file_pointer' argument. Pass attachments via original_filename only (not id or storage_path). Files in context are already available, don't attempt to re-download.
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
@@ -486,6 +486,7 @@ def build_planner_system_prompt(
 
 MANDATORY DECOMPOSITION INVARIANTS:
 - Plan information retrieval and discovery in spawn_explore_agent before dependent execution. spawn_browser_agent may read pages only while executing a known stateful trajectory; it MUST NOT own public research, target discovery, or route discovery.
+- When the goal is programmatic public-data work - querying structured APIs (GitHub, npm, PyPI, etc.), ranking or deduplicating large repo/package lists, cutoff verification, or deterministic formatting from metadata - plan spawn_code_agent instead of spawn_explore_agent or reasoning. Explore agents and reasoning steps are the expensive path for that work; one tightly scoped coding agent that calls the API or scripts the fetch is lower energy.
 - Each sub-task maps to exactly one tool call
 - tasks[i].task_idx is the 0-based array index encoded as a string and must equal i
 - tasks[i].depends_on lists indices of tasks that must complete first
@@ -524,6 +525,7 @@ MANDATORY DECOMPOSITION INVARIANTS:
   Example: Gather requirements -> (Design frontend, Design backend) -> Integration
 - Causal handoff: Step 0 gather facts; Step 1 use those facts to draft; Step 2 review the draft -> tasks[1].depends_on=["0"], tasks[2].depends_on=["1"]
 - Retrieval-to-execution: Step 0 spawn_explore_agent retrieves the public target or route; Step 1 spawn_browser_agent executes the complete stateful flow -> tasks[1].depends_on=["0"]
+- Programmatic public API ranking: Step 0 spawn_code_agent queries the API, deduplicates, ranks, and formats the final list -> do NOT fan out spawn_explore_agent tracks or reasoning verifiers for the same aggregation work
 
 ## Planner Spawn Aliases
 

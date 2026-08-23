@@ -1659,6 +1659,18 @@ def test_planner_routes_retrieval_before_stateful_execution():
     assert "entry_point_source" not in prompt
 
 
+def test_planner_routes_programmatic_public_api_ranking_to_code_agent():
+    """Programmatic public API ranking must be planned on spawn_code_agent, not explore/reasoning."""
+    from tools.prompts.spawn_agent import PROMPT as SPAWN_AGENT_PROMPT
+    from utils.prompts import build_planner_system_prompt
+
+    prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
+    assert "plan spawn_code_agent instead of spawn_explore_agent or reasoning" in prompt
+    assert "Programmatic public API ranking" in prompt
+    assert "Do NOT use reasoning for ranking, deduplication, cutoff checks, or formatting" in prompt
+    assert "spawn_claude_code_agent for programmatic API/scripted metadata work" in prompt
+
+
 # ============================================================================
 # 17. Tool prompts open with a declarative third-person sentence
 # ----------------------------------------------------------------------------
@@ -1989,6 +2001,10 @@ async def run_all_tests():
     r.record(
         "planner_routes_retrieval_before_stateful_execution",
         test_planner_routes_retrieval_before_stateful_execution,
+    )
+    r.record(
+        "planner_routes_programmatic_public_api_ranking_to_code_agent",
+        test_planner_routes_programmatic_public_api_ranking_to_code_agent,
     )
 
     # 19. Tool prompt length stays within budget

@@ -4984,5 +4984,121 @@
     "bench": "rose-bench",
     "group": "rose-bench",
     "runner": "agent"
+  },
+  {
+    "name": "cuda-kernel-github-top100-code-agent",
+    "title": "CUDA Kernel GitHub Top 100 (Code Agent Ranking)",
+    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\n\nExecution requirements:\n- Use spawn_claude_code_agent exactly once to programmatically discover, deduplicate, and rank repositories via the GitHub API or an equivalent scripted metadata fetch. Do NOT fan out parallel explore agents or independent reasoning/verifier steps to synthesize the final ranked list.\n- You may use at most 2 explore agents only for optional category scoping before the coding agent runs; all ranking, deduplication, cutoff verification, and final formatting must happen inside the coding agent.\n- Rank by current GitHub stars descending at observation time. Return exactly 100 unique public non-fork repos with evidence-backed CUDA kernel engineering work.\n- Each repo entry must include rank, repo_name (owner/name), repo_url, stars, and description.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "research",
+      "github"
+    ],
+    "price_limit_cents": 400,
+    "no_anthropic_price_limit_cents": 600,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "expected_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "forbidden_tools": [
+      "spawn_general_purpose_agent",
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tool_count_scope": "tree",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "repos",
+          "type": "list[object]",
+          "required": true,
+          "properties": [
+            {
+              "name": "rank",
+              "type": "int"
+            },
+            {
+              "name": "repo_name",
+              "type": "str"
+            },
+            {
+              "name": "repo_url",
+              "type": "str"
+            },
+            {
+              "name": "stars",
+              "type": "int"
+            },
+            {
+              "name": "description",
+              "type": "str"
+            }
+          ]
+        }
+      ]
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "description": "Regression from agent b775556c: top-100 CUDA-kernel GitHub ranking must use one coding agent for API/scripted ranking, not parallel explore verifiers.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "web_search",
+        "github_api"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://api.github.com"
+      ],
+      "context_notes": "Live GitHub metadata fetch. The regression is planner/tool routing: fanning out explore agents plus reasoning verifiers to rank 100 repos costs ~10x more than one spawn_claude_code_agent that queries GitHub programmatically."
+    },
+    "evaluators": [
+      {
+        "id": "code-agent-ranking-route",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one spawn_claude_code_agent call completes the ranking work",
+          "No spawn_general_purpose_agent detour is used",
+          "Final structured output contains a repos list"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "expected_status": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "top100-repo-quality",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Final output contains exactly 100 unique GitHub repositories",
+          "Repos are ranked by stars descending with rank 1 highest",
+          "Repositories are materially CUDA-kernel or kernel-adjacent engineering projects",
+          "Each entry includes repo_name, repo_url, stars, and description grounded in tool evidence"
+        ],
+        "judge_prompt": "Grade whether the agent returned exactly 100 unique public GitHub repositories ranked by current stars for CUDA-kernel-adjacent engineering work. PASS only if: (1) repos list length is 100 with unique canonical URLs; (2) ranks are consecutive 1-100 and stars are non-increasing; (3) entries are real CUDA/GPU-kernel engineering repos, not incidental CUDA mentions; (4) repo_name, repo_url, stars, and description are present and grounded in coding-agent or explore evidence. FAIL if the agent used only prose synthesis without a coding-agent fetch, returned fewer than 100 repos, or has duplicates/forks dominating the list."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "agent b775556c-e2be-4c61-99b1-81c5af7d5490",
+      "rca:cuda-kernel-github-ranking-used-explore-verifiers"
+    ],
+    "group": "rose-bench"
   }
 ]
