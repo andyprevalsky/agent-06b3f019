@@ -335,42 +335,7 @@ describe('useMessageSending', () => {
     expect(result.current.messageInput).toBe('');
     expect(result.current.selectedModel).toBeTruthy();
     expect(result.current.isSendingMessage).toBe(false);
-  });
-
-  it('syncs pending price limit from credits usage on mount', async () => {
-    server.use(
-      http.get(`${API_BASE}/credits/usage`, () =>
-        HttpResponse.json({
-          total: 5,
-          used: 0,
-          remaining: 5,
-          tier: null,
-          upgradeOptions: [],
-        }),
-      ),
-    );
-    const { result } = renderHook(() => useMessageSending(defaultArgs() as never));
-    await waitFor(() => {
-      expect(result.current.pendingPriceLimitCents).toBe(500);
-    });
-  });
-
-  it('caps pending price limit at $10 from credits usage', async () => {
-    server.use(
-      http.get(`${API_BASE}/credits/usage`, () =>
-        HttpResponse.json({
-          total: 25,
-          used: 0,
-          remaining: 25,
-          tier: 30,
-          upgradeOptions: [],
-        }),
-      ),
-    );
-    const { result } = renderHook(() => useMessageSending(defaultArgs() as never));
-    await waitFor(() => {
-      expect(result.current.pendingPriceLimitCents).toBe(1000);
-    });
+    expect(result.current.pendingPriceLimitCents).toBe(1000);
   });
 
   it('sets messageInput from localStorage prefill then clears it', () => {

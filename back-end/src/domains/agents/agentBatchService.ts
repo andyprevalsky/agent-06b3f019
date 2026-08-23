@@ -15,7 +15,7 @@
 
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { createLogger } from '../../providers/logger';
-import { resolveDefaultPriceLimitCents } from '../../providers/priceLimitDefaults';
+import { DEFAULT_TASK_PRICE_LIMIT_CENTS } from '../../providers/priceLimitDefaults';
 import { resolvePromptSecrets } from './agentLifecycleService';
 import {
   executeDescendantWorkflowStart,
@@ -282,7 +282,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     assertWorldModelModeAccess(body, userId);
   }
 
-  const defaultPriceLimitCents = await resolveDefaultPriceLimitCents(userId);
+  const defaultPriceLimitCents = DEFAULT_TASK_PRICE_LIMIT_CENTS;
   for (const body of bodies) {
     if (body.price_limit_cents === undefined) {
       body.price_limit_cents = defaultPriceLimitCents;

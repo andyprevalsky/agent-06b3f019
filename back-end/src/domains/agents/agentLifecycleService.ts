@@ -205,7 +205,7 @@ export async function createAgent(
     proxyCountry: proxyGeo.country,
     proxyState: proxyGeo.state,
     proxyCity: proxyGeo.city,
-    priceLimitCents: await resolvePriceLimitCents(userId, body.price_limit_cents),
+    priceLimitCents: resolvePriceLimitCents(body.price_limit_cents),
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
     worldModelMode: body.world_model_mode,

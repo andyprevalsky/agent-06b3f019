@@ -6,7 +6,6 @@ const api = vi.hoisted(() => ({
   postMessage: vi.fn(),
   resumeAgent: vi.fn(),
   checkAndRespondToAttention: vi.fn(async () => false),
-  fetchCreditsUsage: vi.fn(async () => null),
 }));
 
 vi.mock('@/features/terminal/api', () => api);
