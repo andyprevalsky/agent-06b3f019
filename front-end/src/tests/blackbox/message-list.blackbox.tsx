@@ -474,6 +474,77 @@ describe('MessageList', () => {
     expect(screen.queryByTestId('tool-row-explore-step-1')).not.toBeInTheDocument();
   });
 
+  it('shows per-explore-agent token counts instead of sharing one aggregate', async () => {
+    const now = Date.now();
+    const ctx = makeAgentCtx({
+      agent: makeAgent({ status: 'ACTIVE' }),
+      messages: [
+        msg('e-init-a', {
+          role: 'TOOL',
+          text: '',
+          timestamp: new Date(now).toISOString(),
+          metadata: {
+            toolCallId: 'explore-init-a',
+            toolName: 'spawn_agent',
+            title: 'Explore A',
+            toolStatus: 'IN_PROGRESS',
+            agentType: 'explore',
+            taskId: 'task-A',
+          },
+        }),
+        msg('e-init-b', {
+          role: 'TOOL',
+          text: '',
+          timestamp: new Date(now + 10).toISOString(),
+          metadata: {
+            toolCallId: 'explore-init-b',
+            toolName: 'spawn_agent',
+            title: 'Explore B',
+            toolStatus: 'IN_PROGRESS',
+            agentType: 'explore',
+            taskId: 'task-B',
+          },
+        }),
+      ],
+      streamingBubbles: new Map([
+        [
+          'stream-a',
+          {
+            text: '',
+            sequence: 1,
+            done: false,
+            subAgentId: 'task-A',
+            startedAtMs: now - 5000,
+            charCount: 8000,
+          },
+        ],
+        [
+          'stream-b',
+          {
+            text: '',
+            sequence: 1,
+            done: false,
+            subAgentId: 'task-B',
+            startedAtMs: now - 3000,
+            charCount: 4000,
+          },
+        ],
+      ]),
+    });
+
+    renderList(ctx);
+
+    await waitFor(() => expect(screen.getAllByTestId('explore-thinking-icon')).toHaveLength(2));
+    await waitFor(
+      () => {
+        const text = document.body.textContent ?? '';
+        expect(text).toContain('2,000 tokens');
+        expect(text).toContain('1,000 tokens');
+      },
+      { timeout: 3000 },
+    );
+  });
+
   it('derives active explore web-search titles from message content when metadata is generic', async () => {
     const now = Date.now();
     const ctx = makeAgentCtx({

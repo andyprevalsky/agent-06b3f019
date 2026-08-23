@@ -27,6 +27,7 @@
 
 import { memo, useEffect } from 'react';
 import type { WaitForCheck } from '../types';
+import type { SubAgentStreamingMetrics } from './useMessageFiltering';
 import { WaitForConditionChip } from './wait-for-chip/WaitForConditionChip';
 import { WaitForTimestampChip } from './wait-for-chip/WaitForTimestampChip';
 
@@ -55,6 +56,7 @@ interface WaitForChipProps {
   startTimestamp?: string;
   thinkingStreamTokenCount?: number;
   thinkingStreamStartedAtMs?: number;
+  streamingMetricsBySubAgentId?: Map<string, SubAgentStreamingMetrics>;
   onTypingComplete?: () => void;
 }
 
@@ -75,6 +77,7 @@ const WaitForChip = memo(function WaitForChip({
   metadata,
   thinkingStreamTokenCount = 0,
   thinkingStreamStartedAtMs,
+  streamingMetricsBySubAgentId,
   onTypingComplete,
 }: WaitForChipProps) {
   useFireTypingComplete(onTypingComplete);
@@ -123,6 +126,7 @@ const WaitForChip = memo(function WaitForChip({
       totalChecksCompleted={metadata?.data?.checks_completed}
       thinkingStreamTokenCount={thinkingStreamTokenCount}
       thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+      streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
     />
   );
 });
