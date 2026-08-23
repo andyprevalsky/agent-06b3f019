@@ -18,7 +18,6 @@ import { server } from './msw/server';
 import {
   getAuthHeaders,
   fetchIntegrationsApi,
-  fetchImessageBridgeStatusApi,
   uploadFileApi,
   startGmailOAuthApi,
   sendPasswordRequestApi,
@@ -92,33 +91,6 @@ describe('integrations/api', () => {
     it('throws "Not authenticated" when no session', async () => {
       localStorage.clear();
       await expect(fetchIntegrationsApi()).rejects.toThrow('Not authenticated');
-    });
-  });
-
-  describe('fetchImessageBridgeStatusApi', () => {
-    it('returns connected + last_seen_at on 200', async () => {
-      server.use(
-        http.get(`${API_BASE}/imessage/bridge/status`, () =>
-          HttpResponse.json({
-            connected: false,
-            last_seen_at: '2026-01-01T00:00:00.000Z',
-          }),
-        ),
-      );
-      const out = await fetchImessageBridgeStatusApi();
-      expect(out).toEqual({
-        connected: false,
-        last_seen_at: '2026-01-01T00:00:00.000Z',
-      });
-    });
-
-    it('throws when the API returns non-OK', async () => {
-      server.use(
-        http.get(`${API_BASE}/imessage/bridge/status`, () =>
-          HttpResponse.json({ error: 'Unauthorized' }, { status: 401 }),
-        ),
-      );
-      await expect(fetchImessageBridgeStatusApi()).rejects.toThrow('Unauthorized');
     });
   });
 

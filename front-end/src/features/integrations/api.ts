@@ -30,28 +30,6 @@ function getAuthToken(): string {
   return token;
 }
 
-export interface ImessageBridgeStatus {
-  connected: boolean;
-  last_seen_at: string | null;
-}
-
-export async function fetchImessageBridgeStatusApi(): Promise<ImessageBridgeStatus> {
-  const headers = getAuthHeaders();
-  const response = await fetch(`${API_BASE_WITH_PATH}/imessage/bridge/status`, { headers });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(
-      payload !== null &&
-        typeof payload === 'object' &&
-        'error' in payload &&
-        typeof (payload as { error: unknown }).error === 'string'
-        ? (payload as { error: string }).error
-        : 'Failed to load Mac app status',
-    );
-  }
-  return payload as ImessageBridgeStatus;
-}
-
 export async function fetchIntegrationsApi(): Promise<ConnectedIntegration[]> {
   const headers = getAuthHeaders();
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations`, { headers });

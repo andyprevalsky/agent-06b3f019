@@ -19,7 +19,6 @@
   "src/features/terminal/components/Terminal.tsx",
   "src/features/terminal/components/TerminalContent.tsx",
   "src/features/terminal/components/TerminalHeader.tsx",
-  "src/features/terminal/components/MacAppOfflineBadge.tsx",
   "src/features/terminal/components/TerminalModals.tsx",
   "src/features/terminal/components/AgentChatArea.tsx",
   "src/features/terminal/components/BackgroundPattern.tsx",

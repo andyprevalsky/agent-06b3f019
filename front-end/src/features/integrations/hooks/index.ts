@@ -5,7 +5,6 @@ export { usePasswordSync } from './usePasswordSync';
 export { useComputeSync } from './useComputeSync';
 export { useComputeAccounts } from './useComputeAccounts';
 export { useMessagesSync } from './useMessagesSync';
-export { useMacAppRelayStatus } from './useMacAppRelayStatus';
 export { useFileUpload } from './useFileUpload';
 export { useGmailConnect } from './useGmailConnect';
 export { useOAuthRedirect } from './useOAuthRedirect';

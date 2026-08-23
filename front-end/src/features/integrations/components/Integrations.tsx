@@ -28,7 +28,6 @@ import {
   usePasswordSync,
   useComputeSync,
   useMessagesSync,
-  useMacAppRelayStatus,
   useFileUpload,
   useGmailConnect,
   useOAuthRedirect,
@@ -52,9 +51,6 @@ export default function Integrations() {
   const passwords = usePasswordSync(handlers, data.fetchIntegrations);
   const compute = useComputeSync(handlers, data.fetchIntegrations);
   const messages = useMessagesSync(handlers, data.fetchIntegrations);
-  const relayStatus = useMacAppRelayStatus(isFullySignedIn && data.iMessageSynced);
-  const macAppRelayOffline =
-    data.iMessageSynced && relayStatus !== null && !relayStatus.connected;
   const fileUpload = useFileUpload();
   const gmail = useGmailConnect(data.fetchIntegrations);
   const plaid = usePlaidIntegration();
@@ -117,7 +113,6 @@ export default function Integrations() {
               passwords={passwords}
               compute={compute}
               messages={messages}
-              macAppRelayOffline={macAppRelayOffline}
               gmail={gmail}
               actions={actions}
               plaid={plaid}
