@@ -32,6 +32,10 @@ export {
 
 // ── Pure utilities re-exported so components can reach them via hooks.ts ──
 export { deduplicateToolMessages } from './hooks/deduplicateToolMessages';
+export {
+  computeDefaultPriceLimitCents,
+  MAX_DEFAULT_PRICE_LIMIT_CENTS,
+} from './priceLimitDefaults';
 
 // ── Imperative API functions (used by components in event handlers) ───────
 export {

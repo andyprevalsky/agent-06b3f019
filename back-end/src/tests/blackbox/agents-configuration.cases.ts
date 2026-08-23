@@ -21,6 +21,7 @@ import {
   prisma,
   randomUUID,
 } from './agents-blackbox-harness';
+import { computeDefaultPriceLimitCents } from '../../providers/priceLimitDefaults';
 
 test('POST / — with context_gates parameter', async () => {
   const session = await createAnonymousSession('ctx-gates');
@@ -104,6 +105,33 @@ test('POST / — with price_limit_cents', async () => {
   assert(
     detail.agent.price_limit_cents === 500,
     `Expected price_limit_cents=500, got ${detail.agent.price_limit_cents}`
+  );
+  await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — default price_limit_cents is min(account credits, $10)', async () => {
+  const session = await createAnonymousSession('default-price-limit');
+  const usageRes = await request(`${BASE_URL}/api/credits/usage`, {
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(usageRes.status, 200, usageRes.data);
+  const usage = usageRes.data as { remaining: number };
+  const expectedLimit = computeDefaultPriceLimitCents(usage.remaining);
+
+  const res = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
+    goal: 'Default price limit test',
+  });
+  assertStatus(res.status, 201, res.data);
+  const body = res.data as { agent_id: string };
+
+  const detailRes = await request(`${BASE_URL}/api/agents/${body.agent_id}`, {
+    headers: authHeaders(session.session.access_token),
+  });
+  assertStatus(detailRes.status, 200, detailRes.data);
+  const detail = detailRes.data as { agent: { price_limit_cents: number | null } };
+  assert(
+    detail.agent.price_limit_cents === expectedLimit,
+    `Expected price_limit_cents=${expectedLimit}, got ${detail.agent.price_limit_cents}`
   );
   await deleteTestAgent(body.agent_id, session.user.id);
 });

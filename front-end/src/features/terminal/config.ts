@@ -72,7 +72,10 @@ export const BROWSER_REVIEW_TEST_PHONE = '+15555550123';
 
 // ── Default price limit ───────────────────────────────────────────────────
 
-/** Default price limit in cents for new agents ($1.00). */
+/** Hard cap for auto-defaulted task price limits ($10.00). */
+export { MAX_DEFAULT_PRICE_LIMIT_CENTS } from '../terminal-component-group/priceLimitDefaults';
+
+/** Fallback before credits load; real default is min(account credits, $10). */
 export const DEFAULT_PRICE_LIMIT_CENTS = 100;
 
 // ── Context window fallback ───────────────────────────────────────────────

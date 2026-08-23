@@ -9,6 +9,7 @@ import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/ch
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
+import { resolvePriceLimitCents } from '../../providers/priceLimitDefaults';
 import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
 import * as repo from './repo';
@@ -177,6 +178,7 @@ export async function createAgent(
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
+  const priceLimitCents = await resolvePriceLimitCents(userId, body.price_limit_cents);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -204,7 +206,7 @@ export async function createAgent(
     proxyCountry: proxyGeo.country,
     proxyState: proxyGeo.state,
     proxyCity: proxyGeo.city,
-    priceLimitCents: body.price_limit_cents,
+    priceLimitCents,
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
     worldModelMode: body.world_model_mode,

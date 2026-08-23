@@ -22,6 +22,7 @@ import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
+import { computeDefaultPriceLimitCents, fetchCreditsUsage } from '@/features/terminal-component-group/hooks';
 import { createAgent, postMessage, resumeAgent, checkAndRespondToAttention } from '../api';
 import type { FilePointer, AgentDetail, PendingAgentCreationInput, TerminalView } from '../types';
 
@@ -68,7 +69,10 @@ export function useMessageSending({
   });
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
-  const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
+  const [pendingPriceLimitCents, setPendingPriceLimitCentsState] = useState(
+    DEFAULT_PRICE_LIMIT_CENTS,
+  );
+  const priceLimitUserOverrideRef = useRef(false);
   // Fast Mode aggressive cache — session-only, account-scoped default, never persisted client-side.
   const [fastMode, setFastModeState] = useState(false);
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
@@ -84,6 +88,27 @@ export function useMessageSending({
   useEffect(() => {
     messageInputRef.current = messageInput;
   }, [messageInput]);
+
+  useEffect(() => {
+    if (!isFullySignedIn || priceLimitUserOverrideRef.current) return;
+
+    let cancelled = false;
+    const syncDefaultPriceLimit = async () => {
+      const usage = await fetchCreditsUsage();
+      if (cancelled || priceLimitUserOverrideRef.current || usage === null) return;
+      setPendingPriceLimitCentsState(computeDefaultPriceLimitCents(usage.remaining));
+    };
+
+    void syncDefaultPriceLimit();
+    return () => {
+      cancelled = true;
+    };
+  }, [isFullySignedIn]);
+
+  const setPendingPriceLimitCents = useCallback((cents: number) => {
+    priceLimitUserOverrideRef.current = true;
+    setPendingPriceLimitCentsState(cents);
+  }, []);
 
   useEffect(() => {
     if (!userCanUseFastMode) {
