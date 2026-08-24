@@ -3893,7 +3893,7 @@ def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
     assert "completion sms" in task.environment["context_notes"].lower()
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
-        "single_turn_llm_judge",
+        "agentic_llm_judge",
     ]
     static_types = {check["type"] for check in task.evaluators[0]["checks"]}
     assert static_types == {
@@ -3925,6 +3925,85 @@ def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
     for failure in ("approval of the payment", "order confirmation", "completion sms", "entered card details"):
         assert failure in judge_prompt
     assert "pending payment approval itself is valid grounding" in judge_prompt
+
+
+def _load_blue_bottle_k5_fixture(agent_id: str) -> dict:
+    import json
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2] / f"benchmarks/fixtures/blue_bottle_k5/trial_{agent_id[:8]}.json"
+    )
+    return json.loads(fixture_path.read_text())
+
+
+def _blue_bottle_k5_eval_data(fixture: dict) -> dict:
+    return {
+        "agent": {"agent_id": fixture["agent_id"], "status": fixture["status"]},
+        "messages": fixture["messages"],
+        "_benchmark": fixture["benchmark_state"],
+    }
+
+
+async def _assert_blue_bottle_k5_replay_passes_agentic_semantics(agent_id: str, failure_hint: str):
+    """Replay archived k=5 payment-boundary runs: static passes, agentic semantics pass."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    import benchmarks.run_benchmark as bench
+
+    fixture = _load_blue_bottle_k5_fixture(agent_id)
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    data = _blue_bottle_k5_eval_data(fixture)
+    static = task.evaluators[0]
+    semantics = task.evaluators[1]
+
+    static_passed, static_reason = bench._run_declared_static_check(task, static, data)
+    assert static_passed is True, static_reason
+
+    original_single = bench._call_declared_llm_judge
+    original_agentic = bench._call_declared_agentic_llm_judge
+
+    async def failing_single_turn(task_arg, evaluator_arg, data_arg):
+        return {"score": 0.0, "reasoning": failure_hint}
+
+    async def passing_agentic(task_arg, evaluator_arg, data_arg):
+        assert evaluator_arg["method"] == "agentic_llm_judge"
+        assert evaluator_arg["id"] == "blue_bottle_pickup_order_semantics"
+        assert data_arg["agent"]["agent_id"] == agent_id
+        return {"score": 1.0, "reasoning": "Payment approval grounds item, total, Ferry Building pickup, and pickup time."}
+
+    try:
+        bench._call_declared_llm_judge = failing_single_turn
+        bench._call_declared_agentic_llm_judge = passing_agentic
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+        assert passed is True, reason
+        assert results[0]["passed"] is True
+        assert results[1]["passed"] is True
+        assert results[1]["method"] == "agentic_llm_judge"
+    finally:
+        bench._call_declared_llm_judge = original_single
+        bench._call_declared_agentic_llm_judge = original_agentic
+
+
+async def test_blue_bottle_k5_trial_b217afca_passes_agentic_semantics():
+    await _assert_blue_bottle_k5_replay_passes_agentic_semantics(
+        "b217afca-6595-4eb5-bfd1-9688c2c9826a",
+        "No grounded pickup time or pickup window in the evidence.",
+    )
+
+
+async def test_blue_bottle_k5_trial_52d717ea_passes_agentic_semantics():
+    await _assert_blue_bottle_k5_replay_passes_agentic_semantics(
+        "52d717ea-c5be-4bfe-b146-5efd535628ad",
+        "Ferry Building store is not grounded at checkout.",
+    )
+
+
+async def test_blue_bottle_k5_trial_7d282652_passes_agentic_semantics():
+    await _assert_blue_bottle_k5_replay_passes_agentic_semantics(
+        "7d282652-2c5b-4dd3-b8c8-461929a37bf8",
+        "Ferry Building store is not grounded in browser evidence.",
+    )
+
 
 def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
     """DoorDash stages checkout then stops at an unresolved place-order write lock."""
@@ -15569,6 +15648,18 @@ async def run_all_tests():
     r.record(
         "blue_bottle_payment_card_request_contract",
         test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
+    )
+    await r.record_async(
+        "blue_bottle_k5_trial_b217afca_passes_agentic_semantics",
+        test_blue_bottle_k5_trial_b217afca_passes_agentic_semantics,
+    )
+    await r.record_async(
+        "blue_bottle_k5_trial_52d717ea_passes_agentic_semantics",
+        test_blue_bottle_k5_trial_52d717ea_passes_agentic_semantics,
+    )
+    await r.record_async(
+        "blue_bottle_k5_trial_7d282652_passes_agentic_semantics",
+        test_blue_bottle_k5_trial_7d282652_passes_agentic_semantics,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",

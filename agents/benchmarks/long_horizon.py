@@ -34,7 +34,7 @@ from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
 
 CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
-RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge"}
+RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
 RUNTIME_STATIC_CHECK_TYPES = {
     "agent_status",
     "approval_request_count",

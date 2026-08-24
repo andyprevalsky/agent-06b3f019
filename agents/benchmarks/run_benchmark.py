@@ -8073,6 +8073,181 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     return evidence
 
 
+_AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "fields": [
+        {
+            "name": "score",
+            "type": "float",
+            "description": (
+                "1.0 only when every catalog criterion is directly grounded in the attached "
+                "trajectory evidence; otherwise 0.0."
+            ),
+        },
+        {
+            "name": "reasoning",
+            "type": "str",
+            "description": (
+                "Concise pass/fail explanation citing the grounded evidence locations "
+                "(tool messages, payment approval metadata, browser actions)."
+            ),
+        },
+    ]
+}
+
+_AGENTIC_JUDGE_METADATA_KEYS = (
+    "action_type",
+    "toolName",
+    "toolStatus",
+    "url",
+    "title",
+    "browser_session_metadata",
+    "requestUserApproval",
+    "completionSummary",
+    "toolCallId",
+    "subAgentId",
+    "task_id",
+    "browser_url",
+)
+
+
+def _declared_agentic_evaluator_evidence(data: dict) -> dict[str, Any]:
+    """Build a full trajectory bundle for an agentic Codex judge."""
+    messages: list[dict[str, Any]] = []
+    for message in (data.get("messages") or [])[-500:]:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").upper() or "UNKNOWN"
+        text_value = message.get("text", message.get("message", message.get("content", "")))
+        if not isinstance(text_value, str):
+            text_value = json.dumps(text_value, default=str)
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence_metadata = {key: metadata[key] for key in _AGENTIC_JUDGE_METADATA_KEYS if key in metadata}
+        messages.append(
+            {
+                "role": role,
+                "text": text_value[:50000],
+                "metadata": evidence_metadata,
+            }
+        )
+
+    summaries = _final_completion_summaries(data)
+    completion_cards: list[dict[str, Any]] = []
+    if summaries:
+        completion = summaries[-1]
+        outputs = completion.get("outputs")
+        completion_cards.append(
+            {
+                "summary": str(completion.get("summary") or "")[:50000],
+                "outputs": outputs[:200] if isinstance(outputs, list) else [],
+            }
+        )
+
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    return {
+        "agent": {
+            key: agent.get(key)
+            for key in ("agent_id", "id", "status", "progress")
+            if agent.get(key) is not None
+        },
+        "messages": messages,
+        "completion_cards": completion_cards,
+        "benchmark_state": data.get("_benchmark", {}),
+    }
+
+
+def _build_agentic_judge_goal(task: BenchmarkTask, evaluator: dict) -> str:
+    criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    return f"""You are a strict benchmark judge for a live agent trajectory.
+
+Read the attached `benchmark_evidence.json` file in /home/user/attachments/. Search it thoroughly
+with shell tools (grep, jq, less) before scoring. The task prompt and criteria below describe
+requirements; they are not evidence.
+
+Score exactly 1.0 only when every criterion is directly grounded in tool/browser output,
+payment-request metadata, or typed benchmark state inside the evidence file. Otherwise score 0.0
+and explain the first missing or contradicted requirement. The pending payment approval itself
+is valid grounding for item, total, store, and pickup facts when those fields appear there.
+Unsupported assistant claims without tool evidence are not proof.
+
+Task requirement: {task.prompt}
+Criteria:
+{criteria}
+Judge-specific instruction: {evaluator.get("judge_prompt", "")}
+
+Write the final `score` and `reasoning` fields to the structured output contract.
+"""
+
+
+async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dict[str, Any]:
+    """Resolve a synced GPT/Codex compute token for the benchmark judge harness."""
+    from helpers.llm import fetch_compute_token_activity, fetch_gpt_code_token_activity
+
+    token_data = await fetch_compute_token_activity(
+        user_id,
+        agent_id=agent_id,
+        root_agent_id=agent_id,
+    )
+    if token_data and token_data.get("accessToken"):
+        return token_data
+    token_data = await fetch_gpt_code_token_activity(user_id)
+    if token_data and token_data.get("accessToken"):
+        return token_data
+    raise RuntimeError("Codex compute token unavailable for agentic benchmark judge")
+
+
+async def _call_declared_agentic_llm_judge(
+    task: BenchmarkTask,
+    evaluator: dict,
+    data: dict,
+) -> dict:
+    """Execute one catalog-declared agentic judge via the Codex code harness."""
+    from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
+    from helpers.attachments import upload_to_storage
+
+    user_id = _current_benchmark_user_id()
+    judge_agent_id = str(uuid.uuid4())
+    tool_call_id = str(uuid.uuid4())
+    token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id)
+
+    evidence = _declared_agentic_evaluator_evidence(data)
+    evidence_bytes = json.dumps(evidence, default=str, indent=2).encode("utf-8")
+    attachment = await upload_to_storage(
+        user_id,
+        evidence_bytes,
+        "benchmark_evidence.json",
+        "application/json",
+    )
+
+    result = await spawn_claude_code_activity(
+        user_id=user_id,
+        agent_id=judge_agent_id,
+        goal=_build_agentic_judge_goal(task, evaluator),
+        tool_call_id=tool_call_id,
+        output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
+        attachments=[attachment],
+        code_provider="codex",
+        gpt_token=token_data["accessToken"],
+        gpt_account_id=token_data.get("accountId"),
+        gpt_token_source=token_data.get("source"),
+        gpt_token_pool_id=token_data.get("poolTokenId"),
+    )
+
+    structured = result.get("structured_response") if isinstance(result.get("structured_response"), dict) else {}
+    score_raw = structured.get("score", result.get("score", 0.0))
+    try:
+        score = float(score_raw)
+    except (TypeError, ValueError):
+        score = 0.0
+    reasoning = str(
+        structured.get("reasoning")
+        or result.get("message")
+        or "Agentic judge returned no reasoning"
+    )
+    usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
+    usage = aggregate_usage_items(usage_items) if usage_items else None
+    return {"score": score, "reasoning": reasoning, "usage": usage}
+
+
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
@@ -9044,6 +9219,12 @@ async def _run_declared_evaluators(
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
                 judged = await _call_declared_llm_judge(task, evaluator, data)
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            elif method == "agentic_llm_judge":
+                judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
                 score = float(judged.get("score", 0.0))
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
