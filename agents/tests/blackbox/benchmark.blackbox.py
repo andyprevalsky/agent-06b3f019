@@ -15754,6 +15754,8 @@ async def run_all_tests():
     r.record(
         "payment_merchant_bare_business_name",
         test_payment_merchant_accepts_bare_business_name,
+    )
+    r.record(
         "hotel_payment_merchant_bare_hotels_com",
         test_hotel_payment_merchant_accepts_bare_hotels_com_label,
     )
