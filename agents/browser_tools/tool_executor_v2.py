@@ -88,13 +88,6 @@ async def execute_browser_tool(
             return {"success": True, "done": True, "text": tool_args.get("text", "")}
         elif tool_name == "attempt_completion":
             return {"success": True, "attempt_completion": True}
-        elif tool_name == "send_message_to_user":
-            return {
-                "success": True,
-                "message_to_user": True,
-                "message": tool_args.get("message", ""),
-                "reason": tool_args.get("reason", "other")
-            }
         # Tab management
         elif tool_name == "switch_tab":
             return await _execute_switch_tab(dom_service, tool_args)
@@ -649,6 +642,8 @@ async def _execute_scroll(dom_service: DOMService, args: Dict[str, Any]) -> Dict
     direction = args.get("direction", "down")
     amount = args.get("amount", 300)
     index = args.get("index")  # Optional: scroll within element
+    if index == 0:
+        index = None
     
     session = dom_service.session
     

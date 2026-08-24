@@ -1051,6 +1051,7 @@ async def run_agent(
                 sequence = [0]
                 last_text = [""]
                 llm_started_at_ms = int(_safe_now().timestamp() * 1000)
+                last_raw_progress_chars = [0]
                 start_event = ToolEvent(
                     type=EventType.STREAM_MESSAGE,
                     stream_id=stream_id,
@@ -1121,6 +1122,21 @@ async def run_agent(
                         _sequence[0] += 1
                         _last_text[0] = text_so_far
 
+                async def on_raw_progress(
+                    total_chars: int,
+                    *,
+                    _broadcaster: CoalescingStreamBroadcaster = broadcaster,
+                    _sequence: List[int] = sequence,
+                    _last_raw: List[int] = last_raw_progress_chars,
+                ):
+                    if is_inside_temporal_activity:
+                        activity.heartbeat(f"LLM streaming: {total_chars} raw bytes")
+                    if total_chars - _last_raw[0] < 50:
+                        return
+                    _last_raw[0] = total_chars
+                    _broadcaster.update_progress(total_chars, _sequence[0])
+                    _sequence[0] += 1
+
                 # Fast Mode: the inline path (explore / browser sub-agents that run
                 # run_agent INSIDE an activity) bypasses call_llm_activity, so it must
                 # set the cache context itself. Keys are canonical request fingerprints;
@@ -1179,6 +1195,7 @@ async def run_agent(
                                     max_tokens=8192,
                                     response_model=turn_response_model,
                                     on_chunk=on_chunk,
+                                    on_raw_progress=on_raw_progress,
                                     reasoning_max_tokens=reasoning_max_tokens,
                                     agent_id=agent_id,
                                     claude_token=current_claude_token,

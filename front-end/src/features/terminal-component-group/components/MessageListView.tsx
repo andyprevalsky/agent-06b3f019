@@ -92,7 +92,7 @@ function ThinkingIndicators({
     );
   }
   return bubbles.map(([streamId, bubble]) => {
-    const tokenCount = Math.round(bubble.text.length / 4);
+    const tokenCount = Math.round(Math.max(bubble.charCount ?? 0, bubble.text.length) / 4);
     return (
       <ThinkingIndicator
         key={`thinking-${streamId}`}

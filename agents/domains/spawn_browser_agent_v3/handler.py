@@ -2379,6 +2379,132 @@ async def _perform_generic_browser_recovery(
     return actions
 
 
+async def _hard_recover_frozen_renderer_page(
+    *,
+    input_page: Optional[Any],
+    playwright_browser: Optional[Any],
+    fallback_url: str = "",
+    timeout_s: float = 20.0,
+) -> tuple[Optional[Any], List[str]]:
+    """Open a fresh page, then kill the frozen target via browser-process CDP.
+
+    When classify_evaluate_cdp_stall reports renderer_main_thread_blocked, the
+    page-target CDP is dead but Browser.getVersion still works. Creating the
+    replacement page *before* closing the hung target is required: closing the
+    last page target via CDP can tear down the Playwright BrowserContext.
+    """
+    actions: List[str] = []
+    if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
+        return input_page, actions
+
+    target_url = (getattr(input_page, "url", None) or "") if input_page is not None else ""
+    resume_url = fallback_url if fallback_url.startswith(("http://", "https://")) else target_url
+    if not resume_url and fallback_url:
+        resume_url = fallback_url
+
+    context = getattr(input_page, "context", None) if input_page is not None else None
+    if context is None:
+        contexts = getattr(playwright_browser, "contexts", None) or []
+        context = contexts[0] if contexts else None
+    if context is None:
+        actions.append("no_browser_context")
+        return None, actions
+
+    frozen_target_ids: List[str] = []
+    browser_cdp = None
+    try:
+        browser_cdp = await playwright_browser.new_browser_cdp_session()
+        targets = await asyncio.wait_for(browser_cdp.send("Target.getTargets"), timeout=5.0)
+        for info in targets.get("targetInfos") or []:
+            if info.get("type") != "page":
+                continue
+            page_url = str(info.get("url") or "")
+            target_id = info.get("targetId")
+            if not target_id:
+                continue
+            should_close = False
+            if target_url and page_url == target_url:
+                should_close = True
+            elif resume_url.startswith(("http://", "https://")) and page_url.startswith(
+                ("http://", "https://")
+            ):
+                try:
+                    from urllib.parse import urlparse
+
+                    if urlparse(page_url).netloc == urlparse(resume_url).netloc:
+                        should_close = True
+                except Exception:
+                    should_close = False
+            elif input_page is not None and not target_url.startswith(("http://", "https://")):
+                should_close = True
+            if should_close:
+                frozen_target_ids.append(str(target_id))
+    except Exception as exc:
+        actions.append(f"browser_cdp_list_failed:{type(exc).__name__}")
+        if browser_cdp is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
+            browser_cdp = None
+
+    try:
+        # Prefer a fresh BrowserContext: under a pegged renderer,
+        # context.new_page() can fail with "Please use browser.new_context()".
+        new_context = await asyncio.wait_for(playwright_browser.new_context(), timeout=10.0)
+        new_page = await asyncio.wait_for(new_context.new_page(), timeout=10.0)
+        actions.append("new_context_page")
+    except Exception as exc:
+        actions.append(f"new_page_failed:{type(exc).__name__}")
+        try:
+            new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
+            actions.append("new_page")
+        except Exception as exc2:
+            actions.append(f"context_new_page_failed:{type(exc2).__name__}")
+            if browser_cdp is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
+            return None, actions
+
+    if resume_url.startswith(("http://", "https://")):
+        try:
+            await asyncio.wait_for(
+                new_page.goto(
+                    resume_url,
+                    wait_until="domcontentloaded",
+                    timeout=int(timeout_s * 1000),
+                ),
+                timeout=timeout_s + 5,
+            )
+            actions.append("goto_resume_url")
+        except Exception as exc:
+            actions.append(f"goto_resume_failed:{type(exc).__name__}")
+    elif resume_url:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(new_page.goto(resume_url), timeout=10.0)
+            actions.append("goto_resume_url")
+
+    if browser_cdp is not None:
+        closed = 0
+        for target_id in frozen_target_ids:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
+                    timeout=5.0,
+                )
+                closed += 1
+                actions.append(f"close_target:{target_id[:12]}")
+        if closed:
+            actions.append(f"closed_targets:{closed}")
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
+
+    if input_page is not None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(input_page.close(), timeout=3.0)
+            actions.append("close_playwright_page")
+
+    return new_page, actions
+
+
 async def _run_browser_supervisor_recovery(
     *,
     agent_id: str,
@@ -8045,48 +8171,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
                 continue
 
-            if action_name == "send_message_to_user":
-                message = unified_action.get("params", {}).get("message", "")
-                reason = unified_action.get("params", {}).get("reason", "other")
-
-                logger.info("Browser agent requested user attention", reason=reason)
-                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                dom_service = None
-
-                await close_browser_session(config, session_id, pause=True, current_url=current_url)
-
-                await save_browser_action_message(
-                    agent_id=agent_id,
-                    title="Browser Session Paused",
-                    task_id=task_id,
-                    message=message,
-                    status=MessageStatus.FINISHED,
-                    browser_url=browser_url,
-                    action_type="session_paused",
-                )
-
-                execution_time_ms = (safe_time() - start_time) * 1000
-                usage_items = build_usage_items(
-                    total_input_tokens,
-                    total_output_tokens,
-                    model_pricing,
-                    execution_time_ms,
-                    usage_by_model,
-                )
-                await browser_stream.finish_tools(status="FINISHED")
-
-                return {
-                    "status": "needs_user_help",
-                    "message": message,
-                    "reason": reason,
-                    "task_id": task_id,
-                    "session_id": session_id,
-                    "browser_url": browser_url,
-                    "original_goal": goal,
-                    "execution_time_ms": execution_time_ms,
-                    "usage_items": usage_items,
-                }
-
             if action_name in ("attempt_completion", "done"):
                 close_reasoning = unified_action.get("params", {}).get("reasoning", "") or unified_action.get(
                     "params", {}
@@ -8495,17 +8579,104 @@ Based on this feedback, I need to continue working on the task and address the i
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
+                # Any action can hang on a frozen renderer (Momence Konva waiver:
+                # evaluate OR click). Classify via browser-process CDP before soft
+                # recovery; soft bring_to_front alone cannot reclaim the page.
+                from domains.spawn_browser_agent_v3.service_actions import (
+                    _evaluate_code_fingerprint,
+                    classify_evaluate_cdp_stall,
+                )
+
+                stall: Dict[str, Any] = await classify_evaluate_cdp_stall(
+                    input_page=input_page,
+                    playwright_browser=playwright_browser,
+                    timeout_s=2.0,
+                )
+                stall_log: Dict[str, Any] = {
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "iteration": iteration,
+                    "current_url": current_url,
+                    "action_name": action_name,
+                    "stall": stall,
+                }
+                if action_name == "evaluate":
+                    eval_code = str((unified_action.get("params") or {}).get("code") or "")
+                    stall_log.update(_evaluate_code_fingerprint(eval_code))
+                logger.error(
+                    "Browser action timed out; CDP stall classification",
+                    **stall_log,
+                )
+                renderer_frozen = stall.get("verdict") == "renderer_main_thread_blocked"
                 await _recover_browser_step(
                     f"action_timeout_{action_name}_{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s",
-                    reload_page=False,
+                    reload_page=renderer_frozen,
                 )
+                if renderer_frozen:
+                    recycled_page, hard_actions = await _hard_recover_frozen_renderer_page(
+                        input_page=input_page,
+                        playwright_browser=playwright_browser,
+                        fallback_url=current_url or "",
+                    )
+                    logger.warning(
+                        "Hard recovery after renderer-frozen action timeout",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        action_name=action_name,
+                        actions=hard_actions,
+                        recycled=recycled_page is not None,
+                    )
+                    if recycled_page is not None:
+                        from browser_tools.humanizer import BrowserHumanizer
+
+                        input_page = recycled_page
+                        humanizer = await _replace_browser_humanizer(
+                            current_humanizer=humanizer,
+                            enabled=True,
+                            dom_page=dom_page,
+                            input_page=input_page,
+                            cursor_observer=observe_cursor,
+                            humanizer_factory=BrowserHumanizer,
+                        )
+                        if browser_recorder is not None:
+                            browser_recorder.page = input_page
+                        # Point browser-use at a fresh navigation so DOM/state
+                        # watchdogs leave the destroyed frozen target.
+                        resume = current_url or getattr(input_page, "url", "") or ""
+                        if resume.startswith(("http://", "https://")) and dom_service is not None:
+                            with contextlib.suppress(Exception):
+                                from browser_use.browser.events import NavigateToUrlEvent
+
+                                nav = dom_service.session.event_bus.dispatch(
+                                    NavigateToUrlEvent(url=resume, wait_until="commit")
+                                )
+                                await asyncio.wait_for(nav, timeout=30.0)
+                                with contextlib.suppress(Exception):
+                                    await nav.event_result(raise_if_any=False, raise_if_none=False)
+                        input_page, humanizer = await _rebind_browser_tab_runtime(
+                            dom_service=dom_service,
+                            dom_page=dom_page,
+                            playwright_browser=playwright_browser,
+                            current_page=input_page,
+                            humanizer=humanizer,
+                            browser_recorder=browser_recorder,
+                            cursor_observer=observe_cursor,
+                        )
                 result = {
                     "success": False,
                     "error": (
                         f"Browser action '{action_name}' timed out after "
-                        f"{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s; generic browser supervisor recovery ran."
+                        f"{BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS}s; "
+                        + (
+                            "hard renderer recovery ran after CDP classified "
+                            "renderer_main_thread_blocked."
+                            if renderer_frozen
+                            else "generic browser supervisor recovery ran."
+                        )
                     ),
                     "supervisor_recovered": True,
+                    "renderer_stall": stall or None,
                 }
             except Exception as action_error:
                 logger.error(
@@ -9553,6 +9724,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "write_lock_rejected",
+                                "task_id": result.get("task_id"),
                             },
                         )
                         return

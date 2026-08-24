@@ -125,7 +125,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 "type": "integer",
                 "description": "Number of pixels to scroll (default: 300)",
             },
-            "index": {"type": "integer", "description": "Optional element index to scroll within specific container"},
+            "index": {
+                "type": "integer",
+                "description": "Optional scroll-container index from browser_state; omit or use 0 for viewport scroll",
+            },
         },
     },
     "find_text": {
@@ -185,18 +188,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     "attempt_completion": {
         "description": attempt_completion_prompt.strip(),
         "params": {},
-    },
-    "send_message_to_user": {
-        "description": "Send a message to the user (for updates or asking for help)",
-        "params": {
-            "message": {
-                "type": "string",
-                "description": user_facing_text_description(
-                    "The exact message shown to the user for an update or request for help."
-                ),
-                "required": True,
-            }
-        },
     },
     "request_user_assistance_for_authentication": {
         "description": (
@@ -1120,10 +1111,6 @@ _VALID_ACTIONS = frozenset(
         "close_tab",
         "open_new_tab",
         "attempt_completion",
-        # BROWSER_USE_TOOLS advertises send_message_to_user so the model can ask
-        # the user for help mid-task. Keep the allowlist in sync with the tool
-        # schema or normalize_browser_use_response() will reject it.
-        "send_message_to_user",
         "request_user_assistance_for_authentication",
         "request_payment_card",
         "generate_write_lock_notification",

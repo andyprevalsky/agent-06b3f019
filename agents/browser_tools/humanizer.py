@@ -132,8 +132,11 @@ class BrowserHumanizer:
         # Type text (assumes element is focused)
         await humanizer.type_text("hello@example.com")
 
-        # Scroll
+        # Scroll viewport
         await humanizer.scroll(delta_y=300)
+
+        # Scroll within a container (wheel events at element center)
+        await humanizer.scroll(delta_y=300, at_coords=(x, y))
     """
 
     def __init__(

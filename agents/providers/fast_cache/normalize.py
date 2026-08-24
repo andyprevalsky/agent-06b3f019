@@ -850,13 +850,30 @@ def content_key(goal: str, call_site: str, messages: Any) -> str:
     return build_key("llm", goal, f"{normalize_call_site(call_site)}:c:{sha256(canonical_messages(messages))[:32]}")
 
 
+def _user_messages_for_position_fingerprint(messages: Any) -> list[Any]:
+    """All user-role turns for position LLM keys.
+
+    Position keys still ignore assistant/tool history (volatile tool-call IDs,
+    durations, sandbox IDs), but user messages shape the model's tool choice —
+    goals, attachment metadata, and inline images must participate in the key.
+    """
+    if not isinstance(messages, list):
+        return []
+    user_messages: list[Any] = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "user":
+            user_messages.append(message)
+    return user_messages
+
+
 def position_request_fingerprint(request: Any) -> str:
     """Behavior-shaping request material for trajectory replay.
 
-    This deliberately excludes prior assistant/tool history: during Fast Mode
-    replay that history is the thing we are trying to avoid using as a volatile
-    key. It keeps static system prompts, model/config/tool/schema settings, and
-    an optional environment fingerprint so prompt/config changes still miss.
+    Position keys pair a durable step index with static request config so live
+    assistant/tool outputs (IDs, timings, sandbox handles) do not bust replay.
+    User messages are included because they carry goals and attachments the
+    model actually sees; canonical_messages() normalizes timestamps, refs, and
+    collapses image blobs.
     """
     if not isinstance(request, dict):
         return sha256(canonical_messages(request))[:32]
@@ -878,6 +895,7 @@ def position_request_fingerprint(request: Any) -> str:
         "pool": request.get("pool"),
         "pool_contract": request.get("pool_contract"),
         "static_messages": static_messages,
+        "user_messages": _user_messages_for_position_fingerprint(messages),
         "tools": request.get("tools"),
         "tool_choice": request.get("tool_choice"),
         "temperature": request.get("temperature"),
