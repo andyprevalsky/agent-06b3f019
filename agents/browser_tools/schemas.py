@@ -859,6 +859,7 @@ BROWSER_TOOL_MODELS = {
     # Observation
     "screenshot": ScreenshotTool,
     "read_logs": ReadLogsBrowserTool,
+    "read_network_requests": ReadNetworkRequestsBrowserTool,
     # Index-based actions
     "click": ClickTool,
     "input_text": InputTextTool,

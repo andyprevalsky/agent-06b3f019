@@ -1694,7 +1694,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     body = captured_bodies[0]
     assert body["tool_choice"] == "auto"
     assert body["tools"][0]["name"] == "click"
-    assert [tool["name"] for tool in body["tools"]] == ["click"]
+    assert [tool["name"] for tool in body["tools"]] == ["click", "click_coordinates"]
     assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["instructions"]
 
@@ -1713,7 +1713,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert payload["config"]["requested_params"]["temperature"] == 1.0
     assert payload["config"]["requested_params"]["max_tokens"] == 16000
     assert payload["tools"][0]["name"] == "click"
-    assert [tool["name"] for tool in payload["tools"]] == ["click"]
+    assert [tool["name"] for tool in payload["tools"]] == ["click", "click_coordinates"]
     assert payload["config"]["tool_choice"] == "auto"
     assert payload["extra"]["browser_recording_manifest_path"] == "/tmp/browser-recording/manifest.json"
     assert payload["extra"]["iteration"] == 7

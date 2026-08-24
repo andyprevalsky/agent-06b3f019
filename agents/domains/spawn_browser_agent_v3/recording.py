@@ -2754,7 +2754,7 @@ class BrowserNetworkRecorder:
 
     def replay_console_status_hints(self) -> None:
         """Re-run console→network status correlation over the full console buffer."""
-        for entry in self.console_entries:
+        for entry in getattr(self, "console_entries", []):
             self._correlate_console_http_status(entry)
 
     @classmethod
