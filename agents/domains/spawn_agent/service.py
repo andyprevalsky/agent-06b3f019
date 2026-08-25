@@ -15,10 +15,10 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_DEFAULT_DEPTH,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
+    resolve_explore_depth,
 )
 from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
@@ -337,6 +337,13 @@ async def spawn_explore_agent_activity(
         _,
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
+
+    # Belt-and-suspenders: even if the workflow passed depth=quick (DAG clamp /
+    # schema default), Fast Mode must allow July trajectories to finish.
+    depth = resolve_explore_depth(
+        depth,
+        fast_mode_cache_enabled=_explore_fast_mode_enabled,
+    )
 
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
 
@@ -664,8 +671,19 @@ async def spawn_explore_agent_activity(
     current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Resolve the caller's thoroughness. The depth tag rides in the per-call goal
     # (NOT the cacheable system prompt); the turn cap comes from the same depth.
-    effective_depth = depth or EXPLORE_DEFAULT_DEPTH
-    resolved_max_iterations = max_iterations or explore_limits_for_depth(effective_depth)[0]
+    # Fast Mode may have already promoted depth above; re-resolve so a stale
+    # max_iterations=5 from an older caller cannot clip July replay mid-trajectory.
+    effective_depth = resolve_explore_depth(
+        depth,
+        fast_mode_cache_enabled=_explore_fast_mode_enabled,
+    )
+    depth_cap = explore_limits_for_depth(effective_depth)[0]
+    if max_iterations is None:
+        resolved_max_iterations = depth_cap
+    elif _explore_fast_mode_enabled and max_iterations < depth_cap:
+        resolved_max_iterations = depth_cap
+    else:
+        resolved_max_iterations = max_iterations
     state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:

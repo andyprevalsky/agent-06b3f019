@@ -373,25 +373,27 @@ export async function cacheGetPosition(args: {
   // from failed Fast Mode verifies cannot poison OAi-demo replay. Fall back to
   // any oldest row when no warm-era match exists.
   //
-  // When an exact step misses, fall back to the oldest position-keyed row for
-  // the same call site (any step). Jul 2026 summarize_web_fetch trajectories
-  // often start at p:2 while today's explore ambient step is p:1 — exact-step
-  // miss would otherwise force a live LLM call and break 100% Fast Mode.
-  const patterns: string[] =
+  // When an exact step misses, fall forward to the oldest row at step >=
+  // requested (same call site). Jul 2026 summarize_web_fetch trajectories often
+  // start at p:2 while today's explore ambient step is p:1 — exact-step miss
+  // would otherwise force a live LLM call. Never fall BACK to a lower step:
+  // that re-replays early web_search turns and loops explore to max iterations.
+  const patterns: Array<{ like: string; minStep: number | null }> =
     step === null
-      ? [`fastmode:%:llm:${args.goalHash}:${site}:c:%`]
+      ? [{ like: `fastmode:%:llm:${args.goalHash}:${site}:c:%`, minStep: null }]
       : [
-          `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`,
-          `fastmode:%:llm:${args.goalHash}:${site}:p:%:c:%`,
+          { like: `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`, minStep: null },
+          { like: `fastmode:%:llm:${args.goalHash}:${site}:p:%:c:%`, minStep: step },
         ];
 
-  for (const pattern of patterns) {
+  for (const { like: pattern, minStep } of patterns) {
     for (const warmOnly of [true, false]) {
       const rows = await getFastCachePrisma().$queryRawUnsafe<
         Array<{ key: string; value: unknown; blobPath: string | null }>
       >(
         warmOnly
-          ? `
+          ? minStep === null
+            ? `
             SELECT key, value, "blobPath"
             FROM "FastModeCacheEntry"
             WHERE "goalHash" = $1
@@ -401,7 +403,19 @@ export async function cacheGetPosition(args: {
             ORDER BY "createdAt" ASC
             LIMIT 1
           `
-          : `
+            : `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2
+              AND "createdAt" < TIMESTAMPTZ '2026-08-25'
+              AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
+            ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
+            LIMIT 1
+          `
+          : minStep === null
+            ? `
             SELECT key, value, "blobPath"
             FROM "FastModeCacheEntry"
             WHERE "goalHash" = $1
@@ -409,9 +423,20 @@ export async function cacheGetPosition(args: {
               AND key LIKE $2
             ORDER BY "createdAt" ASC
             LIMIT 1
+          `
+            : `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2
+              AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
+            ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
+            LIMIT 1
           `,
-        args.goalHash,
-        pattern
+        ...(minStep === null
+          ? [args.goalHash, pattern]
+          : [args.goalHash, pattern, minStep])
       );
       const row = rows[0];
       if (!row) continue;

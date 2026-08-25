@@ -19,7 +19,6 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
-    EXPLORE_DEFAULT_DEPTH,
     EXPLORE_DEFAULT_MODEL,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
@@ -27,6 +26,7 @@ from domains.spawn_agent.config import (
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
     explore_limits_for_depth,
+    resolve_explore_depth,
 )
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
@@ -326,8 +326,15 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
-        # Caller-controlled thoroughness → turn cap + activity timeout. Default quick.
-        depth = tool_call.get("depth") or EXPLORE_DEFAULT_DEPTH
+        # Caller-controlled thoroughness → turn cap + activity timeout.
+        # Fast Mode promotes quick/missing → deep so July OAi-demo explores can
+        # reach attempt_completion (~14 turns avg; quick aborts at 5).
+        depth = resolve_explore_depth(
+            tool_call.get("depth"),
+            fast_mode_cache_enabled=bool(
+                getattr(workflow_instance, "fast_mode_cache_enabled", False)
+            ),
+        )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 
         # IN_PROGRESS

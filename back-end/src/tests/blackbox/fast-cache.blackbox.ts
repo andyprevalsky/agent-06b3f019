@@ -163,7 +163,7 @@ async function main(): Promise<void> {
     await post('/api/fast-cache/purge', { goalHash: posGoal });
   });
 
-  await test('get-position falls back to any-step when exact step misses', async () => {
+  await test('get-position falls forward to higher step when exact step misses', async () => {
     const posGoal = `bbposdrift${Date.now().toString(16)}`;
     const key = `fastmode:v42:llm:${posGoal}:summarize_web_fetch:p:2:c:cccccccccccccccccccccccccccccccc`;
     await post('/api/fast-cache/set', {
@@ -178,9 +178,28 @@ async function main(): Promise<void> {
       step: 1,
     });
     assert(pos.status === 200, `get-position status ${pos.status}`);
-    assert(pos.json.hit === true, 'expected any-step fallback hit');
-    assert((pos.json.value as JsonObject).content === 'SWF_P2', 'must replay oldest site row');
+    assert(pos.json.hit === true, 'expected forward-step fallback hit');
+    assert((pos.json.value as JsonObject).content === 'SWF_P2', 'must replay p:2 for p:1 miss');
     assert(pos.json.key === key, 'must return p:2 key for p:1 miss');
+    await post('/api/fast-cache/purge', { goalHash: posGoal });
+  });
+
+  await test('get-position does not fall back to a lower step', async () => {
+    const posGoal = `bbposback${Date.now().toString(16)}`;
+    const key = `fastmode:v42:llm:${posGoal}:explore_agent:p:1:c:dddddddddddddddddddddddddddddddd`;
+    await post('/api/fast-cache/set', {
+      key,
+      kind: 'llm',
+      goalHash: posGoal,
+      value: { content: 'EX_P1' },
+    });
+    const pos = await post('/api/fast-cache/get-position', {
+      goalHash: posGoal,
+      callSite: 'explore_agent',
+      step: 5,
+    });
+    assert(pos.status === 200, `get-position status ${pos.status}`);
+    assert(pos.json.hit === false, 'must miss rather than replay lower-step web_search');
     await post('/api/fast-cache/purge', { goalHash: posGoal });
   });
 
