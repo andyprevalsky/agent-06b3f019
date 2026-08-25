@@ -7,7 +7,7 @@ import { createLogger } from './logger';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
-  shouldWriteFastModeCacheForUser,
+  resolveFastModeWriteEnabled,
 } from './codeAgentFastModeEnv';
 import { FilePointer, downloadFromStorage } from './storage';
 import { v4 as uuidv4 } from 'uuid';
@@ -172,8 +172,7 @@ export async function createClaudeCodeSession(
   }
 
   const taskId = uuidv4();
-  const fastModeWriteEnabled =
-    fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
+  const fastModeWriteEnabled = resolveFastModeWriteEnabled(fastModeCacheEnabled, userId);
   const codeAgentFastModeActive = shouldEnableClaudeCodeFastMode({
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
     fastModeCacheEnabled,
@@ -532,8 +531,7 @@ export async function createCodexCodeSession(
     log.info(`Using OPENAI_API_KEY funded fallback for Codex Code agent ${agentId}`);
   }
 
-  const fastModeWriteEnabled =
-    fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
+  const fastModeWriteEnabled = resolveFastModeWriteEnabled(fastModeCacheEnabled, userId);
   const fastModeEnv = buildFastModeCodexEnv(
     goal,
     fastModeCacheEnabled === true,

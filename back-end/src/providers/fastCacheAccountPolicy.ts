@@ -3,3 +3,13 @@ const FAST_MODE_WRITE_THROUGH_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917b
 export function shouldWriteFastModeCacheForUser(userId: string | null | undefined): boolean {
   return userId !== null && userId !== undefined && FAST_MODE_WRITE_THROUGH_USER_IDS.has(userId);
 }
+
+export function resolveFastModeWriteEnabled(
+  fastModeCacheEnabled: boolean | undefined,
+  userId: string | null | undefined
+): boolean {
+  if (fastModeCacheEnabled === false) {
+    return false;
+  }
+  return fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
+}

@@ -28,6 +28,18 @@
     },
     {
       "role": "TOOL",
+      "message": "Selected guest checkout and continued without account login.",
+      "metadata": {
+        "toolName": "spawn_browser_agent",
+        "toolStatus": "FINISHED",
+        "action_type": "guest_checkout",
+        "title": "Guest checkout",
+        "subAgentId": "blue-bottle-browser",
+        "browser_url": "https://kernel.example/live/blue-bottle-52d7"
+      }
+    },
+    {
+      "role": "TOOL",
       "message": "",
       "metadata": {
         "toolName": "spawn_browser_agent",
@@ -76,9 +88,7 @@
             }
           ],
           "subtotalCents": 875,
-          "totalCents": 875,
-          "pickupLocation": "Blue Bottle Coffee Ferry Building",
-          "pickupTime": "Today, 3:00 PM"
+          "totalCents": 875
         }
       }
     ]

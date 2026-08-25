@@ -3945,63 +3945,53 @@ def _blue_bottle_k5_eval_data(fixture: dict) -> dict:
     }
 
 
-async def _assert_blue_bottle_k5_replay_passes_agentic_semantics(agent_id: str, failure_hint: str):
-    """Replay archived k=5 payment-boundary runs: static passes, agentic semantics pass."""
+async def _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(agent_id: str):
+    """Replay k=5 payment-boundary runs with real judges: static passes, single-turn fails, agentic passes."""
     from benchmarks.benchmark_tasks import get_task_by_name
-    import benchmarks.run_benchmark as bench
+    from benchmarks.run_benchmark import (
+        _call_declared_agentic_llm_judge,
+        _call_declared_llm_judge,
+        _run_declared_static_check,
+    )
 
     fixture = _load_blue_bottle_k5_fixture(agent_id)
     task = get_task_by_name("browser-blue-bottle-challenge-recovery")
     data = _blue_bottle_k5_eval_data(fixture)
-    static = task.evaluators[0]
-    semantics = task.evaluators[1]
+    static, semantics = task.evaluators[0], task.evaluators[1]
 
-    static_passed, static_reason = bench._run_declared_static_check(task, static, data)
+    static_passed, static_reason = _run_declared_static_check(task, static, data)
     assert static_passed is True, static_reason
 
-    original_single = bench._call_declared_llm_judge
-    original_agentic = bench._call_declared_agentic_llm_judge
+    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    single_score = float(single_turn.get("score") or 0)
+    assert single_score < 1.0, (
+        f"Expected single-turn judge to fail for {agent_id}; got score={single_score}: "
+        f"{single_turn.get('reasoning')}"
+    )
 
-    async def failing_single_turn(task_arg, evaluator_arg, data_arg):
-        return {"score": 0.0, "reasoning": failure_hint}
-
-    async def passing_agentic(task_arg, evaluator_arg, data_arg):
-        assert evaluator_arg["method"] == "agentic_llm_judge"
-        assert evaluator_arg["id"] == "blue_bottle_pickup_order_semantics"
-        assert data_arg["agent"]["agent_id"] == agent_id
-        return {"score": 1.0, "reasoning": "Payment approval grounds item, total, Ferry Building pickup, and pickup time."}
-
-    try:
-        bench._call_declared_llm_judge = failing_single_turn
-        bench._call_declared_agentic_llm_judge = passing_agentic
-        passed, reason, results = await bench._run_declared_evaluators(task, data)
-        assert passed is True, reason
-        assert results[0]["passed"] is True
-        assert results[1]["passed"] is True
-        assert results[1]["method"] == "agentic_llm_judge"
-    finally:
-        bench._call_declared_llm_judge = original_single
-        bench._call_declared_agentic_llm_judge = original_agentic
+    agentic = await _call_declared_agentic_llm_judge(task, semantics, data)
+    agentic_score = float(agentic.get("score") or 0)
+    assert agentic_score >= 1.0, (
+        f"Expected agentic Codex judge to pass for {agent_id}; got score={agentic_score}: "
+        f"{agentic.get('reasoning')}"
+    )
 
 
 async def test_blue_bottle_k5_trial_b217afca_passes_agentic_semantics():
-    await _assert_blue_bottle_k5_replay_passes_agentic_semantics(
+    await _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(
         "b217afca-6595-4eb5-bfd1-9688c2c9826a",
-        "No grounded pickup time or pickup window in the evidence.",
     )
 
 
 async def test_blue_bottle_k5_trial_52d717ea_passes_agentic_semantics():
-    await _assert_blue_bottle_k5_replay_passes_agentic_semantics(
+    await _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(
         "52d717ea-c5be-4bfe-b146-5efd535628ad",
-        "Ferry Building store is not grounded at checkout.",
     )
 
 
 async def test_blue_bottle_k5_trial_7d282652_passes_agentic_semantics():
-    await _assert_blue_bottle_k5_replay_passes_agentic_semantics(
+    await _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(
         "7d282652-2c5b-4dd3-b8c8-461929a37bf8",
-        "Ferry Building store is not grounded in browser evidence.",
     )
 
 

@@ -8174,25 +8174,89 @@ Criteria:
 {criteria}
 Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 
-Write the final `score` and `reasoning` fields to the structured output contract.
+Write the final verdict to `/home/user/output/judgment.json` as JSON with `score` (1.0 or 0.0)
+and `reasoning` fields, then validate that file exists before finishing.
 """
 
 
 async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dict[str, Any]:
     """Resolve a synced GPT/Codex compute token for the benchmark judge harness."""
-    from helpers.llm import fetch_compute_token_activity, fetch_gpt_code_token_activity
+    from config import load_config
+    from helpers.llm import fetch_gpt_code_token_activity
 
-    token_data = await fetch_compute_token_activity(
-        user_id,
-        agent_id=agent_id,
-        root_agent_id=agent_id,
-    )
-    if token_data and token_data.get("accessToken"):
-        return token_data
     token_data = await fetch_gpt_code_token_activity(user_id)
     if token_data and token_data.get("accessToken"):
-        return token_data
+        return {**token_data, "type": "gpt"}
+
+    config = load_config()
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            params={"tokenType": "gpt", "agentId": agent_id},
+            timeout=15.0,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("accessToken") and data.get("type") == "gpt":
+                return {
+                    "type": "gpt",
+                    "accessToken": data["accessToken"],
+                    "accountId": data.get("accountId"),
+                    "source": data.get("source", "user"),
+                    "poolTokenId": data.get("poolTokenId"),
+                }
+
     raise RuntimeError("Codex compute token unavailable for agentic benchmark judge")
+
+
+async def _parse_agentic_judge_verdict(result: dict) -> tuple[float, str]:
+    """Read the benchmark judge score from Codex output, not harness verifier progress."""
+    structured = result.get("structured_response") if isinstance(result.get("structured_response"), dict) else {}
+    if "score" in structured:
+        try:
+            score = float(structured["score"])
+            reasoning = str(structured.get("reasoning") or "")
+            if reasoning:
+                return score, reasoning
+        except (TypeError, ValueError):
+            pass
+
+    from helpers.attachments import FilePointer, get_file_content
+
+    for file_pointer in result.get("output_files") or []:
+        if not isinstance(file_pointer, dict):
+            continue
+        if str(file_pointer.get("original_filename") or "") != "judgment.json":
+            continue
+        try:
+            content = await get_file_content(FilePointer.from_dict(file_pointer))
+            parsed = json.loads(content.decode("utf-8"))
+            score = float(parsed.get("score", 0.0))
+            reasoning = str(parsed.get("reasoning") or "")
+            if reasoning:
+                return score, reasoning
+        except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+
+    message = str(result.get("message") or "")
+    for line in message.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{") or "score" not in stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+            score = float(parsed.get("score", 0.0))
+            reasoning = str(parsed.get("reasoning") or "")
+            if reasoning:
+                return score, reasoning
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+
+    return 0.0, "Agentic judge returned no parseable benchmark verdict"
 
 
 async def _call_declared_agentic_llm_judge(
@@ -8203,6 +8267,8 @@ async def _call_declared_agentic_llm_judge(
     """Execute one catalog-declared agentic judge via the Codex code harness."""
     from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
     from helpers.attachments import upload_to_storage
+
+    _sync_compute_tokens(required_token_types=("gpt",))
 
     user_id = _current_benchmark_user_id()
     judge_agent_id = str(uuid.uuid4())
@@ -8230,19 +8296,10 @@ async def _call_declared_agentic_llm_judge(
         gpt_account_id=token_data.get("accountId"),
         gpt_token_source=token_data.get("source"),
         gpt_token_pool_id=token_data.get("poolTokenId"),
+        fast_mode_cache_enabled=False,
     )
 
-    structured = result.get("structured_response") if isinstance(result.get("structured_response"), dict) else {}
-    score_raw = structured.get("score", result.get("score", 0.0))
-    try:
-        score = float(score_raw)
-    except (TypeError, ValueError):
-        score = 0.0
-    reasoning = str(
-        structured.get("reasoning")
-        or result.get("message")
-        or "Agentic judge returned no reasoning"
-    )
+    score, reasoning = await _parse_agentic_judge_verdict(result)
     usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
     usage = aggregate_usage_items(usage_items) if usage_items else None
     return {"score": score, "reasoning": reasoning, "usage": usage}
