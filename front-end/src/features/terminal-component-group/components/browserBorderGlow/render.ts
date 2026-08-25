@@ -1,4 +1,5 @@
 import { CONFIG, type Dot } from './config';
+import type { GlowToneColors } from './tones';
 
 function computeWavePositions(timestamp: number): number[] {
   const { numWaves, waveSpeed } = CONFIG;
@@ -42,8 +43,9 @@ function blendDotPixel(
   idx: number,
   newAlpha: number,
   existingAlpha: number,
+  colors: GlowToneColors,
 ) {
-  const { dotColor } = CONFIG;
+  const { dotColor } = colors;
   const outAlpha = newAlpha + existingAlpha * (1 - newAlpha);
   if (outAlpha > 0) {
     data[idx] = (dotColor.r * newAlpha + data[idx] * existingAlpha * (1 - newAlpha)) / outAlpha;
@@ -62,6 +64,7 @@ function drawDot(
   scaledRadius: number,
   canvasWidth: number,
   canvasHeight: number,
+  colors: GlowToneColors,
 ) {
   for (let dy = -scaledRadius; dy <= scaledRadius; dy++) {
     for (let dx = -scaledRadius; dx <= scaledRadius; dx++) {
@@ -71,7 +74,7 @@ function drawDot(
         const idx = (py * canvasWidth + px) * 4;
         const existingAlpha = data[idx + 3] / 255;
         const newAlpha = alpha / 255;
-        blendDotPixel(data, idx, newAlpha, existingAlpha);
+        blendDotPixel(data, idx, newAlpha, existingAlpha, colors);
       }
     }
   }
@@ -85,6 +88,7 @@ export interface RenderFrameArgs {
   glowData: Uint8ClampedArray;
   dots: Dot[];
   timestamp: number;
+  colors: GlowToneColors;
 }
 
 export function renderFrame({
@@ -95,6 +99,7 @@ export function renderFrame({
   glowData,
   dots,
   timestamp,
+  colors,
 }: RenderFrameArgs) {
   const imageData = ctx.createImageData(canvasWidth, canvasHeight);
   imageData.data.set(glowData);
@@ -107,7 +112,7 @@ export function renderFrame({
     const opacity = computeDotOpacity(dot, wavePositions, timestamp);
     if (opacity > 0.01) {
       const alpha = Math.min(255, opacity * 255);
-      drawDot(data, dot, alpha, scaledRadius, canvasWidth, canvasHeight);
+      drawDot(data, dot, alpha, scaledRadius, canvasWidth, canvasHeight, colors);
     }
   }
 
