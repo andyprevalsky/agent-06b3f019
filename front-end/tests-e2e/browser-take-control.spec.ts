@@ -200,6 +200,23 @@ test.describe('browser-take-control', () => {
         timeout: 30_000,
       });
 
+      // Hand back must release browser ownership so the browser worker can resume reasoning.
+      const session = process.env.SEMANTIC_SESSION;
+      const bearerHeaders =
+        session !== undefined && session !== ''
+          ? { Authorization: `Bearer ${JSON.parse(session).access_token}` }
+          : { 'X-API-Key': TEST_API_KEY, 'X-User-Id': userId };
+      await expect
+        .poll(async () => {
+          const res = await fetch(`${BACKEND_URL}/api/browser-session/task/${taskId}/control`, {
+            headers: bearerHeaders,
+          });
+          if (!res.ok) return 'unavailable';
+          const snapshot = (await res.json()) as { state?: string };
+          return snapshot.state ?? 'unknown';
+        })
+        .toBe('agent');
+
       expect(hasUncaughtErrors(rec), 'Uncaught errors during take-control flow').toEqual([]);
     } finally {
       await deleteAgent(agentId);

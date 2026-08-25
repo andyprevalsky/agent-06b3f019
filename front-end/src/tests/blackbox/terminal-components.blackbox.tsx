@@ -1749,10 +1749,15 @@ describe('BrowserStatusBar (blackbox)', () => {
 
   it('clicking "Take control" on a live browser enables interaction and can hand control back', async () => {
     let resumeCalled = false;
+    let agentResumeCalls = 0;
     const controlModes: string[] = [];
     let controlStateReads = 0;
     let controlRequested = false;
     server.use(
+      http.post(`${API_BASE}/agents/:agentId/resume`, () => {
+        agentResumeCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
       http.post(`${API_BASE}/browser-session/resume`, async ({ request }) => {
         resumeCalled = true;
         const body = (await request.json()) as { task_id?: string };
@@ -1818,6 +1823,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     await user.click(screen.getByRole('button', { name: 'Hand back control' }));
     expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
     expect(controlModes).toEqual(['user', 'agent']);
+    expect(agentResumeCalls).toBe(0);
     expect(screen.getByTitle('Browser')).toHaveAttribute('src', 'about:blank');
   });
 
