@@ -142,6 +142,8 @@ def test_recover_from_challenge_normalizes_and_preserves_reason():
 
 def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
+    assert "Call this immediately when a challenge interstitial blocks progress" in description
+    assert "do not spend steps dragging sliders" in description
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
     assert "parallel cookie-group reductions" in description
@@ -153,6 +155,8 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     assert "in parallel" in description
     assert "user's default" in description
     assert "rotate_ip" not in BROWSER_USE_TOOLS
+    reason = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["reason"]["description"]
+    assert "challenge blocks the page" in reason
 
 
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
@@ -193,13 +197,13 @@ def test_state_has_indexed_dom_targets_detects_interactive_indices():
     assert state_has_indexed_dom_targets(browser_state)
 
 
-def test_filter_browser_use_actions_removes_coordinates_when_dom_has_indices():
+def test_filter_browser_use_actions_keeps_coordinates_when_dom_has_indices():
     actions = ["click", "click_coordinates", "wait"]
     browser_state = {"dom_tree": "[92]<button aria-label=Add item to Cart />"}
 
     out = filter_browser_use_actions_for_state(actions, browser_state)
 
-    assert out == ["click", "wait"]
+    assert out == actions
 
 
 def test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state():
@@ -211,6 +215,76 @@ def test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state():
     assert out == actions
 
 
+def test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell():
+    """Hotels.com Bot or Not mounts indexed shell nodes with no slider index.
+
+    click_coordinates must stay in the tool list so the model can engage a
+    visual-only widget after screenshot; stripping it produced
+    'no interactive solve control is available' recoveries.
+    """
+    actions = ["click", "click_coordinates", "screenshot", "wait", "recover_from_challenge"]
+    browser_state = {
+        "dom_tree": (
+            "[3545]<div id=app-captcha-pwa />\n"
+            "\t[3582]<a />\n"
+            "\tShow us your human side...\n"
+            "\tWe can't tell if you're a human or a bot.\n"
+            "\t[3594]<span />\n"
+            "\t6d75d0d4-6be2-4c72-aa2f-af218aad299f"
+        ),
+        "title": "Bot or Not?",
+        "url": "https://www.hotels.com/bot-or-not",
+    }
+
+    out = filter_browser_use_actions_for_state(actions, browser_state)
+
+    assert out == actions
+    assert "click_coordinates" in out
+
+
+def test_screenshot_tool_desc_calls_out_misleading_captcha_dom():
+    tools = build_browser_use_tools(["screenshot"])
+    desc = tools[0]["description"]
+    assert "misleading shell" in desc
+    assert "Bot or Not" in desc
+    assert "drag" in desc
+    assert "recover_from_challenge immediately" in desc
+
+
+def test_drag_tool_in_catalog_and_normalizes_coordinates():
+    assert "drag" in BROWSER_USE_TOOLS
+    tools = build_browser_use_tools(["drag"])
+    assert tools[0]["name"] == "drag"
+    assert "slider" in tools[0]["description"].lower() or "CAPTCHA" in tools[0]["description"]
+
+    out = normalize_browser_use_response(
+        {
+            "thinking": "slide captcha",
+            "action": [{"drag": {"start_x": 400, "start_y": 420, "end_x": 900, "end_y": 420, "steps": 30}}],
+        }
+    )
+    assert out["action"] == "drag"
+    assert out["params"]["start_x"] == 400
+    assert out["params"]["end_x"] == 900
+    assert out["params"]["steps"] == 30
+
+
+def test_drag_tool_schema_requires_start_and_end():
+    from browser_tools.schemas import DragTool
+
+    DragTool.model_validate(
+        {"tool": "drag", "source_index": 1, "target_index": 2}
+    )
+    DragTool.model_validate(
+        {"tool": "drag", "start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4}
+    )
+    try:
+        DragTool.model_validate({"tool": "drag", "start_x": 1, "start_y": 2})
+        raise AssertionError("expected validation error")
+    except Exception:
+        pass
+
+
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     prompt = build_browser_use_system_prompt([])
 
@@ -220,9 +294,15 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "  - 3. Saved passwords" in prompt
     assert "  - 4. Email OTP" in prompt
     assert "  - 5. SMS OTP" in prompt
+    assert "  - 6. Minted account" in prompt
+    assert "  - 7. Guest/anonymous completion, if viable" in prompt
+    assert "  - 8. request_user_assistance_for_authentication" in prompt
     assert "OTP codes from email or SMS are automatically injected" in prompt
     assert "call request_user_assistance_for_authentication" in prompt
-    assert "Do not call attempt_completion or report a status instead." in prompt
+    assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
+    assert "CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication." in prompt
+    assert "Call recover_from_challenge immediately when one blocks progress" in prompt
+    assert "do not drag sliders" in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
 
@@ -273,6 +353,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
 
     auth_help = tools[1]
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
+    assert "Never use this for CAPTCHA" in auth_help["description"]
+    assert "Bot or Not" in auth_help["description"]
     assert auth_help["input_schema"]["properties"] == {}
     assert auth_help["input_schema"]["required"] == []
 
@@ -955,8 +1037,8 @@ def test_read_network_requests_tool_advertised_and_normalized():
     generation, and passthrough of every filter/detail param.
     """
     assert "read_network_requests" in BROWSER_USE_TOOLS
-    desc = generate_tool_descriptions(["read_network_requests"])
-    assert "read_network_requests" in desc
+    desc = BROWSER_USE_TOOLS["read_network_requests"]["description"]
+    assert "read_network_requests" in desc or "network" in desc.lower()
     # params render without raising (schema dicts, not bare strings)
     for param in (
         "url_pattern",
@@ -1012,6 +1094,46 @@ def test_read_network_requests_tool_advertised_and_normalized():
     nested = normalize_browser_use_response({"action": [{"read_network_requests": {"url_pattern": "checkout"}}]})
     assert nested["action"] == "read_network_requests"
     assert nested["params"] == {"url_pattern": "checkout"}
+
+
+def test_read_logs_tool_advertised_and_normalized():
+    """Browser agents use read_logs to inspect console + network traffic together."""
+    assert "read_logs" in BROWSER_USE_TOOLS
+    desc = generate_tool_descriptions(["read_logs"])
+    assert "read_logs" in desc
+    for param in (
+        "pattern",
+        "limit",
+        "clear",
+        "sources",
+        "level",
+        "status",
+        "url_pattern",
+        "include_bodies",
+    ):
+        assert param in desc, f"{param} missing from read_logs description"
+
+    flat = normalize_browser_use_response(
+        {
+            "thinking": "inspect logs",
+            "action": [
+                {
+                    "action_name": "read_logs",
+                    "pattern": "429|ApolloError",
+                    "limit": 25,
+                    "sources": ["console", "network"],
+                    "status": "error",
+                    "clear": True,
+                }
+            ],
+        }
+    )
+    assert flat["action"] == "read_logs"
+    assert flat["params"]["pattern"] == "429|ApolloError"
+    assert flat["params"]["limit"] == 25
+    assert flat["params"]["sources"] == ["console", "network"]
+    assert flat["params"]["status"] == "error"
+    assert flat["params"]["clear"] is True
 
 
 def test_normalize_remaps_navigate_to_goto():
@@ -1572,7 +1694,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     body = captured_bodies[0]
     assert body["tool_choice"] == "auto"
     assert body["tools"][0]["name"] == "click"
-    assert [tool["name"] for tool in body["tools"]] == ["click"]
+    assert [tool["name"] for tool in body["tools"]] == ["click", "click_coordinates"]
     assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert "# Available Actions" not in body["instructions"]
 
@@ -1591,7 +1713,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     assert payload["config"]["requested_params"]["temperature"] == 1.0
     assert payload["config"]["requested_params"]["max_tokens"] == 16000
     assert payload["tools"][0]["name"] == "click"
-    assert [tool["name"] for tool in payload["tools"]] == ["click"]
+    assert [tool["name"] for tool in payload["tools"]] == ["click", "click_coordinates"]
     assert payload["config"]["tool_choice"] == "auto"
     assert payload["extra"]["browser_recording_manifest_path"] == "/tmp/browser-recording/manifest.json"
     assert payload["extra"]["iteration"] == 7
@@ -1768,13 +1890,23 @@ async def run_all_tests():
     r.record("system_prompt_hides_extract", test_build_browser_use_system_prompt_does_not_advertise_extract)
     r.record("state_has_indexed_dom_targets", test_state_has_indexed_dom_targets_detects_interactive_indices)
     r.record(
-        "filter_actions_removes_coordinates_when_indexed",
-        test_filter_browser_use_actions_removes_coordinates_when_dom_has_indices,
+        "filter_actions_keeps_coordinates_when_indexed",
+        test_filter_browser_use_actions_keeps_coordinates_when_dom_has_indices,
     )
     r.record(
         "filter_actions_keeps_coordinates_when_unindexed",
         test_filter_browser_use_actions_keeps_coordinates_for_unindexed_state,
     )
+    r.record(
+        "filter_keeps_click_coordinates_on_bot_or_not_captcha_shell",
+        test_filter_keeps_click_coordinates_on_bot_or_not_captcha_shell,
+    )
+    r.record(
+        "screenshot_tool_desc_misleading_captcha_dom",
+        test_screenshot_tool_desc_calls_out_misleading_captcha_dom,
+    )
+    r.record("drag_tool_catalog_and_normalize", test_drag_tool_in_catalog_and_normalizes_coordinates)
+    r.record("drag_tool_schema_requires_endpoints", test_drag_tool_schema_requires_start_and_end)
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
     r.record(
@@ -1876,6 +2008,10 @@ async def run_all_tests():
     r.record(
         "read_network_requests_advertised_and_normalized",
         test_read_network_requests_tool_advertised_and_normalized,
+    )
+    r.record(
+        "read_logs_advertised_and_normalized",
+        test_read_logs_tool_advertised_and_normalized,
     )
 
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)

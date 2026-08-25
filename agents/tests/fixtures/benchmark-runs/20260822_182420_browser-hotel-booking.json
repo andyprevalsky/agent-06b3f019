@@ -1,0 +1,54 @@
+{
+  "tasks": [
+    {
+      "name": "browser-hotel-booking",
+      "passed": false,
+      "logs": {
+        "messages": [
+          {
+            "role": "ASSISTANT",
+            "metadata": {
+              "tool_calls": [
+                {
+                  "tool": "spawn_agent",
+                  "type": "browser",
+                  "tool_call_id": "spawn-1",
+                  "goal": "Book Hotel Kabuki. Complete the booking.",
+                  "output_schema": {
+                    "fields": [
+                      {
+                        "name": "booking_completed",
+                        "type": "boolean"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "role": "ASSISTANT",
+            "metadata": {
+              "tool_calls": [
+                {
+                  "tool": "spawn_agent",
+                  "type": "browser",
+                  "tool_call_id": "spawn-2",
+                  "goal": "Retry Hotel Kabuki booking after max steps.",
+                  "output_schema": {
+                    "fields": [
+                      {
+                        "name": "booking_completed",
+                        "type": "boolean"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

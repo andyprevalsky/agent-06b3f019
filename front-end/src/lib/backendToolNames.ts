@@ -108,6 +108,7 @@ export const BROWSER_EMITTED_ACTION_TYPES = [
   'payment_card_ready',
   'press_key',
   'purchase',
+  'read_logs',
   'read_network_requests',
   'recording',
   'recover_from_challenge',

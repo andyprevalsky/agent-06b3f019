@@ -3,6 +3,8 @@
  *
  * [ACTIVE]
  *   - iframe + BrowserBorderGlow + BrowserCursorOverlay
+ *   - glow tone=default (blue) | tone=challenge_recovery (orange) while
+ *     recover_from_challenge progress messages are IN_PROGRESS
  *
  * [WAITING_FOR_AUTH_ASSISTANCE]
  *   - iframe + blurred Start Agent overlay
@@ -22,6 +24,7 @@ import { useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
+import { resolveBrowserBorderGlowTone } from '../browserBorderGlow/resolveTone';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { resolveBrowserControlState } from '../browserControlState';
 import { StatusOverlay } from './StatusOverlay';
@@ -56,6 +59,7 @@ export function BrowserIframe({
     isDisconnected,
     isWaitingForAuthAssistance,
   });
+  const glowTone = resolveBrowserBorderGlowTone(messages, taskId);
 
   return (
     <div
@@ -73,7 +77,7 @@ export function BrowserIframe({
         title="Browser Session"
       />
 
-      {controlState === 'active' && <BrowserBorderGlow />}
+      {controlState === 'active' && <BrowserBorderGlow tone={glowTone} />}
       {controlState === 'active' && (
         <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
       )}

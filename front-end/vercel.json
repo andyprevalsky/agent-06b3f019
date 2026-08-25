@@ -4,6 +4,18 @@
       "source": "/subscribe",
       "destination": "https://buy.stripe.com/test_5kQcN64tX2PccvS6dM9ws00",
       "permanent": false
+    },
+    {
+      "source": "/open-agent",
+      "has": [
+        {
+          "type": "query",
+          "key": "agent-id",
+          "value": "(?<agentId>.*)"
+        }
+      ],
+      "destination": "/?agent-id=:agentId",
+      "permanent": false
     }
   ],
   "rewrites": [
