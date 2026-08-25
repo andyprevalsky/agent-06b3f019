@@ -31,9 +31,7 @@ const renderInPortal = (
   children: React.ReactNode
 ): React.ReactElement =>
   createPortal(
-    <div className={interactive ? 'pointer-events-auto' : 'pointer-events-none'}>
-      {children}
-    </div>,
+    <div className={interactive ? 'pointer-events-auto' : 'pointer-events-none'}>{children}</div>,
     container
   );
 
