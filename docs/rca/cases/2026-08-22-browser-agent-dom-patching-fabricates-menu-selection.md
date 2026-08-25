@@ -128,16 +128,16 @@ Implemented in `agents/benchmarks/spawn_contract.py` and wired through
 `run_benchmark.py`, `spawn_agent/handler.py`, and
 `spawn_browser_agent_v3/{handler,service_actions}.py`:
 
-1. **Spawn goal injection:** When `success_on_payment_card_request` is set,
-   browser spawn goals are rewritten to stop at `request_payment_card` and
-   forbid submit-order / confirmation claims.
-2. **live_targets seeding:** Browser `start_url` is forced to
+1. **live_targets seeding:** Browser `start_url` is forced to
    `environment.live_targets[0]` when the planner starts on marketing/search
    detours.
-3. **Guest-checkout auth skip:** Guest-checkout tasks with no `live_fixtures`
+2. **Guest-checkout auth skip:** Guest-checkout tasks with no `live_fixtures`
    set `BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true` for the task lifetime.
-4. **Anti-reward-hack evaluate guard:** Payment-boundary benchmark tasks reject
+3. **Anti-reward-hack evaluate guard:** Payment-boundary benchmark tasks reject
    `evaluate` code that mutates option labels / returns `patched`.
+
+Spawn goals are **not** rewritten. Tasks may say "complete payment"; write-lock
+and payment-approval stop the agent before an order is actually placed.
 
 Checked-in repro:
 `agents/tests/blackbox/benchmark.blackbox.py` →
@@ -161,7 +161,9 @@ contract is reachable when navigation converges.
 
 ## Human feedback
 
-None recorded.
+2026-08-25: Do not clamp spawn goals to forbid "complete payment" language —
+that is expected. Write-lock / payment-approval catch the agent before an order
+is actually placed; rewriting goals was the wrong fix shape.
 
 ## Reusable lesson
 

@@ -1,10 +1,12 @@
 """Benchmark browser-spawn contract helpers.
 
-Payment-boundary guest-checkout tasks waste wall-clock when the root planner
-rewrites spawn goals past ``request_payment_card``, the browser starts on
-marketing/search detours instead of ``environment.live_targets``, saved-session
-auth churn runs on tasks with no live fixture, or ``evaluate`` mutates menu
-labels to fake unavailable modifiers.
+Guest-checkout payment-boundary tasks waste wall-clock when the browser starts
+on marketing/search detours instead of ``environment.live_targets``,
+saved-session auth churn runs on tasks with no live fixture, or ``evaluate``
+mutates menu labels to fake unavailable modifiers.
+
+Spawn goals may still say "complete payment" — write-lock / payment-approval
+catch the agent before an order is actually placed.
 """
 
 from __future__ import annotations
@@ -19,17 +21,6 @@ from benchmarks.benchmark_tasks import BenchmarkTask, get_task_by_name
 from benchmarks.live_fixtures import resolve_live_fixtures
 
 _BENCHMARK_ACTIVE_TASK_ENV = "BENCHMARK_ACTIVE_TASK_NAME"
-
-_PAYMENT_COMPLETION_PHRASES = (
-    "complete payment and submit",
-    "complete the purchase",
-    "complete payment and place",
-    "submit the order",
-    "place the order",
-    "do not stop at the cart",
-    "order confirmation id",
-    "confirmed order confirmation",
-)
 
 _GUEST_CHECKOUT_MARKERS = (
     "guest checkout",
@@ -88,32 +79,13 @@ def guest_checkout_without_live_fixture(task: BenchmarkTask) -> bool:
     return any(marker in prompt_blob for marker in _GUEST_CHECKOUT_MARKERS)
 
 
-def payment_boundary_spawn_goal(task: BenchmarkTask) -> str:
-    """Canonical browser sub-goal for tasks that terminate at request_payment_card."""
-    live_target = primary_live_target(task.environment)
-    start_hint = f" Start at {live_target}." if live_target else ""
-    return (
-        f"{task.prompt.strip()}{start_hint} "
-        "Use exactly one browser session with guest checkout. Configure the drink and pickup "
-        "location on the provider checkout, then call request_payment_card once you reach the "
-        "grounded payment step. Do not submit the order, enter card details, or claim the "
-        "order was placed. If a required modifier is unavailable, proceed with the closest "
-        "grounded option and report the limitation instead of patching the DOM."
-    )
-
-
-def clamp_browser_spawn_tool_call(
+def apply_browser_spawn_live_target(
     task: BenchmarkTask,
     tool_call: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Apply payment-boundary spawn contract to a browser tool call."""
+    """Seed browser ``start_url`` from the task's declared live target when needed."""
     patched = dict(tool_call)
-    environment = task.environment or {}
-
-    if task.success_on_payment_card_request:
-        patched["goal"] = payment_boundary_spawn_goal(task)
-
-    live_target = primary_live_target(environment)
+    live_target = primary_live_target(task.environment)
     if live_target:
         current_start = str(patched.get("start_url") or "").strip()
         if not current_start or _should_replace_start_url(current_start, live_target):
@@ -163,9 +135,9 @@ def evaluate_dom_patch_blocked(code: str) -> Optional[str]:
 
 def apply_active_task_spawn_contract(tool_call: Mapping[str, Any]) -> dict[str, Any]:
     task = active_benchmark_task()
-    if task is None or not task.success_on_payment_card_request:
+    if task is None:
         return dict(tool_call)
-    return clamp_browser_spawn_tool_call(task, tool_call)
+    return apply_browser_spawn_live_target(task, tool_call)
 
 
 def with_active_benchmark_task(task_name: str):

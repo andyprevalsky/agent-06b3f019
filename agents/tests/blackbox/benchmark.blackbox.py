@@ -4026,14 +4026,13 @@ async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
     )
 
 
-def test_blue_bottle_spawn_contract_seeds_live_target_and_clamps_payment_goal():
-    """k=5 timeouts burned budget on marketing detours and submit-order spawn goals."""
+def test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal():
+    """k=5 timeouts burned budget on marketing detours; goals may still say complete payment."""
     import os
 
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.spawn_contract import (
-        clamp_browser_spawn_tool_call,
-        payment_boundary_spawn_goal,
+        apply_browser_spawn_live_target,
         should_disable_saved_browser_auth,
         with_active_benchmark_task,
     )
@@ -4041,23 +4040,20 @@ def test_blue_bottle_spawn_contract_seeds_live_target_and_clamps_payment_goal():
     task = get_task_by_name("browser-blue-bottle-challenge-recovery")
     assert should_disable_saved_browser_auth(task) is True
 
-    rewritten_goal = (
+    planner_goal = (
         "Place a pickup order immediately from Blue Bottle Coffee at the Ferry Building in San Francisco, "
         "using guest checkout. Complete payment and submit the order, using available agent payment capabilities. "
         "Do not stop at the cart. Return the confirmed order confirmation ID."
     )
-    clamped = clamp_browser_spawn_tool_call(
+    patched = apply_browser_spawn_live_target(
         task,
         {
-            "goal": rewritten_goal,
+            "goal": planner_goal,
             "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
         },
     )
-    assert clamped["start_url"] == task.environment["live_targets"][0]
-    assert "complete payment and submit" not in clamped["goal"].lower()
-    assert "request_payment_card" in clamped["goal"].lower()
-    assert "do not submit the order" in clamped["goal"].lower()
-    assert payment_boundary_spawn_goal(task).startswith(task.prompt)
+    assert patched["start_url"] == task.environment["live_targets"][0]
+    assert patched["goal"] == planner_goal
 
     with with_active_benchmark_task(task.name):
         assert os.environ["BENCHMARK_ACTIVE_TASK_NAME"] == task.name
@@ -15844,7 +15840,7 @@ async def run_all_tests():
     )
     r.record(
         "blue_bottle_spawn_contract_seeds_live_target",
-        test_blue_bottle_spawn_contract_seeds_live_target_and_clamps_payment_goal,
+        test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal,
     )
     r.record(
         "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",
