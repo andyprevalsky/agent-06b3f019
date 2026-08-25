@@ -202,12 +202,24 @@ async def cached_complete(
     key = ctx.llm_key(call_site, request_key_material(complete_kwargs))
     if ctx.read_enabled:
         try:
-            stored = await cache_client.cache_get(key)
+            lookup_keys = ctx.llm_lookup_keys(call_site, request_key_material(complete_kwargs))
+            stored, hit_key = await cache_client.cache_get_first(lookup_keys)
+            if stored is None and ctx.base_step is not None:
+                stored, hit_key = await cache_client.cache_get_position_fallback(
+                    ctx.goal_hash,
+                    call_site,
+                    ctx.base_step,
+                )
         except Exception as exc:  # cache read failures degrade to live
             logger.warning("fast_cache.get_error", key=key, error=str(exc))
-            stored = None
+            stored, hit_key = None, None
         if stored is not None:
-            logger.info("llm.cache.replay", call_site=call_site, key=key)
+            if hit_key and hit_key != key and ctx.should_write:
+                try:
+                    await cache_client.cache_set(key, "llm", ctx.goal_hash, stored)
+                except Exception as exc:
+                    logger.warning("fast_cache.set_error", key=key, error=str(exc))
+            logger.info("llm.cache.replay", call_site=call_site, key=key, hit_key=hit_key or key)
             async for chunk in _replay(stored):
                 yield chunk
             return

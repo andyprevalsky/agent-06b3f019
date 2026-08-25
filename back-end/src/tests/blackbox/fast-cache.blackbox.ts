@@ -106,6 +106,36 @@ async function main(): Promise<void> {
     assert(results[`${key}:missing`].hit === false, 'missing key should miss');
   });
 
+  await test('get-position returns oldest matching trajectory slot', async () => {
+    const posGoal = `bbpos${Date.now().toString(16)}`;
+    const olderKey = `fastmode:v42:llm:${posGoal}:plan_loop:p:1:c:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`;
+    const newerKey = `fastmode:v43:llm:${posGoal}:plan_loop:p:1:c:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`;
+    await post('/api/fast-cache/set', {
+      key: olderKey,
+      kind: 'llm',
+      goalHash: posGoal,
+      value: { content: 'OLDER' },
+    });
+    // Ensure newer createdAt by a later write
+    await new Promise((r) => setTimeout(r, 20));
+    await post('/api/fast-cache/set', {
+      key: newerKey,
+      kind: 'llm',
+      goalHash: posGoal,
+      value: { content: 'NEWER' },
+    });
+    const pos = await post('/api/fast-cache/get-position', {
+      goalHash: posGoal,
+      callSite: 'plan_loop',
+      step: 1,
+    });
+    assert(pos.status === 200, `get-position status ${pos.status}`);
+    assert(pos.json.hit === true, 'expected position hit');
+    assert((pos.json.value as JsonObject).content === 'OLDER', 'must prefer oldest slot write');
+    assert(pos.json.key === olderKey, 'must return older key');
+    await post('/api/fast-cache/purge', { goalHash: posGoal });
+  });
+
   await test('#26 secrets stripped at the route', async () => {
     const skey = `${key}:secret`;
     await post('/api/fast-cache/set', {

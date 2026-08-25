@@ -2,7 +2,10 @@ import type { CreateAgentBody } from './types';
 import { isNonRealWorldModelMode, normalizeWorldModelMode } from '../../providers/worldModelMode';
 import { isAdminUser } from '../../utils/adminAccess';
 export { normalizeWorldModelMode } from '../../providers/worldModelMode';
-const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
+const DEFAULT_FAST_MODE_USER_IDS = new Set([
+  '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy
+  '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamy
+]);
 
 export class WorldModelModeAccessError extends Error {
   constructor() {

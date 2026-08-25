@@ -348,6 +348,50 @@ export async function cachePurge(goalHash: string): Promise<number> {
   return res.count;
 }
 
+/**
+ * Oldest LLM position entry for (goalHash, callSite, step) when exact keys miss.
+ * Used to replay the Jul 2026 OAi mass-agent warm cache after fingerprint drift.
+ */
+export async function cacheGetPosition(args: {
+  goalHash: string;
+  callSite: string;
+  step: number;
+}): Promise<CacheGetResult & { key: string | null }> {
+  const site = args.callSite.trim();
+  const step = Math.trunc(args.step);
+  if (!args.goalHash || !site || !Number.isFinite(step) || step < 0) {
+    return { hit: false, value: null, blobPath: null, key: null };
+  }
+  // Match both historical CACHE_KEY_VERSION values (v42/v43) under the durable
+  // trajectory slot: fastmode:vN:llm:{goalHash}:{site}:p:{step}:c:{fingerprint}
+  const pattern = `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`;
+  const rows = await fastCachePrisma.$queryRawUnsafe<
+    Array<{ key: string; value: unknown; blobPath: string | null }>
+  >(
+    `
+    SELECT key, value, "blobPath"
+    FROM "FastModeCacheEntry"
+    WHERE "goalHash" = $1
+      AND kind = 'llm'
+      AND key LIKE $2
+    ORDER BY "createdAt" ASC
+    LIMIT 1
+  `,
+    args.goalHash,
+    pattern
+  );
+  const row = rows[0];
+  if (!row) return { hit: false, value: null, blobPath: null, key: null };
+  const result: CacheGetResult & { key: string | null } = {
+    hit: true,
+    value: row.value,
+    blobPath: row.blobPath,
+    key: row.key,
+  };
+  writeMemoryCache(row.key, args.goalHash, result);
+  return result;
+}
+
 export async function agentFastMode(agentId: string): Promise<{
   enabled: boolean;
   goal: string | null;

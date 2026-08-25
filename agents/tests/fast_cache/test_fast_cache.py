@@ -2129,3 +2129,46 @@ def test_goal_hash_collapses_run_local_message_refs():
     assert normalize.goal_hash(run_a) != normalize.goal_hash("Different goal" + run_a)
     # Goals without refs hash exactly as before (raw sha256 prefix).
     assert normalize.goal_hash(base) == normalize.sha256(base)[:16]
+
+
+def test_oai_demo_root_goal_hash_constant():
+    assert normalize.OAI_DEMO_ROOT_GOAL_HASH == "4ae3193053ac1d8f"
+
+
+def test_position_lookup_keys_include_july_demo_aliases():
+    request = {
+        "pool": "rose-1-ultra",
+        "messages": [
+            {"role": "system", "content": "static system"},
+            {"role": "user", "content": "dynamic user that must not affect july fp"},
+        ],
+        "tools": [{"name": "spawn"}],
+        "temperature": 0,
+    }
+    keys = normalize.position_lookup_keys("mass agent root goal", "dag_param_populator", 1, request)
+    assert keys[0] == normalize.position_key("mass agent root goal", "dag_param_populator", 1, request)
+    assert any(k.startswith("fastmode:v42:") for k in keys)
+    assert any(k.startswith("fastmode:v43:") for k in keys)
+    legacy_fp = normalize.oai_demo_position_request_fingerprint(request)
+    assert any(f":c:{legacy_fp}" in k for k in keys)
+    # July fingerprint ignores trailing user messages; current fingerprint must not.
+    assert normalize.oai_demo_position_request_fingerprint(request) != normalize.position_request_fingerprint(
+        request
+    )
+    # Without the user message, July and current fingerprints still differ by
+    # exclude_anthropic_family (present only in the current material).
+    static_only = {
+        "pool": "rose-1-ultra",
+        "messages": [{"role": "system", "content": "static system"}],
+        "tools": [{"name": "spawn"}],
+        "temperature": 0,
+    }
+    assert normalize.oai_demo_position_request_fingerprint(static_only) != normalize.position_request_fingerprint(
+        static_only
+    )
+
+
+def test_position_prefix_pattern_matches_durable_slot():
+    pattern = normalize.position_prefix_pattern("goal", "plan_loop", 2)
+    gh = normalize.goal_hash("goal")
+    assert pattern == f"fastmode:%:llm:{gh}:plan_loop:p:2:c:%"

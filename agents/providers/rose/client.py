@@ -591,9 +591,39 @@ class RoseClient:
 
         key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
         if ctx.read_enabled:
-            stored = await _fc.cache_get(key)
+            lookup_keys = ctx.llm_lookup_keys(call_site, _fc_request_key_material(kwargs))
+            stored, hit_key = await _fc.cache_get_first(lookup_keys)
+            if stored is None and ctx.base_step is not None:
+                stored, hit_key = await _fc.cache_get_position_fallback(
+                    ctx.goal_hash,
+                    call_site,
+                    ctx.base_step,
+                )
             if stored is not None:
-                logger.info("llm.cache.replay", call_site=call_site, key=key)
+                if hit_key and hit_key != key and ctx.should_write:
+                    # Migrate demo-era / drifted keys onto the current fingerprint
+                    # so subsequent runs hit without the alias path.
+                    try:
+                        await _fc.cache_set(key, "llm", ctx.goal_hash, stored)
+                        logger.info(
+                            "llm.cache.alias_promoted",
+                            call_site=call_site,
+                            from_key=hit_key,
+                            to_key=key,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "llm.cache.alias_promote_error",
+                            call_site=call_site,
+                            error=str(exc)[:200],
+                        )
+                logger.info(
+                    "llm.cache.replay",
+                    call_site=call_site,
+                    key=key,
+                    hit_key=hit_key or key,
+                    alias_hit=bool(hit_key and hit_key != key),
+                )
                 async for chunk in _fc_replay(stored):
                     yield chunk
                 return

@@ -384,6 +384,68 @@ async def cache_get(key: str) -> Optional[Any]:
     return record.get("value") if record.get("hit") else None
 
 
+async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]]:
+    """Return `(value, hit_key)` for the first hitting key in `keys`, else `(None, None)`."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    if not ordered:
+        return None, None
+    if len(ordered) == 1:
+        value = await cache_get(ordered[0])
+        return (value, ordered[0]) if value is not None else (None, None)
+
+    # Prefer get-many so alias lookups stay one RTT; fall back to serial gets.
+    try:
+        records = await _fetch_cache_records_many(ordered)
+        for key in ordered:
+            record = records.get(key) or {}
+            if record.get("hit") and record.get("value") is not None:
+                return record.get("value"), key
+        return None, None
+    except Exception:
+        for key in ordered:
+            value = await cache_get(key)
+            if value is not None:
+                return value, key
+        return None, None
+
+
+async def cache_get_position_fallback(
+    goal_hash: str,
+    call_site: str,
+    step: int,
+) -> tuple[Optional[Any], Optional[str]]:
+    """Oldest matching position entry for goal/site/step when exact keys miss.
+
+    Restores the Jul 2026 OAi demo warm cache after fingerprint drift: prefer the
+    earliest row under that durable trajectory slot (the original warm write).
+    """
+    api_url, api_key = _backend()
+    try:
+        resp = await _shared_client().post(
+            f"{api_url}/api/fast-cache/get-position",
+            headers=backend_api_headers(api_key),
+            json={"goalHash": goal_hash, "callSite": call_site, "step": step},
+            timeout=_GET_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warning("fast_cache.get_position_error", error=str(exc)[:300])
+        return None, None
+    if resp.status_code != 200:
+        if resp.status_code not in {404, 405}:
+            logger.warning("fast_cache.get_position_failed", status=resp.status_code)
+        return None, None
+    data = resp.json()
+    if not data.get("hit"):
+        return None, None
+    return data.get("value"), data.get("key")
+
+
 # Per-process memo of (read_enabled, goal, write_enabled, root_agent_id) keyed by agent_id, so
 # auto-resolution costs at most one backend lookup per agent per worker process.
 _AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str]]] = {}

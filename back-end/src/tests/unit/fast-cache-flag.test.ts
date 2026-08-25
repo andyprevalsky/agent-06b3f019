@@ -312,9 +312,15 @@ test('explicit Fast Mode off is preserved for Andy root agents', () => {
   assert.strictEqual(body.fast_mode_cache_enabled, false);
 });
 
-test('non-default accounts do not default Fast Mode on', () => {
+test('Tamy root agents default Fast Mode on when flag is absent', () => {
   const body = createAgentSchema.parse({ goal: 'x' });
   applyFastModeDefault(body, '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9');
+  assert.strictEqual(body.fast_mode_cache_enabled, true);
+});
+
+test('non-default accounts do not default Fast Mode on', () => {
+  const body = createAgentSchema.parse({ goal: 'x' });
+  applyFastModeDefault(body, '00000000-0000-4000-8000-000000000099');
   assert.strictEqual(body.fast_mode_cache_enabled, undefined);
 });
 
@@ -428,6 +434,25 @@ test('cache entry storage uses the shared Fast Mode database URL', () => {
     'manual purge uses shared cache DB'
   );
   assert.ok(/prisma\.agent\.findUnique/.test(repo), 'agent flag lookup stays on active app DB');
+  assert.ok(
+    /export async function cacheGetPosition/.test(repo),
+    'position fallback must be available for OAi-demo fingerprint drift'
+  );
+});
+
+test('fast-cache routes expose get-position for durable trajectory replay', () => {
+  const routes = readFileSync(join(process.cwd(), 'src', 'domains', 'fast-cache', 'routes.ts'), 'utf8');
+  assert.ok(routes.includes("'/get-position'"), 'get-position route registered');
+  assert.ok(routes.includes('cacheGetPosition'), 'get-position calls store helper');
+});
+
+test('Andy and Tamy are Fast Mode write-through accounts', () => {
+  const policy = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'fastCacheAccountPolicy.ts'),
+    'utf8'
+  );
+  assert.ok(policy.includes('1f85ff25-6e29-4c1b-8739-f917bd101a30'), 'Andy write-through');
+  assert.ok(policy.includes('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'), 'Tamy write-through');
 });
 
 test('cache writes are last-write-wins', () => {
