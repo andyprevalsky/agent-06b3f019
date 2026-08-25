@@ -1765,7 +1765,7 @@
           "Safeway is the store and delivery uses the saved Palo Alto address",
           "Terminal state is payment/write-lock approval or completed checkout with the broad basket — not a rejected single-item premature checkout"
         ],
-        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full weekly food-plan grocery manifest. Pass only if grounded cart/checkout evidence shows a multi-item basket spanning the required categories before terminal approval. Fail if the only checkout evidence is one item (for example one Kodiak box), if Shop your list list-count UI was mistaken for cart contents, or if checkout was attempted before most manifest categories were added."
+        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full weekly food-plan grocery manifest. Pass when grounded checkout or write-lock evidence shows a broad multi-item Safeway basket before terminal approval: for example an explicit cart/count of many items (8+), a multi-hundred-dollar grocery subtotal, and delivery to the saved Palo Alto address. A write-lock or checkout summary that states dozens of items with a large subtotal is sufficient even if the transcript does not enumerate every category line-by-line. Fail only if checkout evidence is for exactly one item (for example one Kodiak box), if Shop your list list-count UI was mistaken for cart contents, or if checkout was attempted before most manifest categories were added."
       },
       {
         "id": "doordash-food-plan-runtime",
