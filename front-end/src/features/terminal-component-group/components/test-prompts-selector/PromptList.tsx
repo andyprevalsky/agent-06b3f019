@@ -8,11 +8,11 @@
  * during attachment resolution are blocked.
  *
  * Diagram:
- *   lastFivePassed === true  → Check icon (emerald) + aria "Last 5 runs passed"
+ *   lastFivePassed === true  → CheckCircle2 icon (emerald) + aria "Last 5 runs passed"
  *   lastFivePassed !== true  → no pass badge
  */
 
-import { Check } from 'lucide-react';
+import { CheckCircle2 } from 'lucide-react';
 import type { TestPrompt } from './types';
 
 interface PromptListProps {
@@ -38,8 +38,8 @@ export default function PromptList({ prompts, disabled, onSelect }: PromptListPr
             <span className="font-medium text-sm text-foreground inline-flex items-center gap-1.5">
               {testPrompt.title}
               {showPassCheck && (
-                <Check
-                  className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
+                <CheckCircle2
+                  className="h-4 w-4 shrink-0 text-emerald-600 fill-emerald-600/15 dark:text-emerald-400 dark:fill-emerald-400/20"
                   aria-label="Last 5 runs passed"
                   data-testid="last-five-passed-check"
                 />
