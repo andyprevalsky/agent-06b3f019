@@ -20,10 +20,13 @@
  * animations on mobile while preserving nested chip/SVG/text animations and
  * non-message panel flashes.
  */
-import type { AgentDetail, Message } from '../hooks';
+import type { AgentDetail, Message, StreamingBubble, StreamingTool } from '../hooks';
 import { getClientSource } from '@/lib/clientSource';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
-import type { FilteredStreamingState } from './useMessageFiltering';
+import {
+  buildStreamingMetricsBySubAgentId,
+  type FilteredStreamingState,
+} from './useMessageFiltering';
 import type { MessageAnimationState } from './useMessageList';
 import { ChatModeActions } from './ChatModeActions';
 import { MessageListItems } from './MessageListItems';
@@ -47,6 +50,8 @@ export interface MessageListViewProps {
   exploreStepMap: Map<string, ExploreStep[]>;
   waitForCheckMap: Map<string, WaitForCheck[]>;
   streaming: FilteredStreamingState;
+  streamingBubbles: Map<string, StreamingBubble>;
+  streamingTools: Map<string, StreamingTool>;
   animation: MessageAnimationState;
   animatedTokenCount: number;
   onAddCredits?: () => void;
@@ -122,6 +127,8 @@ export function MessageListView(props: MessageListViewProps) {
     exploreStepMap,
     waitForCheckMap,
     streaming,
+    streamingBubbles,
+    streamingTools,
     animation,
     animatedTokenCount,
     onAddCredits,
@@ -134,7 +141,15 @@ export function MessageListView(props: MessageListViewProps) {
   const showMainBanners = showStatusBanners && subAgentId === undefined;
   const showAttention = shouldShowStreamingAttention(streaming.attention, subAgentId);
   const showWebPreview = showMainBanners && agent !== null && getClientSource() === 'WEB';
-  const thinkingStreamTokenCount = Math.round(streaming.charCount / 4);
+  const streamingMetricsBySubAgentId = buildStreamingMetricsBySubAgentId(
+    streamingBubbles,
+    streamingTools,
+  );
+  const targetStreamingKey = subAgentId ?? '';
+  const targetStreamingMetrics = streamingMetricsBySubAgentId.get(targetStreamingKey) ?? {
+    charCount: 0,
+  };
+  const thinkingStreamTokenCount = Math.round(targetStreamingMetrics.charCount / 4);
 
   return (
     <div ref={containerRef} className={`${containerClassName} mobile-disable-message-entry-spawn`}>
@@ -151,8 +166,7 @@ export function MessageListView(props: MessageListViewProps) {
         waitForCheckMap={waitForCheckMap}
         streamingPlanCharCount={streaming.plan?.char_count}
         streamingPlanStartedAtMs={streaming.plan?.startedAtMs}
-        thinkingStreamTokenCount={thinkingStreamTokenCount}
-        thinkingStreamStartedAtMs={streaming.streamStartedAtMs}
+        streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
       />
       {chatActionsVisible && (
         <ChatModeActions filteredMessages={filteredMessages} selectedAgentId={selectedAgentId} />

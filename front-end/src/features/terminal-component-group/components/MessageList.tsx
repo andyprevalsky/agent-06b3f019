@@ -140,6 +140,8 @@ export function MessageList({
       exploreStepMap={filtered.exploreStepMap}
       waitForCheckMap={filtered.waitForCheckMap}
       streaming={streaming}
+      streamingBubbles={ctx.streamingBubbles}
+      streamingTools={ctx.streamingTools}
       animation={animation}
       animatedTokenCount={animatedTokenCount}
       onAddCredits={onAddCredits}
