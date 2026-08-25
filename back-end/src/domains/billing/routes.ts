@@ -63,7 +63,9 @@ router.post(
         return;
       }
 
-      const result = await service.createSubscriptionCheckoutSession(userId);
+      const returnUrl =
+        typeof req.body?.returnUrl === 'string' ? req.body.returnUrl.trim() : undefined;
+      const result = await service.createSubscriptionCheckoutSession(userId, { returnUrl });
       res.json(result);
     } catch (error) {
       log.error('Error creating subscription checkout session', {
