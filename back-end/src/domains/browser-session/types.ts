@@ -45,9 +45,22 @@ const storageStateSchema = z
   })
   .passthrough();
 
+const httpPublicUrlSchema = z
+  .string()
+  .url()
+  .max(8192)
+  .refine((value) => {
+    try {
+      const protocol = new URL(value).protocol;
+      return protocol === 'http:' || protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }, 'URL must use http or https');
+
 export const recoverChallengeSchema = z.object({
   task_id: z.string().uuid(),
-  current_url: z.string().url().max(8192),
+  current_url: httpPublicUrlSchema,
   storage_state: storageStateSchema,
   /**
    * Parallel cookie-signature lanes for config search. Each lane keeps its own
@@ -68,7 +81,7 @@ export const recoverChallengeSchema = z.object({
   /** Agent-facing recovery reason forwarded into the LLM challenge classifier. */
   recovery_reason: z.string().max(4000).optional(),
   /** Failure-driven blocked third-party URL that triggered this recovery. */
-  blocked_resource_url: z.string().url().max(8192).optional(),
+  blocked_resource_url: httpPublicUrlSchema.optional(),
   /**
    * @deprecated Ignored. Promote uses the single LLM gate only (blocked resource
    * URL is folded into classifier recovery_reason evidence when present).

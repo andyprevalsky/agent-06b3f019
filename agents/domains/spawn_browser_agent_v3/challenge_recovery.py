@@ -877,6 +877,17 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
     """
     text = (goal or "").lower()
+    signed_in_needles = (
+        "sign in",
+        "sign-in",
+        "log in",
+        "login",
+        "saved credentials",
+        "use my account",
+        "use my credentials",
+    )
+    if any(needle in text for needle in signed_in_needles):
+        return False
     needles = (
         "guest checkout",
         "as guest",
@@ -884,9 +895,7 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "do not sign in",
         "don't sign in",
         "without signing in",
-        "without an account",
-        "do not create an account",
-        "don't create an account",
+        "no account needed",
         "do not log in",
         "don't log in",
     )
@@ -1008,8 +1017,14 @@ async def recover_from_challenge(
             "sessions (not the live debug desktop; known challenge strips may commit, "
             "others are diagnostic).",
         )
-        results = await asyncio.gather(*(probe(state) for _label, _keys, state in wave))
-        clean_by_label = {label: bool(clean) for (label, _keys, _state), clean in zip(wave, results)}
+        results = await asyncio.gather(
+            *(probe(state) for _label, _keys, state in wave),
+            return_exceptions=True,
+        )
+        clean_by_label = {
+            label: False if isinstance(result, BaseException) else bool(result)
+            for (label, _keys, _state), result in zip(wave, results)
+        }
 
     if _state_digest(source_state) != original_digest:
         raise RuntimeError("Challenge recovery mutated its source browser state")

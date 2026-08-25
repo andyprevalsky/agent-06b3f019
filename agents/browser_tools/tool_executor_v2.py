@@ -23,6 +23,7 @@ VERIFIED EVENT NAMES (from browser_use/browser/events.py):
 """
 
 import asyncio
+import contextlib
 import logging
 from typing import Any, Dict, Optional
 
@@ -295,56 +296,74 @@ async def _execute_drag(
         cdp_session = await session.get_or_create_cdp_session()
         session_id = cdp_session.session_id
         send = cdp_session.cdp_client.send.Input.dispatchMouseEvent
-        await send(params={"type": "mouseMoved", "x": start_x, "y": start_y}, session_id=session_id)
-        await asyncio.sleep(0.05)
-        await send(
-            params={
-                "type": "mousePressed",
-                "x": start_x,
-                "y": start_y,
-                "button": "left",
-                "buttons": 1,
-                "clickCount": 1,
-            },
-            session_id=session_id,
-        )
-        for i in range(1, steps + 1):
-            t = i / steps
+        pressed = False
+        try:
+            await send(params={"type": "mouseMoved", "x": start_x, "y": start_y}, session_id=session_id)
+            await asyncio.sleep(0.05)
             await send(
                 params={
-                    "type": "mouseMoved",
-                    "x": start_x + (end_x - start_x) * t,
-                    "y": start_y + (end_y - start_y) * t,
+                    "type": "mousePressed",
+                    "x": start_x,
+                    "y": start_y,
                     "button": "left",
                     "buttons": 1,
+                    "clickCount": 1,
                 },
                 session_id=session_id,
             )
-            await asyncio.sleep(0.01)
-        await send(
-            params={
-                "type": "mouseReleased",
-                "x": end_x,
-                "y": end_y,
-                "button": "left",
-                "buttons": 0,
-                "clickCount": 1,
-            },
-            session_id=session_id,
-        )
-        await action_history.record_action(
-            dom_service=dom_service,
-            action="drag",
-            coordinates=(start_x, start_y),
-            params={"end": {"x": end_x, "y": end_y}, "steps": steps},
-            result={"success": True},
-        )
-        return {
-            "success": True,
-            "start": {"x": start_x, "y": start_y},
-            "end": {"x": end_x, "y": end_y},
-            "steps": steps,
-        }
+            pressed = True
+            for i in range(1, steps + 1):
+                t = i / steps
+                await send(
+                    params={
+                        "type": "mouseMoved",
+                        "x": start_x + (end_x - start_x) * t,
+                        "y": start_y + (end_y - start_y) * t,
+                        "button": "left",
+                        "buttons": 1,
+                    },
+                    session_id=session_id,
+                )
+                await asyncio.sleep(0.01)
+            await send(
+                params={
+                    "type": "mouseReleased",
+                    "x": end_x,
+                    "y": end_y,
+                    "button": "left",
+                    "buttons": 0,
+                    "clickCount": 1,
+                },
+                session_id=session_id,
+            )
+            pressed = False
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="drag",
+                coordinates=(start_x, start_y),
+                params={"end": {"x": end_x, "y": end_y}, "steps": steps},
+                result={"success": True},
+            )
+            return {
+                "success": True,
+                "start": {"x": start_x, "y": start_y},
+                "end": {"x": end_x, "y": end_y},
+                "steps": steps,
+            }
+        finally:
+            if pressed:
+                with contextlib.suppress(Exception):
+                    await send(
+                        params={
+                            "type": "mouseReleased",
+                            "x": end_x,
+                            "y": end_y,
+                            "button": "left",
+                            "buttons": 0,
+                            "clickCount": 1,
+                        },
+                        session_id=session_id,
+                    )
     except Exception as e:
         return {"success": False, "error": str(e)}
 

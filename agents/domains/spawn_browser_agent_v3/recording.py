@@ -3606,6 +3606,10 @@ class BrowserNetworkRecorder:
             duration_ms = _duration_ms(entry)
             if duration_ms is not None:
                 row["duration_ms"] = duration_ms
+            if entry.get("request_ts_ms") is not None:
+                row["request_ts_ms"] = entry.get("request_ts_ms")
+            if entry.get("response_ts_ms") is not None:
+                row["response_ts_ms"] = entry.get("response_ts_ms")
             if entry.get("encoded_data_length") is not None:
                 row["size_bytes"] = entry.get("encoded_data_length")
             if entry.get("redirects"):

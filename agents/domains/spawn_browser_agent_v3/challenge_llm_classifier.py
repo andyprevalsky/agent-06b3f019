@@ -459,6 +459,7 @@ async def classify_challenge_with_llm(
             "usage": empty_classifier_usage(),
         }
 
+    usage_out = empty_classifier_usage()
     try:
         result = await call_llm(
             messages=build_challenge_classifier_messages(context),
@@ -481,7 +482,6 @@ async def classify_challenge_with_llm(
         )
         content = (result.get("content") or "").strip()
         usage = result.get("usage") or {}
-        parsed = ChallengePageClassification.model_validate_json(content)
         usage_out = {
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
@@ -492,6 +492,7 @@ async def classify_challenge_with_llm(
             "from_fast_cache": bool(usage.get("from_fast_cache")),
             "call_site": CHALLENGE_LLM_CALL_SITE,
         }
+        parsed = ChallengePageClassification.model_validate_json(content)
         logger.info(
             "Challenge LLM classifier result",
             challenged=parsed.challenged,
@@ -518,7 +519,7 @@ async def classify_challenge_with_llm(
         return {
             "challenged": True,
             "reason": f"classifier_error: {exc}",
-            "usage": empty_classifier_usage(),
+            "usage": usage_out,
         }
 
 

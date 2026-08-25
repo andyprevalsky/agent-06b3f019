@@ -6680,9 +6680,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 raise
             current_url = browser_state.get("url", "")
             await record_passkey_usage_once()
-            auth_runtime_state.observe_page_text(
-                f"{browser_state.get('title') or ''}\n{browser_state.get('dom_tree') or ''}"
-            )
+            auth_runtime_state.observe_page_text(browser_state.get("title") or "")
 
             # Clicks, form submissions, and server redirects can cross an auth
             # realm without a goto tool call. Prepare that realm before the

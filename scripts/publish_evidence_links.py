@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
 ARTIFACTS_ROOT = Path("/opt/cursor/artifacts/rca_evidence")
+_AGENT_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_agent_id(raw: str) -> str:
+    agent_id = raw.strip()
+    if not _AGENT_ID_RE.fullmatch(agent_id):
+        raise SystemExit(f"invalid agent_id (expected UUID): {raw!r}")
+    return agent_id.lower()
 
 
 def _opener() -> urllib.request.OpenerDirector:
@@ -175,7 +187,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    agent_id = args.agent_id.strip()
+    agent_id = _normalize_agent_id(args.agent_id)
     run_id = ""
     if args.run_json and not args.skip_hub_upload:
         run_id = upload_run_json(args.run_json.resolve())

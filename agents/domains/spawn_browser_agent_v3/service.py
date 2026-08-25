@@ -67,7 +67,22 @@ def select_auth_assistance_current_url(current_url: str, visited_urls: List[str]
 
 # Guest/anonymous CTAs that make step 7 observable. Once seen in-page, the
 # auth-assistance hard gate requires a guest attempt before step 8.
-GUEST_COMPLETION_OPTION_RE = re.compile(
+GUEST_PAGE_COMPLETION_OPTION_RE = re.compile(
+    r"(?:"
+    r"check\s*out as guest|"
+    r"continue as guest|"
+    r"order as guest|"
+    r"guest check\s*out|"
+    r"book as guest|"
+    r"continue without (?:signing|logging|an account|creating)|"
+    r"book without (?:signing|logging|an account)|"
+    r"no account (?:needed|required)|"
+    r"skip (?:sign|log)\s*in"
+    r")",
+    re.IGNORECASE,
+)
+
+GUEST_CLICK_COMPLETION_OPTION_RE = re.compile(
     r"(?:"
     r"check\s*out as guest|"
     r"continue as guest|"
@@ -77,7 +92,6 @@ GUEST_COMPLETION_OPTION_RE = re.compile(
     r"continue without (?:signing|logging|an account|creating)|"
     r"book without (?:signing|logging|an account)|"
     r"reserve without|"
-    # Booking.com renders "I'll\xa0reserve" with a non-breaking space.
     r"i['’]?ll\s+reserve|"
     r"i\s+will\s+reserve|"
     r"pay at the property|"
@@ -89,10 +103,17 @@ GUEST_COMPLETION_OPTION_RE = re.compile(
 
 
 def text_indicates_guest_completion_option(text: Optional[str]) -> bool:
-    """True when page/element copy offers a guest/anonymous completion path."""
+    """True when page copy offers a guest/anonymous completion path."""
     if not text:
         return False
-    return bool(GUEST_COMPLETION_OPTION_RE.search(text))
+    return bool(GUEST_PAGE_COMPLETION_OPTION_RE.search(text))
+
+
+def clicked_text_indicates_guest_completion_option(text: Optional[str]) -> bool:
+    """True when clicked control copy offers guest/anonymous completion."""
+    if not text:
+        return False
+    return bool(GUEST_CLICK_COMPLETION_OPTION_RE.search(text))
 
 
 @dataclass
@@ -181,7 +202,7 @@ class AuthRuntimeState:
 
     def observe_clicked_element_text(self, text: Optional[str]) -> None:
         """Record a guest/anonymous CTA click as exhausting step 7."""
-        if text_indicates_guest_completion_option(text):
+        if clicked_text_indicates_guest_completion_option(text):
             self.guest_option_seen = True
             self.guest_attempted = True
 
