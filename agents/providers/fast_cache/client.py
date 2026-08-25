@@ -418,19 +418,24 @@ async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]
 async def cache_get_position_fallback(
     goal_hash: str,
     call_site: str,
-    step: int,
+    step: Optional[int] = None,
 ) -> tuple[Optional[Any], Optional[str]]:
-    """Oldest matching position entry for goal/site/step when exact keys miss.
+    """Oldest matching entry for goal/site[/step] when exact keys miss.
 
     Restores the Jul 2026 OAi demo warm cache after fingerprint drift: prefer the
     earliest row under that durable trajectory slot (the original warm write).
+    When `step` is None, matches content-addressed keys (`:c:`) for the site
+    (e.g. response_schema).
     """
     api_url, api_key = _backend()
+    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site}
+    if step is not None:
+        body["step"] = step
     try:
         resp = await _shared_client().post(
             f"{api_url}/api/fast-cache/get-position",
             headers=backend_api_headers(api_key),
-            json={"goalHash": goal_hash, "callSite": call_site, "step": step},
+            json=body,
             timeout=_GET_TIMEOUT_S,
         )
     except Exception as exc:

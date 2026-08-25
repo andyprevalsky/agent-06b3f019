@@ -33,7 +33,8 @@ const getManySchema = z.object({ keys: z.array(z.string().min(1)).min(1).max(500
 const getPositionSchema = z.object({
   goalHash: z.string().min(1),
   callSite: z.string().min(1),
-  step: z.number().int().min(0),
+  // Omit (or null) for content-addressed slots like response_schema (`:c:`).
+  step: z.number().int().min(0).nullish(),
 });
 const setSchema = z.object({
   key: z.string().min(1),

@@ -593,7 +593,7 @@ class RoseClient:
         if ctx.read_enabled:
             lookup_keys = ctx.llm_lookup_keys(call_site, _fc_request_key_material(kwargs))
             stored, hit_key = await _fc.cache_get_first(lookup_keys)
-            if stored is None and ctx.base_step is not None:
+            if stored is None:
                 stored, hit_key = await _fc.cache_get_position_fallback(
                     ctx.goal_hash,
                     call_site,

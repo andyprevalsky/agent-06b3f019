@@ -136,6 +136,33 @@ async function main(): Promise<void> {
     await post('/api/fast-cache/purge', { goalHash: posGoal });
   });
 
+  await test('get-position without step matches content-addressed call sites', async () => {
+    const posGoal = `bbposc${Date.now().toString(16)}`;
+    const olderKey = `fastmode:v42:llm:${posGoal}:response_schema:c:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`;
+    const newerKey = `fastmode:v43:llm:${posGoal}:response_schema:c:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`;
+    await post('/api/fast-cache/set', {
+      key: olderKey,
+      kind: 'llm',
+      goalHash: posGoal,
+      value: { content: 'SCHEMA_OLD' },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    await post('/api/fast-cache/set', {
+      key: newerKey,
+      kind: 'llm',
+      goalHash: posGoal,
+      value: { content: 'SCHEMA_NEW' },
+    });
+    const pos = await post('/api/fast-cache/get-position', {
+      goalHash: posGoal,
+      callSite: 'response_schema',
+    });
+    assert(pos.status === 200, `get-position status ${pos.status}`);
+    assert(pos.json.hit === true, 'expected content-slot hit');
+    assert((pos.json.value as JsonObject).content === 'SCHEMA_OLD', 'must prefer oldest schema write');
+    await post('/api/fast-cache/purge', { goalHash: posGoal });
+  });
+
   await test('#26 secrets stripped at the route', async () => {
     const skey = `${key}:secret`;
     await post('/api/fast-cache/set', {

@@ -204,7 +204,7 @@ async def cached_complete(
         try:
             lookup_keys = ctx.llm_lookup_keys(call_site, request_key_material(complete_kwargs))
             stored, hit_key = await cache_client.cache_get_first(lookup_keys)
-            if stored is None and ctx.base_step is not None:
+            if stored is None:
                 stored, hit_key = await cache_client.cache_get_position_fallback(
                     ctx.goal_hash,
                     call_site,

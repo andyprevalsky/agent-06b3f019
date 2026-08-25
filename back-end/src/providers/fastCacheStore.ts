@@ -349,22 +349,29 @@ export async function cachePurge(goalHash: string): Promise<number> {
 }
 
 /**
- * Oldest LLM position entry for (goalHash, callSite, step) when exact keys miss.
+ * Oldest LLM entry for (goalHash, callSite[, step]) when exact keys miss.
  * Used to replay the Jul 2026 OAi mass-agent warm cache after fingerprint drift.
+ * When `step` is omitted, matches content-addressed keys (`:c:`) for that site
+ * (e.g. response_schema).
  */
 export async function cacheGetPosition(args: {
   goalHash: string;
   callSite: string;
-  step: number;
+  step?: number | null;
 }): Promise<CacheGetResult & { key: string | null }> {
   const site = args.callSite.trim();
-  const step = Math.trunc(args.step);
-  if (!args.goalHash || !site || !Number.isFinite(step) || step < 0) {
+  const step =
+    args.step === null || args.step === undefined ? null : Math.trunc(args.step);
+  if (!args.goalHash || !site || (step !== null && (!Number.isFinite(step) || step < 0))) {
     return { hit: false, value: null, blobPath: null, key: null };
   }
   // Match both historical CACHE_KEY_VERSION values (v42/v43) under the durable
   // trajectory slot: fastmode:vN:llm:{goalHash}:{site}:p:{step}:c:{fingerprint}
-  const pattern = `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`;
+  // or content-addressed: fastmode:vN:llm:{goalHash}:{site}:c:{hash}
+  const pattern =
+    step === null
+      ? `fastmode:%:llm:${args.goalHash}:${site}:c:%`
+      : `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`;
   const rows = await getFastCachePrisma().$queryRawUnsafe<
     Array<{ key: string; value: unknown; blobPath: string | null }>
   >(
