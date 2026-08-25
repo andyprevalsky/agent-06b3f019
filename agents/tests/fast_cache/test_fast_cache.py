@@ -2196,6 +2196,15 @@ def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():
     py_goal = build_for_each_goal(base, item)
     js_like = f"{base}\n\nUse this row context for the task below.\nRow item:\n{json.dumps(item, separators=(',', ':'))}"
     assert normalize.goal_hash(py_goal) != normalize.goal_hash(js_like)
-    # Spaced separators (Python default) must be what spawn_agent uses.
-    spaced = f"{base}\n\nUse this row context for the task below.\nRow item:\n{json.dumps(item, ensure_ascii=True)}"
+    # Spaced separators + sort_keys must match spawn_agent (JSONB-stable).
+    spaced = (
+        f"{base}\n\nUse this row context for the task below.\nRow item:\n"
+        f"{json.dumps(item, ensure_ascii=True, sort_keys=True)}"
+    )
     assert normalize.goal_hash(py_goal) == normalize.goal_hash(spaced)
+    # Insertion-order dumps must NOT be used — they miss the Jul OAi namespaces.
+    unsorted = (
+        f"{base}\n\nUse this row context for the task below.\nRow item:\n"
+        f"{json.dumps(item, ensure_ascii=True)}"
+    )
+    assert normalize.goal_hash(py_goal) != normalize.goal_hash(unsorted)

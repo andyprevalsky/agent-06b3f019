@@ -269,8 +269,16 @@ def coerce_for_each_items(tool_call: Dict[str, Any]) -> List[Any]:
 
 
 def build_for_each_goal(base_goal: str, item: Any) -> str:
-    """Build a per-item sub-agent goal from shared goal + row context."""
-    item_text = json.dumps(item, ensure_ascii=True) if isinstance(item, dict) else str(item)
+    """Build a per-item sub-agent goal from shared goal + row context.
+
+    ``sort_keys=True`` is required for Fast Mode stability: FastModeCacheEntry
+    values round-trip through Postgres JSONB (which reorders object keys), so
+    insertion-order dumps diverge from the Jul 2026 OAi-demo namespaces and from
+    any later replay that re-materializes items from cached JSON.
+    """
+    item_text = (
+        json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
+    )
     return f"{base_goal}\n\nUse this row context for the task below.\nRow item:\n{item_text}"
 
 

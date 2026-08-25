@@ -31,7 +31,11 @@ type CreatorItem = {
   platforms?: unknown;
 };
 
-/** Match Python `json.dumps(obj, ensure_ascii=True)` spacing/separators for ASCII payloads. */
+/**
+ * Match Python `json.dumps(obj, ensure_ascii=True, sort_keys=True)` spacing
+ * (`, ` / `: `) — required because Fast Mode JSONB round-trips reorder keys
+ * and `build_for_each_goal` now dumps with sort_keys=True.
+ */
 function pyJsonDumps(value: unknown): string {
   if (value === null) return 'null';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
@@ -41,6 +45,7 @@ function pyJsonDumps(value: unknown): string {
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([k, v]) => `${JSON.stringify(k)}: ${pyJsonDumps(v)}`);
     return `{${entries.join(', ')}}`;
   }
@@ -49,7 +54,7 @@ function pyJsonDumps(value: unknown): string {
 
 function buildForEachGoal(baseGoal: string, item: unknown): string {
   // Must match agents/domains/spawn_agent/service.py:build_for_each_goal
-  // (Python json.dumps separators), not JS JSON.stringify.
+  // (Python json.dumps ensure_ascii=True, sort_keys=True), not JS JSON.stringify.
   return `${baseGoal}\n\nUse this row context for the task below.\nRow item:\n${pyJsonDumps(item)}`;
 }
 
