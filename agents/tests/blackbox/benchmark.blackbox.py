@@ -2795,6 +2795,45 @@ async def test_required_declared_evaluator_controls_pass_fail():
     ]
 
 
+def test_declared_evaluator_evidence_includes_payment_approval_metadata():
+    """Single-turn judges must see payment-request metadata, not a stripped title-only view."""
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    evidence = _declared_evaluator_evidence(
+        {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": "",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolStatus": "FINISHED",
+                        "action_type": "request_payment_card",
+                        "title": "Payment card requested ($8.75)",
+                        "requestUserApproval": {
+                            "requestPaymentCard": {
+                                "merchant": "Blue Bottle Coffee",
+                                "pickupLocation": "Blue Bottle Coffee Ferry Building",
+                                "pickupTime": "Today, 2:30 PM",
+                            }
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    payment_rows = [
+        item
+        for item in evidence
+        if item.get("metadata", {}).get("action_type") == "request_payment_card"
+    ]
+    assert len(payment_rows) == 1
+    approval = payment_rows[0]["metadata"]["requestUserApproval"]["requestPaymentCard"]
+    assert approval["pickupLocation"] == "Blue Bottle Coffee Ferry Building"
+    assert approval["pickupTime"] == "Today, 2:30 PM"
+
+
 def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
     """Semantic judges receive the rendered final answer as assistant evidence."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -3893,7 +3932,7 @@ def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
     assert "completion sms" in task.environment["context_notes"].lower()
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
-        "agentic_llm_judge",
+        "single_turn_llm_judge",
     ]
     static_types = {check["type"] for check in task.evaluators[0]["checks"]}
     assert static_types == {
@@ -3945,11 +3984,10 @@ def _blue_bottle_k5_eval_data(fixture: dict) -> dict:
     }
 
 
-async def _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(agent_id: str):
-    """Replay k=5 payment-boundary runs with real judges: static passes, single-turn fails, agentic passes."""
+async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
+    """Replay k=5 payment-boundary runs with real judges: static and single-turn both pass."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
-        _call_declared_agentic_llm_judge,
         _call_declared_llm_judge,
         _run_declared_static_check,
     )
@@ -3964,33 +4002,26 @@ async def _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(agent_i
 
     single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
-    assert single_score < 1.0, (
-        f"Expected single-turn judge to fail for {agent_id}; got score={single_score}: "
+    assert single_score >= 1.0, (
+        f"Expected single-turn judge to pass for {agent_id}; got score={single_score}: "
         f"{single_turn.get('reasoning')}"
     )
 
-    agentic = await _call_declared_agentic_llm_judge(task, semantics, data)
-    agentic_score = float(agentic.get("score") or 0)
-    assert agentic_score >= 1.0, (
-        f"Expected agentic Codex judge to pass for {agent_id}; got score={agentic_score}: "
-        f"{agentic.get('reasoning')}"
-    )
 
-
-async def test_blue_bottle_k5_trial_b217afca_passes_agentic_semantics():
-    await _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(
+async def test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics():
+    await _assert_blue_bottle_k5_replay_single_turn_passes(
         "b217afca-6595-4eb5-bfd1-9688c2c9826a",
     )
 
 
-async def test_blue_bottle_k5_trial_52d717ea_passes_agentic_semantics():
-    await _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(
+async def test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics():
+    await _assert_blue_bottle_k5_replay_single_turn_passes(
         "52d717ea-c5be-4bfe-b146-5efd535628ad",
     )
 
 
-async def test_blue_bottle_k5_trial_7d282652_passes_agentic_semantics():
-    await _assert_blue_bottle_k5_replay_agentic_passes_single_turn_fails(
+async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
+    await _assert_blue_bottle_k5_replay_single_turn_passes(
         "7d282652-2c5b-4dd3-b8c8-461929a37bf8",
     )
 
@@ -15548,6 +15579,10 @@ async def run_all_tests():
         test_required_declared_evaluator_controls_pass_fail,
     )
     r.record(
+        "declared_evaluator_evidence_includes_payment_approval_metadata",
+        test_declared_evaluator_evidence_includes_payment_approval_metadata,
+    )
+    r.record(
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
@@ -15640,16 +15675,16 @@ async def run_all_tests():
         test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
     )
     await r.record_async(
-        "blue_bottle_k5_trial_b217afca_passes_agentic_semantics",
-        test_blue_bottle_k5_trial_b217afca_passes_agentic_semantics,
+        "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+        test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics,
     )
     await r.record_async(
-        "blue_bottle_k5_trial_52d717ea_passes_agentic_semantics",
-        test_blue_bottle_k5_trial_52d717ea_passes_agentic_semantics,
+        "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+        test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics,
     )
     await r.record_async(
-        "blue_bottle_k5_trial_7d282652_passes_agentic_semantics",
-        test_blue_bottle_k5_trial_7d282652_passes_agentic_semantics,
+        "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+        test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",

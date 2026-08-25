@@ -8018,6 +8018,22 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
+_DECLARED_JUDGE_METADATA_KEYS = (
+    "action_type",
+    "toolName",
+    "toolStatus",
+    "url",
+    "title",
+    "browser_session_metadata",
+    "requestUserApproval",
+    "completionSummary",
+    "toolCallId",
+    "subAgentId",
+    "task_id",
+    "browser_url",
+)
+
+
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge."""
     evidence: list[dict] = []
@@ -8027,21 +8043,12 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         role = str(message.get("role") or "").upper()
         if role in {"USER", "SYSTEM"}:
             continue
-        text_value = message.get("text", message.get("content", ""))
+        text_value = message.get("text", message.get("message", message.get("content", "")))
         if not isinstance(text_value, str):
             text_value = json.dumps(text_value, default=str)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         evidence_metadata = {
-            key: metadata[key]
-            for key in (
-                "action_type",
-                "toolName",
-                "toolStatus",
-                "url",
-                "title",
-                "browser_session_metadata",
-            )
-            if key in metadata
+            key: metadata[key] for key in _DECLARED_JUDGE_METADATA_KEYS if key in metadata
         }
         evidence.append(
             {
@@ -8094,22 +8101,6 @@ _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
     ]
 }
 
-_AGENTIC_JUDGE_METADATA_KEYS = (
-    "action_type",
-    "toolName",
-    "toolStatus",
-    "url",
-    "title",
-    "browser_session_metadata",
-    "requestUserApproval",
-    "completionSummary",
-    "toolCallId",
-    "subAgentId",
-    "task_id",
-    "browser_url",
-)
-
-
 def _declared_agentic_evaluator_evidence(data: dict) -> dict[str, Any]:
     """Build a full trajectory bundle for an agentic Codex judge."""
     messages: list[dict[str, Any]] = []
@@ -8121,7 +8112,7 @@ def _declared_agentic_evaluator_evidence(data: dict) -> dict[str, Any]:
         if not isinstance(text_value, str):
             text_value = json.dumps(text_value, default=str)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        evidence_metadata = {key: metadata[key] for key in _AGENTIC_JUDGE_METADATA_KEYS if key in metadata}
+        evidence_metadata = {key: metadata[key] for key in _DECLARED_JUDGE_METADATA_KEYS if key in metadata}
         messages.append(
             {
                 "role": role,

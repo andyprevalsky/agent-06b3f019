@@ -4362,7 +4362,7 @@
       },
       {
         "id": "blue_bottle_pickup_order_semantics",
-        "method": "agentic_llm_judge",
+        "method": "single_turn_llm_judge",
         "criteria": [
           "The configured item is one 16oz iced vanilla bean shakerato with almond or oat milk for Blue Bottle Ferry Building pickup",
           "Grounded evidence reports the order total and pickup time or pickup window",
