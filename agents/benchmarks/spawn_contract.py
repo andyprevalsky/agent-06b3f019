@@ -51,6 +51,19 @@ def active_benchmark_live_target() -> Optional[str]:
     return None
 
 
+def active_benchmark_task() -> Optional["BenchmarkTask"]:
+    """Load the active benchmark task. Activity-only — do not call from workflows."""
+    name = active_benchmark_task_name()
+    if not name:
+        return None
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    try:
+        return get_task_by_name(name)
+    except KeyError:
+        return None
+
+
 def primary_live_target(environment: Mapping[str, Any] | None) -> Optional[str]:
     if not environment:
         return None

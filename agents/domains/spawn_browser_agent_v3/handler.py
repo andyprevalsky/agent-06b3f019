@@ -3905,6 +3905,11 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     # answer browser actions using the parent's whole-agent output contract.
     # The tool-call namespace remains stable across write-lock resumes, whose
     # payload also restores the exact browser session id.
+    from benchmarks.spawn_contract import apply_active_task_spawn_contract
+
+    contracted = apply_active_task_spawn_contract({"start_url": start_url, "goal": goal})
+    start_url = str(contracted.get("start_url") or start_url or "")
+    goal = str(contracted.get("goal") or goal or "")
     world_model = WorldModelToolExecutionAdapter.from_env(
         agent_id=f"{agent_id}:browser:{tool_call_id}",
         inherit_explicit_session=False,
@@ -9408,9 +9413,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
-        from benchmarks.spawn_contract import apply_active_task_spawn_contract
-
-        tool_call = apply_active_task_spawn_contract(tool_call)
         start_url = tool_call.get("start_url", "")
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")
