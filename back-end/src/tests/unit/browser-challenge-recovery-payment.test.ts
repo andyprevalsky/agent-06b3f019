@@ -80,9 +80,9 @@ function testPaymentCdnFocusedSearchPlanSkipsAvoidAndKernelsFirst(): void {
   );
 }
 
-async function testRequirePaymentCdnHardFilterPicksStripeCapable(): Promise<void> {
-  // Hard filter: only paymentCdnOk configs are eligible. Soft latency ranking
-  // among CF-clears must not promote Kernel when Stripe.js is required.
+async function testRequirePaymentCdnHardFilterIsIgnoredForLlmOnlyGate(): Promise<void> {
+  // Payment-CDN hard filter removed: first fully-stable config in lane order wins,
+  // even when requirePaymentCdn is set and paymentCdnOk is false.
   const configs = browserRecoveryCandidates({ country: 'US' });
   const promoted: string[] = [];
   const winner = await runParallelBrowserConfigSearch(
@@ -92,7 +92,7 @@ async function testRequirePaymentCdnHardFilterPicksStripeCapable(): Promise<void
       probe: async (config) => ({
         stablePasses: 2,
         attempts: 2,
-        latencyMs: config.key === 'steel_managed' ? 500 : 1,
+        latencyMs: 1,
         paymentCdnOk: config.key === 'steel_managed',
       }),
       promote: async (candidate) => {
@@ -102,8 +102,8 @@ async function testRequirePaymentCdnHardFilterPicksStripeCapable(): Promise<void
     },
     { requirePaymentCdn: true }
   );
-  assert.strictEqual(winner.config.key, 'steel_managed');
-  assert.deepStrictEqual(promoted, ['steel_managed']);
+  assert.strictEqual(winner.config.key, configs[0]?.key);
+  assert.deepStrictEqual(promoted, [winner.config.key]);
 }
 
 async function testCfOnlyAvoidPicksFastestNonAvoided(): Promise<void> {
@@ -128,9 +128,8 @@ async function testCfOnlyAvoidPicksFastestNonAvoided(): Promise<void> {
     },
     { avoidConfigKey: 'kernel_isp' }
   );
-  // Fastest non-avoided CF-stable (not steel soft-bias).
+  // Sequential lane: first non-avoided full clear (avoided tried last).
   assert.notStrictEqual(winner.config.key, 'kernel_isp');
-  assert.ok(winner.probe.latencyMs <= 100);
   assert.deepStrictEqual(promoted, [winner.config.key]);
 }
 
@@ -169,15 +168,14 @@ async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
   );
   assert.notStrictEqual(winner.config.key, 'steel_managed');
   assert.deepStrictEqual(promoted, [winner.config.key]);
-  assert.strictEqual(winner.config.key, 'kernel_isp');
+  // Sequential lane order: first non-avoided full clear wins (not lowest latency).
+  assert.strictEqual(winner.config.key, 'kernel_residential_city');
 }
 
 async function testHardPaymentCdnFilterKeepsOnlyWorkingConfig(): Promise<void> {
-  // Eventim flake (agent f1ba73c2, 2026-08-16): recovery must hard-filter to
-  // configs that clear Stripe.js when that is the failure mode — not soft-rank
-  // paymentCdnOk vs avoidConfigKey. Exact probe matrix from backend.log @ 22:58:59Z.
-  // With requirePaymentCdn=true, steel_managed is the only survivor; avoid is
-  // irrelevant because no alternative works.
+  // After CDN hard-filter removal, only fully-stable LLM clears are eligible.
+  // Simulate Eventim: every Kernel exit stays challenged; only steel_managed clears.
+  // avoidConfigKey=steel_managed still allows promote when it is the sole survivor.
   const configs = browserRecoveryCandidates({
     country: 'US',
     state: 'TX',
@@ -195,39 +193,13 @@ async function testHardPaymentCdnFilterKeepsOnlyWorkingConfig(): Promise<void> {
             attempts: 2,
             latencyMs: 12380,
             paymentCdnOk: true,
-            paymentCdnHosts: {
-              'js.stripe.com': true,
-              'api.stripe.com': false,
-              'm.stripe.com': true,
-              'stripe.js': true,
-            },
-          };
-        }
-        if (config.key === 'kernel_isp') {
-          return {
-            stablePasses: 2,
-            attempts: 2,
-            latencyMs: 6518,
-            paymentCdnOk: false,
-            paymentCdnHosts: {
-              'js.stripe.com': true,
-              'api.stripe.com': true,
-              'm.stripe.com': true,
-              'stripe.js': false,
-            },
           };
         }
         return {
-          stablePasses: 2,
+          stablePasses: 0,
           attempts: 2,
-          latencyMs: 13122,
+          latencyMs: 6518,
           paymentCdnOk: false,
-          paymentCdnHosts: {
-            'js.stripe.com': true,
-            'api.stripe.com': true,
-            'm.stripe.com': true,
-            'stripe.js': false,
-          },
         };
       },
       promote: async (candidate) => {
@@ -237,11 +209,7 @@ async function testHardPaymentCdnFilterKeepsOnlyWorkingConfig(): Promise<void> {
     },
     { avoidConfigKey: 'steel_managed', requirePaymentCdn: true }
   );
-  assert.strictEqual(
-    winner.config.key,
-    'steel_managed',
-    'hard paymentCdn filter: only working config survives (ignore avoid)'
-  );
+  assert.strictEqual(winner.config.key, 'steel_managed');
   assert.deepStrictEqual(promoted, ['steel_managed']);
 }
 
@@ -270,6 +238,7 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
       originAuthVisible = false;
       return { status: () => 200 };
     },
+    url: () => 'https://order.online/store/blue-bottle',
     waitForTimeout: async () => undefined,
     evaluate: async (
       pageFunction: unknown,
@@ -359,28 +328,32 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
       ],
     },
     {
-      requirePaymentCdn: true,
       blockedResourceUrl: 'https://js.cdn.example/v3',
+      waitForSolver: async () => ({
+        clean: true,
+        reason: null,
+        title: 'Blue Bottle Coffee',
+        usage: null,
+      }),
     }
   );
 
   assert.deepStrictEqual(addedCookies, cookies, 'full auth cookies must be loaded before probing');
   assert.strictEqual(newContextCalls, 0, 'the disposable incognito context is not promoted');
   assert.strictEqual(disposablePageVisits, 0);
-  assert.strictEqual(defaultPageVisits, 2, 'the exact promoted context must pass twice');
+  assert.strictEqual(defaultPageVisits, 1, 'the exact promoted context must pass once');
   assert.strictEqual(initScripts.length, 1, 'origin state is installed on the promoted context');
-  assert.strictEqual(originStorageRestores, 2, 'origin auth is awaited before both clean probes');
+  assert.strictEqual(originStorageRestores, 1, 'origin auth is awaited before the clean probe');
   assert.strictEqual(defaultContextCloseCalls, 0, 'the promoted context must remain alive');
   assert.strictEqual(browserCloseCalls, 1, 'only the validation CDP connection is closed');
   assert.deepStrictEqual(result, {
-    stablePasses: 2,
-    attempts: 2,
+    stablePasses: 1,
+    attempts: 1,
     latencyMs: result.latencyMs,
     paymentCdnOk: true,
-    paymentCdnHosts: {
-      'js.cdn.example': true,
-      'script.load': true,
-    },
+    paymentCdnHosts: {},
+    classifierLlmUsage: [],
+    settledUrl: 'https://order.online/store/blue-bottle',
   });
 }
 
@@ -397,7 +370,7 @@ function testPaymentCdnProbeUsesNoCorsForHostFetches(): void {
 
 async function main(): Promise<void> {
   testPaymentCdnFocusedSearchPlanSkipsAvoidAndKernelsFirst();
-  await testRequirePaymentCdnHardFilterPicksStripeCapable();
+  await testRequirePaymentCdnHardFilterIsIgnoredForLlmOnlyGate();
   await testCfOnlyAvoidPicksFastestNonAvoided();
   await testAvoidConfigKeyBeatsPartialPaymentHostClear();
   await testHardPaymentCdnFilterKeepsOnlyWorkingConfig();

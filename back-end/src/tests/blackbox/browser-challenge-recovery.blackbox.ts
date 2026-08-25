@@ -212,7 +212,9 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
       released.push(sessionId);
     },
     probe: async (candidateSession) => ({
-      stablePasses: 2,
+      // Lane search promotes the first fully-stable config. Residential city is
+      // probed before ISP when geolocation has a city, so only ISP may pass.
+      stablePasses: candidateSession.proxySource === 'isp_city' ? 2 : 1,
       attempts: 2,
       latencyMs: candidateSession.proxySource === 'isp_city' ? 1 : 100,
       paymentCdnOk: false,
@@ -234,14 +236,17 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
 
     assert(result.provider === 'kernel', `unexpected winner: ${result.provider}`);
     assert(result.proxy_tier === 'isp_city', `unexpected tier: ${result.proxy_tier}`);
-    assert(created.length === 6, `expected six hidden provider sessions, saw ${created.length}`);
+    assert(
+      created.length === 4,
+      `expected four probed provider sessions before ISP wins, saw ${created.length}`
+    );
     const afterRows = await prisma.browserSession.count({ where: { contextId: context.id } });
     const afterMessages = await prisma.message.count({ where: { agentId: agent.id } });
     assert(afterRows === beforeRows, 'config search created a child BrowserSession row');
     assert(afterMessages === beforeMessages, 'config search emitted a child browser chip/message');
     assert(
-      released.length === 6,
-      `expected five losers plus original release, saw ${released.length}`
+      released.length === 4,
+      `expected three partial-clear losers plus original release, saw ${released.length}`
     );
 
     const persisted = await prisma.browserContext.findUniqueOrThrow({ where: { id: context.id } });
