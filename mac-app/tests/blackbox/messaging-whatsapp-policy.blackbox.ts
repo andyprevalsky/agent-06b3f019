@@ -19,6 +19,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => process.env.MAC_APP_TEST_USER_DATA ?? '/tmp/mac-app-test'),
+  },
+}));
+
 import {
   WHATSAPP_STATUS_LOGGED_OUT,
   WHATSAPP_STATUS_RESTART_REQUIRED,
