@@ -6673,7 +6673,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     continue
                 raise
             await record_passkey_usage_once()
-            auth_runtime_state.observe_page_text(browser_state.get("title") or "")
+            observe_page_state = await dom_service.get_browser_state(include_screenshot=False)
+            auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
 
             # Clicks, form submissions, and server redirects can cross an auth
             # realm without a goto tool call. Prepare that realm before the
@@ -7379,9 +7380,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     _append_browser_turn_messages(
                         browser_turn_messages,
-                        task=task_prompt,
-                        browser_state=browser_state,
-                        include_screenshot=False,
                         unified_action=unified_action,
                         result=blocked_result,
                         tool_call_id=tool_call_id_action,
