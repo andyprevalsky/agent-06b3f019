@@ -12,6 +12,7 @@
 
 import assert from 'node:assert';
 import {
+  floatReplenishPolicyFromEnvironment,
   planFloatReplenish,
   runCoinbaseFloatReplenish,
   settlementWindowKey,
@@ -123,6 +124,25 @@ async function testPlanning(): Promise<void> {
       settlementWindowKey(new Date('2026-08-05T23:59:59Z')),
       settlementWindowKey(new Date('2026-08-05T00:00:00Z'))
     );
+  });
+
+  await check('env policy hard-kill ignores COINBASE_FLOAT_REPLENISH_ENABLED=1', () => {
+    const previous = process.env.COINBASE_FLOAT_REPLENISH_ENABLED;
+    process.env.COINBASE_FLOAT_REPLENISH_ENABLED = '1';
+    try {
+      const policy = floatReplenishPolicyFromEnvironment();
+      assert.strictEqual(
+        policy.enabled,
+        false,
+        'Brex→Coinbase rail must stay hard-disabled even when the env flag is armed'
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COINBASE_FLOAT_REPLENISH_ENABLED;
+      } else {
+        process.env.COINBASE_FLOAT_REPLENISH_ENABLED = previous;
+      }
+    }
   });
 }
 

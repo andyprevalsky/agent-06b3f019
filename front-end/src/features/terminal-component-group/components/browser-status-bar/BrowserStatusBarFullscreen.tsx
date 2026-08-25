@@ -30,6 +30,7 @@ import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
+import { resolveBrowserBorderGlowTone } from '../browserBorderGlow/resolveTone';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { resolveBrowserControlState, type BrowserControlState } from '../browserControlState';
 import type { Message } from '../../hooks';
@@ -169,6 +170,7 @@ function BrowserPaneBody({
   isMobile,
   onResume,
 }: PaneProps) {
+  const glowTone = resolveBrowserBorderGlowTone(messages, taskId);
   return (
     <div
       className={cn(
@@ -188,7 +190,9 @@ function BrowserPaneBody({
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
           title="Browser"
         />
-        {controlState === 'active' && !isUserControlling && <BrowserBorderGlow />}
+        {controlState === 'active' && !isUserControlling && (
+          <BrowserBorderGlow tone={glowTone} />
+        )}
         {controlState === 'active' && !isUserControlling && (
           <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
         )}

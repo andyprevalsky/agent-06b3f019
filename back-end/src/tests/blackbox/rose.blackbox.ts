@@ -270,8 +270,10 @@ async function testPool_forModelFuzzy() {
   assertEqual(poolForModel('rose-labs/rose-1-lite'), 'rose-1-lite', 'lite');
   assertEqual(poolForModel('rose-labs/rose-1-ultra'), 'rose-1-ultra', 'ultra');
   assertEqual(poolForModel('rose-labs/rose-1-browser-use'), 'rose-1-browser-use', 'browser-use');
+  assertEqual(poolForModel('rose-labs/rose-1-mini'), 'rose-1-mini', 'mini');
   assertEqual(poolForModel('rose'), 'rose-1-lite', 'rose alias');
   assertEqual(poolForModel('rose-ultra'), 'rose-1-ultra', 'rose-ultra alias');
+  assertEqual(poolForModel('rose-mini'), 'rose-1-mini', 'rose-mini alias');
   // Strict resolution: unknown rose-labs/* identifiers fall through to null so
   // the caller rejects them explicitly (e.g. a typo or unreleased rose-labs/rose-2
   // must not silently route to rose-1-lite).
@@ -316,7 +318,8 @@ async function testPool_getPoolRegistryShape() {
     'browserUse waterfall has no anthropic layer'
   );
   assert(lite.waterfall !== ultra.waterfall, 'lite.waterfall !== ultra.waterfall');
-  assertEqual(Object.keys(POOL_REGISTRY).length, 3, 'registry has 3 pools');
+  assertEqual(Object.keys(POOL_REGISTRY).length, 4, 'registry has 4 pools');
+  assert(Boolean(POOL_REGISTRY['rose-1-mini']), 'rose-1-mini registered');
 }
 
 async function testPool_unknownModelThrows() {

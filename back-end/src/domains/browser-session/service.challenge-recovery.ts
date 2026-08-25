@@ -1,5 +1,8 @@
 import { getBrowserCaptchaTelemetry } from '../../providers/browser';
-import { searchAndPromoteBrowserConfig } from '../../providers/browser/challengeRecovery';
+import {
+  probeCookieVariant,
+  searchAndPromoteBrowserConfig,
+} from '../../providers/browser/challengeRecovery';
 import * as repo from './repo';
 import { SessionNotFoundError } from './service.local-storage';
 
@@ -16,14 +19,38 @@ export async function getChallengeSolverTelemetry(taskId: string, userId?: strin
   return getBrowserCaptchaTelemetry(taskId);
 }
 
-export async function recoverBrowserChallenge(input: {
+export async function probeBrowserCookieVariant(input: {
   taskId: string;
   userId?: string;
   currentUrl: string;
   storageState: Record<string, unknown>;
   userAgent?: string;
   blockedResourceUrl?: string;
+  recoveryReason?: string | null;
+}) {
+  await requireOwnedTask(input.taskId, input.userId);
+  return probeCookieVariant({
+    taskId: input.taskId,
+    userId: input.userId,
+    targetUrl: input.currentUrl,
+    storageState: input.storageState,
+    userAgent: input.userAgent,
+    blockedResourceUrl: input.blockedResourceUrl,
+    recoveryReason: input.recoveryReason,
+  });
+}
+
+export async function recoverBrowserChallenge(input: {
+  taskId: string;
+  userId?: string;
+  currentUrl: string;
+  storageState: Record<string, unknown>;
+  storageLanes?: Array<{ key: string; storageState: Record<string, unknown> }>;
+  userAgent?: string;
+  blockedResourceUrl?: string;
+  recoveryReason?: string | null;
   requirePaymentCdn?: boolean;
+  preserveAuth?: boolean;
 }) {
   await requireOwnedTask(input.taskId, input.userId);
   return searchAndPromoteBrowserConfig({
@@ -31,8 +58,11 @@ export async function recoverBrowserChallenge(input: {
     userId: input.userId,
     targetUrl: input.currentUrl,
     storageState: input.storageState,
+    storageLanes: input.storageLanes,
     userAgent: input.userAgent,
     blockedResourceUrl: input.blockedResourceUrl,
+    recoveryReason: input.recoveryReason,
     requirePaymentCdn: input.requirePaymentCdn,
+    preserveAuth: input.preserveAuth,
   });
 }

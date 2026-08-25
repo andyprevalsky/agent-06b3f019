@@ -15,6 +15,7 @@
 
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { createLogger } from '../../providers/logger';
+import { DEFAULT_TASK_PRICE_LIMIT_CENTS } from '../../providers/priceLimitDefaults';
 import { resolvePromptSecrets } from './agentLifecycleService';
 import {
   executeDescendantWorkflowStart,
@@ -124,7 +125,7 @@ async function startBatchWorkflow(
       ...(body.bus_id !== undefined ? { busId: body.bus_id } : {}),
       ...(body.start_phase !== undefined ? { startPhase: body.start_phase } : {}),
       ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
-      priceLimitCents: body.price_limit_cents ?? 100,
+      priceLimitCents: body.price_limit_cents!,
       ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
       ...(body.fast_mode_cache_enabled !== undefined
         ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
@@ -279,6 +280,13 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   for (const body of bodies) {
     disableFastModeForWorldModel(body);
     assertWorldModelModeAccess(body, userId);
+  }
+
+  const defaultPriceLimitCents = DEFAULT_TASK_PRICE_LIMIT_CENTS;
+  for (const body of bodies) {
+    if (body.price_limit_cents === undefined) {
+      body.price_limit_cents = defaultPriceLimitCents;
+    }
   }
 
   // Idempotency: existing rows are returned untouched.

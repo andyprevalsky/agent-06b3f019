@@ -1,5 +1,11 @@
 import type { Page, Response } from 'playwright';
 
+import {
+  classifyPageAfterSettle,
+  type ChallengeClassifierBilling,
+  type ChallengeClassifierLlmUsage,
+} from './challengeLlmClassifier';
+
 const CHALLENGE_TEXT = [
   'access denied',
   'attention required! | cloudflare',
@@ -25,7 +31,36 @@ const HTML_CHALLENGE_MARKERS = [
   'challenges.cloudflare.com/turnstile',
 ];
 const SUBSTANTIVE_BODY_CHARS = 80;
+/** Provider-native CAPTCHA/challenge solvers need wall-clock room; soft-walls
+ * often hydrate a real document title only after the first few polls. */
+export const PROVIDER_SOLVER_WAIT_MS = 60_000;
+// Chromium / anti-bot shells often expose these instead of a real document title
+// while the wall is still up. Matching structure only — never a vendor or host.
+const BARE_HOSTNAME_TITLE = /^(www\.)?([a-z0-9-]+\.)+[a-z]{2,}$/i;
+const LOADING_URL_TITLE = /^loading\s+https?:\/\//i;
+const URL_TITLE = /^https?:\/\//i;
 
+/**
+ * True when `title` looks like a real rendered document, not a navigation shell.
+ *
+ * Soft anti-bot walls (any vendor) commonly keep empty titles, bare hostnames
+ * (`example.com`), or Chromium "Loading https://..." titles while body HTML is
+ * already non-empty from meta/noscript. Treating those as clean made candidate
+ * probes report stablePasses=2 in ~4s/attempt, then live verify correctly failed.
+ */
+export function isUsableDocumentTitle(title: string): boolean {
+  const trimmed = title.trim();
+  if (!trimmed) return false;
+  if (LOADING_URL_TITLE.test(trimmed) || URL_TITLE.test(trimmed)) return false;
+  if (BARE_HOSTNAME_TITLE.test(trimmed)) return false;
+  return true;
+}
+
+/**
+ * @deprecated Prefer the rose-1-mini LLM classifier in challengeLlmClassifier.ts.
+ * Retained for regression tests and historical RCA fixtures — do not use for
+ * probe/live-verify promotion decisions.
+ */
 export function challengeDetectionReason(input: {
   status: number | null;
   title: string;
@@ -63,9 +98,16 @@ export function challengeDetectionReason(input: {
       if (html.includes(marker)) return `html:${marker}`;
     }
   }
+  // Hard gate for probe stability: no usable document title ⇒ still challenged,
+  // even when body text is already long (meta/noscript shells during soft walls).
+  if (!isUsableDocumentTitle(input.title)) return 'unusable_title';
   return null;
 }
 
+/**
+ * @deprecated Prefer classifyPageAfterSettle / classifyChallengeWithLlm.
+ * Thin wrapper over the deprecated heuristic reasoner.
+ */
 export function pageLooksChallenged(input: {
   status: number | null;
   title: string;
@@ -92,24 +134,32 @@ async function challengeSnapshot(page: Page, response: Response | null) {
   };
 }
 
+/**
+ * After DOM settle, ask rose-1-mini (screenshot + cleaned DOM + network meta)
+ * whether the page is still challenged. Heuristic marker polling is deprecated.
+ * Returns LLM usage so recover-challenge can forward cost rows to the agent.
+ */
 export async function waitForProviderSolver(
   page: Page,
-  response: Response | null
-): Promise<{ clean: boolean; reason: string | null; title: string }> {
-  // Both candidate factories explicitly enable their provider-native solver.
-  // Give it the first chance on every attempt, polling the page instead of
-  // assuming a fixed solve duration. A clean page exits immediately.
-  const deadline = Date.now() + 45_000;
-  let currentResponse = response;
-  let lastReason: string | null = 'probe_timeout';
-  let lastTitle = '';
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(2_000);
-    const snapshot = await challengeSnapshot(page, currentResponse);
-    lastTitle = snapshot.title;
-    lastReason = challengeDetectionReason(snapshot);
-    if (lastReason === null) return { clean: true, reason: null, title: lastTitle };
-    currentResponse = null;
-  }
-  return { clean: false, reason: lastReason, title: lastTitle };
+  response: Response | null,
+  billing: ChallengeClassifierBilling = {},
+  options?: { recoveryReason?: string | null }
+): Promise<{
+  clean: boolean;
+  reason: string | null;
+  title: string;
+  usage: ChallengeClassifierLlmUsage | null;
+}> {
+  const result = await classifyPageAfterSettle(page, response, undefined, billing, {
+    recoveryReason: options?.recoveryReason,
+  });
+  return {
+    clean: result.clean,
+    reason: result.clean ? null : result.reason,
+    title: result.title,
+    usage: result.usage,
+  };
 }
+
+// Keep challengeSnapshot exported-adjacent for tests that may monkeypatch via module.
+export const __deprecatedChallengeSnapshotForTests = challengeSnapshot;
