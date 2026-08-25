@@ -160,8 +160,7 @@ export async function captureCleanedDom(page: Page): Promise<string> {
           .replace(/\\s+/g, ' ')
           .trim()
           .slice(0, charCap);
-      })`,
-      CLEANED_DOM_CHAR_CAP
+      })(${CLEANED_DOM_CHAR_CAP})`
     );
     return typeof cleaned === 'string' ? cleaned : '';
   } catch {
@@ -270,13 +269,13 @@ export async function captureNetworkSummary(
             durationMs: Math.round(entry.duration || 0),
             transferSize: Number(entry.transferSize || 0),
           };
-          if (typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
-            row.status = entry.responseStatus;
+          const maybeStatus = entry.responseStatus;
+          if (typeof maybeStatus === 'number' && maybeStatus > 0) {
+            row.status = maybeStatus;
           }
           return row;
         });
-      })`,
-      NETWORK_ENTRY_CAP
+      })(${NETWORK_ENTRY_CAP})`
     );
     if (!Array.isArray(entries) || entries.length === 0) return '(no resource timings)';
     return formatNetworkSummaryLines(

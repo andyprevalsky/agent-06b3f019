@@ -315,15 +315,20 @@ export function ExploreActiveToolCarousel({
   if (!current) return null;
 
   return (
-    <span className={cn('relative flex min-w-0 flex-1 items-center overflow-hidden', className)}>
-      <AnimatePresence initial={false} mode="popLayout">
+    <span
+      className={cn(
+        'relative flex h-[1.125rem] min-w-0 flex-1 items-center overflow-hidden',
+        className,
+      )}
+    >
+      <AnimatePresence initial={false} mode="wait">
         <motion.span
           key={current.kind === 'thinking' ? `${current.key}:${thinkingResetKey}` : current.key}
-          className="flex min-w-0 items-center"
-          initial={reduceMotion ? { opacity: 1 } : { opacity: 0, y: 10 }}
+          className="absolute inset-0 flex min-w-0 items-center overflow-hidden"
+          initial={reduceMotion ? { opacity: 1 } : { opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -10 }}
-          transition={{ duration: 0.34, ease: [0.2, 0.8, 0.2, 1] }}
+          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, y: -8 }}
+          transition={{ duration: 0.24, ease: [0.2, 0.8, 0.2, 1] }}
         >
           <CarouselItemContent
             item={current}
