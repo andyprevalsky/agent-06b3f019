@@ -9212,6 +9212,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
+        from benchmarks.spawn_contract import apply_active_task_spawn_contract
+
+        tool_call = apply_active_task_spawn_contract(tool_call)
         start_url = tool_call.get("start_url", "")
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")

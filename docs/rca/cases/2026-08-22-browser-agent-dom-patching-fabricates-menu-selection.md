@@ -25,8 +25,11 @@ sources:
   - agent 72f978c4-9bec-4e39-9a1c-844787d11e87
   - agent 9d654c0c-6a32-49be-81b7-b3682e3c0f44
   - agent 1d357440-2ee9-458f-b920-bd3a63703e9b
-repro: ROSE_USE_SYSTEM_PG=true scripts/run-bench --local browser-blue-bottle-challenge-recovery
-status: open
+  - agent 4021f047-e0f3-4e26-89a4-1710dce45211
+  - agent e8caf9a1-d9c8-4c52-9c3d-345ca96d951e
+  - fleet run bc91d2ad-0bae-4220-b8b3-06c21a7dce78
+repro: cd agents && python tests/blackbox/benchmark.blackbox.py blue_bottle_spawn_contract_seeds_live_target blue_bottle_k5_timeout_4021f047_fails_payment_contract blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract
+status: fixed
 ---
 
 ## Problem
@@ -121,22 +124,40 @@ not payment submission.
 
 ## Solution
 
-Proposed (not implemented — RCA-only):
+Implemented in `agents/benchmarks/spawn_contract.py` and wired through
+`run_benchmark.py`, `spawn_agent/handler.py`, and
+`spawn_browser_agent_v3/{handler,service_actions}.py`:
 
-1. **Harness:** Reject or flag `evaluate` actions that mutate option labels /
-   cart line text when grounding checkout configuration (anti-reward-hack guard).
-2. **Prompt/coaching:** Instruct browser agent to report unavailable required
-   modifiers explicitly instead of DOM patching.
-3. **Benchmark contract review:** Confirm whether Oat (Default) is still a live
-   Ferry Building option; if not, update task to an available milk or mark as
-   authorized blocker branch.
-4. **Spawn goal injection:** When `success_on_payment_card_request` is set, root
-   spawn sub-goals must not say “complete payment/submit order” — stop at
-   `request_payment_card`.
-5. **live_targets seeding:** Browser session first `goto` should prefer task
-   `environment.live_targets[0]` over marketing-site search detours.
-6. **Guest-checkout auth skip:** Do not run `browser_session_auth` loops when the
-   benchmark goal is guest checkout and no live fixture is declared.
+1. **Spawn goal injection:** When `success_on_payment_card_request` is set,
+   browser spawn goals are rewritten to stop at `request_payment_card` and
+   forbid submit-order / confirmation claims.
+2. **live_targets seeding:** Browser `start_url` is forced to
+   `environment.live_targets[0]` when the planner starts on marketing/search
+   detours.
+3. **Guest-checkout auth skip:** Guest-checkout tasks with no `live_fixtures`
+   set `BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true` for the task lifetime.
+4. **Anti-reward-hack evaluate guard:** Payment-boundary benchmark tasks reject
+   `evaluate` code that mutates option labels / returns `patched`.
+
+Checked-in repro:
+`agents/tests/blackbox/benchmark.blackbox.py` →
+`test_blue_bottle_spawn_contract_*` and
+`test_blue_bottle_k5_timeout_{4021f047,e8caf9a1}_fails_payment_contract`.
+
+### k=5 timeout recurrence (2026-08-23, run `bc91d2ad`)
+
+Parallel k=5 (`20260823_060537`) produced two additional timeouts with zero
+`payment_approval` events:
+
+| Agent | Duration | Steps | Top actions | Failure |
+| --- | --- | --- | --- | --- |
+| 4021f047 | 1210s | 36/100 | system=51, click=24, goto=14, challenge_recovery=5 | Timeout, 0 approvals |
+| e8caf9a1 | 1220s | 45/100 | click=38, evaluate=10, read_network_requests=8, goto=10 | Timeout, 0 approvals |
+
+Trial 4021f047 matches auth/session churn (51 `system` actions). Trial
+e8caf9a1 matches modifier-hunting via `evaluate` + network inspection before
+checkout. The three payment-reaching trials in the same run confirm the task
+contract is reachable when navigation converges.
 
 ## Human feedback
 

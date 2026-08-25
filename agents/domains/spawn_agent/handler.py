@@ -565,11 +565,14 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Delegate to existing SpawnBrowserAgentManagerV3."""
+        from benchmarks.spawn_contract import apply_active_task_spawn_contract
+
+        contracted = apply_active_task_spawn_contract(tool_call)
         browser_tool_call = {
             "tool": "spawn_browser_agent",
-            "start_url": tool_call.get("start_url"),
-            "goal": tool_call.get("goal"),
-            "output_schema": tool_call.get("output_schema"),
+            "start_url": contracted.get("start_url"),
+            "goal": contracted.get("goal"),
+            "output_schema": contracted.get("output_schema"),
         }
         if tool_call.get("attachments"):
             browser_tool_call["attachments"] = tool_call["attachments"]

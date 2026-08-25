@@ -90,6 +90,7 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
+from benchmarks.spawn_contract import should_disable_saved_browser_auth
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
@@ -9435,6 +9436,13 @@ async def run_single_task(
         print(f"     approval={task.approval_handling}")
     print(f"  {'=' * 50}")
 
+    previous_active_task_name = os.environ.get("BENCHMARK_ACTIVE_TASK_NAME")
+    previous_disable_saved_browser_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
+    os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = task.name
+    if should_disable_saved_browser_auth(task):
+        os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
+        print("    🍪 Guest-checkout task: disabled saved browser auth material")
+
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
@@ -10125,6 +10133,14 @@ async def run_single_task(
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
         await _restore_live_fixture_scenarios_async(live_fixture_manifests)
+        if previous_active_task_name is None:
+            os.environ.pop("BENCHMARK_ACTIVE_TASK_NAME", None)
+        else:
+            os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = previous_active_task_name
+        if previous_disable_saved_browser_auth is None:
+            os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
+        else:
+            os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_browser_auth
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:

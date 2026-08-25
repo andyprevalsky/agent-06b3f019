@@ -1257,6 +1257,20 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
+        from benchmarks.spawn_contract import active_benchmark_task, evaluate_dom_patch_blocked
+
+        active_task = active_benchmark_task()
+        if active_task is not None and active_task.success_on_payment_card_request:
+            dom_patch_reason = evaluate_dom_patch_blocked(code)
+            if dom_patch_reason:
+                await context.action_history.record_action(
+                    dom_service=context.dom_service,
+                    action="evaluate",
+                    thinking=context.thinking,
+                    params={"code": code},
+                    result={"success": False, "error": dom_patch_reason},
+                )
+                return {"success": False, "error": dom_patch_reason}
         timeout_s = normalize_evaluate_timeout_seconds(context.params.get("timeout"))
         fingerprint = _evaluate_code_fingerprint(code)
         logger.info(

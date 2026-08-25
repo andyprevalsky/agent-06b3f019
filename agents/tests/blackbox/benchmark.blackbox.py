@@ -4026,6 +4026,162 @@ async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
     )
 
 
+def test_blue_bottle_spawn_contract_seeds_live_target_and_clamps_payment_goal():
+    """k=5 timeouts burned budget on marketing detours and submit-order spawn goals."""
+    import os
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.spawn_contract import (
+        clamp_browser_spawn_tool_call,
+        payment_boundary_spawn_goal,
+        should_disable_saved_browser_auth,
+        with_active_benchmark_task,
+    )
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    assert should_disable_saved_browser_auth(task) is True
+
+    rewritten_goal = (
+        "Place a pickup order immediately from Blue Bottle Coffee at the Ferry Building in San Francisco, "
+        "using guest checkout. Complete payment and submit the order, using available agent payment capabilities. "
+        "Do not stop at the cart. Return the confirmed order confirmation ID."
+    )
+    clamped = clamp_browser_spawn_tool_call(
+        task,
+        {
+            "goal": rewritten_goal,
+            "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
+        },
+    )
+    assert clamped["start_url"] == task.environment["live_targets"][0]
+    assert "complete payment and submit" not in clamped["goal"].lower()
+    assert "request_payment_card" in clamped["goal"].lower()
+    assert "do not submit the order" in clamped["goal"].lower()
+    assert payment_boundary_spawn_goal(task).startswith(task.prompt)
+
+    with with_active_benchmark_task(task.name):
+        assert os.environ["BENCHMARK_ACTIVE_TASK_NAME"] == task.name
+
+
+def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.spawn_contract import evaluate_dom_patch_blocked, with_active_benchmark_task
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    patch_code = (
+        "(() => { const el = document.querySelector('[data-testid=milk]'); "
+        "el.textContent = 'Oat (Default)'; return 'patched'; })()"
+    )
+    with with_active_benchmark_task(task.name):
+        reason = evaluate_dom_patch_blocked(patch_code)
+    assert reason is not None
+    assert "DOM mutation" in reason
+
+    benign = "(() => document.querySelectorAll('button').length)()"
+    assert evaluate_dom_patch_blocked(benign) is None
+
+
+def test_blue_bottle_k5_timeout_4021f047_fails_payment_contract():
+    """k=5 trial 4 timed out with 51 system/auth actions and 0 payment approvals."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    auth_churn_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "browser_session_auth",
+                    "toolStatus": "FINISHED",
+                    "title": "Browser session credential applied",
+                },
+                "message": "Applied saved browser session credential.",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "IN_PROGRESS",
+                    "action_type": "system",
+                    "title": "Auth/session setup",
+                },
+                "message": "",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "goto",
+                    "title": "Navigated → https://bluebottlecoffee.com",
+                },
+                "message": "",
+            },
+        ],
+        "_benchmark": {
+            "approvals_triggered": 0,
+            "attention_request_kind_seen": None,
+            "expected_attention_kind_seen": None,
+        },
+    }
+    passed, reason = evaluate_task(task, auth_churn_terminal, approvals_triggered=0)
+    assert passed is False
+    assert "payment" in (reason or "").lower()
+
+
+def test_blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract():
+    """k=5 trial 5 timed out after evaluate/network-request modifier hunting."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    modifier_hunt_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "evaluate",
+                    "title": "evaluate...",
+                },
+                "message": "Executed JS, result: patched",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "read_network_requests",
+                    "title": "Read network requests",
+                },
+                "message": "",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "title": "Browser automation complete",
+                },
+                "message": "Could not ground oat milk on the live menu.",
+            },
+        ],
+        "_benchmark": {
+            "approvals_triggered": 0,
+            "attention_request_kind_seen": None,
+            "expected_attention_kind_seen": None,
+        },
+    }
+    passed, reason = evaluate_task(task, modifier_hunt_terminal, approvals_triggered=0)
+    assert passed is False
+    assert "payment" in (reason or "").lower()
+
+
 def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
     """DoorDash stages checkout then stops at an unresolved place-order write lock."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -15685,6 +15841,22 @@ async def run_all_tests():
     await r.record_async(
         "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
         test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
+    )
+    r.record(
+        "blue_bottle_spawn_contract_seeds_live_target",
+        test_blue_bottle_spawn_contract_seeds_live_target_and_clamps_payment_goal,
+    )
+    r.record(
+        "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",
+        test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate,
+    )
+    r.record(
+        "blue_bottle_k5_timeout_4021f047_fails_payment_contract",
+        test_blue_bottle_k5_timeout_4021f047_fails_payment_contract,
+    )
+    r.record(
+        "blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract",
+        test_blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
