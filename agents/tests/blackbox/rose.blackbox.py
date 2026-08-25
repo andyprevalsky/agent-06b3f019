@@ -2380,7 +2380,14 @@ def test_build_codex_responses_body_contract():
     assert body["reasoning"]["effort"] == "high"
     assert body["prompt_cache_key"].startswith("rose:")
     assert body["prompt_cache_key"] == same_prompt_different_request["prompt_cache_key"]
-    assert "service_tier" not in body
+    assert body["service_tier"] == "priority"
+    off_body = build_codex_responses_body(
+        pool_spec=pool,
+        messages=[{"role": "user", "content": "hi"}],
+        provider_fast_mode=False,
+        request_id="fast-mode-off",
+    )
+    assert "service_tier" not in off_body
     fast_body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "hi"}],
