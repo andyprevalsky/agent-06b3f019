@@ -36,13 +36,14 @@ def test_depth_default_and_unknown_fall_back_to_default():
 
 
 def test_fast_mode_promotes_quick_and_missing_to_deep():
-    """July OAi-demo explore caches finish around turn ~14; quick (5) aborts them."""
+    """July OAi-demo explore caches finish around turn ~14–36; quick/medium abort them."""
     assert EXPLORE_FAST_MODE_DEPTH == "deep"
     assert resolve_explore_depth(None, fast_mode_cache_enabled=True) == "deep"
     assert resolve_explore_depth("quick", fast_mode_cache_enabled=True) == "deep"
-    assert resolve_explore_depth("medium", fast_mode_cache_enabled=True) == "medium"
+    assert resolve_explore_depth("medium", fast_mode_cache_enabled=True) == "deep"
     assert resolve_explore_depth("deep", fast_mode_cache_enabled=True) == "deep"
     assert resolve_explore_depth("quick", fast_mode_cache_enabled=False) == "quick"
+    assert resolve_explore_depth("medium", fast_mode_cache_enabled=False) == "medium"
     assert resolve_explore_depth(None, fast_mode_cache_enabled=False) == "quick"
 
 

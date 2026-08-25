@@ -44,12 +44,11 @@ def resolve_explore_depth(
 ) -> str:
     """Pick explore thoroughness for a spawn.
 
-    Explicit medium/deep always win. Under Fast Mode, missing or "quick" is
-    promoted to EXPLORE_FAST_MODE_DEPTH so cached July trajectories can finish
-    (avg first attempt_completion ≈ 14 turns; quick caps at 5).
+    Under Fast Mode, always use EXPLORE_FAST_MODE_DEPTH: July OAi-demo explore
+    caches often reach attempt_completion at turn ~26–36, so both the live
+    default (quick=5) and an explicit medium=20 abort mid-replay. Outside Fast
+    Mode, explicit medium/deep win; otherwise the live default applies.
     """
-    if requested_depth in EXPLORE_DEPTH_LIMITS and requested_depth != "quick":
-        return requested_depth
     if fast_mode_cache_enabled:
         return EXPLORE_FAST_MODE_DEPTH
     if requested_depth in EXPLORE_DEPTH_LIMITS:
