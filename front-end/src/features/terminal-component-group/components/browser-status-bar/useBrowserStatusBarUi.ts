@@ -33,7 +33,7 @@ export interface BrowserStatusBarUi {
 }
 
 interface SessionOverride {
-  sourceBrowserUrl: string;
+  taskId: string;
   browserUrl: string;
   resumedFromDisconnected?: boolean;
 }
@@ -46,9 +46,9 @@ interface BrowserControlTransitions {
 
 function currentSession(
   session: SessionOverride | null,
-  browserUrl: string,
+  taskId: string,
 ): SessionOverride | null {
-  return session?.sourceBrowserUrl === browserUrl ? session : null;
+  return session?.taskId === taskId ? session : null;
 }
 
 export function interactiveBrowserUrl(browserUrl: string): string {
@@ -76,11 +76,15 @@ async function requestUserControl(
     if (isDisconnected) {
       const resumed = await resumeBrowserSession(taskId);
       liveBrowserUrl = resumed.debug_url || browserUrl;
-      transitions.setResumedSession({ sourceBrowserUrl: browserUrl, browserUrl: liveBrowserUrl });
+      transitions.setResumedSession({
+        taskId,
+        browserUrl: liveBrowserUrl,
+        resumedFromDisconnected: true,
+      });
     }
     const snapshot = await takeBrowserControl(taskId);
     transitions.setUserControl({
-      sourceBrowserUrl: browserUrl,
+      taskId,
       browserUrl: interactiveBrowserUrl(liveBrowserUrl),
       resumedFromDisconnected: isDisconnected || snapshot.agentPaused,
     });
@@ -114,7 +118,6 @@ async function returnAgentControl(
 
 function useBrowserControlRecovery(
   taskId: string,
-  browserUrl: string,
   activeUserControl: SessionOverride | null,
   setResumedSession: (session: SessionOverride) => void,
   setUserControl: (session: SessionOverride | null) => void,
@@ -126,15 +129,16 @@ function useBrowserControlRecovery(
         let snapshot = await readBrowserControlState(taskId);
         if (snapshot.state === 'requested') snapshot = await takeBrowserControl(taskId);
         if (!cancelled && snapshot.state === 'user') {
-          const liveBrowserUrl = snapshot.debugUrl || browserUrl;
+          const liveBrowserUrl = snapshot.debugUrl;
+          if (liveBrowserUrl === null || liveBrowserUrl === '') return;
           const recoveredControl = {
-            sourceBrowserUrl: browserUrl,
+            taskId,
             browserUrl: interactiveBrowserUrl(liveBrowserUrl),
             resumedFromDisconnected: snapshot.agentPaused,
           };
           if (snapshot.agentPaused) {
             setResumedSession({
-              sourceBrowserUrl: browserUrl,
+              taskId,
               browserUrl: liveBrowserUrl,
               resumedFromDisconnected: true,
             });
@@ -149,7 +153,7 @@ function useBrowserControlRecovery(
     return () => {
       cancelled = true;
     };
-  }, [browserUrl, setResumedSession, setUserControl, taskId]);
+  }, [setResumedSession, setUserControl, taskId]);
 
   useEffect(() => {
     if (activeUserControl === null) return undefined;
@@ -181,15 +185,9 @@ function useBrowserSessionControl(
   const [resumedSession, setResumedSession] = useState<SessionOverride | null>(null);
   const [userControl, setUserControl] = useState<SessionOverride | null>(null);
 
-  const activeResumedSession = currentSession(resumedSession, browserUrl);
-  const activeUserControl = currentSession(userControl, browserUrl);
-  useBrowserControlRecovery(
-    taskId,
-    browserUrl,
-    activeUserControl,
-    setResumedSession,
-    setUserControl,
-  );
+  const activeResumedSession = currentSession(resumedSession, taskId);
+  const activeUserControl = currentSession(userControl, taskId);
+  useBrowserControlRecovery(taskId, activeUserControl, setResumedSession, setUserControl);
   const hasReconnected = activeResumedSession !== null;
   const controlledBrowserUrl =
     activeUserControl?.browserUrl ?? activeResumedSession?.browserUrl ?? browserUrl;
