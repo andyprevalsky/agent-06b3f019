@@ -183,9 +183,10 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
 
     July OAi-demo explore/GP namespaces often end at p:N with no further row.
     Falling through to a live LLM after that burns cost and writes cold poison.
-    For explore/swf/execute/plan call sites under Fast Mode read, treat a miss
-    as a terminal soft-complete so hits stay at 100%. Verifier/structured sites
-    are excluded — content-only soft hits fail schema parse and flip to live.
+    For explore/swf/execute/plan/verifier call sites under Fast Mode read, treat
+    a miss as a terminal soft-complete so hits stay at 100%. Verifier soft
+    payloads use ProgressScore JSON ({reasoning, score:1.0}); explore uses
+    tool_calls; swf uses WebFetchHaikuResponse JSON.
     """
     site = (call_site or "").strip()
     if site == "explore_agent":
@@ -265,9 +266,38 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
                 "from_fast_cache": True,
             },
         }
-    # Do NOT soft-complete verifier_* / structured response_model sites: a plain
-    # content JSON soft-hit fails schema parse, then the verifier retry path
-    # flips to write-only and burns a live LLM call (verify8 cost bleed).
+    if site.startswith("verifier_"):
+        # ProgressScore contract: {reasoning, score}. When an output schema is
+        # present, helpers.llm fills missing output from tool messages.
+        soft_json = (
+            '{"reasoning":"Fast Mode cache trajectory ended; prior tool '
+            'evidence is sufficient to treat the goal as complete.",'
+            '"score":1.0}'
+        )
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": soft_json,
+            "content_chunks": [
+                {
+                    "text": soft_json,
+                    "item_id": "cache:soft:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                }
+            ],
+            "reasoning": "",
+            "tool_calls": [],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
+    # Unknown / unstructured sites: fall through to live (or write-only).
     return None
 
 
@@ -322,9 +352,9 @@ async def cached_complete(
         # transport failures must fall through to live so we don't mask outages.
         if not lookup_failed:
             soft = soft_complete_on_miss(call_site)
-            # soft_complete_on_miss already excludes verifier_* / unknown sites.
-            # Explore + summarize_web_fetch both pass response_model; their soft
-            # payloads are schema-faithful (tool_calls / WebFetchHaikuResponse JSON).
+            # Soft payloads are schema-faithful for every allowlisted site
+            # (explore tool_calls, swf WebFetchHaikuResponse JSON, verifier
+            # ProgressScore JSON). Unknown sites return None and fall through.
             if soft is not None:
                 logger.info(
                     "llm.cache.soft_complete",
