@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useBottomLeftChipPortal } from '../bottom-left-chips/hooks';
 import {
   checkForUpdates,
   downloadUpdate,
@@ -6,34 +7,10 @@ import {
   subscribeToUpdateProgress,
   subscribeToUpdateStatus,
 } from './api';
-import { NONE_DISMISS_DELAY_MS, PORTAL_ID } from './config';
+import { NONE_DISMISS_DELAY_MS } from './config';
 import type { UpdateStatusPayload, UseUpdateIndicatorResult } from './types';
 
 type TimerRef = { current: ReturnType<typeof setTimeout> | null };
-
-/**
- * Creates (or reuses) the portal root div used by the indicator, and
- * removes it from `document.body` on unmount.
- */
-const usePortalContainer = (): HTMLElement => {
-  const container = useMemo(() => {
-    const existing = document.getElementById(PORTAL_ID);
-    if (existing !== null) return existing;
-    const node = document.createElement('div');
-    node.id = PORTAL_ID;
-    document.body.appendChild(node);
-    return node;
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      const node = document.getElementById(PORTAL_ID);
-      if (node !== null) node.remove();
-    };
-  }, []);
-
-  return container;
-};
 
 // `building` is treated as up-to-date in the UI — normalize at the boundary.
 const effectiveStatusPayload = (payload: UpdateStatusPayload): UpdateStatusPayload =>
@@ -106,7 +83,7 @@ export const useUpdateIndicator = (): UseUpdateIndicatorResult => {
   const dismissedVersionRef = useRef<string | null>(null);
   const noneTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const container = usePortalContainer();
+  const container = useBottomLeftChipPortal();
   useUpdateStatusSubscription(setStatus, setProgress, setShowNoneChip, noneTimerRef);
 
   const dismiss = (): void => {

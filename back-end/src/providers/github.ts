@@ -40,9 +40,70 @@ export function parseGithubUrl(url: string): { owner: string; repo: string } | n
   return { owner: match[1], repo: match[2] };
 }
 
+function githubApiAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+  };
+  const token = [process.env.GITHUB_TOKEN ?? '', process.env.GITHUB_DISPATCH_TOKEN ?? '']
+    .map((value) => value.trim())
+    .find((value) => value !== '');
+  if (token !== undefined) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+type GithubRepoVisibility = 'public' | 'private' | 'missing' | 'unknown';
+
+/**
+ * Resolve whether a GitHub repo exists and is publicly cloneable.
+ * Unauthenticated requests work for public repos; a configured token improves rate limits.
+ */
+export async function fetchGithubRepoVisibility(
+  owner: string,
+  repo: string
+): Promise<GithubRepoVisibility> {
+  try {
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      headers: githubApiAuthHeaders(),
+    });
+    if (response.status === 404) return 'missing';
+    if (!response.ok) {
+      log.warn('GitHub repo visibility lookup failed', {
+        owner,
+        repo,
+        status: response.status,
+      });
+      return 'unknown';
+    }
+    const data = (await response.json()) as { private?: boolean };
+    return data.private === true ? 'private' : 'public';
+  } catch (error) {
+    log.warn('GitHub repo visibility lookup errored', {
+      owner,
+      repo,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 'unknown';
+  }
+}
+
+async function grantGithubRepoAccess(userId: string, repoUrl: string): Promise<void> {
+  try {
+    await prisma.githubRepoAccess.create({
+      data: { userId, repoUrl },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('Unique constraint')) {
+      throw error;
+    }
+  }
+}
+
 /**
  * Check if a user has access to clone a specific GitHub repo.
- * Checks the GithubRepoAccess allowlist table.
+ * Checks the GithubRepoAccess allowlist table, then auto-grants public repos.
  */
 export async function checkGithubRepoAccess(
   userId: string,
@@ -67,17 +128,36 @@ export async function checkGithubRepoAccess(
     },
   });
 
-  if (!access) {
-    const parsed = parseGithubUrl(normalizedUrl);
-    const repoName = parsed ? `${parsed.owner}/${parsed.repo}` : normalizedUrl;
-    return {
-      allowed: false,
-      normalizedUrl,
-      error: `Access denied: You don't have permission to clone ${repoName}. Please contact support to request access.`,
-    };
+  if (access) {
+    return { allowed: true, normalizedUrl };
   }
 
-  return { allowed: true, normalizedUrl };
+  const parsed = parseGithubUrl(normalizedUrl);
+  const repoName = parsed ? `${parsed.owner}/${parsed.repo}` : normalizedUrl;
+  if (parsed) {
+    const visibility = await fetchGithubRepoVisibility(parsed.owner, parsed.repo);
+    if (visibility === 'public') {
+      await grantGithubRepoAccess(userId, normalizedUrl);
+      log.info('Auto-granted public GitHub repo access', {
+        userId,
+        repoUrl: normalizedUrl,
+      });
+      return { allowed: true, normalizedUrl };
+    }
+    if (visibility === 'private') {
+      return {
+        allowed: false,
+        normalizedUrl,
+        error: `Access denied: ${repoName} is private. Please contact support to request access.`,
+      };
+    }
+  }
+
+  return {
+    allowed: false,
+    normalizedUrl,
+    error: `Access denied: You don't have permission to clone ${repoName}. Please contact support to request access.`,
+  };
 }
 
 /**

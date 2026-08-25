@@ -102,6 +102,41 @@ describe('ExploreActiveToolCarousel', () => {
     vi.useRealTimers();
   });
 
+  it('keeps only one carousel label mounted at a time', () => {
+    vi.useFakeTimers();
+
+    const { container, rerender } = render(
+      <ExploreActiveToolCarousel
+        iconClassName="h-3 w-3"
+        items={[{ key: 'fetch-a', text: 'Fetching https://api.github.com/repos/CHAI-MAGMA/magma', icon: Search }]}
+      />,
+    );
+
+    expect(container.querySelectorAll('[class*="truncate"]').length).toBe(1);
+
+    rerender(
+      <ExploreActiveToolCarousel
+        iconClassName="h-3 w-3"
+        items={[
+          { key: 'fetch-a', text: 'Fetching https://api.github.com/repos/CHAI-MAGMA/magma', icon: Search },
+          {
+            key: 'fetch-b',
+            text: 'Fetching https://api.github.com/repos/icl-utk-edu/magma',
+            icon: Search,
+          },
+        ]}
+      />,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1800);
+    });
+
+    expect(container.querySelectorAll('[class*="truncate"]').length).toBe(1);
+
+    vi.useRealTimers();
+  });
+
   it('does not reset or remount the thinking item on equivalent rerenders', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));

@@ -30,6 +30,7 @@ import { ChatScrollArea } from '@/features/terminal/components/ChatScrollArea';
 import { OPENING_MESSAGES } from '@/features/terminal/config';
 import AttentionInbox from '@/features/terminal-component-group/components/AttentionInbox';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
+import BrowserStatusBarCarousel from '@/features/terminal-component-group/components/BrowserStatusBarCarousel';
 import BrowserViewPanel from '@/features/terminal-component-group/components/BrowserViewPanel';
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context/types';
@@ -1748,10 +1749,15 @@ describe('BrowserStatusBar (blackbox)', () => {
 
   it('clicking "Take control" on a live browser enables interaction and can hand control back', async () => {
     let resumeCalled = false;
+    let agentResumeCalls = 0;
     const controlModes: string[] = [];
     let controlStateReads = 0;
     let controlRequested = false;
     server.use(
+      http.post(`${API_BASE}/agents/:agentId/resume`, () => {
+        agentResumeCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
       http.post(`${API_BASE}/browser-session/resume`, async ({ request }) => {
         resumeCalled = true;
         const body = (await request.json()) as { task_id?: string };
@@ -1817,7 +1823,163 @@ describe('BrowserStatusBar (blackbox)', () => {
     await user.click(screen.getByRole('button', { name: 'Hand back control' }));
     expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
     expect(controlModes).toEqual(['user', 'agent']);
+    expect(agentResumeCalls).toBe(0);
     expect(screen.getByTitle('Browser')).toHaveAttribute('src', 'about:blank');
+  });
+
+  it('keeps user control after the live browser URL updates from agent navigation', async () => {
+    server.use(
+      http.post(`${API_BASE}/browser-session/task/task-nav/control`, async ({ request }) => {
+        const body = (await request.json()) as { mode?: string };
+        return HttpResponse.json({
+          state: body.mode === 'user' ? 'user' : 'agent',
+          agentPaused: false,
+        });
+      }),
+      http.get(`${API_BASE}/browser-session/task/task-nav/control`, () =>
+        HttpResponse.json({ state: 'agent', agentPaused: false }),
+      ),
+    );
+
+    const initialMessages: Message[] = [
+      {
+        message_id: 'm-nav-1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-nav',
+          action_type: 'click',
+          title: 'Opening checkout',
+          browser_url: 'https://kernel.example/session?v=1',
+        },
+      },
+    ];
+    const navigatedMessages: Message[] = [
+      ...initialMessages,
+      {
+        message_id: 'm-nav-2',
+        timestamp: '2026-01-01T00:00:10Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-nav',
+          action_type: 'navigate',
+          title: 'Moved to cart',
+          browser_url: 'https://kernel.example/session?v=2',
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    const { rerender } = renderWithProviders(
+      withAgentCtx(
+        initialMessages,
+        <BrowserStatusBar taskId="task-nav" browserUrl="https://kernel.example/session?v=1" />,
+      ),
+    );
+
+    await user.click(screen.getByText('Opening checkout'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    await user.click(await screen.findByRole('button', { name: 'Take control' }));
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+
+    rerender(
+      withAgentCtx(
+        navigatedMessages,
+        <BrowserStatusBar taskId="task-nav" browserUrl="https://kernel.example/session?v=2" />,
+      ),
+    );
+
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(screen.getByTitle('Browser')).toHaveAttribute(
+      'src',
+      expect.stringContaining('interactive=true'),
+    );
+  });
+
+  it('browser status chip carousel can take control from fullscreen after navigation updates the live URL', async () => {
+    server.use(
+      http.post(`${API_BASE}/browser-session/task/task-chip/control`, async ({ request }) => {
+        const body = (await request.json()) as { mode?: string };
+        return HttpResponse.json({
+          state: body.mode === 'user' ? 'user' : 'agent',
+          agentPaused: false,
+        });
+      }),
+      http.get(`${API_BASE}/browser-session/task/task-chip/control`, () =>
+        HttpResponse.json({ state: 'agent', agentPaused: false }),
+      ),
+    );
+
+    const initialMessages: Message[] = [
+      {
+        message_id: 'm-chip-1',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-chip',
+          action_type: 'session_started',
+          title: 'Browser ready',
+          browser_url: 'https://kernel.example/session?step=1',
+        },
+      },
+    ];
+    const navigatedMessages: Message[] = [
+      ...initialMessages,
+      {
+        message_id: 'm-chip-2',
+        timestamp: '2026-01-01T00:00:05Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-chip',
+          action_type: 'click',
+          title: 'Clicked add to cart',
+          browser_url: 'https://kernel.example/session?step=2',
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    const { rerender } = renderWithProviders(
+      withAgentCtx(
+        initialMessages,
+        <BrowserStatusBarCarousel
+          browsers={[{ taskId: 'task-chip', browserUrl: 'https://kernel.example/session?step=1' }]}
+        />,
+      ),
+    );
+
+    expect(screen.getByTestId('browser-status-chip')).toBeInTheDocument();
+    await user.click(screen.getByText('Browser ready'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    await user.click(await screen.findByRole('button', { name: 'Take control' }));
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+
+    rerender(
+      withAgentCtx(
+        navigatedMessages,
+        <BrowserStatusBarCarousel
+          browsers={[{ taskId: 'task-chip', browserUrl: 'https://kernel.example/session?step=2' }]}
+        />,
+      ),
+    );
+
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(screen.getByTitle('Browser')).toHaveAttribute(
+      'src',
+      expect.stringContaining('interactive=true'),
+    );
   });
 
   it('restores hand-back control after the frontend reloads during a leased handoff', async () => {

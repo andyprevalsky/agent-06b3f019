@@ -54,7 +54,7 @@ async function parseJsonResponse(res: Response): Promise<Record<string, unknown>
   }
 }
 
-async function resolveTestUserId(): Promise<string> {
+export async function resolveTestUserId(): Promise<string> {
   if (IS_PROD || process.env.TEST_USER_ID !== undefined) return TEST_USER_ID;
   resolvedLocalUserId ??= (async () => {
     const sendRes = await fetch(`${BACKEND_URL}/api/auth/send-otp`, {

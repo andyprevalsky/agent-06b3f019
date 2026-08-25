@@ -11,7 +11,7 @@
  *   - Default export is a React component
  *   - IPC registration contract (`onUpdateStatus`, `onUpdateProgress`
  *     subscribed exactly once across re-renders)
- *   - Portal lifecycle (`#rose-update-indicator` div created on first
+ *   - Portal lifecycle (`#rose-bottom-left-chips` div created on first
  *     mount and removed on unmount)
  *   - Empty / idle state renders nothing (null)
  *   - Each discrete state-payload variant that renderer-main does not
@@ -41,13 +41,13 @@ import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
 import { clearIpcMock, installIpcMock } from './ipc-mock';
 import UpdateIndicator from '../../ui/UpdateIndicator';
+import { PORTAL_ID } from '../../ui/features/bottom-left-chips/config';
 import type { IPC, UpdateStatusPayload } from '../../shared/types/ipc';
 
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
-const PORTAL_ID = 'rose-update-indicator';
 const NONE_DISMISS_DELAY_MS = 3000;
 
 interface Harness {
@@ -181,7 +181,7 @@ describe('UpdateIndicator — portal lifecycle', () => {
     expect(screen.queryByText(/Update failed/i)).not.toBeInTheDocument();
   });
 
-  it('creates exactly one #rose-update-indicator portal root and reuses it across state emits', () => {
+  it('creates exactly one #rose-bottom-left-chips portal root and reuses it across state emits', () => {
     const { emitStatus } = setupHarness();
     renderWithProviders(<UpdateIndicator />);
 

@@ -13,6 +13,11 @@ import {
   getSubscriptionCheckoutEnv,
 } from './config';
 import { resolveSubscriptionCheckoutCredentials } from './checkoutMode';
+import {
+  buildSubscriptionCallbackUrls,
+  resolveSubscriptionReturnUrl,
+  subscriptionCheckoutIdempotencyKey,
+} from './returnUrl';
 
 export class NotFoundError extends Error {
   constructor(msg: string) {
@@ -50,8 +55,12 @@ function checkoutStripeClient(secretKey: string): Stripe {
   return getStripeClientForSecretKey(secretKey);
 }
 
-export async function createSubscriptionCheckoutSession(userId: string): Promise<{ url: string }> {
-  const returnUrl = IS_PRODUCTION ? RETURN_URL_PRODUCTION : RETURN_URL_DEVELOPMENT;
+export async function createSubscriptionCheckoutSession(
+  userId: string,
+  options?: { returnUrl?: string | null }
+): Promise<{ url: string }> {
+  const returnUrl = resolveSubscriptionReturnUrl(options?.returnUrl);
+  const { successUrl, cancelUrl } = buildSubscriptionCallbackUrls(returnUrl);
   // Credentials are resolved at call time so NODE_ENV flips in tests still mint live.
   const credentials = resolveSubscriptionCheckoutCredentials(getSubscriptionCheckoutEnv());
 
@@ -66,16 +75,22 @@ export async function createSubscriptionCheckoutSession(userId: string): Promise
       mode: 'subscription',
       client_reference_id: userId,
       line_items: [{ price: credentials.priceId, quantity: 1 }],
-      success_url: `${returnUrl}?subscription=success`,
-      cancel_url: `${returnUrl}?subscription=cancelled`,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
       allow_promotion_codes: true,
     },
     // Per-user idempotency: the subscription gate that mints this is a per-user
     // singleton and its Temporal mint activity is at-least-once, so a retry must
     // reuse the same Checkout session (within Stripe's 24h key window) instead of
-    // creating a duplicate. Params are stable per user+env; include livemode so a
-    // sandbox→live cutover does not reuse a sandbox session id.
-    { idempotencyKey: `subscription-checkout:${credentials.livemode ? 'live' : 'test'}:${userId}` }
+    // creating a duplicate. Include returnUrl so a gate click from an agent page
+    // does not reuse a session minted for /settings.
+    {
+      idempotencyKey: subscriptionCheckoutIdempotencyKey(
+        userId,
+        credentials.livemode === true,
+        returnUrl
+      ),
+    }
   );
 
   if (session.url === null || session.url === '') {
