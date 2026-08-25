@@ -60,10 +60,7 @@ async function testPaymentCdnOkRequiresScriptLoad(): Promise<void> {
   // Helper still distinguishes fetch-ok vs script-ORB for evidence; promote no
   // longer hard-filters on it (LLM gate consumes blocked-resource reason).
   const fakePage = makeProbePage({ fetchOk: true, scriptOk: false });
-  const result = await probePaymentCdnReachable(
-    fakePage as never,
-    'https://js.cdn.example/v3'
-  );
+  const result = await probePaymentCdnReachable(fakePage as never, 'https://js.cdn.example/v3');
   assert.strictEqual(result.paymentCdnOk, false);
   assert.strictEqual(result.paymentCdnHosts?.['js.cdn.example'], true);
   assert.strictEqual(result.paymentCdnHosts?.['script.load'], false);
@@ -71,10 +68,7 @@ async function testPaymentCdnOkRequiresScriptLoad(): Promise<void> {
 
 async function testPaymentCdnOkWhenScriptLoads(): Promise<void> {
   const fakePage = makeProbePage({ fetchOk: true, scriptOk: true });
-  const result = await probePaymentCdnReachable(
-    fakePage as never,
-    'https://js.cdn.example/v3'
-  );
+  const result = await probePaymentCdnReachable(fakePage as never, 'https://js.cdn.example/v3');
   assert.strictEqual(result.paymentCdnOk, true);
   assert.strictEqual(result.paymentCdnHosts?.['js.cdn.example'], true);
   assert.strictEqual(result.paymentCdnHosts?.['script.load'], true);

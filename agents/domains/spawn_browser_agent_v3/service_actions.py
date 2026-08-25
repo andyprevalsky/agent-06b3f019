@@ -629,6 +629,40 @@ def grant_site_write_lock_approvals(
     return granted
 
 
+def apply_user_write_lock_grant(
+    approvals: Optional[Dict],
+    approval_type: str,
+    grant_url: str,
+    approved_at: float,
+    *,
+    prior_payment_refs: Any = None,
+) -> Dict[str, Dict]:
+    """Record a user-granted typed write-lock for this browser activity.
+
+    Always stores the typed entry (``purchase``, ``email_send``, …). A
+    ``purchase`` approval also calls ``grant_site_write_lock_approvals`` so later
+    purchase clicks on the same merchant (Buy Now again, Place order) do not
+    re-prompt after auth/address friction that exceeds
+    ``WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS``.
+
+    Amazon saved-payment flows never mint a one-time card, so without this
+    purchase path they only had the 120s typed timeout (agent 2c475824).
+
+    Non-purchase approvals never create or re-key a site unlock: an existing
+    payment/site grant is preserved as-is (``prior_payment_refs`` is accepted for
+    call-site compatibility but does not authorize unlocking a different host).
+    """
+    _ = prior_payment_refs  # handler still passes; must not re-key site unlock
+    granted = dict(approvals or {})
+    granted[approval_type] = {
+        "domain": get_domain_from_url(grant_url),
+        "approved_at": approved_at,
+    }
+    if approval_type == "purchase":
+        granted = grant_site_write_lock_approvals(granted, grant_url, approved_at)
+    return granted
+
+
 # ========================================
 # ACTION EXECUTION
 # ========================================
