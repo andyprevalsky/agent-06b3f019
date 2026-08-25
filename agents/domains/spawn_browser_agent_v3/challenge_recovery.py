@@ -877,6 +877,19 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
     """
     text = (goal or "").lower()
+    guest_needles = (
+        "guest checkout",
+        "as guest",
+        "continue as guest",
+        "do not sign in",
+        "don't sign in",
+        "without signing in",
+        "no account needed",
+        "do not log in",
+        "don't log in",
+    )
+    if any(needle in text for needle in guest_needles):
+        return True
     signed_in_needles = (
         "sign in",
         "sign-in",
@@ -888,18 +901,7 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     )
     if any(needle in text for needle in signed_in_needles):
         return False
-    needles = (
-        "guest checkout",
-        "as guest",
-        "continue as guest",
-        "do not sign in",
-        "don't sign in",
-        "without signing in",
-        "no account needed",
-        "do not log in",
-        "don't log in",
-    )
-    return any(needle in text for needle in needles)
+    return False
 
 
 async def recover_from_challenge(
