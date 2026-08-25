@@ -7664,6 +7664,31 @@ def test_user_granted_purchase_survives_past_timeout_like_2c475824():
     assert SITE_WRITE_LOCK_APPROVAL_KEY not in email_only
     assert is_approval_valid(email_only, "email_send", "https://mail.example.com/compose") is False
 
+    # Non-purchase approval must not re-key an existing payment site unlock onto
+    # a different merchant (CodeRabbit: prior_payment_refs / existing site grant).
+    amazon_site = apply_user_write_lock_grant(
+        {},
+        "purchase",
+        grant_url,
+        time_module.time(),
+    )
+    amazon_base = amazon_site[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"]
+    after_email = apply_user_write_lock_grant(
+        amazon_site,
+        "email_send",
+        "https://other-merchant.example/checkout",
+        time_module.time(),
+        prior_payment_refs={"card_number": "ref"},
+    )
+    assert after_email[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == amazon_base
+    assert is_approval_valid(after_email, "purchase", second_buy_url) is True
+    assert (
+        is_approval_valid(
+            after_email, "purchase", "https://other-merchant.example/checkout"
+        )
+        is False
+    )
+
 
 def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
     """write_lock_approvals are resume-state only; a new browser activity starts empty."""
