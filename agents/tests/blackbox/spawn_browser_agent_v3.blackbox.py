@@ -8109,6 +8109,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     }
     filtered = recorder.query_requests(url_pattern="/api/", limit=10)
     # Query string + fragment (token/sig) redacted by default; path preserved.
+    # response_ts_ms is part of the DevTools-grade summary when present.
     assert filtered == [
         {
             "id": "1",
@@ -8116,6 +8117,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
             "method": "POST",
             "status": 403,
             "resource_type": "XHR",
+            "response_ts_ms": 200,
             "body_available": False,
         }
     ]
