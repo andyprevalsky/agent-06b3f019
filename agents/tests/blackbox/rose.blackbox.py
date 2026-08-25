@@ -3051,6 +3051,20 @@ def test_build_openrouter_body_provider_fast_mode():
     assert body["speed"] == "fast"
 
 
+def test_build_openrouter_body_defaults_provider_fast_mode_on():
+    body = build_openrouter_body(
+        model="anthropic/claude-opus-4.8",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    assert body["speed"] == "fast"
+
+
 def test_build_openrouter_body_minimal_omits_optionals():
     body = build_openrouter_body(
         model="m",
@@ -3061,6 +3075,7 @@ def test_build_openrouter_body_minimal_omits_optionals():
         temperature=None,
         max_tokens=None,
         seed=None,
+        provider_fast_mode=False,
     )
     assert body["stream_options"] == {"include_usage": True}
     assert "tools" not in body
@@ -3069,6 +3084,25 @@ def test_build_openrouter_body_minimal_omits_optionals():
     assert "temperature" not in body
     assert "max_tokens" not in body
     assert "seed" not in body
+    assert "speed" not in body
+
+
+def test_build_anthropic_body_defaults_provider_fast_mode_on_for_opus():
+    opus_pool = PoolSpec(
+        name="rose-1-ultra",
+        claude_auth_model="claude-opus-4-8",
+        gpt_auth_model="gpt-5.5",
+        waterfall=(),
+    )
+    body = build_anthropic_body(
+        pool_spec=opus_pool,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["speed"] == "fast"
 
 
 async def test_waterfall_falls_through_then_succeeds():
@@ -5962,6 +5996,10 @@ async def run_all_tests():
     r.record("anthropic_body_message_breakpoint", test_build_anthropic_body_message_cache_breakpoint)
     r.record("anthropic_body_skip_cache_write", test_build_anthropic_body_skip_cache_write_keeps_system_markers)
     r.record("anthropic_body_provider_fast_mode", test_build_anthropic_body_provider_fast_mode_supported_opus_only)
+    r.record(
+        "anthropic_body_provider_fast_mode_default",
+        test_build_anthropic_body_defaults_provider_fast_mode_on_for_opus,
+    )
     r.record("anthropic_fast_mode_beta_header", test_anthropic_fast_mode_transport_adds_beta_header)
 
     await r.record_async("claude_auth_400_no_rotate", test_claude_auth_400_raises_invalid_request_no_rotation)
@@ -6039,6 +6077,10 @@ async def run_all_tests():
         test_named_tool_choice_degrades_only_for_google_routes,
     )
     r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
+    r.record(
+        "openrouter_body_provider_fast_mode_default",
+        test_build_openrouter_body_defaults_provider_fast_mode_on,
+    )
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     r.record(
         "openrouter_body_no_tools_flattens_tool_history",

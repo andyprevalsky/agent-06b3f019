@@ -69,8 +69,8 @@ export function useMessageSending({
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
-  // Fast Mode aggressive cache — session-only, account-scoped default, never persisted client-side.
-  const [fastMode, setFastModeState] = useState(false);
+  // Fast Mode aggressive cache — session-only; defaults on for allowlisted accounts.
+  const [fastMode, setFastModeState] = useState(true);
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
   const [simulatorMode, setSimulatorModeState] = useState(false);
 

@@ -632,7 +632,7 @@ class RoseClient:
         idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
         thinking: Optional[Dict[str, Any]] = None,
         effort: Optional[str] = None,
-        provider_fast_mode: bool = False,
+        provider_fast_mode: bool = True,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
@@ -1723,7 +1723,7 @@ async def _try_claude_auth(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -1786,7 +1786,7 @@ async def _try_gpt_auth(
     agent_id: Optional[str],
     call_site: Optional[str],
     cache_namespace: Optional[str] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -1898,7 +1898,7 @@ async def _try_anthropic_api_key(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:

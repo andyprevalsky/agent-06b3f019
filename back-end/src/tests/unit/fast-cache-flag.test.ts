@@ -32,6 +32,7 @@ import {
   disableFastModeForWorldModel,
 } from '../../domains/agents/agentExecutionMode';
 import { buildChatTemporalStartParams } from '../../providers/chat/chatHandler';
+import { buildAgentWorkflowArgs } from '../../providers/temporal';
 
 let passed = 0;
 const failures: string[] = [];
@@ -300,25 +301,31 @@ test('createAgentSchema accepts SMS source for SMS-origin sub-agents', () => {
   assert.strictEqual(body.source, 'SMS');
 });
 
-test('Andy root agents default Fast Mode on when flag is absent', () => {
+test('root agents default Fast Mode on when flag is absent', () => {
   const body = createAgentSchema.parse({ goal: 'x' });
   applyFastModeDefault(body, '1f85ff25-6e29-4c1b-8739-f917bd101a30');
   assert.strictEqual(body.fast_mode_cache_enabled, true);
 });
 
-test('explicit Fast Mode off is preserved for Andy root agents', () => {
+test('explicit Fast Mode off is preserved for root agents', () => {
   const body = createAgentSchema.parse({ goal: 'x', fast_mode_cache_enabled: false });
   applyFastModeDefault(body, '1f85ff25-6e29-4c1b-8739-f917bd101a30');
   assert.strictEqual(body.fast_mode_cache_enabled, false);
 });
 
-test('non-default accounts do not default Fast Mode on', () => {
+test('all accounts default Fast Mode on for root agents', () => {
   const body = createAgentSchema.parse({ goal: 'x' });
   applyFastModeDefault(body, '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9');
-  assert.strictEqual(body.fast_mode_cache_enabled, undefined);
+  assert.strictEqual(body.fast_mode_cache_enabled, true);
 });
 
-test('sub-agents do not use account default Fast Mode', () => {
+test('non-allowlisted accounts also default Fast Mode on', () => {
+  const body = createAgentSchema.parse({ goal: 'x' });
+  applyFastModeDefault(body, '00000000-0000-4000-8000-000000000099');
+  assert.strictEqual(body.fast_mode_cache_enabled, true);
+});
+
+test('sub-agents do not use root Fast Mode default', () => {
   const body = createAgentSchema.parse({
     goal: 'x',
     parent_agent_id: '00000000-0000-4000-8000-000000000001',
@@ -336,6 +343,16 @@ test('sub-agents inherit Fast Mode read flag from parent when absent', () => {
   });
   applyFastModeInheritance(body, true);
   assert.strictEqual(body.fast_mode_cache_enabled, true);
+});
+
+test('sub-agents inherit Fast Mode off from parent when absent', () => {
+  const body = createAgentSchema.parse({
+    goal: 'x',
+    parent_agent_id: '00000000-0000-4000-8000-000000000001',
+    parent_workflow_id: 'workflow-parent',
+  });
+  applyFastModeInheritance(body, false);
+  assert.strictEqual(body.fast_mode_cache_enabled, false);
 });
 
 test('explicit sub-agent Fast Mode off is not overwritten by inheritance', () => {
@@ -619,6 +636,56 @@ test('#17-19 no cache kind for browser session / E2B sandbox / token', () => {
   ]) {
     assert.ok(new RegExp(`'${allowed}'`).test(kinds), `expected '${allowed}' kind`);
   }
+});
+
+test('SMS start_new_agent persists Fast Mode on and passes it into Temporal', () => {
+  const startAgent = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'smsSupervisor', 'supervisorTools.startAgent.ts'),
+    'utf8'
+  );
+  assert.ok(
+    startAgent.includes('fastModeCacheEnabled: true'),
+    'SMS agent create must set Fast Mode on the Agent row'
+  );
+  assert.ok(
+    /startAgentWorkflow\(\{[\s\S]*fastModeCacheEnabled:\s*true/.test(startAgent),
+    'SMS startAgentWorkflow must pass Fast Mode so Rose complete gets provider_fast_mode'
+  );
+});
+
+test('Temporal workflow args default Fast Mode on when callers omit the flag', () => {
+  const args = buildAgentWorkflowArgs({
+    agentId: 'a',
+    userId: 'u',
+    goal: 'g',
+    model: 'rose-labs/rose-1-lite',
+    reasoningMaxTokens: 2048,
+    verifier: { type: 'FLOAT_LLM_JUDGE' },
+  });
+  assert.strictEqual(args[15], true);
+});
+
+test('Rose createStreamingCompletion defaults provider_fast_mode on', () => {
+  const client = readFileSync(join(process.cwd(), 'src', 'providers', 'rose', 'client.ts'), 'utf8');
+  assert.ok(
+    client.includes('provider_fast_mode: options.provider_fast_mode ?? true'),
+    'TS Rose complete must default provider_fast_mode to true'
+  );
+});
+
+test('Python Rose complete defaults provider_fast_mode on', () => {
+  const client = readFileSync(
+    join(process.cwd(), '..', 'agents', 'providers', 'rose', 'client.py'),
+    'utf8'
+  );
+  assert.ok(
+    client.includes('provider_fast_mode: bool = True'),
+    'Python RoseClient.complete must default provider_fast_mode to True'
+  );
+  assert.ok(
+    !client.includes('provider_fast_mode: bool = False'),
+    'Python Rose client must not keep a False default for provider_fast_mode'
+  );
 });
 
 function extractFunction(source: string, name: string): string {

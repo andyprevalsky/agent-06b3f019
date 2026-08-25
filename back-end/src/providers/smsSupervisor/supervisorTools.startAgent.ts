@@ -59,6 +59,9 @@ export async function commitStartNewAgent(
           reasoningMaxTokens: 2048,
           status: 'STARTING_UP',
           priceLimitCents,
+          // Match POST /api/agents default: Fast Mode on so Rose complete
+          // calls get provider_fast_mode via the agent flag trickle-down.
+          fastModeCacheEnabled: true,
         },
       });
 
@@ -151,6 +154,7 @@ export async function commitStartNewAgent(
         type: 'FLOAT_LLM_JUDGE',
       },
       priceLimitCents,
+      fastModeCacheEnabled: true,
     });
 
     await prisma.agent.update({

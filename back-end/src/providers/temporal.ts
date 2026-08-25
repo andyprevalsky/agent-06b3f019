@@ -328,7 +328,7 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
     params.maxIterations || null,
     params.priceLimitCents || 100,
     params.contextGates || null,
-    params.fastModeCacheEnabled ?? false,
+    params.fastModeCacheEnabled ?? true,
   ];
   // Keep ordinary real-mode starts compatible with the previous 16-argument
   // worker. Deployment state remains #17; Simulator mode uses #18 so it does
