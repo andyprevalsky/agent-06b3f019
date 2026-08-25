@@ -69,8 +69,7 @@ export function projectModelContextAfterCompaction(messages: ChatMessage[]): Cha
 
   const checkpointMessage = messages[checkpointIndex];
   const checkpoint = metadata(checkpointMessage)[CONTEXT_COMPACTION_KEY] as
-    | ContextCompactionMetadata
-    | undefined;
+    ContextCompactionMetadata | undefined;
   const compressedContext = checkpoint?.compressedContext;
   if (!Array.isArray(compressedContext)) return messages;
 

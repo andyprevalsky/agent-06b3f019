@@ -54,13 +54,16 @@ async function main(): Promise<void> {
     },
   });
 
-  const { ensureChatContextWithinBudget, shouldAutoCompactChat } = await import(
-    '../../providers/chat/chatCompaction'
-  );
+  const { ensureChatContextWithinBudget, shouldAutoCompactChat } =
+    await import('../../providers/chat/chatCompaction');
   const { loadChatModelMessages } = await import('../../providers/chat/initialContext');
 
   const rawMessages = buildProdChatCompactionScenario();
-  assert.equal(shouldAutoCompactChat(rawMessages), true, 'fixture must exceed auto-compact trigger');
+  assert.equal(
+    shouldAutoCompactChat(rawMessages),
+    true,
+    'fixture must exceed auto-compact trigger'
+  );
 
   const projected = await ensureChatContextWithinBudget({
     agentId: PROD_CHAT_COMPACTION_AGENT_ID,
@@ -75,7 +78,10 @@ async function main(): Promise<void> {
   );
   assert.equal(checkpointWrites.length, 1, 'compaction must persist one context_reset checkpoint');
   assert.equal(checkpointWrites[0]?.agentId, PROD_CHAT_COMPACTION_AGENT_ID);
-  assert.ok((checkpointWrites[0]?.compressedCount ?? 0) > 0, 'checkpoint must store compressed tail');
+  assert.ok(
+    (checkpointWrites[0]?.compressedCount ?? 0) > 0,
+    'checkpoint must store compressed tail'
+  );
 
   const startupMessages = await loadChatModelMessages(
     {

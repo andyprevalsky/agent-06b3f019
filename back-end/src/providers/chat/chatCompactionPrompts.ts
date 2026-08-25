@@ -47,8 +47,7 @@ export const NO_TOOLS_PREAMBLE = `CRITICAL: Respond with TEXT ONLY. Do NOT call 
 - Your entire response must be plain text: an <analysis> block followed by a <summary> block.
 `;
 
-export const NO_TOOLS_TRAILER =
-  '\nRemember: respond with TEXT ONLY. Do NOT call tools.\n';
+export const NO_TOOLS_TRAILER = '\nRemember: respond with TEXT ONLY. Do NOT call tools.\n';
 
 export function stripCompactAnalysis(summary: string): string {
   const match = summary.match(/<summary>([\s\S]*?)<\/summary>/i);

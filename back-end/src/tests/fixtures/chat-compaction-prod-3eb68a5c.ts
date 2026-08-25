@@ -24,7 +24,9 @@ function researchToolPayload(toolName: (typeof RESEARCH_TOOLS)[number], index: n
       results: Array.from({ length: 8 }, (_, resultIndex) => ({
         title: `Option ${index}-${resultIndex}: boutique hotel near conference venue`,
         url: `https://example.com/research/${index}/${resultIndex}`,
-        snippet: 'Rates, amenities, and walkability notes from the prior research pass. '.repeat(12),
+        snippet: 'Rates, amenities, and walkability notes from the prior research pass. '.repeat(
+          12
+        ),
       })),
     };
   }
@@ -102,8 +104,7 @@ export function buildProdChatCompactionScenario(cycleCount = 290): ChatMessage[]
 
   messages.push({
     role: 'ASSISTANT',
-    text:
-      'I finished the research run and compared the strongest hotel options with rates, amenities, and tradeoffs.',
+    text: 'I finished the research run and compared the strongest hotel options with rates, amenities, and tradeoffs.',
     metadata: { completionSummary: true },
   });
   messages.push({

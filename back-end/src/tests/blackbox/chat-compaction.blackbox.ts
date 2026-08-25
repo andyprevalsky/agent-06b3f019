@@ -10,16 +10,15 @@ import {
   buildContextCompactionMetadata,
   projectModelContextAfterCompaction,
 } from '../../providers/chat/contextCompaction';
-import {
-  estimateContextTokens,
-  messageSummaryWeight,
-} from '../../providers/chat/contextTokens';
+import { estimateContextTokens, messageSummaryWeight } from '../../providers/chat/contextTokens';
 import {
   getAutoCompactThreshold,
   shouldAutoCompactChat,
 } from '../../providers/chat/chatCompaction';
-import type { ChatMessage } from '../../providers/chat/initialContext';
-import { loadChatModelMessages } from '../../providers/chat/initialContext';
+import {
+  loadChatModelMessages,
+  type ChatMessage,
+} from '../../providers/chat/initialContext';
 import { splitHeadMiddleTail } from '../../providers/chat/splitHeadMiddleTail';
 import {
   buildProdChatCompactionScenario,
@@ -60,9 +59,7 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 }
 
 function makeMessages(count: number, textSize = 2_000): ChatMessage[] {
-  const messages: ChatMessage[] = [
-    { role: 'USER', text: 'Original goal', metadata: {} },
-  ];
+  const messages: ChatMessage[] = [{ role: 'USER', text: 'Original goal', metadata: {} }];
   for (let index = 0; index < count; index += 1) {
     messages.push({
       role: 'TOOL',
@@ -273,7 +270,9 @@ const tests: Array<[string, () => Promise<void> | void]> = [
             if (!shouldAutoCompactChat(projectModelContextAfterCompaction(params.rawMessages))) {
               throw new Error('prod fixture must require compaction before router');
             }
-            const split = splitHeadMiddleTail(projectModelContextAfterCompaction(params.rawMessages));
+            const split = splitHeadMiddleTail(
+              projectModelContextAfterCompaction(params.rawMessages)
+            );
             if (!split) throw new Error('expected split for prod-shaped chat');
             return [
               ...split.headIndices.map((index) => params.rawMessages[index]),

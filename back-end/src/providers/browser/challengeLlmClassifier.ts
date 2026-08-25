@@ -148,19 +148,22 @@ export async function waitForDomSettled(
 
 export async function captureCleanedDom(page: Page): Promise<string> {
   try {
-    const cleaned = await page.evaluate((charCap: number) => {
-      const body = document.body;
-      if (!body) return '';
-      const clone = body.cloneNode(true) as HTMLElement;
-      clone
-        .querySelectorAll('script, style, noscript, svg, iframe')
-        .forEach((node) => node.remove());
-      return (clone.innerText || clone.textContent || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, charCap);
-    }, CLEANED_DOM_CHAR_CAP);
-    return cleaned;
+    const cleaned = await page.evaluate(
+      `((charCap) => {
+        const body = document.body;
+        if (!body) return '';
+        const clone = body.cloneNode(true);
+        clone
+          .querySelectorAll('script, style, noscript, svg, iframe')
+          .forEach((node) => node.remove());
+        return (clone.innerText || clone.textContent || '')
+          .replace(/\\s+/g, ' ')
+          .trim()
+          .slice(0, charCap);
+      })`,
+      CLEANED_DOM_CHAR_CAP
+    );
+    return typeof cleaned === 'string' ? cleaned : '';
   } catch {
     return '';
   }
@@ -258,22 +261,23 @@ export async function captureNetworkSummary(
     return formatNetworkSummaryLines(options.networkEntries.slice(-NETWORK_ENTRY_CAP));
   }
   try {
-    const entries = await page.evaluate((cap: number) => {
-      const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
-      return resources.slice(-cap).map((entry) => {
-        const row: Record<string, unknown> = {
-          name: String(entry.name || '').slice(0, 180),
-          durationMs: Math.round(entry.duration || 0),
-          transferSize: Number(entry.transferSize || 0),
-        };
-        const maybeStatus = (entry as PerformanceResourceTiming & { responseStatus?: number })
-          .responseStatus;
-        if (typeof maybeStatus === 'number' && maybeStatus > 0) {
-          row.status = maybeStatus;
-        }
-        return row;
-      });
-    }, NETWORK_ENTRY_CAP);
+    const entries = await page.evaluate(
+      `((cap) => {
+        const resources = performance.getEntriesByType('resource');
+        return resources.slice(-cap).map((entry) => {
+          const row = {
+            name: String(entry.name || '').slice(0, 180),
+            durationMs: Math.round(entry.duration || 0),
+            transferSize: Number(entry.transferSize || 0),
+          };
+          if (typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
+            row.status = entry.responseStatus;
+          }
+          return row;
+        });
+      })`,
+      NETWORK_ENTRY_CAP
+    );
     if (!Array.isArray(entries) || entries.length === 0) return '(no resource timings)';
     return formatNetworkSummaryLines(
       entries.map((entry) => ({

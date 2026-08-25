@@ -72,7 +72,9 @@ function formatToolCallForPrompt(toolCall: Record<string, unknown>): string {
   const args =
     toolCall.arguments ??
     Object.fromEntries(
-      Object.entries(toolCall).filter(([key]) => !['tool', 'tool_call_id', 'id', 'name'].includes(key))
+      Object.entries(toolCall).filter(
+        ([key]) => !['tool', 'tool_call_id', 'id', 'name'].includes(key)
+      )
     );
   return jsonDumpsSafe(
     {
@@ -182,7 +184,12 @@ export async function compressChatContext(params: {
   const split = splitHeadMiddleTail(params.messages);
   if (!split) return params.messages;
 
-  const summary = await summarizeMiddle(params.messages, split.middleIndices, params.model, params.agentId);
+  const summary = await summarizeMiddle(
+    params.messages,
+    split.middleIndices,
+    params.model,
+    params.agentId
+  );
   const syntheticSummary: ChatMessage = {
     role: 'USER',
     text: summary,
@@ -315,7 +322,5 @@ export function estimateChatPromptChars(messages: ChatMessage[]): number {
 }
 
 export function estimateChatPromptTokens(messages: ChatMessage[]): number {
-  return estimateTokensForCompaction(
-    messages.map((message) => message.text ?? '').join('\n')
-  );
+  return estimateTokensForCompaction(messages.map((message) => message.text ?? '').join('\n'));
 }
