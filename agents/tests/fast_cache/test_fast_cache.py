@@ -2226,6 +2226,6 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert execute is not None
     assert execute["tool_calls"][0]["name"] == "attempt_completion"
 
-    assert soft_complete_on_miss("verifier_execute") is not None
+    assert soft_complete_on_miss("verifier_execute") is None
     assert soft_complete_on_miss("context_compression") is None
     assert soft_complete_on_miss("response_schema") is None

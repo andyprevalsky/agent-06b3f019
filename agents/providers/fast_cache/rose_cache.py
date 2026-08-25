@@ -258,32 +258,9 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
                 "from_fast_cache": True,
             },
         }
-    if site in {"verifier_execute", "verifier_plan", "verifier_browser"}:
-        # Structured verifier responses use response_model; soft-complete with a
-        # passing score keeps Fast Mode from going live when the slot is missing.
-        return {
-            "actual_model": "fast-mode-soft-complete",
-            "pool_name": "",
-            "request_id": "fast-mode-soft-complete",
-            "content": '{"score":1.0,"feedback":"Fast Mode soft-complete: cache trajectory ended."}',
-            "content_chunks": [
-                {
-                    "text": '{"score":1.0,"feedback":"Fast Mode soft-complete: cache trajectory ended."}',
-                    "item_id": "cache:soft:0",
-                    "output_index": 0,
-                    "content_index": 0,
-                    "phase": "final_answer",
-                }
-            ],
-            "reasoning": "",
-            "tool_calls": [],
-            "codex_reasoning_items": [],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "from_fast_cache": True,
-            },
-        }
+    # Do NOT soft-complete verifier_* / structured response_model sites: a plain
+    # content JSON soft-hit fails schema parse, then the verifier retry path
+    # flips to write-only and burns a live LLM call (verify8 cost bleed).
     return None
 
 
@@ -333,7 +310,7 @@ async def cached_complete(
                 yield chunk
             return
             soft = soft_complete_on_miss(call_site)
-            if soft is not None:
+            if soft is not None and complete_kwargs.get("response_model") is None:
                 logger.info(
                     "llm.cache.soft_complete",
                     call_site=call_site,

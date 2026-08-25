@@ -629,7 +629,10 @@ class RoseClient:
                     yield chunk
                 return
             soft = _fc_soft_complete(call_site)
-            if soft is not None:
+            # Structured response_model streams cannot consume a content-only
+            # soft-complete; replaying one fails parse and the verifier retry
+            # path flips to write-only live LLM.
+            if soft is not None and kwargs.get("response_model") is None:
                 logger.info(
                     "llm.cache.soft_complete",
                     call_site=call_site,
