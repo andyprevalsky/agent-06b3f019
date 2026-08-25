@@ -438,6 +438,14 @@ test('cache entry storage uses the shared Fast Mode database URL', () => {
     /export async function cacheGetPosition/.test(repo),
     'position fallback must be available for OAi-demo fingerprint drift'
   );
+  assert.ok(
+    /getFastCachePrisma\(\)\.\$queryRawUnsafe/.test(repo),
+    'cacheGetPosition must use the real Prisma client, not the fastModeCacheEntry proxy'
+  );
+  assert.ok(
+    !/fastCachePrisma\.\$queryRawUnsafe/.test(repo),
+    'cacheGetPosition must not call $queryRawUnsafe on the model-only proxy'
+  );
 });
 
 test('fast-cache routes expose get-position for durable trajectory replay', () => {

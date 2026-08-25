@@ -365,7 +365,7 @@ export async function cacheGetPosition(args: {
   // Match both historical CACHE_KEY_VERSION values (v42/v43) under the durable
   // trajectory slot: fastmode:vN:llm:{goalHash}:{site}:p:{step}:c:{fingerprint}
   const pattern = `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`;
-  const rows = await fastCachePrisma.$queryRawUnsafe<
+  const rows = await getFastCachePrisma().$queryRawUnsafe<
     Array<{ key: string; value: unknown; blobPath: string | null }>
   >(
     `
