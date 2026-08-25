@@ -78,6 +78,7 @@ class BenchmarkTask:
     # --- Unified eval-catalog contract (additive; validated by benchmarks/long_horizon.py) ---
     status: str = "ready"  # "ready" = runnable end-to-end today; "incomplete" = missing fixtures/judge runner, excluded from suite runs
     runner: str = "agent"  # "agent" = run_benchmark.py creates a real benchmark agent
+    harness: str = "rose"  # "rose" = Temporal Rose workflow; "codex" = Codex E2B orchestrator via codex_runner.py
     bench: str = "pipeline-e2e"  # "pipeline-e2e" = harness plumbing works (write locks, cookie inject, tool pipes); "rose-bench" = harness-independent capability (fixture + prompt + eval portable to any harness)
     world_model_mode: Optional[str] = None  # "real" = sim off, "simulate" = WMH boundaries, "shadow" = live + WMH compare
     description: Optional[str] = None  # One-line summary served to the FE test-prompts picker (falls back to title)

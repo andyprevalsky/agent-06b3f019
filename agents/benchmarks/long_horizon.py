@@ -67,6 +67,7 @@ TASK_STATUSES = {"ready", "incomplete", "retired"}
 #            Local-only: outbound Surge is intercepted by the benchmark stack's
 #            capture harness, so a run never texts a human. See sms_runner.py.
 TASK_RUNNERS = {"agent", "sms"}
+TASK_HARNESSES = {"rose", "codex"}
 # pipeline-e2e = e2e test that a harness pipe/quirk works (write locks trigger,
 # cookies inject, tool plumbing). rose-bench = harness-INDEPENDENT capability
 # measurement: fixture + prompt + evaluators are portable to any harness
@@ -222,6 +223,9 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     runner = raw.get("runner", "agent")
     if runner not in TASK_RUNNERS:
         raise ValueError(f"{item_id}: runner must be one of {sorted(TASK_RUNNERS)}")
+    harness = raw.get("harness", "rose")
+    if harness not in TASK_HARNESSES:
+        raise ValueError(f"{item_id}: harness must be one of {sorted(TASK_HARNESSES)}")
     if raw.get("bench") not in TASK_BENCHES:
         raise ValueError(f"{item_id}: bench must be declared explicitly, one of {sorted(TASK_BENCHES)}")
     min_steps = raw.get("min_steps")

@@ -736,6 +736,41 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     return DURABLE_BENCHMARK_FRONTEND_URL
 
 
+def _rose_api_url_for_codex_harness(base_url: str) -> str:
+    """Public Rose API origin reachable from E2B (frontend dev server proxies /api)."""
+    for key in ("BENCHMARK_PUBLIC_API_URL", "BACKEND_API_URL", "PUBLIC_API_URL"):
+        explicit = os.environ.get(key, "").strip()
+        if explicit:
+            return explicit.rstrip("/")
+    services_path = _benchmark_context_path() / "services.json"
+    if services_path.exists():
+        try:
+            urls = (json.loads(services_path.read_text()) or {}).get("urls") or {}
+            for field in ("backend_api", "public", "backend"):
+                candidate = str(urls.get(field) or "").strip()
+                if candidate:
+                    return candidate.rstrip("/")
+        except Exception:
+            pass
+    parsed = urlparse(base_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return base_url.rstrip("/")
+    public_frontend = os.environ.get("PUBLIC_BASE_URL", "").strip()
+    if public_frontend:
+        return public_frontend.rstrip("/")
+    if parsed.port:
+        return f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    return base_url.rstrip("/")
+
+
+def _effective_harness(task: BenchmarkTask) -> str:
+    override = os.environ.get("BENCHMARK_HARNESS", "").strip().lower()
+    if override in {"rose", "codex"}:
+        return override
+    harness = getattr(task, "harness", "rose") or "rose"
+    return harness if harness in {"rose", "codex"} else "rose"
+
+
 def _report_frontend_url_for_benchmark(base_url: str) -> str:
     """Human-facing agent links for report cards / RCA / descend evidence.
 
@@ -1380,6 +1415,23 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
 CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
     "Claude Code credentials unavailable: no synced Claude token and no available pool token"
 )
+CODEX_HARNESS_CREDENTIAL_SKIP_REASON = (
+    "Codex harness credentials unavailable: no synced GPT compute token and no funded OpenAI API key"
+)
+
+
+def _codex_harness_credential_skip_result(task: BenchmarkTask) -> TaskResult:
+    return TaskResult(
+        name=task.name,
+        passed=False,
+        agent_id="",
+        status="SKIPPED",
+        progress_score=0,
+        duration_seconds=0,
+        cost_cents=0,
+        message_count=0,
+        failure_reason=CODEX_HARNESS_CREDENTIAL_SKIP_REASON,
+    )
 
 
 def _claude_code_credential_skip_result(task: BenchmarkTask) -> TaskResult:
@@ -9141,6 +9193,10 @@ async def run_single_task(
         from benchmarks.sms_runner import build_deps_from_module, run_sms_task
 
         return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__]))
+    if _effective_harness(task) == "codex":
+        if not await _check_codex_harness_credentials(base_url):
+            print(f"  ⚠ Codex harness credentials unavailable at task dispatch — skipping: {task.name}")
+            return _codex_harness_credential_skip_result(task)
     # Parallel suites can queue a long-running Claude task for several minutes.
     # A credential that was available during the suite-level preflight may be
     # invalidated or enter cooldown before this task obtains its execution slot.
@@ -9340,6 +9396,19 @@ async def run_single_task(
                         auth_realm=str(task.browser_auth_realm),
                     )
                 )
+            )
+
+        if _effective_harness(task) == "codex":
+            from benchmarks.codex_runner import build_deps_from_module, run_codex_task
+
+            fast_mode_cache = _resolved_fast_mode_cache(task)
+            benchmark_goal = _benchmark_goal_for_task(task, base_url)
+            return await run_codex_task(
+                base_url,
+                task,
+                build_deps_from_module(sys.modules[__name__]),
+                benchmark_goal,
+                fast_mode_cache_enabled=fast_mode_cache,
             )
 
         # Handle attachments: create agent first, upload files, then post file messages
@@ -10599,6 +10668,25 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
         return False
 
 
+async def _check_codex_harness_credentials(base_url: str) -> bool:
+    """Codex harness requires a usable GPT compute token or funded OpenAI API key."""
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{base_url}/api/integrations/gpt-code/credentials/token",
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if bool(data.get("accessToken")):
+                    return True
+        return bool(os.environ.get("GPT_API_KEY", "").strip())
+    except Exception:
+        return False
+
+
 async def _check_claude_code_credentials(base_url: str) -> bool:
     """Check whether Claude Code can actually create a code session.
 
@@ -11523,6 +11611,13 @@ def main():
         default=None,
         help="Optional tree JSON output path for --checkpoint-source-index.",
     )
+    parser.add_argument(
+        "--harness",
+        choices=["rose", "codex"],
+        default=None,
+        help="Override benchmark harness (rose=Temporal agent workflow, codex=Codex E2B orchestrator). "
+        "Also set via BENCHMARK_HARNESS env.",
+    )
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
         "--prod",
@@ -11568,6 +11663,8 @@ def main():
 
     if args.anon:
         _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)
+    if args.harness:
+        os.environ["BENCHMARK_HARNESS"] = args.harness
     _apply_world_model_cli_env(args, parser)
 
     asyncio.run(main_async(args))

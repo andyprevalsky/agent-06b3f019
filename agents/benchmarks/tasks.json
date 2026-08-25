@@ -1690,6 +1690,102 @@
     ]
   },
   {
+    "name": "browser-doordash-food-plan-grocery-order",
+    "title": "DoorDash Food-Plan Grocery Order",
+    "description": "Reproduces prod premature-checkout failure: full Safeway grocery manifest must reach checkout, not a single-item cart.",
+    "prompt": "On DoorDash, execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session. Deliver to your saved Palo Alto address. Add ALL required ingredients before checkout: about 2.5 lb 93/7 ground beef, about 3 lb plain chicken breast, about 1.2 lb salmon, at least 700 g liquid egg whites, 1 dozen eggs, 7 Fairlife Elite 42g protein shakes, Kodiak Power Cakes mix, sweet potatoes (~4.5 lb), dry unsalted rice, PB2, Valentina hot sauce, frozen mixed berries, bananas, Fairlife 2% chocolate milk, Jell-O Zero Sugar chocolate fudge pudding, bok choy or comparable greens, no-salt-added crushed tomatoes, cheddar cheese, Fage 0% yogurt, olive oil, and iodized salt. Use low-sodium substitutions where needed; do not substitute sugar-alcohol sweeteners or banned items (diet soda, Olipop, taco seasoning packets, regular soy sauce). Do NOT proceed to checkout until the cart contains substantially all listed categories — a single-item cart (for example only Kodiak mix) is incorrect. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "grocery",
+      "doordash",
+      "food-plan"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "rose-bench",
+    "pinned_facts": {
+      "minimum_distinct_grocery_categories": 8,
+      "store": "Safeway",
+      "platform": "DoorDash",
+      "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1"
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "doordash.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
+      ],
+      "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex.",
+      "live_cookie_domains": [
+        "doordash.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "doordash-food-plan-cart-completeness",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The cart contains items from at least eight distinct required grocery categories from the prompt (protein, eggs, shakes, pancake mix, produce, pantry, dairy, condiments) — not a single SKU",
+          "Checkout or write-lock evidence shows multiple line items or a multi-item subtotal, not an order summary for exactly one item",
+          "The trajectory does not treat DoorDash Shop your list chrome as a populated cart without adding manifest items",
+          "Safeway is the store and delivery uses the saved Palo Alto address",
+          "Terminal state is payment/write-lock approval or completed checkout with the broad basket — not a rejected single-item premature checkout"
+        ],
+        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full weekly food-plan grocery manifest. Pass only if grounded cart/checkout evidence shows a multi-item basket spanning the required categories before terminal approval. Fail if the only checkout evidence is one item (for example one Kodiak box), if Shop your list list-count UI was mistaken for cart contents, or if checkout was attempted before most manifest categories were added."
+      },
+      {
+        "id": "doordash-food-plan-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "At least one browser-agent session is used"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "agent:c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "rca:2026-08-22-write-lock-rejected-never-closed-browser-status-chip"
+    ]
+  },
+  {
     "name": "browser-alchemy-springs-sauna",
     "title": "Alchemy Springs Sauna Session",
     "description": "Book a time-slotted local wellness service with a flexible Sunday window.",

@@ -3056,6 +3056,22 @@ def test_instacart_catalog_uses_complete_weekly_grocery_basket():
         assert requirement in criteria
 
 
+def test_doordash_food_plan_grocery_repro_contract():
+    """DoorDash food-plan grocery repro targets multi-item Safeway checkout, not one SKU."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    assert task.group == "daily"
+    assert task.harness == "rose"
+    assert "safeway" in task.prompt.lower()
+    assert "kodiak" in task.prompt.lower()
+    assert "single-item cart" in task.prompt.lower()
+    assert task.pinned_facts["minimum_distinct_grocery_categories"] >= 8
+    cart_evaluator = task.evaluators[0]
+    assert cart_evaluator["id"] == "doordash-food-plan-cart-completeness"
+    assert "single item" in cart_evaluator["judge_prompt"].lower()
+
+
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
     """Guest checkout domains stay scoped without requiring an injectable CookieBundle."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -12958,7 +12974,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
-def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
+def test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows():
     """The daily ecommerce slice stays focused, complete, and stable."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.fixtures import DEFAULT_BASE_IMAGE
@@ -12969,6 +12985,7 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
         "browser-toast-nopa-write-lock",
         "browser-instacart-grocery-order",
         "browser-doordash-usb-c-cable",
+        "browser-doordash-food-plan-grocery-order",
         "minted-agent-accounts-uber",
         "browser-agent-amazon-cookie-payment",
         "browser-alchemy-springs-sauna",
@@ -12982,7 +12999,7 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 12
+    assert len(ecommerce) == 13
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -15648,6 +15665,10 @@ async def run_all_tests():
         test_instacart_catalog_uses_complete_weekly_grocery_basket,
     )
     r.record(
+        "doordash_food_plan_grocery_repro_contract",
+        test_doordash_food_plan_grocery_repro_contract,
+    )
+    r.record(
         "live_cookie_scope_separate_from_injectable_cookie_requirement",
         test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement,
     )
@@ -15912,7 +15933,7 @@ async def run_all_tests():
     )
     r.record(
         "daily_ecommerce_v1_catalog",
-        test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows,
+        test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",
