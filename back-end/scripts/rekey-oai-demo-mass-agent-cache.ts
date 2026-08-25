@@ -31,8 +31,26 @@ type CreatorItem = {
   platforms?: unknown;
 };
 
+/** Match Python `json.dumps(obj, ensure_ascii=True)` spacing/separators for ASCII payloads. */
+function pyJsonDumps(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(pyJsonDumps).join(', ')}]`;
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => `${JSON.stringify(k)}: ${pyJsonDumps(v)}`);
+    return `{${entries.join(', ')}}`;
+  }
+  throw new Error(`unsupported json value: ${typeof value}`);
+}
+
 function buildForEachGoal(baseGoal: string, item: unknown): string {
-  return `${baseGoal}\n\nUse this row context for the task below.\nRow item:\n${JSON.stringify(item)}`;
+  // Must match agents/domains/spawn_agent/service.py:build_for_each_goal
+  // (Python json.dumps separators), not JS JSON.stringify.
+  return `${baseGoal}\n\nUse this row context for the task below.\nRow item:\n${pyJsonDumps(item)}`;
 }
 
 async function loadWarmPayload(prisma: PrismaClient): Promise<{

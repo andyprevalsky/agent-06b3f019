@@ -2172,3 +2172,30 @@ def test_position_prefix_pattern_matches_durable_slot():
     pattern = normalize.position_prefix_pattern("goal", "plan_loop", 2)
     gh = normalize.goal_hash("goal")
     assert pattern == f"fastmode:%:llm:{gh}:plan_loop:p:2:c:%"
+
+
+def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():
+    """JS JSON.stringify hashes diverge from Python json.dumps — rekey must use Python form."""
+    from domains.spawn_agent.service import build_for_each_goal
+
+    base = (
+        "Analyze the assigned creator only for a brand strategy project.\n"
+        "Current date is 2026-07-03."
+    )
+    item = {
+        "rank": 1,
+        "name": "Andrew Huberman",
+        "primary_niche_angle": "health/longevity + performance systems",
+        "platforms": {
+            "youtube": {"url": "https://www.youtube.com/@hubermanlab", "handle": "@hubermanlab"},
+            "instagram": None,
+            "tiktok": None,
+            "substack": None,
+        },
+    }
+    py_goal = build_for_each_goal(base, item)
+    js_like = f"{base}\n\nUse this row context for the task below.\nRow item:\n{json.dumps(item, separators=(',', ':'))}"
+    assert normalize.goal_hash(py_goal) != normalize.goal_hash(js_like)
+    # Spaced separators (Python default) must be what spawn_agent uses.
+    spaced = f"{base}\n\nUse this row context for the task below.\nRow item:\n{json.dumps(item, ensure_ascii=True)}"
+    assert normalize.goal_hash(py_goal) == normalize.goal_hash(spaced)
