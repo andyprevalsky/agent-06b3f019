@@ -19,7 +19,15 @@ import {
   shouldAutoCompactChat,
 } from '../../providers/chat/chatCompaction';
 import type { ChatMessage } from '../../providers/chat/initialContext';
+import { loadChatModelMessages } from '../../providers/chat/initialContext';
 import { splitHeadMiddleTail } from '../../providers/chat/splitHeadMiddleTail';
+import {
+  buildProdChatCompactionScenario,
+  PROD_CHAT_COMPACTION_AGENT_ID,
+  PROD_CHAT_COMPACTION_CONTINUE,
+  PROD_CHAT_COMPACTION_FOLLOW_UP,
+} from '../fixtures/chat-compaction-prod-3eb68a5c';
+import { COMPACTION_SUMMARY_PREFIX } from '../../providers/chat/chatCompactionPrompts';
 
 interface TestResult {
   name: string;
@@ -166,6 +174,127 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       if (split.middleIndices.length === 0) {
         throw new Error('expected non-empty middle');
       }
+    },
+  ],
+  [
+    'prod agent 3eb68a5c post-completion history exceeds auto-compact trigger',
+    () => {
+      const messages = buildProdChatCompactionScenario();
+      assertEqual(shouldAutoCompactChat(messages), true, 'prod-shaped chat should compact');
+      const tokens = estimateContextTokens(messages);
+      if (tokens < getAutoCompactThreshold()) {
+        throw new Error(
+          `prod fixture too small (${tokens} < ${getAutoCompactThreshold()}); shrink cycleCount`
+        );
+      }
+      if (messages.length < 500) {
+        throw new Error(`prod fixture should mirror ~586 messages, got ${messages.length}`);
+      }
+    },
+  ],
+  [
+    'prod agent 3eb68a5c history exceeds OpenRouter 262k context window without compaction',
+    () => {
+      const messages = buildProdChatCompactionScenario();
+      const tokens = estimateContextTokens(messages);
+      if (tokens < 262_144) {
+        throw new Error(
+          `prod fixture should exceed 262k OpenRouter window without compaction (${tokens})`
+        );
+      }
+    },
+  ],
+  [
+    'prod agent 3eb68a5c keeps failed follow-up asks in compaction tail',
+    () => {
+      const messages = buildProdChatCompactionScenario();
+      const split = splitHeadMiddleTail(messages);
+      if (!split) throw new Error('expected split for prod-shaped chat');
+
+      const tailTexts = split.tailIndices.map((index) => messages[index].text ?? '');
+      if (!tailTexts.some((text) => text.includes(PROD_CHAT_COMPACTION_FOLLOW_UP))) {
+        throw new Error('follow-up ask must remain in protected tail');
+      }
+      if (!tailTexts.some((text) => text === PROD_CHAT_COMPACTION_CONTINUE)) {
+        throw new Error('continue follow-up must remain in protected tail');
+      }
+    },
+  ],
+  [
+    'prod agent 3eb68a5c simulated compaction shrinks metadata-heavy history below trigger',
+    () => {
+      const messages = buildProdChatCompactionScenario();
+      const split = splitHeadMiddleTail(messages);
+      if (!split) throw new Error('expected split for prod-shaped chat');
+
+      const summary: ChatMessage = {
+        role: 'USER',
+        text: `${COMPACTION_SUMMARY_PREFIX} prior hotel research and option comparisons were summarized.`,
+        metadata: { compactionSummary: true },
+      };
+      const compressed = [
+        ...split.headIndices.map((index) => messages[index]),
+        summary,
+        ...split.tailIndices.map((index) => messages[index]),
+      ];
+
+      const before = estimateContextTokens(messages);
+      const after = estimateContextTokens(compressed);
+      if (after >= before) {
+        throw new Error(`simulated compaction must shrink context (${before} -> ${after})`);
+      }
+      if (shouldAutoCompactChat(compressed)) {
+        throw new Error(
+          `simulated compaction must land below trigger (${after} >= ${getAutoCompactThreshold()})`
+        );
+      }
+    },
+  ],
+  [
+    'loadChatModelMessages invokes compaction for prod-shaped post-completion history',
+    async () => {
+      const fixture = buildProdChatCompactionScenario();
+      let ensureCalls = 0;
+      const messages = await loadChatModelMessages(
+        {
+          agentId: PROD_CHAT_COMPACTION_AGENT_ID,
+          requestedModel: 'rose-labs/rose-1-lite',
+        },
+        {
+          findMessages: async () =>
+            fixture.map((message) => ({
+              role: message.role,
+              text: message.text,
+              filePointer: message.filePointer ?? null,
+              metadata: message.metadata ?? null,
+            })),
+          ensureWithinBudget: async (params) => {
+            ensureCalls += 1;
+            if (!shouldAutoCompactChat(projectModelContextAfterCompaction(params.rawMessages))) {
+              throw new Error('prod fixture must require compaction before router');
+            }
+            const split = splitHeadMiddleTail(projectModelContextAfterCompaction(params.rawMessages));
+            if (!split) throw new Error('expected split for prod-shaped chat');
+            return [
+              ...split.headIndices.map((index) => params.rawMessages[index]),
+              {
+                role: 'USER' as const,
+                text: `${COMPACTION_SUMMARY_PREFIX} summarized prior research.`,
+                metadata: { compactionSummary: true },
+              },
+              ...split.tailIndices.map((index) => params.rawMessages[index]),
+            ];
+          },
+        }
+      );
+
+      assertEqual(ensureCalls, 1, 'compaction hook invoked once');
+      assertEqual(shouldAutoCompactChat(messages), false, 'router input must be under trigger');
+      assertEqual(
+        messages.some((message) => message.text?.includes(PROD_CHAT_COMPACTION_FOLLOW_UP)),
+        true,
+        'follow-up ask preserved after compaction'
+      );
     },
   ],
 ];
