@@ -1717,6 +1717,10 @@
       "payment_approval",
       "write_lock"
     ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1770,7 +1774,7 @@
         "method": "static_check",
         "criteria": [
           "No tool call fails",
-          "At least one browser-agent session is used"
+          "Exactly one browser-agent session is used"
         ],
         "checks": [
           {
@@ -1778,7 +1782,8 @@
           },
           {
             "type": "browser_agent_session_count",
-            "min": 1
+            "min": 1,
+            "max": 1
           }
         ]
       }

@@ -3069,6 +3069,8 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert task.pinned_facts["prod_user_id"] == "5824c58c-7f11-4c92-8f81-33eb3c324a2f"
     assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
     assert task.environment["required_injectable_cookie_domains"] == ["doordash.com"]
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
     cart_evaluator = task.evaluators[0]
     assert cart_evaluator["id"] == "doordash-food-plan-cart-completeness"
     assert "one item" in cart_evaluator["judge_prompt"].lower()
