@@ -3067,9 +3067,12 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert "kodiak" in task.prompt.lower()
     assert "single-item cart" in task.prompt.lower()
     assert task.pinned_facts["minimum_distinct_grocery_categories"] >= 8
+    assert task.pinned_facts["prod_user_id"] == "5824c58c-7f11-4c92-8f81-33eb3c324a2f"
+    assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
+    assert task.environment["required_injectable_cookie_domains"] == ["doordash.com"]
     cart_evaluator = task.evaluators[0]
     assert cart_evaluator["id"] == "doordash-food-plan-cart-completeness"
-    assert "single item" in cart_evaluator["judge_prompt"].lower()
+    assert "one item" in cart_evaluator["judge_prompt"].lower()
 
 
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
@@ -13008,7 +13011,10 @@ def test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows():
     for name in expected_names:
         loaded = get_task_by_name(name)
         assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
-        assert loaded.environment["live_fixtures"] == ["live"]
+        if name == "browser-doordash-food-plan-grocery-order":
+            assert loaded.environment["live_fixtures"] == ["live-aman-food-plan-identity"]
+        else:
+            assert loaded.environment["live_fixtures"] == ["live"]
 
 
 def test_browser_search_single_result_tasks_use_browser_only():
@@ -13732,7 +13738,7 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity"}
+    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-aman-food-plan-identity"}
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -13809,7 +13815,7 @@ def test_live_fixture_is_single_and_explicit():
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity"}, (
+        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-aman-food-plan-identity"}, (
             f"{t.name}: noncanonical live fixture"
         )
         if env.get("mode") == "synthetic":

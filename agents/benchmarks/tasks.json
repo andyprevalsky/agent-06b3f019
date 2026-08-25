@@ -1693,7 +1693,7 @@
     "name": "browser-doordash-food-plan-grocery-order",
     "title": "DoorDash Food-Plan Grocery Order",
     "description": "Reproduces prod premature-checkout failure: full Safeway grocery manifest must reach checkout, not a single-item cart.",
-    "prompt": "On DoorDash, execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session. Deliver to your saved Palo Alto address. Add ALL required ingredients before checkout: about 2.5 lb 93/7 ground beef, about 3 lb plain chicken breast, about 1.2 lb salmon, at least 700 g liquid egg whites, 1 dozen eggs, 7 Fairlife Elite 42g protein shakes, Kodiak Power Cakes mix, sweet potatoes (~4.5 lb), dry unsalted rice, PB2, Valentina hot sauce, frozen mixed berries, bananas, Fairlife 2% chocolate milk, Jell-O Zero Sugar chocolate fudge pudding, bok choy or comparable greens, no-salt-added crushed tomatoes, cheddar cheese, Fage 0% yogurt, olive oil, and iodized salt. Use low-sodium substitutions where needed; do not substitute sugar-alcohol sweeteners or banned items (diet soda, Olipop, taco seasoning packets, regular soy sauce). Do NOT proceed to checkout until the cart contains substantially all listed categories — a single-item cart (for example only Kodiak mix) is incorrect. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "prompt": "Execute the complete DoorDash grocery purchase for the weekly food-plan using your authenticated DoorDash session, the Safeway store at 2811 Middlefield Rd in Palo Alto, and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address and use saved payment. Add ALL required ingredients across protein, eggs, shakes, pancake mix, produce, pantry, dairy, and condiments before checkout — a single-item cart (for example only Kodiak mix) is incorrect. Use at most two stores (Safeway first; 99 Ranch only for Asian pantry items if needed). Complete checkout and stop at payment/write-lock approval when the harness requires it.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1726,15 +1726,13 @@
       "minimum_distinct_grocery_categories": 8,
       "store": "Safeway",
       "platform": "DoorDash",
-      "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1"
+      "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "prod_user_id": "5824c58c-7f11-4c92-8f81-33eb3c324a2f"
     },
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": [
-        "live"
-      ],
       "services": [
         "doordash.com",
         "write_lock"
@@ -1744,7 +1742,13 @@
         "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
       ],
       "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex.",
+      "live_fixtures": [
+        "live-aman-food-plan-identity"
+      ],
       "live_cookie_domains": [
+        "doordash.com"
+      ],
+      "required_injectable_cookie_domains": [
         "doordash.com"
       ]
     },
