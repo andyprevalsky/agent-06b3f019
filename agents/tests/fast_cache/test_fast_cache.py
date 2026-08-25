@@ -2222,6 +2222,9 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     swf = soft_complete_on_miss("summarize_web_fetch")
     assert swf is not None
     assert "trajectory ended" in swf["content"]
+    parsed = json.loads(swf["content"])
+    assert parsed["summary"]
+    assert parsed["files_to_download"] == []
 
     execute = soft_complete_on_miss("execute_loop")
     assert execute is not None

@@ -214,14 +214,20 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
             },
         }
     if site == "summarize_web_fetch":
+        # Must be valid WebFetchHaikuResponse JSON — this call site always
+        # passes response_model=WebFetchHaikuResponse.
+        soft_summary = (
+            '{"summary":"Fast Mode cache trajectory ended; no additional '
+            'summary.","files_to_download":[]}'
+        )
         return {
             "actual_model": "fast-mode-soft-complete",
             "pool_name": "",
             "request_id": "fast-mode-soft-complete",
-            "content": "Fast Mode cache trajectory ended; no additional summary.",
+            "content": soft_summary,
             "content_chunks": [
                 {
-                    "text": "Fast Mode cache trajectory ended; no additional summary.",
+                    "text": soft_summary,
                     "item_id": "cache:soft:0",
                     "output_index": 0,
                     "content_index": 0,
@@ -316,10 +322,10 @@ async def cached_complete(
         # transport failures must fall through to live so we don't mask outages.
         if not lookup_failed:
             soft = soft_complete_on_miss(call_site)
-            # Structured response_model streams cannot consume a content-only
-            # soft-complete; replaying one fails parse and the verifier retry
-            # path flips to write-only live LLM.
-            if soft is not None and complete_kwargs.get("response_model") is None:
+            # soft_complete_on_miss already excludes verifier_* / unknown sites.
+            # Explore + summarize_web_fetch both pass response_model; their soft
+            # payloads are schema-faithful (tool_calls / WebFetchHaikuResponse JSON).
+            if soft is not None:
                 logger.info(
                     "llm.cache.soft_complete",
                     call_site=call_site,
