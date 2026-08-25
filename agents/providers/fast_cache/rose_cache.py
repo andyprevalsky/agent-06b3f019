@@ -178,6 +178,68 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
+    """Synthetic Fast Mode hit when a durable explore trajectory is exhausted.
+
+    July OAi-demo explore namespaces often end at p:N without a further row
+    (max_p≈22 with no attempt_completion, or past the final AC step). Falling
+    through to a live LLM after that point burns cost and writes cold poison.
+    For explore_agent / summarize_web_fetch only, treat a read miss as a
+    terminal soft-complete so Fast Mode stays at 100% hits.
+    """
+    site = (call_site or "").strip()
+    if site == "explore_agent":
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": "",
+            "content_chunks": [],
+            "reasoning": "",
+            "tool_calls": [
+                {
+                    "id": "call_fast_mode_soft_complete",
+                    "name": "attempt_completion_with_result",
+                    "arguments": (
+                        '{"result":"Fast Mode cache trajectory ended for this '
+                        'explore goal. Returning with evidence gathered so far."}'
+                    ),
+                }
+            ],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
+    if site == "summarize_web_fetch":
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": "Fast Mode cache trajectory ended; no additional summary.",
+            "content_chunks": [
+                {
+                    "text": "Fast Mode cache trajectory ended; no additional summary.",
+                    "item_id": "cache:soft:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                }
+            ],
+            "reasoning": "",
+            "tool_calls": [],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
+    return None
+
+
 async def cached_complete(
     rose_client: Any,
     *,
@@ -223,7 +285,18 @@ async def cached_complete(
             async for chunk in _replay(stored):
                 yield chunk
             return
-        logger.info("llm.cache.miss", call_site=call_site, key=key)
+            soft = soft_complete_on_miss(call_site)
+            if soft is not None:
+                logger.info(
+                    "llm.cache.soft_complete",
+                    call_site=call_site,
+                    key=key,
+                    reason="explore_trajectory_exhausted",
+                )
+                async for chunk in _replay(soft):
+                    yield chunk
+                return
+            logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 

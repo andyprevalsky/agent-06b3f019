@@ -2208,3 +2208,19 @@ def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():
         f"{json.dumps(item, ensure_ascii=True)}"
     )
     assert normalize.goal_hash(py_goal) != normalize.goal_hash(unsorted)
+
+
+def test_soft_complete_on_miss_for_explore_sites_only():
+    from providers.fast_cache.rose_cache import soft_complete_on_miss
+
+    explore = soft_complete_on_miss("explore_agent")
+    assert explore is not None
+    assert explore["tool_calls"][0]["name"] == "attempt_completion_with_result"
+    assert explore["usage"]["from_fast_cache"] is True
+
+    swf = soft_complete_on_miss("summarize_web_fetch")
+    assert swf is not None
+    assert "trajectory ended" in swf["content"]
+
+    assert soft_complete_on_miss("plan_loop") is None
+    assert soft_complete_on_miss("execute_loop") is None

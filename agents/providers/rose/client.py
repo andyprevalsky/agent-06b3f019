@@ -561,6 +561,7 @@ class RoseClient:
         from providers.fast_cache.rose_cache import (
             request_key_material as _fc_request_key_material,
         )
+        from providers.fast_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
 
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
@@ -625,6 +626,17 @@ class RoseClient:
                     alias_hit=bool(hit_key and hit_key != key),
                 )
                 async for chunk in _fc_replay(stored):
+                    yield chunk
+                return
+            soft = _fc_soft_complete(call_site)
+            if soft is not None:
+                logger.info(
+                    "llm.cache.soft_complete",
+                    call_site=call_site,
+                    key=key,
+                    reason="explore_trajectory_exhausted",
+                )
+                async for chunk in _fc_replay(soft):
                     yield chunk
                 return
             logger.info("llm.cache.miss", call_site=call_site, key=key)
