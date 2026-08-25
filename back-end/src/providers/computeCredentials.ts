@@ -70,6 +70,51 @@ function integrationNamesForAffinity(
   return ['claude_code', 'gpt_code'];
 }
 
+function alternateComputeTokenType(
+  tokenType: ComputeCodeCredentialType
+): ComputeCodeCredentialType {
+  return tokenType === 'claude' ? 'gpt' : 'claude';
+}
+
+async function updateFastCacheAffinityType(
+  affinityKey: string,
+  userId: string,
+  tokenType: ComputeCodeCredentialType
+): Promise<void> {
+  try {
+    await prisma.computeTokenFastCacheAffinity.upsert({
+      where: { affinityKey },
+      create: { affinityKey, userId, tokenType },
+      update: { tokenType },
+    });
+  } catch (error) {
+    log.error('Unexpected error updating fast-cache affinity', { affinityKey, error });
+  }
+}
+
+async function fetchAlternatePinnedComputeToken(
+  userId: string,
+  options: { forcePool?: boolean; excludePoolTokenIds?: string[] } & ComputeLeaseOptions,
+  exhaustedType: ComputeCodeCredentialType
+): Promise<ComputeCodeCredentialResult | null> {
+  const alternate = alternateComputeTokenType(exhaustedType);
+  const fastCacheAffinityKey = normalizeFastCacheAffinityKey(options.fastCacheAffinityKey);
+  log.info('Pinned compute token type exhausted; rotating to alternate provider', {
+    userId,
+    fromType: exhaustedType,
+    toType: alternate,
+    fastCacheAffinityKey,
+  });
+  const alternateResult = await fetchComputeTokenForUser(userId, {
+    ...options,
+    tokenType: alternate,
+  });
+  if (alternateResult && fastCacheAffinityKey !== null) {
+    await updateFastCacheAffinityType(fastCacheAffinityKey, userId, alternate);
+  }
+  return alternateResult;
+}
+
 function decryptIntegrationCredentials(integration: IntegrationRow, decryptionKey: string) {
   const config = integration.config as Record<string, unknown> | null;
   const encryptedCredentials = config?.encryptedCredentials as string | undefined;
@@ -498,7 +543,12 @@ export async function fetchComputeTokenForUser(
       now,
       lineage
     );
-    if (!poolToken) return null;
+    if (!poolToken) {
+      if (requestedTokenType === null && pinnedTokenType !== null) {
+        return fetchAlternatePinnedComputeToken(userId, options ?? {}, pinnedTokenType);
+      }
+      return null;
+    }
     if (requestedTokenType !== null) return poolToken;
     const affinityType = await persistOrReadFastCacheAffinity(
       fastCacheAffinityKey,
@@ -517,7 +567,12 @@ export async function fetchComputeTokenForUser(
     const userToken = await fetchComputeUserToken(userId, pinnedTokenType);
     if (userToken) return userToken;
   }
-  return fetchComputePoolToken(options?.excludePoolTokenIds, pinnedTokenType);
+  const poolToken = await fetchComputePoolToken(options?.excludePoolTokenIds, pinnedTokenType);
+  if (poolToken) return poolToken;
+  if (requestedTokenType === null && pinnedTokenType !== null) {
+    return fetchAlternatePinnedComputeToken(userId, options ?? {}, pinnedTokenType);
+  }
+  return null;
 }
 
 export async function heartbeatComputeTokenLineage(lineageKey: string) {

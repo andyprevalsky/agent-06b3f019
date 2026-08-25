@@ -6178,6 +6178,29 @@ async def heartbeat_compute_token_lineage_activity(lineage_key: str) -> bool:
 
 
 @activity.defn
+async def release_compute_token_lineage_activity(lineage_key: str) -> bool:
+    """Release a compute-token lineage lease so rotation can acquire a different token."""
+    if not lineage_key:
+        return False
+    config = load_config()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/integrations/compute-code/token/lineage-release",
+                headers={
+                    "X-API-Key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                },
+                json={"lineageKey": lineage_key},
+                timeout=5.0,
+            )
+            return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"Compute token lineage release failed: {e}")
+        return False
+
+
+@activity.defn
 async def mark_claude_token_rate_limited_activity(
     source: str,
     user_id: str,
