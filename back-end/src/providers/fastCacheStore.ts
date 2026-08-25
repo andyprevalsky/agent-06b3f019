@@ -368,35 +368,64 @@ export async function cacheGetPosition(args: {
   // Match both historical CACHE_KEY_VERSION values (v42/v43) under the durable
   // trajectory slot: fastmode:vN:llm:{goalHash}:{site}:p:{step}:c:{fingerprint}
   // or content-addressed: fastmode:vN:llm:{goalHash}:{site}:c:{hash}
-  const pattern =
+  //
+  // Prefer the oldest warm-era row (created before 2026-08-25) so cold writes
+  // from failed Fast Mode verifies cannot poison OAi-demo replay. Fall back to
+  // any oldest row when no warm-era match exists.
+  //
+  // When an exact step misses, fall back to the oldest position-keyed row for
+  // the same call site (any step). Jul 2026 summarize_web_fetch trajectories
+  // often start at p:2 while today's explore ambient step is p:1 — exact-step
+  // miss would otherwise force a live LLM call and break 100% Fast Mode.
+  const patterns: string[] =
     step === null
-      ? `fastmode:%:llm:${args.goalHash}:${site}:c:%`
-      : `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`;
-  const rows = await getFastCachePrisma().$queryRawUnsafe<
-    Array<{ key: string; value: unknown; blobPath: string | null }>
-  >(
-    `
-    SELECT key, value, "blobPath"
-    FROM "FastModeCacheEntry"
-    WHERE "goalHash" = $1
-      AND kind = 'llm'
-      AND key LIKE $2
-    ORDER BY "createdAt" ASC
-    LIMIT 1
-  `,
-    args.goalHash,
-    pattern
-  );
-  const row = rows[0];
-  if (!row) return { hit: false, value: null, blobPath: null, key: null };
-  const result: CacheGetResult & { key: string | null } = {
-    hit: true,
-    value: row.value,
-    blobPath: row.blobPath,
-    key: row.key,
-  };
-  writeMemoryCache(row.key, args.goalHash, result);
-  return result;
+      ? [`fastmode:%:llm:${args.goalHash}:${site}:c:%`]
+      : [
+          `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`,
+          `fastmode:%:llm:${args.goalHash}:${site}:p:%:c:%`,
+        ];
+
+  for (const pattern of patterns) {
+    for (const warmOnly of [true, false]) {
+      const rows = await getFastCachePrisma().$queryRawUnsafe<
+        Array<{ key: string; value: unknown; blobPath: string | null }>
+      >(
+        warmOnly
+          ? `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2
+              AND "createdAt" < TIMESTAMPTZ '2026-08-25'
+            ORDER BY "createdAt" ASC
+            LIMIT 1
+          `
+          : `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2
+            ORDER BY "createdAt" ASC
+            LIMIT 1
+          `,
+        args.goalHash,
+        pattern
+      );
+      const row = rows[0];
+      if (!row) continue;
+      const result: CacheGetResult & { key: string | null } = {
+        hit: true,
+        value: row.value,
+        blobPath: row.blobPath,
+        key: row.key,
+      };
+      writeMemoryCache(row.key, args.goalHash, result);
+      return result;
+    }
+  }
+  return { hit: false, value: null, blobPath: null, key: null };
 }
 
 export async function agentFastMode(agentId: string): Promise<{

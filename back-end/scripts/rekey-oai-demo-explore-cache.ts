@@ -121,21 +121,31 @@ async function main() {
       `%${t.creatorHint.split(/\s+/).slice(0, 2).join('%')}%`
     );
 
-    // Skip if dest already has warm-era explore rows (not just today's cold writes)
-    const destWarm = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+    // Skip only if dest already has a *rich* warm July explore+swf namespace.
+    // Sparse namespaces (2–5 explore, 0 swf) look "warm" but fail after early
+    // turns — those must still be enriched from a richer July source.
+    const destWarm = await prisma.$queryRawUnsafe<
+      Array<{ explore: number; swf: number }>
+    >(
       `
-      SELECT count(*)::int AS n FROM "FastModeCacheEntry"
+      SELECT
+        count(*) FILTER (WHERE key LIKE '%:explore_agent:%')::int AS explore,
+        count(*) FILTER (WHERE key LIKE '%:summarize_web_fetch:%')::int AS swf
+      FROM "FastModeCacheEntry"
       WHERE "goalHash" = $1
-        AND key LIKE '%:explore_agent:%'
-        AND "createdAt" < '2026-08-25'
+        AND "createdAt" < '2026-08-01'
+        AND (key LIKE '%:explore_agent:%' OR key LIKE '%:summarize_web_fetch:%')
     `,
       t.destHash
     );
-    if ((destWarm[0]?.n || 0) > 0) {
+    const warmEx = destWarm[0]?.explore || 0;
+    const warmSwf = destWarm[0]?.swf || 0;
+    if (warmEx >= 10 && warmSwf >= 3) {
       report.push({
         ...t,
         status: 'already_warm',
-        destWarmExplore: destWarm[0].n,
+        destWarmExplore: warmEx,
+        destWarmSwf: warmSwf,
       });
       continue;
     }

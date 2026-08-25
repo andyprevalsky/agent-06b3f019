@@ -163,6 +163,27 @@ async function main(): Promise<void> {
     await post('/api/fast-cache/purge', { goalHash: posGoal });
   });
 
+  await test('get-position falls back to any-step when exact step misses', async () => {
+    const posGoal = `bbposdrift${Date.now().toString(16)}`;
+    const key = `fastmode:v42:llm:${posGoal}:summarize_web_fetch:p:2:c:cccccccccccccccccccccccccccccccc`;
+    await post('/api/fast-cache/set', {
+      key,
+      kind: 'llm',
+      goalHash: posGoal,
+      value: { content: 'SWF_P2' },
+    });
+    const pos = await post('/api/fast-cache/get-position', {
+      goalHash: posGoal,
+      callSite: 'summarize_web_fetch',
+      step: 1,
+    });
+    assert(pos.status === 200, `get-position status ${pos.status}`);
+    assert(pos.json.hit === true, 'expected any-step fallback hit');
+    assert((pos.json.value as JsonObject).content === 'SWF_P2', 'must replay oldest site row');
+    assert(pos.json.key === key, 'must return p:2 key for p:1 miss');
+    await post('/api/fast-cache/purge', { goalHash: posGoal });
+  });
+
   await test('#26 secrets stripped at the route', async () => {
     const skey = `${key}:secret`;
     await post('/api/fast-cache/set', {
