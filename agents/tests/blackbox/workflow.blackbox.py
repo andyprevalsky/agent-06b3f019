@@ -392,6 +392,7 @@ async def mock_fetch_compute_token_activity(
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
     fast_cache_affinity_key: Optional[str] = None,
+    token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     return None
 
@@ -5889,7 +5890,8 @@ async def test_workflow_rotate_compute_token_releases_lineage_and_refetches():
             c for c in fake.activity_calls if c[0] == "release_compute_token_lineage_activity"
         )
         assert release_call[1] == ["agent:agent-rotate"]
-        assert "fetch_compute_token_activity" in activity_names
+        fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
+        assert fetch_call[1][-1] == "gpt"
     finally:
         _restore_workflow(original)
 
@@ -5929,6 +5931,8 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
         assert mark_call[1] == ["claude", "pool", "user-1", "pool-id-1", 5 * 60, None, "auth_error"]
         assert "release_compute_token_lineage_activity" in activity_names
+        fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
+        assert fetch_call[1][-1] == "gpt"
     finally:
         _restore_workflow(original)
 
@@ -6034,6 +6038,8 @@ async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
         mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
         assert mark_call[1] == ["gpt", "pool", "user-1", "gpt-pool-1", 5 * 60, None, "auth_error"]
         assert "release_compute_token_lineage_activity" in activity_names
+        fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
+        assert fetch_call[1][-1] == "claude"
     finally:
         _restore_workflow(original)
 

@@ -6094,6 +6094,7 @@ async def fetch_compute_token_activity(
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
     fast_cache_affinity_key: Optional[str] = None,
+    token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Fetch one provider-typed compute token across Claude/GPT from the backend."""
     config = load_config()
@@ -6111,7 +6112,9 @@ async def fetch_compute_token_activity(
                 params["rootAgentId"] = root_agent_id
             if fast_cache_affinity_key:
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
-            if anthropic_family_excluded():
+            if token_type in ("claude", "gpt"):
+                params["tokenType"] = token_type
+            elif anthropic_family_excluded():
                 params["tokenType"] = "gpt"
             elif pinned_benchmark_type:
                 params["tokenType"] = pinned_benchmark_type

@@ -2107,7 +2107,9 @@ class AgentWorkflow:
         self.compute_token_fetched_at = now
         return True
 
-    async def _refresh_compute_token(self, user_id: str, *, force: bool = False) -> None:
+    async def _refresh_compute_token(
+        self, user_id: str, *, force: bool = False, token_type: Optional[str] = None
+    ) -> None:
         """Fetch or refresh the selected direct compute token if missing or expired."""
         now = workflow.now()
         fetched_at = self.compute_token_fetched_at or self.claude_max_token_fetched_at
@@ -2126,6 +2128,7 @@ class AgentWorkflow:
                     self.agent_id,
                     self.agent_id,
                     self.compute_token_fast_cache_affinity_key,
+                    token_type,
                 ],
                 start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -2143,6 +2146,12 @@ class AgentWorkflow:
 
     async def _rotate_compute_token(self, user_id: str) -> None:
         """Release lineage, clear the cached token, and fetch the next available compute token."""
+        failed_provider = self.compute_token_provider
+        rotate_token_type: Optional[str] = None
+        if failed_provider == "claude":
+            rotate_token_type = "gpt"
+        elif failed_provider == "gpt":
+            rotate_token_type = "claude"
         if self.compute_token_lineage_key:
             try:
                 await workflow.execute_activity(
@@ -2156,7 +2165,7 @@ class AgentWorkflow:
                     f"Failed to release compute token lineage during rotation: {release_error}"
                 )
         self._clear_compute_token()
-        await self._refresh_compute_token(user_id, force=True)
+        await self._refresh_compute_token(user_id, force=True, token_type=rotate_token_type)
 
     def _active_claude_token(self) -> Optional[str]:
         return self.claude_max_token if self.compute_token_provider == "claude" else None
