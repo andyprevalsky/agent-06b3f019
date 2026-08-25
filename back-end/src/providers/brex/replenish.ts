@@ -11,7 +11,10 @@
  *     would see a still-low float and stack duplicate transfers.
  *  2. Brex `Idempotency-Key` on every POST, so a retried request is de-duplicated provider-side.
  *  3. Bounded by a per-transfer max and by Brex's own available balance.
- *  4. Disabled by default, and inert until BREX_COINBASE_COUNTERPARTY_ID is configured.
+ *  4. HARD-DISABLED (2026-08-24): the Brex→Coinbase rail was stacking broken transfers and
+ *     burning cash. `enabled` is forced false regardless of
+ *     COINBASE_FLOAT_REPLENISH_ENABLED until the rail is fixed and explicitly re-enabled in code.
+ *     Also inert until BREX_COINBASE_COUNTERPARTY_ID is configured.
  */
 
 import { prisma } from '../database';
@@ -73,8 +76,10 @@ export function floatReplenishPolicyFromEnvironment(): FloatReplenishPolicy {
     }
     return value;
   };
+  // HARD KILL SWITCH: ignore COINBASE_FLOAT_REPLENISH_ENABLED until the Brex→Coinbase rail is
+  // fixed. Env alone previously re-armed hourly ACH/wires after a restart and kept burning cash.
   const policy: FloatReplenishPolicy = {
-    enabled: process.env.COINBASE_FLOAT_REPLENISH_ENABLED === '1',
+    enabled: false,
     floorCents: read('COINBASE_FLOAT_FLOOR_CENTS', DEFAULT_FLOOR_CENTS),
     targetCents: read('COINBASE_FLOAT_TARGET_CENTS', DEFAULT_TARGET_CENTS),
     minTransferCents: read('COINBASE_FLOAT_MIN_TRANSFER_CENTS', DEFAULT_MIN_TRANSFER_CENTS),

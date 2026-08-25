@@ -20,6 +20,8 @@
 import { CheckCircle, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { WaitForCheck } from '../../types';
+import type { SubAgentStreamingMetrics } from '../useMessageFiltering';
+import { resolveSubAgentStreamingMetrics } from '../useMessageFiltering';
 import { formatDuration, timeAgo } from './helpers';
 import { InlineExploreChip } from './InlineExploreChip';
 import { WaitForConditionHeader } from './WaitForConditionHeader';
@@ -38,6 +40,7 @@ export interface WaitForConditionChipProps {
   totalChecksCompleted?: number;
   thinkingStreamTokenCount?: number;
   thinkingStreamStartedAtMs?: number;
+  streamingMetricsBySubAgentId?: Map<string, SubAgentStreamingMetrics>;
 }
 
 function useNextCheckCountdown(params: {
@@ -131,15 +134,28 @@ function CheckHistoryRow({
   check,
   fallbackNumber,
   isLive,
-  thinkingStreamTokenCount,
-  thinkingStreamStartedAtMs,
+  streamingMetricsBySubAgentId,
+  fallbackThinkingStreamTokenCount,
+  fallbackThinkingStreamStartedAtMs,
 }: {
   check: WaitForCheck;
   fallbackNumber: number;
   isLive: boolean;
-  thinkingStreamTokenCount: number;
-  thinkingStreamStartedAtMs?: number;
+  streamingMetricsBySubAgentId?: Map<string, SubAgentStreamingMetrics>;
+  fallbackThinkingStreamTokenCount: number;
+  fallbackThinkingStreamStartedAtMs?: number;
 }) {
+  const exploreMetrics =
+    check.exploreTaskId && streamingMetricsBySubAgentId
+      ? resolveSubAgentStreamingMetrics(check.exploreTaskId, streamingMetricsBySubAgentId)
+      : undefined;
+  const thinkingStreamTokenCount =
+    exploreMetrics !== undefined
+      ? Math.round(exploreMetrics.charCount / 4)
+      : fallbackThinkingStreamTokenCount;
+  const thinkingStreamStartedAtMs =
+    exploreMetrics?.streamStartedAtMs ?? fallbackThinkingStreamStartedAtMs;
+
   if (!check.explore) {
     return (
       <div className="flex items-center gap-1.5 border-t border-border/40 px-3 py-2">
@@ -163,13 +179,15 @@ function CheckHistoryRow({
 function CheckHistory({
   checks,
   liveCheck,
-  thinkingStreamTokenCount,
-  thinkingStreamStartedAtMs,
+  streamingMetricsBySubAgentId,
+  fallbackThinkingStreamTokenCount,
+  fallbackThinkingStreamStartedAtMs,
 }: {
   checks: WaitForCheck[];
   liveCheck?: WaitForCheck;
-  thinkingStreamTokenCount: number;
-  thinkingStreamStartedAtMs?: number;
+  streamingMetricsBySubAgentId?: Map<string, SubAgentStreamingMetrics>;
+  fallbackThinkingStreamTokenCount: number;
+  fallbackThinkingStreamStartedAtMs?: number;
 }) {
   const newestFirst = [...checks].reverse();
   return (
@@ -186,8 +204,9 @@ function CheckHistory({
             check={check}
             fallbackNumber={checks.length - index}
             isLive={check === liveCheck}
-            thinkingStreamTokenCount={thinkingStreamTokenCount}
-            thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+            streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+            fallbackThinkingStreamTokenCount={fallbackThinkingStreamTokenCount}
+            fallbackThinkingStreamStartedAtMs={fallbackThinkingStreamStartedAtMs}
           />
         ))}
       </div>
@@ -209,6 +228,7 @@ export function WaitForConditionChip({
   totalChecksCompleted,
   thinkingStreamTokenCount = 0,
   thinkingStreamStartedAtMs,
+  streamingMetricsBySubAgentId,
 }: WaitForConditionChipProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const nextCheckIn = useNextCheckCountdown({
@@ -244,8 +264,9 @@ export function WaitForConditionChip({
             <CheckHistory
               checks={checks}
               liveCheck={liveCheck}
-              thinkingStreamTokenCount={thinkingStreamTokenCount}
-              thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+              streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+              fallbackThinkingStreamTokenCount={thinkingStreamTokenCount}
+              fallbackThinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
             />
           )}
         </div>

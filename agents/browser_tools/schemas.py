@@ -103,6 +103,55 @@ class ExtractTool(BaseModel):
     instruction: str = Field(description="Clear instruction describing what data to extract from the page")
 
 
+class ReadLogsBrowserTool(BaseModel):
+    """Read merged browser console + network logs with regex filtering."""
+
+    tool: Literal["read_logs"]
+    pattern: Optional[str] = Field(
+        default=None,
+        description="Optional regex matched against each log line (console text, network summary, URL, status).",
+    )
+    limit: Optional[int] = Field(default=None, description="Maximum number of log lines to return (default 100).")
+    clear: Optional[bool] = Field(default=None, description="When true, clear captured logs after reading.")
+    sources: Optional[List[str]] = Field(
+        default=None,
+        description="Optional subset of log sources: 'console', 'network'. Defaults to both.",
+    )
+    level: Optional[str] = Field(
+        default=None,
+        description="Optional console level filter (e.g. 'error', 'warning', 'log').",
+    )
+    status: Optional[str] = Field(
+        default=None,
+        description="Optional network status filter when network source is included: '403', '4xx', 'error', 'ok'.",
+    )
+    url_pattern: Optional[str] = Field(
+        default=None,
+        description="Optional substring filter for network request URLs.",
+    )
+    method: Optional[str] = Field(default=None, description="Optional HTTP method filter for network rows.")
+    resource_type: Optional[str] = Field(
+        default=None,
+        description="Optional network resource-type filter (e.g. 'Fetch', 'XHR').",
+    )
+    include_query: Optional[bool] = Field(
+        default=None,
+        description="When true, return full network URLs including query strings.",
+    )
+    include_headers: Optional[bool] = Field(
+        default=None,
+        description="When true, include network request/response headers (credentials masked).",
+    )
+    include_bodies: Optional[bool] = Field(
+        default=None,
+        description="When true, include captured network request/response bodies.",
+    )
+    max_body_chars: Optional[int] = Field(
+        default=None,
+        description="Per-body character cap when include_bodies is set (default 4000).",
+    )
+
+
 class ReadNetworkRequestsBrowserTool(BaseModel):
     """Read the HTTP network requests made by the current page, with optional headers and bodies."""
 
@@ -174,6 +223,67 @@ class ClickAtCoordinatesTool(BaseModel):
     x: int = Field(description="X coordinate in pixels from left edge of viewport")
     y: int = Field(description="Y coordinate in pixels from top edge of viewport")
     button: Literal["left", "right", "middle"] = Field(default="left", description="Mouse button to click")
+
+
+class DragTool(BaseModel):
+    """Drag from a start point to an end point via CDP mouse press/move/release.
+
+    Prefer indexed elements when both ends appear in the DOM tree. Use viewport
+    coordinates (matching screenshot pixels) when the control is visual-only
+    (CAPTCHA / Bot or Not slider, canvas, etc.).
+    """
+
+    tool: Literal["drag"]
+    source_index: Optional[int] = Field(
+        default=None,
+        description="DOM index of the drag start element (e.g. slider thumb)",
+    )
+    target_index: Optional[int] = Field(
+        default=None,
+        description="DOM index of the drag end / drop target element",
+    )
+    start_x: Optional[int] = Field(
+        default=None,
+        description="Viewport X of drag start (pixels from left; matches screenshot)",
+    )
+    start_y: Optional[int] = Field(
+        default=None,
+        description="Viewport Y of drag start (pixels from top; matches screenshot)",
+    )
+    end_x: Optional[int] = Field(
+        default=None,
+        description="Viewport X of drag end (pixels from left; matches screenshot)",
+    )
+    end_y: Optional[int] = Field(
+        default=None,
+        description="Viewport Y of drag end (pixels from top; matches screenshot)",
+    )
+    steps: int = Field(
+        default=24,
+        ge=2,
+        le=120,
+        description="Number of intermediate mouse-move samples while the button is held (default 24)",
+    )
+
+    @model_validator(mode="after")
+    def require_start_and_end(self) -> "DragTool":
+        has_start = self.source_index is not None or (
+            self.start_x is not None and self.start_y is not None
+        )
+        has_end = self.target_index is not None or (self.end_x is not None and self.end_y is not None)
+        if not has_start:
+            raise ValueError(
+                "drag requires source_index or both start_x and start_y"
+            )
+        if not has_end:
+            raise ValueError(
+                "drag requires target_index or both end_x and end_y"
+            )
+        if (self.start_x is None) ^ (self.start_y is None):
+            raise ValueError("drag start_x and start_y must be provided together")
+        if (self.end_x is None) ^ (self.end_y is None):
+            raise ValueError("drag end_x and end_y must be provided together")
+        return self
 
 
 # ============================================================================
@@ -331,10 +441,15 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):
-    """Run staged auth-preserving recovery for a persistent anti-bot challenge."""
+    """Last-resort staged recovery after the agent failed to clear the challenge itself."""
 
     tool: Literal["recover_from_challenge"]
-    reason: str = Field(description="One line of concrete evidence that the anti-bot challenge persists")
+    reason: str = Field(
+        description=(
+            "One line of concrete evidence that the anti-bot challenge still persists after "
+            "the agent's own solve attempt"
+        )
+    )
 
 
 class PaymentLineItem(BaseModel):
@@ -777,6 +892,7 @@ BROWSER_TOOL_MODELS = {
     # Observation
     "read_browser_state": ReadBrowserStateTool,
     "screenshot": ScreenshotTool,
+    "read_logs": ReadLogsBrowserTool,
     "read_network_requests": ReadNetworkRequestsBrowserTool,
     # Index-based actions
     "click": ClickTool,
@@ -784,6 +900,7 @@ BROWSER_TOOL_MODELS = {
     "press_key": PressKeyTool,
     # Coordinate-based fallback (for vision models)
     "click_coordinates": ClickAtCoordinatesTool,
+    "drag": DragTool,
     # Dropdown handling
     "dropdown_options": DropdownOptionsTool,
     "select_dropdown": SelectDropdownTool,
@@ -918,6 +1035,7 @@ __all__ = [
     "PressKeyTool",
     # Coordinate-based
     "ClickAtCoordinatesTool",
+    "DragTool",
     # Dropdown
     "DropdownOptionsTool",
     "SelectDropdownTool",

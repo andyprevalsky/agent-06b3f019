@@ -38,23 +38,73 @@ export const rotateProxySchema = z.object({
   current_url: z.string().min(1).max(8192).optional(),
 });
 
+const storageStateSchema = z
+  .object({
+    cookies: z.array(z.record(z.unknown())).default([]),
+    origins: z.array(z.record(z.unknown())).default([]),
+  })
+  .passthrough();
+
+const httpPublicUrlSchema = z
+  .string()
+  .url()
+  .max(8192)
+  .refine((value) => {
+    try {
+      const protocol = new URL(value).protocol;
+      return protocol === 'http:' || protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }, 'URL must use http or https');
+
 export const recoverChallengeSchema = z.object({
   task_id: z.string().uuid(),
-  current_url: z.string().url().max(8192),
-  storage_state: z
-    .object({
-      cookies: z.array(z.record(z.unknown())).default([]),
-      origins: z.array(z.record(z.unknown())).default([]),
-    })
-    .passthrough(),
-  user_agent: z.string().max(2048).optional(),
-  /** Failure-driven blocked third-party URL that triggered this recovery. */
-  blocked_resource_url: z.string().url().max(8192).optional(),
+  current_url: httpPublicUrlSchema,
+  storage_state: storageStateSchema,
   /**
-   * Sticky hard filter: after a prior payment-CDN failure on this task, keep
-   * requiring Stripe.js even on later CF-only recoveries.
+   * Parallel cookie-signature lanes for config search. Each lane keeps its own
+   * storage identity; configs are tried sequentially inside a lane. When omitted,
+   * ``storage_state`` is used as a single ``default`` lane.
+   */
+  storage_lanes: z
+    .array(
+      z.object({
+        key: z.string().min(1).max(64),
+        storage_state: storageStateSchema,
+      })
+    )
+    .min(1)
+    .max(4)
+    .optional(),
+  user_agent: z.string().max(2048).optional(),
+  /** Agent-facing recovery reason forwarded into the LLM challenge classifier. */
+  recovery_reason: z.string().max(4000).optional(),
+  /** Failure-driven blocked third-party URL that triggered this recovery. */
+  blocked_resource_url: httpPublicUrlSchema.optional(),
+  /**
+   * @deprecated Ignored. Promote uses the single LLM gate only (blocked resource
+   * URL is folded into classifier recovery_reason evidence when present).
    */
   require_payment_cdn: z.boolean().optional(),
+  /**
+   * When false, the agent may include a fully stripped cookie lane. Informational
+   * for logs; lane membership is decided by the caller via storage_lanes.
+   */
+  preserve_auth: z.boolean().optional(),
+});
+
+/**
+ * Cookie-isolation probes on ephemeral Kernel/Steel sessions (never the live
+ * debug desktop). One storage variant per request; the agent parallelizes ≤5.
+ */
+export const probeCookieVariantSchema = z.object({
+  task_id: z.string().uuid(),
+  current_url: z.string().url().max(8192),
+  storage_state: storageStateSchema,
+  user_agent: z.string().max(2048).optional(),
+  recovery_reason: z.string().max(4000).optional(),
+  blocked_resource_url: z.string().url().max(8192).optional(),
 });
 
 export const injectLocalStorageSchema = z.object({
@@ -74,6 +124,7 @@ export type CloseSessionInput = z.infer<typeof closeSessionSchema>;
 export type ResumeSessionInput = z.infer<typeof resumeSessionSchema>;
 export type RotateProxyInput = z.infer<typeof rotateProxySchema>;
 export type RecoverChallengeInput = z.infer<typeof recoverChallengeSchema>;
+export type ProbeCookieVariantInput = z.infer<typeof probeCookieVariantSchema>;
 export type InjectLocalStorageInput = z.infer<typeof injectLocalStorageSchema>;
 export type PrepareSessionCredentialsInput = z.infer<typeof prepareSessionCredentialsSchema>;
 

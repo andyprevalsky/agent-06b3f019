@@ -3,7 +3,8 @@
  *
  * System context:
  *
- *   startInitialChatContext ──> ordered messages ──> Router ──┬─ direct_answer
+ *   startInitialChatContext ──> ordered messages ──> project checkpoints
+ *                            ──> auto-compact if over budget ──> Router ──┬─ direct_answer
  *                                                            │    └─ same array ─> Generator
  *                                                            └─ other action
  *                                                                 └─ refresh ───> Generator
@@ -18,6 +19,8 @@
  */
 
 import { prisma } from '../database';
+import { ensureChatContextWithinBudget } from './chatCompaction';
+import { projectModelContextAfterCompaction } from './contextCompaction';
 
 export interface ChatDatabaseMessage {
   role: string;
@@ -35,10 +38,20 @@ export interface ChatMessage {
 
 interface InitialChatContextDependencies {
   findMessages: (agentId: string) => Promise<ChatDatabaseMessage[]>;
+  ensureWithinBudget?: (params: {
+    agentId: string;
+    requestedModel: string;
+    rawMessages: ChatMessage[];
+  }) => Promise<ChatMessage[]>;
 }
 
 export interface InitialChatContext {
   messages: Promise<ChatMessage[]>;
+}
+
+interface StartInitialChatContextConfig {
+  agentId: string;
+  requestedModel: string;
 }
 
 interface ResolveGeneratorMessagesOptions {
@@ -53,15 +66,30 @@ const defaultDependencies: InitialChatContextDependencies = {
       where: { agentId },
       orderBy: { timestamp: 'asc' },
     }),
+  ensureWithinBudget: ensureChatContextWithinBudget,
 };
 
+export async function loadChatModelMessages(
+  config: StartInitialChatContextConfig,
+  dependencies: InitialChatContextDependencies = defaultDependencies
+): Promise<ChatMessage[]> {
+  const rawMessages = mapChatDatabaseMessages(await dependencies.findMessages(config.agentId));
+  const ensureWithinBudget = dependencies.ensureWithinBudget;
+  if (!ensureWithinBudget) {
+    return projectModelContextAfterCompaction(rawMessages);
+  }
+  return ensureWithinBudget({
+    agentId: config.agentId,
+    requestedModel: config.requestedModel,
+    rawMessages,
+  });
+}
+
 export function startInitialChatContext(
-  config: { agentId: string },
+  config: StartInitialChatContextConfig,
   dependencies: InitialChatContextDependencies = defaultDependencies
 ): InitialChatContext {
-  const messages = invoke(() => dependencies.findMessages(config.agentId)).then(
-    mapChatDatabaseMessages
-  );
+  const messages = invoke(() => loadChatModelMessages(config, dependencies));
 
   return { messages };
 }

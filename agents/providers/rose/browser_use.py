@@ -75,6 +75,33 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "y": {"type": "integer", "description": "Y coordinate", "required": True},
         },
     },
+    "drag": {
+        "description": (
+            "Drag from a start point to an end point with a real mouse press → move → release "
+            "(CDP Input.dispatchMouseEvent, same path browser-use uses for Element.drag_to). "
+            "Use for sliders, CAPTCHA / 'Bot or Not' slide-to-verify widgets, scrubbers, and "
+            "drag-and-drop. Prefer source_index/target_index when those nodes are indexed; "
+            "otherwise use start_x/start_y and end_x/end_y from the screenshot viewport."
+        ),
+        "params": {
+            "source_index": {
+                "type": "integer",
+                "description": "DOM index of the drag start element",
+            },
+            "target_index": {
+                "type": "integer",
+                "description": "DOM index of the drag end / drop target",
+            },
+            "start_x": {"type": "integer", "description": "Viewport X of drag start"},
+            "start_y": {"type": "integer", "description": "Viewport Y of drag start"},
+            "end_x": {"type": "integer", "description": "Viewport X of drag end"},
+            "end_y": {"type": "integer", "description": "Viewport Y of drag end"},
+            "steps": {
+                "type": "integer",
+                "description": "Intermediate move samples while held (default 24)",
+            },
+        },
+    },
     "input_text": {
         "description": "Input text into element by index",
         "params": {
@@ -174,25 +201,31 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "request_user_assistance_for_authentication": {
         "description": (
-            "Request user help signing in only after every automated auth option in the current session is exhausted. "
+            "Waterfall step 8: request user help signing in only after steps 1-7 are exhausted or unavailable. "
             "Before calling, you must have tried every saved password, email OTP if available, SMS OTP if "
-            "available, the minted agent account when it has an email, and guest/anonymous completion if possible. Cookie and "
-            "Steel-session auth are applied automatically before you start."
+            "available, the minted agent account when it has an email, and guest/anonymous completion when the "
+            "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
+            "Steel-session auth are applied automatically before you start. "
+            "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
+            "unusual-traffic pages - those are not authentication blockers. Call recover_from_challenge "
+            "immediately instead of trying to solve them yourself."
         ),
         "params": {},
     },
     "recover_from_challenge": {
         "description": (
-            "Recover from a persistent CAPTCHA, bot challenge, access-denied interstitial, unusual-traffic "
-            "page, or repeated 429 after the browser provider's automatic CAPTCHA solver had a chance to "
-            "finish. Use this ONLY with concrete challenge evidence, never for bad credentials, a 404, "
-            "out-of-stock, form validation, or an ordinary load failure. The tool first waits for Kernel or "
-            "Steel's native auto-solver. If the challenge remains, it tests isolated copies of browser state: "
-            "known challenge cookies, all target-site cookies, then parallel cookie-group reductions. The "
-            "signed-in source context is not changed during testing, and anything that may carry authentication "
-            "is always preserved. If no safe cookie fix is proven, it searches permission-compatible Kernel "
-            "residential, Kernel mobile, Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration "
-            "that passes repeated stability probes, and caches that configuration as this user's default for "
+            "Recovery for a CAPTCHA, bot challenge, access-denied interstitial, unusual-traffic page, or "
+            "repeated 429. Call this immediately when a challenge interstitial blocks progress - do not spend "
+            "steps dragging sliders, clicking verify buttons, or otherwise trying to solve the widget yourself. "
+            "Never use it for bad "
+            "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
+            "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
+            "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
+            "cookies, then parallel cookie-group reductions. The signed-in source context is not changed "
+            "during testing, and anything that may carry authentication is always preserved. If no safe "
+            "cookie fix is proven, it searches permission-compatible Kernel residential, Kernel mobile, "
+            "Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration that "
+            "passes repeated stability probes, and caches that configuration as this user's default for "
             "future browser sessions. Provider CAPTCHA solving remains enabled throughout. The successful "
             "recovery returns to the current URL with cookies, localStorage, and IndexedDB preserved."
         ),
@@ -200,8 +233,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "reason": {
                 "type": "string",
                 "description": (
-                    "One line on why you believe the current IP is blocked or rate-limited "
-                    "(e.g. 'repeated 429s on search', 'captcha wall reappears after solving')."
+                    "One line of concrete evidence that the challenge blocks the page (e.g. "
+                    "'Bot or Not slider interstitial on hotels.com', 'captcha wall on search results', "
+                    "'repeated 429s on search')."
                 ),
                 "required": True,
             },
@@ -412,9 +446,87 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "IMPORTANT: if you are attempting to interact with the DOM but progress is not being made "
             "(repeated clicks/waits with no state change), take a screenshot to view components that may be "
             "hidden from the DOM, e.g. a CAPTCHA, Cloudflare 'verify you are human' challenge, or other "
-            "content rendered inside a cross-origin iframe that the DOM tree cannot see."
+            "content rendered inside a cross-origin iframe that the DOM tree cannot see. "
+            "For CAPTCHA / bot-challenge / 'Bot or Not' pages, the DOM is often a misleading shell "
+            "(#app-captcha-pwa with only div/a/span indexes) while the real widget is visual-only. "
+            "Use a screenshot only if you need to confirm the challenge type, then call recover_from_challenge "
+            "immediately - do not drag sliders, click verify buttons, or otherwise try to solve the widget yourself."
         ),
         "params": {},
+    },
+    "read_logs": {
+        "description": (
+            "Read merged browser logs from console errors/warnings AND network traffic "
+            "(like DevTools Console + Network together). Use this to detect soft-blocks "
+            "(403, 429, Cloudflare, Apollo GraphQL errors), discover which API a page "
+            "called, or debug a failed form submission.\n"
+            "Each row is newest-first with {source, level, text, url, status, ...}. "
+            "Console rows include JavaScript exceptions and 'Failed to load resource' lines. "
+            "Network rows include HTTP method, URL, status code, and resource type.\n"
+            "Pass 'pattern' with any regex to filter lines (e.g. '429', "
+            "'ApolloError|graphql', 'botOrNot'). Omit pattern to return recent logs.\n"
+            "Optional filters: 'sources' (['console','network']), 'level' (console only), "
+            "'status'/'url_pattern'/'method' (network only), 'limit' (default 100).\n"
+            "Set 'include_bodies'/'include_headers'/'include_query' when you need full "
+            "network payloads. Use 'clear' to isolate traffic caused by your next action.\n"
+            "Prefer this over screenshots when the DOM is ambiguous but the failure is "
+            "likely HTTP/rate-limit/bot-detection related."
+        ),
+        "params": {
+            "pattern": {
+                "type": "string",
+                "description": "Optional regex filter applied to each log line.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of log lines to return (default 100).",
+            },
+            "clear": {
+                "type": "boolean",
+                "description": "When true, clear captured logs after reading.",
+            },
+            "sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional subset: 'console', 'network'. Default both.",
+            },
+            "level": {
+                "type": "string",
+                "description": "Optional console level filter (error, warning, log, ...).",
+            },
+            "status": {
+                "type": "string",
+                "description": "Optional network status filter: '403', '4xx', 'error', or 'ok'.",
+            },
+            "url_pattern": {
+                "type": "string",
+                "description": "Optional substring filter for network URLs.",
+            },
+            "method": {
+                "type": "string",
+                "description": "Optional HTTP method filter for network rows.",
+            },
+            "resource_type": {
+                "type": "string",
+                "description": "Optional network resource-type filter.",
+            },
+            "include_query": {
+                "type": "boolean",
+                "description": "When true, return full network URLs including query strings.",
+            },
+            "include_headers": {
+                "type": "boolean",
+                "description": "When true, include network headers (credentials masked).",
+            },
+            "include_bodies": {
+                "type": "boolean",
+                "description": "When true, include captured network bodies.",
+            },
+            "max_body_chars": {
+                "type": "integer",
+                "description": "Per-body character cap when include_bodies is set.",
+            },
+        },
     },
     "read_network_requests": {
         "description": (
@@ -503,15 +615,17 @@ def filter_browser_use_actions_for_state(
     available_actions: List[str],
     browser_state: Dict[str, Any],
 ) -> List[str]:
-    """Keep coordinate clicking as a fallback for unindexed/screenshot-only targets.
+    """Return the caller allowlist unchanged.
 
-    Normal web pages expose indexed DOM targets. If `click_coordinates` remains
-    available there, the model can choose raw pixels for indexed controls and
-    loop on visually plausible no-op clicks while the DOM state stays unchanged.
+    Previously this stripped `click_coordinates` whenever the DOM tree exposed
+    any `[index]` node, on the theory that pixels would loop on indexed pages.
+    That broke captcha / Bot-or-Not shells: they index empty `#app-captcha-pwa`
+    wrappers while the real slider has no index, so the only solve path was
+    removed and the model recovered with "no interactive solve control". Prefer
+    indexed click via tool description; never hide the coordinate tool.
     """
-    if not state_has_indexed_dom_targets(browser_state):
-        return list(available_actions)
-    return [action for action in available_actions if action != "click_coordinates"]
+    _ = browser_state
+    return list(available_actions)
 
 
 def generate_tool_descriptions(available_actions: List[str]) -> str:
@@ -656,14 +770,17 @@ action envelope in text; use the provided tool call.
   - 4. Email OTP
   - 5. SMS OTP
   - 6. Minted account
-  - 7. Guest/anonymous completion, if viable
+  - 7. Guest/anonymous completion, if viable (prefer guest checkout over Sign in / Log in when both appear)
+  - 8. request_user_assistance_for_authentication - only after 1-7 are exhausted or unavailable
 - Cookie-based and existing Steel-session auth are applied automatically before you start.
 - If a passkey is listed for this site and you are not already logged in, you MUST try the passkey path before any saved password. The passkey is pre-loaded into the browser's authenticator and signs silently once the site starts WebAuthn; no browser passkey popup is expected. First focus/click the username, email, or account field to trigger any passkey autofill/conditional WebAuthn. If the site asks for an identifier, enter the relevant account email/username from the page or saved credentials and continue, but do not type a password yet. If a "Sign in with a passkey", "Use passkey", or similar option appears, choose it. Wait briefly for navigation, OTP, or account access. Only fall through to saved passwords after the passkey option is absent, unavailable, or visibly fails.
 - For saved passwords, type the listed ref (for example, pwd:andy@email.com) into password fields; the browser tool decrypts it and records credential usage.
 - For multi-account sites, prefer the task-specific user context when present, then the freshest enabled cookie bundle.
 - When a site offers OTP delivery options, prefer email over SMS.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
-- If authentication blocks the task after all available automated auth options are exhausted, call request_user_assistance_for_authentication. Do not call attempt_completion or report a status instead.
+- Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
+- When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
+- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. Call recover_from_challenge immediately when one blocks progress - do not drag sliders, click verify buttons, or otherwise try to solve the widget yourself first. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 
@@ -983,6 +1100,7 @@ _VALID_ACTIONS = frozenset(
     {
         "click",
         "click_coordinates",
+        "drag",
         "scroll",
         "wait",
         "extract",
@@ -1009,6 +1127,7 @@ _VALID_ACTIONS = frozenset(
         # the browser step aborts before the handler can run staged recovery.
         "recover_from_challenge",
         "read_browser_state",
+        "read_logs",
         "read_network_requests",
     }
 )
@@ -1088,6 +1207,21 @@ def normalize_browser_use_response(completion: Any) -> Dict[str, Any]:
             "params": {},
         }
 
+    if normalized_action == "drag":
+        drag_params: Dict[str, Any] = {}
+        for key in ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y", "steps"):
+            if params.get(key) is not None:
+                drag_params[key] = params[key]
+            elif first_action.get(key) is not None:
+                drag_params[key] = first_action[key]
+        return {
+            "action": "drag",
+            "thinking": thinking,
+            "index": drag_params.get("source_index"),
+            "coordinates": None,
+            "params": drag_params,
+        }
+
     if normalized_action == "click" and index is None:
         raise ValueError(
             f"normalize_browser_use_response: click action requires element index, got none. Raw action: {first_action}"
@@ -1118,6 +1252,28 @@ def _normalize_action_params(
 ) -> Dict[str, Any]:
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
+
+    if normalized_action == "read_logs":
+        log_params: Dict[str, Any] = {}
+        for key in (
+            "pattern",
+            "regex",
+            "limit",
+            "level",
+            "status",
+            "url_pattern",
+            "method",
+            "resource_type",
+            "max_body_chars",
+        ):
+            if params.get(key) is not None:
+                log_params[key] = params[key]
+        if params.get("sources") is not None:
+            log_params["sources"] = params["sources"]
+        for key in ("clear", "include_query", "include_headers", "include_bodies"):
+            if params.get(key) is not None:
+                log_params[key] = bool(params[key])
+        return log_params
 
     if normalized_action == "read_network_requests":
         network_params: Dict[str, Any] = {}

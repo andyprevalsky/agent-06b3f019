@@ -50,13 +50,18 @@ the expected tool>`. Do not start from the bug; start from the goal.
 
 The URL must open the concrete agent run that proves the reported failure or
 outcome, not a generic dashboard. Prefer the durable always-on viewer
-`https://roselabs.ai/?agent-id=<id>` (hub archive fallback) — never a
+`https://www.roselabs.ai/?agent-id=<id>` (Terminal deep link; hub archive
+fallback `https://roselabs.ai/?agent-id=<id>`) — never a
 localhost, ngrok, trycloudflare, or ephemeral hub URL that dies when the stack
 tears down. Check it immediately before presenting the
 approval and report `verified rendered`, `verified reachable` (when only an HTTP
 and agent-data probe is available), or `expired/unreachable` honestly.
 Never omit the FE link, substitute a run JSON path, or imply that a dead localhost
-viewer works. If the workflow can restore an archived viewer without rerunning a
+viewer works. Do not link undeployed `/open-agent` paths that render the SPA
+NotFound copy (`Oops! Page not found`) while HTTP stays 200 — use
+`https://www.roselabs.ai/?agent-id=<id>` instead. Before requesting approval,
+run `python3 scripts/publish_evidence_links.py --agent-id <id>` so the FE link
+and last-call LLM dump are durable for multi-day review. Never link `file://…/.context/rendered-llm-dumps/…` without the HTTPS URL the publisher prints. If the workflow can restore an archived viewer without rerunning a
 gated action, restore it before requesting approval.
 
 **LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`

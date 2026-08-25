@@ -8,6 +8,7 @@
 
 import { useState, useCallback } from 'react';
 import { updateAgent, useToast, type AgentDetail } from '../../hooks';
+import { DEFAULT_AGENT_PRICE_LIMIT_CENTS } from '../../config';
 
 interface UsePriceLimitOptions {
   agentDetail?: AgentDetail | null;
@@ -39,14 +40,18 @@ export function usePriceLimit({
 
   const startEdit = useCallback(() => {
     if (agentDetail?.parent_agent_id) return;
-    const cents = agentDetail ? agentDetail.price_limit_cents || 100 : pendingPriceLimitCents;
+    const cents = agentDetail
+      ? agentDetail.price_limit_cents || DEFAULT_AGENT_PRICE_LIMIT_CENTS
+      : pendingPriceLimitCents;
     setInput((cents / 100).toFixed(2));
     setIsEditing(true);
   }, [agentDetail, pendingPriceLimitCents]);
 
   const cancel = useCallback(() => {
     setIsEditing(false);
-    const cents = agentDetail ? agentDetail.price_limit_cents || 100 : pendingPriceLimitCents;
+    const cents = agentDetail
+      ? agentDetail.price_limit_cents || DEFAULT_AGENT_PRICE_LIMIT_CENTS
+      : pendingPriceLimitCents;
     setInput((cents / 100).toFixed(2));
   }, [agentDetail, pendingPriceLimitCents]);
 

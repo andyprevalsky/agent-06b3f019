@@ -544,24 +544,31 @@ async def recover_browser_challenge(
     storage_state: Dict[str, Any],
     user_agent: str = "",
     *,
+    storage_lanes: Optional[List[Dict[str, Any]]] = None,
+    recovery_reason: str = "",
     blocked_resource_url: str = "",
     require_payment_cdn: bool = False,
+    preserve_auth: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """Run the backend's parallel Kernel/Steel browser-configuration search."""
-    # A challenged candidate can spend up to two 45s navigations plus two 45s
-    # provider-solver windows. The six candidates run concurrently, so this is
-    # a bounded wall-clock allowance for one search rather than six serial waits.
+    """Run the backend cookie-lane + sequential browser-configuration search."""
     payload: Dict[str, Any] = {
         "task_id": task_id,
         "current_url": current_url,
         "storage_state": storage_state,
     }
+    if storage_lanes:
+        payload["storage_lanes"] = storage_lanes
     if user_agent:
         payload["user_agent"] = user_agent
+    if recovery_reason:
+        payload["recovery_reason"] = recovery_reason
     if blocked_resource_url:
         payload["blocked_resource_url"] = blocked_resource_url
     if require_payment_cdn:
+        # Deprecated: accepted for wire compatibility; backend ignores it.
         payload["require_payment_cdn"] = True
+    if preserve_auth is not None:
+        payload["preserve_auth"] = preserve_auth
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/recover-challenge",
@@ -577,6 +584,47 @@ async def recover_browser_challenge(
     if response.status_code == 429:
         return {"rate_limited": True, "status_code": 429}
     raise Exception(f"Failed to recover from browser challenge: {response.text}")
+
+
+async def probe_cookie_variant_ephemeral(
+    config: Any,
+    task_id: str,
+    current_url: str,
+    storage_state: Dict[str, Any],
+    *,
+    user_agent: str = "",
+    recovery_reason: str = "",
+    blocked_resource_url: str = "",
+) -> bool:
+    """Probe one cookie variant on an ephemeral Kernel/Steel session (not live desktop)."""
+    payload: Dict[str, Any] = {
+        "task_id": task_id,
+        "current_url": current_url,
+        "storage_state": storage_state,
+    }
+    if user_agent:
+        payload["user_agent"] = user_agent
+    if recovery_reason:
+        payload["recovery_reason"] = recovery_reason
+    if blocked_resource_url:
+        payload["blocked_resource_url"] = blocked_resource_url
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/probe-cookie-variant",
+            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            json=payload,
+        )
+    if response.status_code in (200, 201):
+        data = response.json()
+        return bool(data.get("clean")) if isinstance(data, dict) else False
+    if response.status_code == 429:
+        logger.warning(
+            "Cookie-variant probe rate-limited",
+            task_id=task_id,
+            status_code=429,
+        )
+        return False
+    raise Exception(f"Failed to probe cookie variant: {response.text}")
 
 
 async def fetch_auth_options(config: Any, user_id: str, realm: str) -> Dict[str, Any]:

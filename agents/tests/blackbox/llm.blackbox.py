@@ -1284,6 +1284,22 @@ def test_normalize_response_schema_preserves_explicit_confirmation_identifier_re
     ]
 
 
+def test_normalize_response_schema_skips_confirmation_for_payment_boundary_goal():
+    """Payment-boundary harness goals must not auto-inject purchase confirmation ids."""
+    from helpers.llm import _normalize_response_schema_for_goal
+    from utils.payment_boundary_goal import payment_boundary_operational_suffix
+
+    goal = (
+        "Book Hotel Kabuki on hotels.com guest checkout."
+        + payment_boundary_operational_suffix()
+    )
+    result = _normalize_response_schema_for_goal(
+        goal,
+        {"fields": [{"name": "hotel_name", "type": "str", "required": True}]},
+    )
+    assert [field["name"] for field in result["fields"]] == ["hotel_name"]
+
+
 def test_fill_missing_verifier_output_accepts_matching_idempotent_card_last4():
     """Two independent card-ready results with the same last four populate both fields.
 
@@ -7580,6 +7596,10 @@ async def run_all_tests():
     r.record(
         "normalize_response_schema_explicit_confirmation_identifier",
         test_normalize_response_schema_preserves_explicit_confirmation_identifier_request,
+    )
+    r.record(
+        "normalize_response_schema_payment_boundary_skip_confirmation",
+        test_normalize_response_schema_skips_confirmation_for_payment_boundary_goal,
     )
     r.record(
         "fill_missing_verifier_output_matching_idempotent_card_last4",

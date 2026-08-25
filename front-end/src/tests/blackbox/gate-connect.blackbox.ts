@@ -9,6 +9,11 @@ vi.mock('@/features/integrations/api', () => ({
   startGmailOAuthApi: (returnUrl?: string) => startGmailOAuthApi(returnUrl),
 }));
 
+const startSubscriptionCheckoutApi = vi.fn();
+vi.mock('@/features/billing/api', () => ({
+  startSubscriptionCheckoutApi: (returnUrl?: string) => startSubscriptionCheckoutApi(returnUrl),
+}));
+
 import { runGateConnectAction } from '@/features/terminal-component-group/components/attention-inbox/gateConnect';
 import type { GateMetadata } from '@/features/terminal-component-group/components/attention-inbox/types';
 
@@ -38,6 +43,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   startGmailOAuthApi.mockReset();
+  startSubscriptionCheckoutApi.mockReset();
   delete (window as unknown as { api?: unknown }).api;
   (window as unknown as { location: unknown }).location = realLocation;
 });
@@ -84,29 +90,78 @@ describe('runGateConnectAction', () => {
     expect(startGmailOAuthApi).not.toHaveBeenCalled();
   });
 
-  it('opens subscription/kyc checkout links in a new tab (fresh + stable)', async () => {
+  it('mints a FRESH subscription checkout url on click and opens it (not the stale gate url)', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    startSubscriptionCheckoutApi.mockResolvedValue({
+      url: 'https://checkout.stripe.com/c/fresh-subscription',
+    });
     const gate: GateMetadata = {
       gateKey: 'subscription',
       type: 'subscription',
       presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $30/mo' },
-      action: { kind: 'link', url: 'https://checkout.stripe.com/c/session' },
+      action: { kind: 'link', url: 'https://checkout.stripe.com/c/stale' },
     };
 
     await runGateConnectAction(gate, { requestId: 'req-2' });
 
+    expect(startSubscriptionCheckoutApi).toHaveBeenCalledWith(
+      'https://app.roselabs.ai/?agent-id=agent-7',
+    );
     expect(open).toHaveBeenCalledWith(
-      'https://checkout.stripe.com/c/session',
+      'https://checkout.stripe.com/c/fresh-subscription',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    expect(open).not.toHaveBeenCalledWith('https://checkout.stripe.com/c/stale', expect.anything(), expect.anything());
+    expect(startGmailOAuthApi).not.toHaveBeenCalled();
+  });
+
+  it('opens kyc checkout links in a new tab using the carried url', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const gate: GateMetadata = {
+      gateKey: 'kyc',
+      type: 'kyc',
+      presentation: { title: 'Verify', reason: 'x', cta: 'Verify identity' },
+      action: { kind: 'link', url: 'https://checkout.stripe.com/c/kyc-session' },
+    };
+
+    await runGateConnectAction(gate, { requestId: 'req-kyc' });
+
+    expect(startSubscriptionCheckoutApi).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledWith(
+      'https://checkout.stripe.com/c/kyc-session',
       '_blank',
       'noopener,noreferrer',
     );
     expect(startGmailOAuthApi).not.toHaveBeenCalled();
   });
 
-  it('opens subscription/kyc links through the Mac-app bridge when embedded', async () => {
+  it('falls back to the carried subscription url if the fresh mint fails', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    startSubscriptionCheckoutApi.mockRejectedValue(new Error('checkout down'));
+    const gate: GateMetadata = {
+      gateKey: 'subscription',
+      type: 'subscription',
+      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $30/mo' },
+      action: { kind: 'link', url: 'https://checkout.stripe.com/c/stale' },
+    };
+
+    await runGateConnectAction(gate, { requestId: 'req-sub-fallback' });
+
+    expect(open).toHaveBeenCalledWith(
+      'https://checkout.stripe.com/c/stale',
+      '_blank',
+      'noopener,noreferrer',
+    );
+  });
+
+  it('opens subscription links through the Mac-app bridge when embedded', async () => {
     const openExternal = vi.fn();
     (window as unknown as { api?: unknown }).api = { openExternal };
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    startSubscriptionCheckoutApi.mockResolvedValue({
+      url: 'https://checkout.stripe.com/c/fresh-subscription',
+    });
     const gate: GateMetadata = {
       gateKey: 'subscription',
       type: 'subscription',
@@ -116,7 +171,8 @@ describe('runGateConnectAction', () => {
 
     await runGateConnectAction(gate, { requestId: 'req-2' });
 
-    expect(openExternal).toHaveBeenCalledWith('https://checkout.stripe.com/c/session');
+    expect(startSubscriptionCheckoutApi).toHaveBeenCalledWith(undefined);
+    expect(openExternal).toHaveBeenCalledWith('https://checkout.stripe.com/c/fresh-subscription');
     expect(open).not.toHaveBeenCalled();
   });
 

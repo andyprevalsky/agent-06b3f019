@@ -60,9 +60,9 @@ from utils.prompts import build_verifier_prompt
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
+    goal_allows_logged_out_cookie_commit,
     live_tab_looks_challenged,
     page_looks_challenged,
-    probe_storage_state,
     recover_from_challenge,
     verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
@@ -115,6 +115,7 @@ from .repo import (
     mark_steel_session_auth_failed,
     prepare_browser_auth,
     propagate_browser_run_credentials,
+    probe_cookie_variant_ephemeral,
     recover_browser_challenge,
     report_claude_token_rate_limited,
     resume_browser_session,
@@ -6672,6 +6673,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     continue
                 raise
             await record_passkey_usage_once()
+            auth_runtime_state.observe_page_text(browser_state.get("title") or "")
 
             # Clicks, form submissions, and server redirects can cross an auth
             # realm without a goto tool call. Prepare that realm before the
@@ -7304,6 +7306,104 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     await browser_stream.finish_tools(status="ERROR")
                     continue
+                # CAPTCHA / bot walls are not sign-in blockers. browser-hotel-booking
+                # misrouted Expedia "Bot or Not?" into auth_assistance after
+                # recover_from_challenge falsely skipped as clean; refuse the
+                # handoff while the live document still looks challenged (LLM).
+                auth_guard_classifier_usages: list = []
+                auth_guard_page_challenged = False
+                if input_page is not None:
+                    auth_guard_dom_tree = None
+                    with contextlib.suppress(Exception):
+                        auth_guard_state = await dom_service.get_browser_state(
+                            include_screenshot=False
+                        )
+                        auth_guard_dom_tree = str(auth_guard_state.get("dom_tree") or "") or None
+                    auth_guard_page_challenged = await live_tab_looks_challenged(
+                        input_page,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        claude_token=token_state.access_token,
+                        claude_token_source=token_state.source,
+                        claude_token_pool_id=token_state.pool_token_id,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        usage_collector=auth_guard_classifier_usages,
+                        agent_dom_tree=auth_guard_dom_tree,
+                        network_recorder=browser_network_recorder,
+                    )
+                for classifier_usage in auth_guard_classifier_usages:
+                    if not isinstance(classifier_usage, dict):
+                        continue
+                    c_in = int(classifier_usage.get("prompt_tokens") or 0)
+                    c_out = int(classifier_usage.get("completion_tokens") or 0)
+                    total_input_tokens += c_in
+                    total_output_tokens += c_out
+                    accumulate_model_usage(
+                        usage_by_model,
+                        classifier_usage.get("actual_model") or "rose-labs/rose-1-mini",
+                        c_in,
+                        c_out,
+                        cache_read_input_tokens=int(
+                            classifier_usage.get("cache_read_input_tokens") or 0
+                        ),
+                        cache_creation_input_tokens=int(
+                            classifier_usage.get("cache_creation_input_tokens") or 0
+                        ),
+                        from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
+                    )
+                if auth_guard_page_challenged:
+                    challenge_guard_reason = (
+                        "Current page is a bot challenge/CAPTCHA, not an authentication "
+                        "blocker. Call recover_from_challenge instead of "
+                        "request_user_assistance_for_authentication."
+                    )
+                    logger.info(
+                        "Blocked auth assistance while challenge interstitial is visible",
+                        base_site=base_site,
+                        current_url=current_url,
+                    )
+                    blocked_result = {
+                        "success": False,
+                        "error": challenge_guard_reason,
+                        "recovery_action": "auth_assistance_blocked_challenged_page",
+                    }
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="request_user_assistance_for_authentication",
+                        thinking=thinking,
+                        params={},
+                        result=blocked_result,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=browser_state,
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=blocked_result,
+                        tool_call_id=tool_call_id_action,
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Authentication assistance blocked — challenge page",
+                        task_id=task_id,
+                        message=challenge_guard_reason,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="request_user_assistance_for_authentication",
+                        tool_call_id=tool_call_id_action,
+                        steps_taken=iteration,
+                        total_steps=MAX_ITERATIONS,
+                        extra_metadata={
+                            "recovery_action": "auth_assistance_blocked_challenged_page",
+                            "current_url": current_url,
+                        },
+                    )
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
                 logger.info(
                     "Browser agent requested user authentication assistance",
                     base_site=base_site,
@@ -7646,11 +7746,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
-                    "known_challenge_cookies": "Testing challenge cookies",
-                    "all_target_cookies": "Testing target-site cookies",
-                    "non_auth_cookies": "Testing non-auth cookies",
-                    "cookie_isolation": "Isolating poisoned cookie state",
+                    "cookie_probe_wave": "Probing cookie variants",
                     "apply_cookie_fix": "Applying safe cookie recovery",
+                    "preserve_auth_state": "Preserving auth; searching configs",
                     "browser_config_search": "Searching browser configurations",
                     "live_verify": "Verifying live tab cleared challenge",
                 }
@@ -7668,7 +7766,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         extra_metadata={"recoveryStage": stage},
                     )
 
-                async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
+                async def search_browser_configs(storage_lanes: list) -> Dict[str, Any]:
                     nonlocal require_payment_cdn, payment_cdn_verify_url
                     user_agent = ""
                     with contextlib.suppress(Exception):
@@ -7682,22 +7780,34 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         unified_action.get("params", {}).get("blocked_resource_url") or ""
                     ).strip()
                     if blocked_resource_requires_payment_cdn(blocked_resource_url):
+                        # Sticky URL is still useful as LLM evidence; hard CDN filter is gone.
                         require_payment_cdn = True
                         payment_cdn_verify_url = blocked_resource_url or payment_cdn_verify_url
                     verify_url = blocked_resource_url or payment_cdn_verify_url
+                    lanes = list(storage_lanes or [])
+                    primary_state = (
+                        lanes[0].get("storage_state")
+                        if lanes and isinstance(lanes[0], dict)
+                        else recovery_storage_state
+                    )
+                    preserve_auth = not goal_allows_logged_out_cookie_commit(goal)
                     result = await recover_browser_challenge(
                         config,
                         task_id,
                         current_url,
-                        storage_state,
+                        primary_state if isinstance(primary_state, dict) else recovery_storage_state,
                         user_agent,
+                        storage_lanes=lanes,
+                        recovery_reason=str(recovery_reason or "") or "",
                         blocked_resource_url=verify_url,
                         require_payment_cdn=require_payment_cdn,
+                        preserve_auth=preserve_auth,
                     )
                     if result.get("rate_limited"):
                         raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
                     return result
 
+                challenge_classifier_usages: list = []
                 try:
                     if playwright_browser is None or input_page is None:
                         raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
@@ -7720,26 +7830,50 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             cookie_recovery_successes=cookie_recovery_successes,
                             reason=recovery_reason,
                         )
+                    async def probe_cookie_variant_remote(candidate: Dict[str, Any]) -> bool:
+                        # Ephemeral Kernel/Steel session — never new_context on live desktop.
+                        user_agent = ""
+                        with contextlib.suppress(Exception):
+                            user_agent = str(
+                                await asyncio.wait_for(
+                                    input_page.evaluate("() => navigator.userAgent"),
+                                    timeout=15,
+                                )
+                            )
+                        blocked_resource_url = str(
+                            unified_action.get("params", {}).get("blocked_resource_url") or ""
+                        ).strip()
+                        return await probe_cookie_variant_ephemeral(
+                            config,
+                            task_id,
+                            current_url,
+                            candidate,
+                            user_agent=user_agent,
+                            recovery_reason=str(recovery_reason or "") or "",
+                            blocked_resource_url=blocked_resource_url,
+                        )
+
                     recovery = await recover_from_challenge(
                         source_state=recovery_storage_state,
                         target_url=current_url,
                         wait_for_solver=lambda: _wait_for_provider_captcha_solver(
                             config, task_id, page=input_page
                         ),
-                        probe=lambda candidate: probe_storage_state(
-                            playwright_browser,
-                            candidate,
-                            current_url,
-                        ),
+                        probe=probe_cookie_variant_remote,
                         commit_cookie_removals=lambda keys: commit_cookie_removals(
                             input_page,
                             keys,
                             current_url,
+                            recovery_reason=str(recovery_reason or "") or None,
+                            network_recorder=browser_network_recorder,
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
                         provider_exit_rejected=provider_exit_rejected
                         or escalate_after_cookie_false_stable,
+                        allow_logged_out_cookie_commit=goal_allows_logged_out_cookie_commit(
+                            goal
+                        ),
                     )
                     if recovery.recovery == "cookies_sanitized":
                         cookie_recovery_successes += 1
@@ -7849,29 +7983,42 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             humanizer_factory=BrowserHumanizer,
                         )
 
-                        await emit_recovery_progress(
-                            "live_verify",
-                            "Verifying the promoted browser cleared the challenge on the live tab.",
-                        )
-                        if not await verify_live_page_cleared_challenge(input_page, current_url):
-                            provider = config_result.get("provider")
-                            proxy_tier = config_result.get("proxy_tier")
-                            config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
-                            raise RuntimeError(
-                                f"Promoted {config_key} passed candidate probes but the live tab "
-                                "is still challenged"
-                            )
-                        blocked_resource_url = str(
-                            unified_action.get("params", {}).get("blocked_resource_url") or ""
-                        ).strip()
-                        if blocked_resource_url:
+                        # Preloaded winners already classified clean once on this
+                        # remote session (single-nav probe). Skip a second live-tab
+                        # LLM verify — resume at the settled URL instead.
+                        if not bool(config_result.get("storage_state_preloaded")):
                             await emit_recovery_progress(
                                 "live_verify",
-                                "Verifying the blocked third-party resource loads on the "
-                                "promoted tab.",
+                                "Verifying the promoted browser cleared the challenge on the live tab.",
                             )
-                            if not await verify_live_blocked_resources(
-                                input_page, [blocked_resource_url]
+                            live_verify_dom_tree = None
+                            with contextlib.suppress(Exception):
+                                live_verify_state = await dom_service.get_browser_state(
+                                    include_screenshot=False
+                                )
+                                live_verify_dom_tree = (
+                                    str(live_verify_state.get("dom_tree") or "") or None
+                                )
+                            live_verify_url = str(
+                                config_result.get("saved_url") or current_url or ""
+                            ).strip() or current_url
+                            if not await verify_live_page_cleared_challenge(
+                                input_page,
+                                live_verify_url,
+                                attempts=1,
+                                agent_id=agent_id,
+                                user_id=user_id,
+                                claude_token=token_state.access_token,
+                                claude_token_source=token_state.source,
+                                claude_token_pool_id=token_state.pool_token_id,
+                                gpt_token=gpt_token,
+                                gpt_account_id=gpt_account_id,
+                                gpt_token_source=gpt_token_source,
+                                gpt_token_pool_id=gpt_token_pool_id,
+                                usage_collector=challenge_classifier_usages,
+                                agent_dom_tree=live_verify_dom_tree,
+                                network_recorder=browser_network_recorder,
+                                recovery_reason=str(recovery_reason or "") or None,
                             ):
                                 provider = config_result.get("provider")
                                 proxy_tier = config_result.get("proxy_tier")
@@ -7879,21 +8026,36 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     config_result.get("config_key") or f"{provider}/{proxy_tier}"
                                 )
                                 raise RuntimeError(
-                                    f"Promoted {config_key} cleared the challenge but blocked "
-                                    f"resource still fails: {blocked_resource_url}"
+                                    f"Promoted {config_key} passed candidate probes but the live tab "
+                                    "is still challenged"
                                 )
+                        saved_resume = str(config_result.get("saved_url") or "").strip()
+                        if saved_resume.startswith(("http://", "https://")):
+                            current_url = saved_resume
+                        # Blocked-resource CDN hard-verify removed: the LLM live
+                        # gate already receives blocked_resource_url via recovery_reason.
 
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_url = browser_state.get("url", current_url)
                     if config_result is not None:
+                        saved_resume = str(config_result.get("saved_url") or "").strip()
+                        if saved_resume.startswith(("http://", "https://")) and not str(
+                            current_url or ""
+                        ).startswith(("http://", "https://")):
+                            current_url = saved_resume
                         provider = config_result.get("provider")
                         proxy_tier = config_result.get("proxy_tier")
                         config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
                         blocked_resource_url = str(
                             unified_action.get("params", {}).get("blocked_resource_url") or ""
                         ).strip()
+                        verified_phrase = (
+                            "probe already verified clean"
+                            if bool(config_result.get("storage_state_preloaded"))
+                            else "live tab verified clean"
+                        )
                         recovery_message = (
-                            f"Recovered by selecting {config_key}; live tab verified clean"
+                            f"Recovered by selecting {config_key}; {verified_phrase}"
                             + (
                                 f"; blocked resource cleared ({blocked_resource_url})"
                                 if blocked_resource_url
@@ -7950,6 +8112,30 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         tool_call_id=recovery_call_id,
                     )
                     action_result = {"success": False, "error": error_message}
+                finally:
+                    # Fold Python-side rose-1-mini classifier usage into the
+                    # browser ledger (success or fail). Backend probe classifiers
+                    # already wrote ToolUsage via recordChallengeClassifierUsage.
+                    for classifier_usage in challenge_classifier_usages:
+                        if not isinstance(classifier_usage, dict):
+                            continue
+                        c_in = int(classifier_usage.get("prompt_tokens") or 0)
+                        c_out = int(classifier_usage.get("completion_tokens") or 0)
+                        total_input_tokens += c_in
+                        total_output_tokens += c_out
+                        accumulate_model_usage(
+                            usage_by_model,
+                            classifier_usage.get("actual_model") or "rose-labs/rose-1-mini",
+                            c_in,
+                            c_out,
+                            cache_read_input_tokens=int(
+                                classifier_usage.get("cache_read_input_tokens") or 0
+                            ),
+                            cache_creation_input_tokens=int(
+                                classifier_usage.get("cache_creation_input_tokens") or 0
+                            ),
+                            from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
+                        )
 
                 await _finalize_browser_recovery_action_result(
                     action_result=action_result,
@@ -8296,6 +8482,16 @@ Based on this feedback, I need to continue working on the task and address the i
                 element = dom_service.selector_map.get(idx)
                 if element:
                     element_desc = get_element_description(element)
+                    guest_click_text = element_desc
+                    try:
+                        children_text = element.get_all_children_text()
+                        if children_text and str(children_text).strip():
+                            guest_click_text = str(children_text)
+                    except Exception:
+                        attrs = getattr(element, "attributes", None) or {}
+                        aria = attrs.get("aria-label") or attrs.get("ariaLabel") or ""
+                        guest_click_text = f"{element_desc} {aria}".strip()
+                    auth_runtime_state.observe_clicked_element_text(guest_click_text)
 
             title_progress, title_done, action_name = build_action_titles(
                 action_name, unified_action, element_desc, coords, secret_refs
@@ -9510,6 +9706,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolName": "spawn_browser_agent",
                                 "action_type": "write_lock_rejected",
+                                "task_id": result.get("task_id"),
                             },
                         )
                         return

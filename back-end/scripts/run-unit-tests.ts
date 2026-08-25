@@ -203,7 +203,7 @@ async function main(): Promise<void> {
     const startedAt = performance.now();
     const chunks: Buffer[] = [];
     // Preserve one isolated process per file without npm/tsx wrapper processes.
-    const child = spawn(process.execPath, ['--import', 'tsx', file], {
+    const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--import', 'tsx', file], {
       cwd: backendDir,
       env: {
         ...process.env,

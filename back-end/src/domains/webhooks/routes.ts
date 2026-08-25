@@ -46,6 +46,12 @@ router.post(
     /* c8 ignore start -- requires valid Stripe signature to reach; constructStripeEvent blocks without STRIPE_WEBHOOK_SECRET */
     try {
       switch (event.type) {
+        case 'checkout.session.completed': {
+          const session = event.data.object as Stripe.Checkout.Session;
+          await service.handleCheckoutSessionCompleted(session);
+          break;
+        }
+
         case 'invoice.payment_succeeded': {
           const invoice = event.data.object as Stripe.Invoice;
           await service.handlePaymentSuccess(invoice);

@@ -39,9 +39,9 @@ import { selectChatPhaseModels } from './phaseModels';
 import { executeWebSearch } from './chatTools';
 import { agentFastMode } from '../fastCacheStore';
 import {
-  mapChatDatabaseMessages,
   resolveGeneratorMessages,
   startInitialChatContext,
+  loadChatModelMessages,
 } from './initialContext';
 import {
   broadcastToolEvent,
@@ -81,8 +81,12 @@ export async function handleChatMessage(config: {
 
   const phaseModels = selectChatPhaseModels(config.model);
 
-  const initialContext = startInitialChatContext(config);
+  const initialContext = startInitialChatContext({
+    agentId: config.agentId,
+    requestedModel: config.model,
+  });
   const messages = await initialContext.messages;
+  const chatContextConfig = { agentId: config.agentId, requestedModel: config.model };
 
   const runGenerator = async (
     generatorMessages: typeof messages,
@@ -321,13 +325,7 @@ export async function handleChatMessage(config: {
   const generatorMessages = await resolveGeneratorMessages({
     action: decision.action,
     initialMessages: messages,
-    refreshMessages: async () => {
-      const refreshedDbMessages = await prisma.message.findMany({
-        where: { agentId: config.agentId },
-        orderBy: { timestamp: 'asc' },
-      });
-      return mapChatDatabaseMessages(refreshedDbMessages);
-    },
+    refreshMessages: async () => loadChatModelMessages(chatContextConfig),
   });
 
   const earlyGeneratorResponse =
