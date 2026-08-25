@@ -4057,6 +4057,16 @@ def test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal():
 
     with with_active_benchmark_task(task.name):
         assert os.environ["BENCHMARK_ACTIVE_TASK_NAME"] == task.name
+        from benchmarks.spawn_contract import apply_active_task_spawn_contract
+
+        env_patched = apply_active_task_spawn_contract(
+            {
+                "goal": planner_goal,
+                "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
+            }
+        )
+        assert env_patched["start_url"] == task.environment["live_targets"][0]
+        assert env_patched["goal"] == planner_goal
 
 
 def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():

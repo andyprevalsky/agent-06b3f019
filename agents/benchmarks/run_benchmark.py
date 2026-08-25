@@ -90,7 +90,7 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
-from benchmarks.spawn_contract import should_disable_saved_browser_auth
+from benchmarks.spawn_contract import primary_live_target, should_disable_saved_browser_auth
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
@@ -9619,8 +9619,14 @@ async def run_single_task(
     print(f"  {'=' * 50}")
 
     previous_active_task_name = os.environ.get("BENCHMARK_ACTIVE_TASK_NAME")
+    previous_active_task_live_target = os.environ.get("BENCHMARK_ACTIVE_TASK_LIVE_TARGET")
     previous_disable_saved_browser_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
     os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = task.name
+    live_target = primary_live_target(task.environment)
+    if live_target:
+        os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = live_target
+    else:
+        os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
     if should_disable_saved_browser_auth(task):
         os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
         print("    🍪 Guest-checkout task: disabled saved browser auth material")
@@ -10323,6 +10329,10 @@ async def run_single_task(
             os.environ.pop("BENCHMARK_ACTIVE_TASK_NAME", None)
         else:
             os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = previous_active_task_name
+        if previous_active_task_live_target is None:
+            os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
+        else:
+            os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = previous_active_task_live_target
         if previous_disable_saved_browser_auth is None:
             os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
         else:

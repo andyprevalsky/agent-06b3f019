@@ -14,13 +14,14 @@ from __future__ import annotations
 import os
 import re
 from copy import deepcopy
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 from urllib.parse import urlparse
 
-from benchmarks.benchmark_tasks import BenchmarkTask, get_task_by_name
-from benchmarks.live_fixtures import resolve_live_fixtures
+if TYPE_CHECKING:
+    from benchmarks.benchmark_tasks import BenchmarkTask
 
 _BENCHMARK_ACTIVE_TASK_ENV = "BENCHMARK_ACTIVE_TASK_NAME"
+_BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV = "BENCHMARK_ACTIVE_TASK_LIVE_TARGET"
 
 _GUEST_CHECKOUT_MARKERS = (
     "guest checkout",
@@ -42,14 +43,12 @@ def active_benchmark_task_name() -> Optional[str]:
     return name or None
 
 
-def active_benchmark_task() -> Optional[BenchmarkTask]:
-    name = active_benchmark_task_name()
-    if not name:
-        return None
-    try:
-        return get_task_by_name(name)
-    except KeyError:
-        return None
+def active_benchmark_live_target() -> Optional[str]:
+    """Workflow-safe live target lookup (no tasks.json / pathlib imports)."""
+    target = (os.environ.get(_BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV) or "").strip()
+    if target.startswith(("http://", "https://")):
+        return target
+    return None
 
 
 def primary_live_target(environment: Mapping[str, Any] | None) -> Optional[str]:
@@ -64,7 +63,9 @@ def primary_live_target(environment: Mapping[str, Any] | None) -> Optional[str]:
     return None
 
 
-def guest_checkout_without_live_fixture(task: BenchmarkTask) -> bool:
+def guest_checkout_without_live_fixture(task: "BenchmarkTask") -> bool:
+    from benchmarks.live_fixtures import resolve_live_fixtures
+
     environment = task.environment or {}
     if resolve_live_fixtures(environment):
         return False
@@ -80,17 +81,22 @@ def guest_checkout_without_live_fixture(task: BenchmarkTask) -> bool:
 
 
 def apply_browser_spawn_live_target(
-    task: BenchmarkTask,
+    task: "BenchmarkTask",
     tool_call: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Seed browser ``start_url`` from the task's declared live target when needed."""
+    return _apply_live_target_to_tool_call(primary_live_target(task.environment), tool_call)
+
+
+def _apply_live_target_to_tool_call(
+    live_target: Optional[str],
+    tool_call: Mapping[str, Any],
+) -> dict[str, Any]:
     patched = dict(tool_call)
-    live_target = primary_live_target(task.environment)
     if live_target:
         current_start = str(patched.get("start_url") or "").strip()
         if not current_start or _should_replace_start_url(current_start, live_target):
             patched["start_url"] = live_target
-
     return patched
 
 
@@ -115,7 +121,7 @@ def _should_replace_start_url(current_start: str, live_target: str) -> bool:
     return current_host in marketing_hosts or current_host != target_host
 
 
-def should_disable_saved_browser_auth(task: BenchmarkTask) -> bool:
+def should_disable_saved_browser_auth(task: "BenchmarkTask") -> bool:
     return guest_checkout_without_live_fixture(task)
 
 
@@ -134,27 +140,38 @@ def evaluate_dom_patch_blocked(code: str) -> Optional[str]:
 
 
 def apply_active_task_spawn_contract(tool_call: Mapping[str, Any]) -> dict[str, Any]:
-    task = active_benchmark_task()
-    if task is None:
-        return dict(tool_call)
-    return apply_browser_spawn_live_target(task, tool_call)
+    """Workflow-safe spawn contract: reads live target from env only."""
+    return _apply_live_target_to_tool_call(active_benchmark_live_target(), tool_call)
 
 
 def with_active_benchmark_task(task_name: str):
-    """Context manager for tests that need an active benchmark task env var."""
+    """Context manager for tests that need active benchmark task env vars."""
     from contextlib import contextmanager
+
+    from benchmarks.benchmark_tasks import get_task_by_name
 
     @contextmanager
     def _manager():
-        previous = os.environ.get(_BENCHMARK_ACTIVE_TASK_ENV)
+        previous_name = os.environ.get(_BENCHMARK_ACTIVE_TASK_ENV)
+        previous_live_target = os.environ.get(_BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV)
         os.environ[_BENCHMARK_ACTIVE_TASK_ENV] = task_name
         try:
+            task = get_task_by_name(task_name)
+            live_target = primary_live_target(task.environment)
+            if live_target:
+                os.environ[_BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV] = live_target
+            else:
+                os.environ.pop(_BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV, None)
             yield
         finally:
-            if previous is None:
+            if previous_name is None:
                 os.environ.pop(_BENCHMARK_ACTIVE_TASK_ENV, None)
             else:
-                os.environ[_BENCHMARK_ACTIVE_TASK_ENV] = previous
+                os.environ[_BENCHMARK_ACTIVE_TASK_ENV] = previous_name
+            if previous_live_target is None:
+                os.environ.pop(_BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV, None)
+            else:
+                os.environ[_BENCHMARK_ACTIVE_TASK_LIVE_TARGET_ENV] = previous_live_target
 
     return _manager()
 
