@@ -1106,7 +1106,7 @@ async function testBoundary_closeNonExistentNoOutbound() {
   );
 }
 
-async function testBoundary_githubAccessCheckDbOnly() {
+async function testBoundary_githubAccessCheckDeniesMissingRepo() {
   const captureToken = `claude-github-${crypto.randomUUID()}`;
   const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
     method: 'POST',
@@ -1120,18 +1120,15 @@ async function testBoundary_githubAccessCheckDbOnly() {
   });
   await new Promise((r) => setTimeout(r, 200));
   const calls = await readCapturesForToken(captureToken);
-  // GitHub access check is DB-only — no fetch to github.com.
-  // The request returns 403 (access denied) before reaching E2B, so no E2B calls either.
-  const githubCalls = filterInfraCalls(calls).filter((c) => c.url.includes('github.com'));
   assert(
     res.status === 403,
-    `Expected 403 GITHUB_ACCESS_DENIED (DB-only check), got ${res.status}: ${JSON.stringify(res.data).substring(0, 200)}`
+    `Expected 403 GITHUB_ACCESS_DENIED for missing repo, got ${res.status}: ${JSON.stringify(res.data).substring(0, 200)}`
   );
+  const e2bCalls = filterInfraCalls(calls).filter((c) => c.url.includes('e2b.app'));
   assert(
-    filterInfraCalls(calls).length === 0,
-    `Expected 0 total outbound calls (403 short-circuits before E2B), got ${calls.length}: ${calls.map((c) => c.url).join(', ')}`
+    e2bCalls.length === 0,
+    `Expected 0 E2B calls (403 short-circuits before E2B), got ${e2bCalls.length}: ${e2bCalls.map((c) => c.url).join(', ')}`
   );
-  void githubCalls;
 }
 
 async function testBoundary_healthCallsE2bApi() {
@@ -1602,8 +1599,8 @@ async function runAll() {
         fn: testBoundary_closeNonExistentNoOutbound,
       },
       {
-        name: 'boundary -- github access check is DB-only (no github.com calls)',
-        fn: testBoundary_githubAccessCheckDbOnly,
+        name: 'boundary -- missing github repo is denied after visibility lookup',
+        fn: testBoundary_githubAccessCheckDeniesMissingRepo,
       },
       {
         name: 'boundary -- health check calls E2B API at api.e2b.app',

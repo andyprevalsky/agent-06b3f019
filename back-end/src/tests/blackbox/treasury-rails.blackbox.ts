@@ -162,7 +162,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  const wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
+  let wallet;
+  try {
+    wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/invalid or expired organization token/i.test(message)) {
+      console.log(
+        'SKIP treasury-rails: AgentCard org token rejected by provider (credential-infra precondition)'
+      );
+      return;
+    }
+    throw error;
+  }
   assert.equal(
     wallet.livemode,
     false,

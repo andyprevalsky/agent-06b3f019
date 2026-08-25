@@ -10,6 +10,7 @@
 import type { FeedbackData } from '../../types';
 import type { CodeProvider, ExploreStep, WaitForCheck } from '../../types';
 import type { Message } from '../../hooks';
+import type { SubAgentStreamingMetrics } from '../useMessageFiltering';
 
 export interface MessageBubbleProps {
   message: Message;
@@ -36,6 +37,8 @@ export interface MessageBubbleProps {
   thinkingStreamTokenCount?: number;
   /** Local timestamp from the first observed LLM stream event */
   thinkingStreamStartedAtMs?: number;
+  /** Per-sub-agent streaming metrics for wait_for embedded explore checks */
+  streamingMetricsBySubAgentId?: Map<string, SubAgentStreamingMetrics>;
   /** Explore agent step history (passed from MessageList grouping) */
   exploreStepHistory?: ExploreStep[];
   /** Wait_for check history (passed from MessageList grouping) */

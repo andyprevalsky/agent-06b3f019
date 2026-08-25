@@ -173,6 +173,12 @@ export function handleAssistantStream(
       if (existing?.timeoutId) window.clearTimeout(existing.timeoutId);
 
       const accumulatedText = (existing?.text || '') + chunk.delta;
+      const reportedCharCount = chunk.char_count ?? 0;
+      const charCount = Math.max(
+        reportedCharCount,
+        accumulatedText.length,
+        existing?.charCount ?? 0,
+      );
 
       if (chunk.done && chunk.clear_on_done) {
         if (accumulatedText.trim()) {
@@ -209,6 +215,7 @@ export function handleAssistantStream(
         llmStartedAtMs: chunk.llm_started_at_ms ?? existing?.llmStartedAtMs,
         isClaude: chunk.is_claude ?? existing?.isClaude ?? false,
         isGpt: chunk.is_gpt ?? existing?.isGpt ?? false,
+        charCount,
       });
     }
 

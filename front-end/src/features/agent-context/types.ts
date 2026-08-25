@@ -14,6 +14,8 @@ export interface StreamingBubble {
   isGpt?: boolean;
   /** LLM request start timestamp from the stream producer */
   llmStartedAtMs?: number;
+  /** Total streamed bytes, including hidden provider chunks not reflected in `text` */
+  charCount?: number;
 }
 
 export interface StreamingPlan {

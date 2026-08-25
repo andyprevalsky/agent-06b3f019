@@ -335,6 +335,7 @@ describe('useMessageSending', () => {
     expect(result.current.messageInput).toBe('');
     expect(result.current.selectedModel).toBeTruthy();
     expect(result.current.isSendingMessage).toBe(false);
+    expect(result.current.pendingPriceLimitCents).toBe(1000);
   });
 
   it('sets messageInput from localStorage prefill then clears it', () => {

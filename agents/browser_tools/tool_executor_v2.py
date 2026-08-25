@@ -23,6 +23,7 @@ VERIFIED EVENT NAMES (from browser_use/browser/events.py):
 """
 
 import asyncio
+import contextlib
 import logging
 from typing import Any, Dict, Optional
 
@@ -63,6 +64,8 @@ async def execute_browser_tool(
             return await _execute_press_key(dom_service, tool_args)
         elif tool_name == "click_coordinates":
             return await _execute_click_coordinates(dom_service, action_history, tool_args)
+        elif tool_name == "drag":
+            return await _execute_drag(dom_service, action_history, tool_args)
         elif tool_name == "dropdown_options":
             return await _execute_dropdown_options(dom_service, tool_args)
         elif tool_name == "select_dropdown":
@@ -250,6 +253,117 @@ async def _execute_click_coordinates(
             result={"success": True}
         )
         return {"success": True, "clicked_at": {"x": x, "y": y}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+async def _execute_drag(
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Drag via CDP mousePressed → mouseMoved → mouseReleased (browser-use Element.drag_to)."""
+    session = dom_service.session
+    if not session:
+        return {"success": False, "error": "Browser not connected"}
+
+    async def _point(index_key: str, x_key: str, y_key: str, label: str) -> Any:
+        x = args.get(x_key)
+        y = args.get(y_key)
+        if x is not None and y is not None:
+            return int(x), int(y)
+        index = args.get(index_key)
+        if index is None:
+            return None
+        coords = await dom_service.get_click_coordinates(int(index))
+        if not coords:
+            coords = await dom_service.get_element_coordinates(int(index))
+        if not coords:
+            raise ValueError(f"drag {label}: no coordinates for index {index}")
+        return int(coords[0]), int(coords[1])
+
+    try:
+        start = await _point("source_index", "start_x", "start_y", "start")
+        end = await _point("target_index", "end_x", "end_y", "end")
+        if start is None:
+            return {"success": False, "error": "drag requires source_index or start_x/start_y"}
+        if end is None:
+            return {"success": False, "error": "drag requires target_index or end_x/end_y"}
+        start_x, start_y = start
+        end_x, end_y = end
+        steps = max(2, min(120, int(args.get("steps") or 24)))
+
+        cdp_session = await session.get_or_create_cdp_session()
+        session_id = cdp_session.session_id
+        send = cdp_session.cdp_client.send.Input.dispatchMouseEvent
+        pressed = False
+        try:
+            await send(params={"type": "mouseMoved", "x": start_x, "y": start_y}, session_id=session_id)
+            await asyncio.sleep(0.05)
+            await send(
+                params={
+                    "type": "mousePressed",
+                    "x": start_x,
+                    "y": start_y,
+                    "button": "left",
+                    "buttons": 1,
+                    "clickCount": 1,
+                },
+                session_id=session_id,
+            )
+            pressed = True
+            for i in range(1, steps + 1):
+                t = i / steps
+                await send(
+                    params={
+                        "type": "mouseMoved",
+                        "x": start_x + (end_x - start_x) * t,
+                        "y": start_y + (end_y - start_y) * t,
+                        "button": "left",
+                        "buttons": 1,
+                    },
+                    session_id=session_id,
+                )
+                await asyncio.sleep(0.01)
+            await send(
+                params={
+                    "type": "mouseReleased",
+                    "x": end_x,
+                    "y": end_y,
+                    "button": "left",
+                    "buttons": 0,
+                    "clickCount": 1,
+                },
+                session_id=session_id,
+            )
+            pressed = False
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="drag",
+                coordinates=(start_x, start_y),
+                params={"end": {"x": end_x, "y": end_y}, "steps": steps},
+                result={"success": True},
+            )
+            return {
+                "success": True,
+                "start": {"x": start_x, "y": start_y},
+                "end": {"x": end_x, "y": end_y},
+                "steps": steps,
+            }
+        finally:
+            if pressed:
+                with contextlib.suppress(Exception):
+                    await send(
+                        params={
+                            "type": "mouseReleased",
+                            "x": end_x,
+                            "y": end_y,
+                            "button": "left",
+                            "buttons": 0,
+                            "clickCount": 1,
+                        },
+                        session_id=session_id,
+                    )
     except Exception as e:
         return {"success": False, "error": str(e)}
 

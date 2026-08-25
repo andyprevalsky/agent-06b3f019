@@ -53,6 +53,7 @@ class BenchmarkTask:
     expected_structured_response_contains: Optional[dict] = None  # required substrings by browser result field
     required_structured_response_fields: List[str] = field(default_factory=list)  # non-empty browser result fields
     expected_gate: Optional[dict] = None  # Expected metadata.gate fields for gate-blocked tasks
+    simulate_gate_webhook: Optional[str] = None  # After gate is seen, replay webhook (e.g. subscription)
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     min_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory minimums by agent class
     max_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory maximums by agent class

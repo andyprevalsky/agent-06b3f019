@@ -788,6 +788,83 @@
     "group": "daily"
   },
   {
+    "name": "gate-subscription-webhook-resume",
+    "title": "Gate — Subscription Webhook Resumes Card Mint",
+    "description": "Local fixture: same depleted account as gate-subscription-card-mint. After the subscription gate appears, a checkout.session.completed webhook must clear the gate and let the browser agent mint a card and finish checkout.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "timeout_seconds": 360,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "subscription",
+      "payment",
+      "browser",
+      "webhook",
+      "local-only"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_gate": {
+      "type": "subscription",
+      "gateKey": "subscription",
+      "severity": "blocking"
+    },
+    "simulate_gate_webhook": "subscription",
+    "expected_payment_receipt": true,
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "purchase_subscription_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Extends gate-subscription-card-mint: after the subscription gate is raised, the harness replays checkout.session.completed so the agent can resume and complete checkout."
+    },
+    "evaluators": [
+      {
+        "id": "subscription-webhook-resume",
+        "method": "static_check",
+        "criteria": [
+          "A subscription gate is raised first",
+          "The harness simulates checkout.session.completed",
+          "The agent resumes and completes checkout with a payment receipt"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "no_browser_agent_failures"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:card-mint-subscription-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "daily"
+  },
+  {
     "name": "gate-subscription-card-mint-admin-bypass",
     "title": "Gate — Admin Bypasses Card-Mint Subscription",
     "description": "Local fixture: the SAME depleted account state as gate-subscription-card-mint (free credits, no active subscription), but the run user is a synthetic ADMIN (ADMIN_USER_IDS_EXTRA). Admins bypass the subscription / card-on-file requirement, so the browser agent must mint a company-funded card and complete checkout with NO subscription gate.",
@@ -1846,10 +1923,10 @@
   },
   {
     "name": "browser-hotel-booking",
-    "title": "Refundable Hotel Booking",
-    "description": "Reserve a one-night hotel stay while comparing room price and cancellation terms.",
-    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room with free cancellation, keep the room rate under $400 before taxes and fees, and do not select a nonrefundable rate, package, room upgrade, or add-on. Complete the reservation.",
-    "timeout_seconds": 900,
+    "title": "Hotel Kabuki One-Night Booking",
+    "description": "Reserve a one-night hotel stay on hotels.com for the next Saturday-to-Sunday weekend.",
+    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from next Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
+    "timeout_seconds": 1125,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent"
@@ -1865,11 +1942,11 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kinds": [
-      "write_lock"
-    ],
+    "expected_attention_kind": "payment_approval",
+    "expected_payment_receipt": true,
+    "success_on_payment_card_request": true,
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1886,27 +1963,27 @@
         "live"
       ],
       "services": [
-        "booking.com",
-        "write_lock"
+        "hotels.com",
+        "request_payment_card"
       ],
       "secrets": [],
       "live_targets": [
-        "https://www.booking.com"
+        "https://www.hotels.com/",
+        "https://www.hotels.com/ho129640/hotel-kabuki-part-of-jdv-by-hyatt-san-francisco-united-states-of-america/"
       ],
-      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation.",
+      "context_notes": "Live lodging inventory on hotels.com for Hotel Kabuki. Success is the single unresolved payment-card approval grounded to hotels.com; the harness never approves it or completes the charge. Do not require a completed reservation or write-lock. Stay dates are relative (next Saturday to Sunday); accept the next reasonable one-night Sat–Sun weekend without requiring a specific calendar week.",
       "live_cookie_domains": [
-        "booking.com"
+        "hotels.com"
       ]
     },
     "evaluators": [
       {
-        "id": "refundable-hotel-runtime-contract",
+        "id": "hotel-kabuki-runtime-contract",
         "method": "static_check",
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
-          "The approval identifies Hotel Kabuki, both stay dates, free cancellation, and the total amount"
+          "The run stops after exactly one unresolved payment-card approval on the grounded hotels.com checkout"
         ],
         "checks": [
           {
@@ -1918,8 +1995,7 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
+            "type": "expected_payment_receipt"
           },
           {
             "type": "approval_request_count",
@@ -1928,15 +2004,14 @@
         ]
       },
       {
-        "id": "refundable-hotel-booking-semantics",
+        "id": "hotel-kabuki-payment-boundary-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The completed reservation is for Hotel Kabuki, one adult, Saturday to Sunday, in a non-smoking room",
-          "Grounded comparison evidence shows the selected rate is the lowest-priced available option with free cancellation and is under $400 before taxes and fees",
-          "No nonrefundable rate, package, upgrade, or add-on is selected, and the single approval describes the selected room or rate, cancellation terms, both dates, and total amount",
-          "The trajectory reaches a grounded final reservation confirmation after approval; checkout, an approval request, or a write-lock alone is not completion"
+          "The pending payment approval is for Hotel Kabuki on hotels.com for one adult on a one-night Saturday-to-Sunday stay (the next upcoming weekend is acceptable; do not require an exact calendar week), with room rate under $400 before taxes and fees",
+          "No package, upgrade, or add-on is selected",
+          "The trajectory ends at exactly one unresolved payment-card approval grounded to hotels.com; the harness does not approve it, and a completed reservation or generic write-lock alone is not success"
         ],
-        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and attention request. Pass only if grounded evidence proves the exact hotel, dates, occupancy, refundability, room constraints, lowest-price selection, price cap, well-formed approval, and completed reservation confirmation."
+        "judge_prompt": "Review the room selection, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com checkout, Hotel Kabuki, a one-night Saturday-to-Sunday stay (the next reasonable weekend is fine; do not fail on exact calendar dates), one-adult occupancy, the under-$400 pre-tax/fees cap, no packages or add-ons, and one unresolved payment-card approval. Judge merchant labels, hotel naming, and room descriptions by meaning rather than exact strings. Do not require lowest-price or non-smoking proof. Do not judge signed-in vs guest checkout, cookie bundles, or challenge-recovery auth-preservation messages. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,

@@ -67,6 +67,7 @@ AGENT_PAYMENT_TASK_NAMES = {
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
+    "gate-subscription-webhook-resume",
     "gate-kyc-card-mint",
     # Must include admin-bypass so needs_frontend_tunnel still publishes
     # BENCHMARK_FRONTEND_URL for /test_payment. Bundling itself now follows

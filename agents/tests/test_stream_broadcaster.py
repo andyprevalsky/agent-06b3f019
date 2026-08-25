@@ -72,6 +72,28 @@ def test_update_is_non_blocking():
         messages.stream_assistant_chunk = orig
 
 
+def test_update_progress_broadcasts_char_count_without_text_delta():
+    rec = _Recorder(latency_s=0.01)
+    orig = messages.stream_assistant_chunk
+    _patch(rec)
+    try:
+
+        async def run():
+            b = CoalescingStreamBroadcaster(agent_id="a", stream_id="s", interval_s=0.02)
+            b.update_progress(120, sequence=1)
+            await asyncio.sleep(0.05)
+            await b.aclose()
+            return rec.calls
+
+        calls = asyncio.run(run())
+        progress_calls = [c for c in calls if not c.get("done")]
+        assert progress_calls, "expected progress broadcast"
+        assert progress_calls[0]["delta"] == ""
+        assert progress_calls[0]["char_count"] == 120
+    finally:
+        messages.stream_assistant_chunk = orig
+
+
 def test_stream_assistant_chunk_enqueues_without_waiting_for_supabase():
     class _SlowClient:
         def __init__(self):
@@ -208,6 +230,7 @@ def test_reset_drops_buffered_deltas():
 
 if __name__ == "__main__":
     test_update_is_non_blocking()
+    test_update_progress_broadcasts_char_count_without_text_delta()
     test_stream_assistant_chunk_enqueues_without_waiting_for_supabase()
     test_coalesces_without_losing_text()
     test_aclose_sends_done_marker()

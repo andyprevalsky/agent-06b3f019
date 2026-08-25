@@ -170,12 +170,21 @@ class BenchmarkRun:
         CLI benchmark runs set BENCHMARK_HUB_REQUIRED after their fail-closed
         startup registration. Fleet children carry BENCHMARK_HUB_PARENT_RUN_ID
         and leave aggregation/upload to that already-visible parent run.
+
+        When the fail-closed Hub is an ephemeral localhost stack, also mirror
+        the terminal bundle to the always-on production Hub so
+        ``roselabs.ai/open-agent`` remains reachable after teardown.
         """
         if os.getenv("BENCHMARK_HUB_PARENT_RUN_ID"):
             return
         required = os.getenv("BENCHMARK_HUB_REQUIRED") == "1"
         try:
-            from benchmarks.hub_upload import hub_upload_enabled, upload_run_bundle
+            from benchmarks.hub_upload import (
+                hub_upload_enabled,
+                mirror_run_bundle_to_durable_hub,
+                print_durable_agent_links,
+                upload_run_bundle,
+            )
         except Exception as e:
             if required:
                 raise
@@ -183,7 +192,17 @@ class BenchmarkRun:
             return
         if not required and not hub_upload_enabled():
             return
-        upload_run_bundle(self.to_dict(), required=required)
+        bundle = self.to_dict()
+        upload_run_bundle(bundle, required=required)
+        try:
+            mirror_run_bundle_to_durable_hub(bundle)
+        except Exception as e:
+            # Cloud agents raise HubVisibilityError from the mirror helper;
+            # local /deploy must not die on a prod outage during mirror.
+            if required and os.getenv("CURSOR_AGENT"):
+                raise
+            print(f"⚠️  durable hub mirror failed (non-fatal): {e}")
+        print_durable_agent_links(bundle)
 
     def _record_history(self) -> None:
         """Record run stats for every completed task, plus pass-only corpora.

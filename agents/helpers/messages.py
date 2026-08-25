@@ -289,6 +289,7 @@ async def stream_assistant_chunk(
     is_gpt: bool = False,
     llm_started_at_ms: int | None = None,
     clear_on_done: bool = False,
+    char_count: int | None = None,
 ) -> None:
     """
     Send a streaming delta DIRECTLY to Supabase Realtime (bypasses backend).
@@ -330,6 +331,8 @@ async def stream_assistant_chunk(
             record["llm_started_at_ms"] = llm_started_at_ms
         if clear_on_done:
             record["clear_on_done"] = True
+        if char_count is not None:
+            record["char_count"] = char_count
 
         await _queue_realtime_record(f"agent:{agent_id}", "ASSISTANT_STREAM", record)
 
@@ -384,6 +387,8 @@ class CoalescingStreamBroadcaster:
         self._interval_s = interval_s
         self._pending: List[str] = []
         self._sequence = 0
+        self._progress_char_count = 0
+        self._last_broadcast_char_count = 0
         self._drainer: Optional[asyncio.Task] = None
         self._closed = False
 
@@ -396,10 +401,21 @@ class CoalescingStreamBroadcaster:
         if self._drainer is None:
             self._drainer = asyncio.create_task(self._drain_loop())
 
+    def update_progress(self, char_count: int, sequence: int) -> None:
+        """Record hidden streaming progress (e.g. codex reasoning items) for the FE token counter."""
+        if self._closed or char_count <= 0:
+            return
+        self._progress_char_count = max(self._progress_char_count, char_count)
+        self._sequence = sequence
+        if self._drainer is None:
+            self._drainer = asyncio.create_task(self._drain_loop())
+
     def reset(self) -> None:
         """Drop buffered deltas when the stream restarts (e.g. parse retry)."""
         self._pending.clear()
         self._sequence = 0
+        self._progress_char_count = 0
+        self._last_broadcast_char_count = 0
 
     async def adispose(self) -> None:
         """Stop the drainer without sending a done marker. Idempotent — safe to
@@ -425,16 +441,18 @@ class CoalescingStreamBroadcaster:
         return bool(ic), bool(ig)
 
     async def _flush(self) -> None:
-        if not self._pending:
+        delta = "".join(self._pending) if self._pending else ""
+        if self._pending:
+            self._pending.clear()
+        char_count = self._progress_char_count
+        if not delta and char_count <= self._last_broadcast_char_count:
             return
-        delta = "".join(self._pending)
-        self._pending.clear()
         is_claude, is_gpt = self._flags()
         async with span(
             "stream.broadcast",
             agent_id=self._agent_id,
             stream_id=self._stream_id,
-            chars=len(delta),
+            chars=len(delta) or char_count,
             coalesced=True,
         ):
             await stream_assistant_chunk(
@@ -447,7 +465,10 @@ class CoalescingStreamBroadcaster:
                 is_claude=is_claude,
                 is_gpt=is_gpt,
                 llm_started_at_ms=self._llm_started_at_ms,
+                char_count=char_count if char_count > 0 else None,
             )
+        if char_count > 0:
+            self._last_broadcast_char_count = char_count
 
     async def aclose(
         self,

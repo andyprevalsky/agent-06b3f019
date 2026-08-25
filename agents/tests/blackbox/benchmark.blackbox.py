@@ -4606,6 +4606,29 @@ def test_payment_merchant_accepts_bare_business_name():
     assert wrong_platform is not None and wrong_platform.startswith("merchant mismatch")
 
 
+def test_hotel_payment_merchant_accepts_bare_hotels_com_label():
+    """Shorthand ``Hotels.com (hotels.com)`` catalog bookkeeping accepts bare Hotels.com labels."""
+    from benchmarks.run_benchmark import _validate_payment_merchant_identity
+
+    error = _validate_payment_merchant_identity(
+        "Hotels.com (hotels.com)",
+        "Hotels.com",
+        {},
+        [],
+        ["Hotel Kabuki", "Hotel Kabuki, part of JdV by Hyatt"],
+    )
+    assert error is None
+
+    wrong = _validate_payment_merchant_identity(
+        "Hotels.com (hotels.com)",
+        "Booking.com",
+        {},
+        [],
+        ["Hotel Kabuki"],
+    )
+    assert wrong is not None and wrong.startswith("merchant mismatch")
+
+
 def _amazon_attention_poll_task():
     from dataclasses import replace
 
@@ -5637,37 +5660,143 @@ def test_approval_request_details_support_multiple_dates_and_seat():
     assert "seat" in reason.lower()
 
 
-def test_hotel_catalog_requires_single_clean_completed_reservation():
-    """Hotel booking uses one browser and a complete, grounded approval."""
+def test_hotel_catalog_stops_at_grounded_payment_approval():
+    """Hotel booking passes at one well-formed, unresolved Hotels.com card request (semantics via judge)."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-hotel-booking")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
-    assert task.prompt.endswith("Complete the reservation.")
-    assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kinds == ["write_lock"]
+    assert "lowest-priced" not in task.prompt.lower()
+    assert "non-smoking" not in task.prompt.lower()
+    assert task.prompt.startswith("Use exactly one browser agent to book")
+    assert task.prompt.endswith("Use guest checkout — do not sign in or create an account.")
+    assert task.approval_handling == "ignore"
+    assert task.expected_attention_kinds == []
+    assert task.expected_attention_kind_any_of == []
+    assert task.expected_attention_kind == "payment_approval"
     assert task.expected_approval_count == 1
+    assert task.success_on_payment_card_request is True
+    assert task.expected_payment_receipt is True
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
     ]
-    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+
+    static_evaluator = task.evaluators[0]
+    static_types = {check["type"] for check in static_evaluator["checks"]}
     assert static_types == {
         "no_tool_failures",
         "browser_agent_session_count",
-        "agent_status",
+        "expected_payment_receipt",
         "approval_request_count",
     }
-    # Approval contents are judged semantically, never matched by substring/regex:
-    # the literal checks rejected correct phrasings and passed on incidental
-    # letter+digit tokens from image URLs. The judge is the sole owner.
     assert "approval_request_details" not in static_types
+
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("lowest-priced", "free cancellation", "completed", "confirmation"):
-        assert requirement in semantic_criteria
-    assert "approval" in semantic_criteria
+    judge = task.evaluators[1]["judge_prompt"].lower()
+    for requirement in ("hotel kabuki", "payment", "unresolved", "guest", "hotels.com"):
+        assert requirement in semantic_criteria or requirement in judge
+    for forbidden in ("lowest-priced", "non-smoking", "lowest-price"):
+        assert forbidden not in semantic_criteria
+
+
+def test_benchmark_goal_injects_payment_boundary_operational_suffix():
+    """Payment-boundary benches steer the root away from completion schemas and retries."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
+
+    hotel = get_task_by_name("browser-hotel-booking")
+    hotel_goal = bench._benchmark_goal_for_task(hotel, "http://localhost:3201")
+    assert PAYMENT_BOUNDARY_GOAL_MARKER not in hotel_goal
+    assert "request_payment_card" not in hotel_goal.lower()
+    assert "do not instruct the browser to submit payment" not in hotel_goal.lower()
+
+    event_ticket = get_task_by_name("browser-event-ticket")
+    goal = bench._benchmark_goal_for_task(event_ticket, "http://localhost:3201")
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in goal
+    assert "do not instruct the browser to submit payment" in goal.lower()
+
+
+def test_hotel_double_spawn_run_artifact_fails_exact_tool_count():
+    """Replay aba4c297: second spawn_browser_agent must fail the static contract."""
+    import json
+    from pathlib import Path
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    run_path = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "benchmark-runs"
+        / "20260822_182420_browser-hotel-booking.json"
+    )
+    payload = json.loads(run_path.read_text())
+    task_result = payload["tasks"][0]
+    task = get_task_by_name("browser-hotel-booking")
+    reason = bench._root_exact_tool_count_exceeded(task, task_result["logs"]["messages"])
+    assert reason is not None
+    assert "spawn_browser_agent" in reason
+    assert "expected 1, got 2" in reason
+
+
+def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
+    """Replay e6a95458: completion-oriented spawn goal ends on phone write_lock, not payment_approval."""
+    import json
+    from pathlib import Path
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    run_path = (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "benchmark-runs"
+        / "20260822_212328_browser-hotel-booking.json"
+    )
+    payload = json.loads(run_path.read_text())
+    task_result = payload["tasks"][0]
+    messages = task_result["logs"]["messages"]
+    serialized = json.dumps(messages)
+
+    task = get_task_by_name("browser-hotel-booking")
+    harness_goal = bench._benchmark_goal_for_task(task, "http://localhost:3201")
+    assert "Complete the purchase" not in harness_goal
+    assert "request_payment_card" not in harness_goal.lower()
+
+    spawn_goal = None
+    spawn_schema_fields: list[str] = []
+    for message in messages:
+        metadata = message.get("metadata") or {}
+        for tool_call in metadata.get("tool_calls") or []:
+            if tool_call.get("tool") == "spawn_agent" and tool_call.get("type") == "browser":
+                spawn_goal = tool_call.get("goal", "")
+                schema = tool_call.get("output_schema") or {}
+                spawn_schema_fields = [field.get("name", "") for field in schema.get("fields", [])]
+                break
+        if spawn_goal:
+            break
+
+    assert spawn_goal
+    assert "Complete the purchase" in spawn_goal
+    assert "request_payment_card" not in spawn_goal.lower()
+    assert "booking_completed" in spawn_schema_fields
+    assert serialized.count("request_payment_card") == 0
+    assert "Make a phone call to +1 (800) 246-8357" in serialized
+
+    data = {
+        "agent": {"status": task_result["status"], "progress": task_result["progress_score"]},
+        "messages": messages,
+    }
+    passed, reason = evaluate_task(task, data, approvals_triggered=task_result["approvals_triggered"])
+    assert passed is False
+    assert "payment_approval" in (reason or "")
+    assert "payment_approval" in task_result["failure_reason"]
+    assert "write_lock" in task_result["failure_reason"]
 
 
 def test_event_ticket_catalog_stops_at_grounded_payment_approval():
@@ -6116,7 +6245,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
         booking = get_task_by_name("browser-hotel-booking")
         manifests = await bench._apply_live_fixtures(booking, "http://localhost:54121")
         assert manifests == [{"fixture": "live", "browser_auth": True, "source": "prod_sync"}]
-        assert synced_domains == [("booking.com",)]
+        assert synced_domains == [("hotels.com",)]
         assert queried_domains == []
 
         uber = get_task_by_name("minted-agent-accounts-uber")
@@ -6131,7 +6260,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
             "Live fixture preflight: no injectable browser credential for uber.com "
             "after the scoped browser-credential sync."
         )
-        assert synced_domains == [("booking.com",), ("uber.com",)]
+        assert synced_domains == [("hotels.com",), ("uber.com",)]
         assert queried_domains == ["uber.com"]
 
 
@@ -15890,6 +16019,10 @@ async def run_all_tests():
         "payment_merchant_bare_business_name",
         test_payment_merchant_accepts_bare_business_name,
     )
+    r.record(
+        "hotel_payment_merchant_bare_hotels_com",
+        test_hotel_payment_merchant_accepts_bare_hotels_com_label,
+    )
     await r.record_async(
         "amazon_beanie_poll_stops_unresolved",
         test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it,
@@ -15968,7 +16101,19 @@ async def run_all_tests():
     )
     r.record(
         "hotel_clean_completed_reservation",
-        test_hotel_catalog_requires_single_clean_completed_reservation,
+        test_hotel_catalog_stops_at_grounded_payment_approval,
+    )
+    r.record(
+        "hotel_payment_boundary_goal_suffix",
+        test_benchmark_goal_injects_payment_boundary_operational_suffix,
+    )
+    r.record(
+        "hotel_double_spawn_run_artifact_tool_count",
+        test_hotel_double_spawn_run_artifact_fails_exact_tool_count,
+    )
+    r.record(
+        "hotel_e6a95458_no_payment_card_boundary",
+        test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary,
     )
     r.record(
         "event_ticket_grounded_payment_approval",

@@ -1,6 +1,4 @@
-import {
-  benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig,
-} from './config';
+import { benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig } from './config';
 import { readCatalogTasks } from './catalog';
 import { createLogger } from '../../providers/logger';
 import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
