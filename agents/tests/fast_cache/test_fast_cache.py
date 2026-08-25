@@ -2222,5 +2222,10 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert swf is not None
     assert "trajectory ended" in swf["content"]
 
-    assert soft_complete_on_miss("plan_loop") is None
-    assert soft_complete_on_miss("execute_loop") is None
+    execute = soft_complete_on_miss("execute_loop")
+    assert execute is not None
+    assert execute["tool_calls"][0]["name"] == "attempt_completion"
+
+    assert soft_complete_on_miss("verifier_execute") is not None
+    assert soft_complete_on_miss("context_compression") is None
+    assert soft_complete_on_miss("response_schema") is None

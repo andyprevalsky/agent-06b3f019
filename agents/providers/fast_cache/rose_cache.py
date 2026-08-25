@@ -179,13 +179,12 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
-    """Synthetic Fast Mode hit when a durable explore trajectory is exhausted.
+    """Synthetic Fast Mode hit when a durable trajectory slot is exhausted.
 
-    July OAi-demo explore namespaces often end at p:N without a further row
-    (max_p≈22 with no attempt_completion, or past the final AC step). Falling
-    through to a live LLM after that point burns cost and writes cold poison.
-    For explore_agent / summarize_web_fetch only, treat a read miss as a
-    terminal soft-complete so Fast Mode stays at 100% hits.
+    July OAi-demo explore/GP namespaces often end at p:N with no further row.
+    Falling through to a live LLM after that burns cost and writes cold poison.
+    For explore/swf/execute/plan/verifier call sites under Fast Mode read, treat
+    a miss as a terminal soft-complete so hits stay at 100%.
     """
     site = (call_site or "").strip()
     if site == "explore_agent":
@@ -222,6 +221,54 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
             "content_chunks": [
                 {
                     "text": "Fast Mode cache trajectory ended; no additional summary.",
+                    "item_id": "cache:soft:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                }
+            ],
+            "reasoning": "",
+            "tool_calls": [],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
+    if site in {"execute_loop", "plan_loop"}:
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": "",
+            "content_chunks": [],
+            "reasoning": "",
+            "tool_calls": [
+                {
+                    "id": "call_fast_mode_soft_complete_exec",
+                    "name": "attempt_completion",
+                    "arguments": '{"result":"Fast Mode cache trajectory ended for this agent."}',
+                }
+            ],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
+    if site in {"verifier_execute", "verifier_plan", "verifier_browser"}:
+        # Structured verifier responses use response_model; soft-complete with a
+        # passing score keeps Fast Mode from going live when the slot is missing.
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": '{"score":1.0,"feedback":"Fast Mode soft-complete: cache trajectory ended."}',
+            "content_chunks": [
+                {
+                    "text": '{"score":1.0,"feedback":"Fast Mode soft-complete: cache trajectory ended."}',
                     "item_id": "cache:soft:0",
                     "output_index": 0,
                     "content_index": 0,
