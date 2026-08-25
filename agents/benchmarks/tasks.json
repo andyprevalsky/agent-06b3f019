@@ -1713,10 +1713,8 @@
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "ignore",
-    "expected_attention_kinds": [
-      "payment_approval",
-      "write_lock"
-    ],
+    "expected_approval_count": 1,
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
