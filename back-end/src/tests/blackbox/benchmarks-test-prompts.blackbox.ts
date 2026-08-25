@@ -13,6 +13,7 @@
  *   - drift guard: payload matches the agent-runner catalog entries 1:1 (count, titles, order)
  *   - filtering: external vitest smokes are excluded
  *   - adaptation: attachment urls live under /test-assets/, {frontend_url} token rewritten
+ *   - lastFivePassed: boolean on every prompt; aligns with ledger when last 5 passed
  *   - dev default: the FE auto-load title exists in the catalog
  *   - idempotency: identical across consecutive requests (same file on disk)
  *
@@ -39,6 +40,7 @@ const TestPromptSchema = z.object({
   prompt: z.string().min(1),
   attachmentUrls: z.array(z.string().min(1)),
   tags: z.array(z.string().min(1)),
+  lastFivePassed: z.boolean(),
 });
 
 const TestPromptsResponseSchema = z.object({
@@ -209,6 +211,107 @@ async function testPrompts_devDefaultPresent() {
   }
 }
 
+async function testPrompts_lastFivePassedIsBoolean() {
+  // Every prompt must carry the last-5 signal so the query-box green check
+  // can render without a second round-trip.
+  const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
+  if (res.status !== 200) return;
+  const body = res.data as { prompts: TestPrompt[] };
+  for (const prompt of body.prompts) {
+    if (typeof prompt.lastFivePassed !== 'boolean') {
+      throw new Error(
+        `Prompt "${prompt.title}" missing lastFivePassed boolean (got ${String(prompt.lastFivePassed)})`
+      );
+    }
+  }
+  if (body.prompts.length === 0) {
+    throw new Error('No prompts returned — cannot assert lastFivePassed');
+  }
+}
+
+async function testPrompts_lastFivePassedReflectsRunHistory() {
+  // Cement against the committed attempts ledger for two known tasks:
+  //   - smoke tasks like "Basic Chat Response" (chat-mode) have a long
+  //     trailing pass window → lastFivePassed true
+  //   - "Test Mass Agent Run - 0" has a trailing fail window → false
+  // Hub uploads can only make the signal stricter (newer fails) or add
+  // samples; they must not flip Mass Agent to true without five real passes.
+  const fs = await import('fs');
+  const path = await import('path');
+  const ledgerPath = path.join(
+    process.cwd(),
+    '..',
+    'agents',
+    'benchmarks',
+    'history',
+    'task_attempts.jsonl'
+  );
+  if (!fs.existsSync(ledgerPath)) {
+    throw new Error(`task_attempts.jsonl missing at ${ledgerPath}`);
+  }
+  const byTask = new Map<string, boolean[]>();
+  for (const line of fs.readFileSync(ledgerPath, 'utf-8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as { task?: unknown; passed?: unknown };
+      if (typeof parsed.task !== 'string' || parsed.task === '') continue;
+      const list = byTask.get(parsed.task) ?? [];
+      list.push(parsed.passed === true);
+      byTask.set(parsed.task, list);
+    } catch {
+      // skip malformed
+    }
+  }
+
+  const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
+  if (res.status !== 200) return;
+  const body = res.data as { prompts: TestPrompt[] };
+
+  const mass = body.prompts.find((p) => p.title === 'Test Mass Agent Run - 0');
+  if (!mass) {
+    throw new Error('Dev default "Test Mass Agent Run - 0" missing — cannot assert fail streak');
+  }
+  const massFlags = byTask.get('test-mass-agent-run-0') ?? [];
+  const massLedgerLastFiveFail =
+    massFlags.length >= 5 && massFlags.slice(-5).every((p) => p === false);
+  if (massLedgerLastFiveFail && mass.lastFivePassed) {
+    throw new Error(
+      'Test Mass Agent Run - 0 has last-5 ledger fails but lastFivePassed=true'
+    );
+  }
+  if (mass.lastFivePassed) {
+    throw new Error('Test Mass Agent Run - 0 unexpectedly has lastFivePassed=true');
+  }
+
+  const chat = body.prompts.find((p) => p.title === 'Basic Chat Response');
+  if (!chat) {
+    throw new Error('"Basic Chat Response" missing from catalog');
+  }
+  const chatFlags = byTask.get('chat-mode') ?? [];
+  const chatLedgerLastFivePass =
+    chatFlags.length >= 5 && chatFlags.slice(-5).every((p) => p === true);
+  if (chatLedgerLastFivePass && !chat.lastFivePassed) {
+    // Hub may have recorded a newer fail — allow false, but require some green.
+    const anyGreen = body.prompts.some((p) => p.lastFivePassed);
+    if (!anyGreen) {
+      throw new Error(
+        'chat-mode ledger last-5 all passed and no prompt has lastFivePassed=true'
+      );
+    }
+  }
+  if (chatLedgerLastFivePass && chat.lastFivePassed !== true && chat.lastFivePassed !== false) {
+    throw new Error('Basic Chat Response lastFivePassed is not a boolean');
+  }
+  // Prefer the strong assertion when hub has not flipped the smoke task.
+  if (chatLedgerLastFivePass && chat.lastFivePassed) {
+    return;
+  }
+  if (!body.prompts.some((p) => p.lastFivePassed)) {
+    throw new Error('Expected ≥1 prompt with lastFivePassed=true from run history');
+  }
+}
+
 async function testPrompts_idempotentSameResponse() {
   const res1 = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   const res2 = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
@@ -234,6 +337,11 @@ async function runAll() {
     { name: 'attachment urls under /test-assets/', fn: testPrompts_attachmentUrlsUseTestAssets },
     { name: '{frontend_url} token rewritten', fn: testPrompts_frontendUrlTokenRewritten },
     { name: 'dev default prompt present', fn: testPrompts_devDefaultPresent },
+    { name: 'lastFivePassed is boolean on every prompt', fn: testPrompts_lastFivePassedIsBoolean },
+    {
+      name: 'lastFivePassed reflects run history streaks',
+      fn: testPrompts_lastFivePassedReflectsRunHistory,
+    },
     { name: 'idempotent same response', fn: testPrompts_idempotentSameResponse },
   ];
 

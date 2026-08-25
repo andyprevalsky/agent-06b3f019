@@ -30,6 +30,7 @@ export interface HubTaskStats {
   last_attempt_at: string | null;
   last_status: string | null;
   last_fast_mode: boolean;
+  last_five_passed?: boolean;
 }
 
 export interface HubTask {

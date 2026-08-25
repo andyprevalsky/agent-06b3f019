@@ -19,6 +19,21 @@ export interface TaskStats {
   last_attempt_at: string | null;
   last_status: string | null;
   last_fast_mode: boolean;
+  /** True iff history has ≥5 attempts and the most recent 5 all passed. */
+  last_five_passed: boolean;
+}
+
+/** How many consecutive recent passes qualify a task for the query-box green check. */
+export const LAST_FIVE_PASS_WINDOW = 5;
+
+/**
+ * Pure helper: given attempts ordered oldest→newest, return whether the most
+ * recent LAST_FIVE_PASS_WINDOW all passed. Fewer than WINDOW attempts → false.
+ */
+export function lastFiveAttemptsPassed(passedFlagsOldestFirst: boolean[]): boolean {
+  if (passedFlagsOldestFirst.length < LAST_FIVE_PASS_WINDOW) return false;
+  const recent = passedFlagsOldestFirst.slice(-LAST_FIVE_PASS_WINDOW);
+  return recent.every((passed) => passed);
 }
 
 function percentile(sorted: number[], p: number): number | null {
@@ -84,6 +99,7 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
       last_attempt_at: last?.timestamp || null,
       last_status: last?.status ?? null,
       last_fast_mode: last?.fastMode === true,
+      last_five_passed: lastFiveAttemptsPassed(list.map((s) => s.passed)),
     });
   }
   return stats;
