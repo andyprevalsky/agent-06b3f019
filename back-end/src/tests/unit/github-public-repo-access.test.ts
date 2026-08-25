@@ -17,7 +17,8 @@ const privateRepoUrl = 'https://github.com/private-owner/private-repo';
 const missingRepoUrl = 'https://github.com/test-owner/test-repo';
 
 globalThis.fetch = (async (input: string | URL | Request): Promise<Response> => {
-  const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+  const url =
+    typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
   if (url.endsWith('/repos/icl-utk-edu/magma')) {
     return Response.json({ private: false, full_name: 'icl-utk-edu/magma' });
   }
