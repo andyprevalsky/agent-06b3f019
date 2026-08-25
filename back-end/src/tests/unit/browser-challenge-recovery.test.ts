@@ -130,35 +130,31 @@ async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear()
   let activeCreates = 0;
   let maxActiveCreates = 0;
 
-  const winner = await runLaneConfigSearch(
-    configs,
-    [{ key: 'auth_kept', storageState: {} }],
-    {
-      create: async (config) => {
-        activeCreates += 1;
-        maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        created.push(config.key);
-        activeCreates -= 1;
-        return fakeSession(config);
-      },
-      probe: async (config, _session, lane) => {
-        assert.strictEqual(lane.key, 'auth_kept');
-        probed.push(config.key);
-        // First config fails; second fully clears — sequential, no partial promote.
-        if (probed.length === 1) {
-          return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
-        }
-        return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
-      },
-      promote: async (candidate) => {
-        promoted.push(candidate.config.key);
-      },
-      release: async (config) => {
-        released.push(config.key);
-      },
-    }
-  );
+  const winner = await runLaneConfigSearch(configs, [{ key: 'auth_kept', storageState: {} }], {
+    create: async (config) => {
+      activeCreates += 1;
+      maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      created.push(config.key);
+      activeCreates -= 1;
+      return fakeSession(config);
+    },
+    probe: async (config, _session, lane) => {
+      assert.strictEqual(lane.key, 'auth_kept');
+      probed.push(config.key);
+      // First config fails; second fully clears — sequential, no partial promote.
+      if (probed.length === 1) {
+        return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+      }
+      return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+    },
+    promote: async (candidate) => {
+      promoted.push(candidate.config.key);
+    },
+    release: async (config) => {
+      released.push(config.key);
+    },
+  });
 
   assert.strictEqual(maxActiveCreates, 1, 'configs within a lane must be sequential');
   assert.strictEqual(probed.length, 2);
@@ -233,18 +229,14 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US' });
   const released: string[] = [];
   await assert.rejects(
-    runLaneConfigSearch(
-      configs,
-      [{ key: 'default', storageState: {} }],
-      {
-        create: async (config) => fakeSession(config),
-        probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true }),
-        promote: async () => assert.fail('zero-pass candidate must never be promoted'),
-        release: async (config) => {
-          released.push(config.key);
-        },
-      }
-    ),
+    runLaneConfigSearch(configs, [{ key: 'default', storageState: {} }], {
+      create: async (config) => fakeSession(config),
+      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true }),
+      promote: async () => assert.fail('zero-pass candidate must never be promoted'),
+      release: async (config) => {
+        released.push(config.key);
+      },
+    }),
     /No stable browser configuration/
   );
   assert.strictEqual(released.length, configs.length);
@@ -254,23 +246,19 @@ async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US' });
   const promoted: string[] = [];
   await assert.rejects(
-    runLaneConfigSearch(
-      configs,
-      [{ key: 'default', storageState: {} }],
-      {
-        create: async (config) => fakeSession(config),
-        probe: async (config) => ({
-          stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
-          attempts: 2,
-          latencyMs: 1,
-          paymentCdnOk: true,
-        }),
-        promote: async (candidate) => {
-          promoted.push(candidate.config.key);
-        },
-        release: async () => undefined,
-      }
-    ),
+    runLaneConfigSearch(configs, [{ key: 'default', storageState: {} }], {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
+        attempts: 2,
+        latencyMs: 1,
+        paymentCdnOk: true,
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    }),
     /No stable browser configuration/
   );
   assert.deepStrictEqual(promoted, []);
@@ -736,8 +724,7 @@ function testRecoveryRequestSchema(): void {
 function testSameSiteNavigationUrl(): void {
   const kabuki =
     'https://www.hotels.com/Hotel-Search?destination=Hotel%20Kabuki%2C%20San%20Francisco';
-  const city =
-    'https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California';
+  const city = 'https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California';
   assert.equal(sameSiteNavigationUrl(kabuki, city), city);
   assert.equal(
     sameSiteNavigationUrl(kabuki, 'https://hotels.com/Hotel-Search?destination=SF'),
