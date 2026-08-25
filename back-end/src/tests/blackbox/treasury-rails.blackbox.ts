@@ -51,22 +51,10 @@ async function waitForTransferReclaimed(
   const deadline = Date.now() + timeoutMs;
   let last = { status: 'not_found', releasedCents: 0 };
   for (;;) {
-    const transfers =
-      (
-        (await callOrgTool('list_transfers', { limit: 100 })) as {
-          structuredContent?: { transfers?: Array<Record<string, unknown>> };
-        }
-      ).structuredContent?.transfers ?? [];
-    const mine = transfers.find((t) => t.card_id === cardId);
+    const mine = await readCardTransfer(cardId);
     if (mine !== undefined) {
-      last = {
-        status: String(mine.status ?? 'unknown'),
-        releasedCents: Number(mine.released_cents ?? 0),
-      };
-      if (
-        last.releasedCents >= minReleasedCents &&
-        (last.status === 'reclaimed' || last.status === 'released')
-      ) {
+      last = mine;
+      if (isFullyReclaimedTransfer(mine, minReleasedCents)) {
         return last;
       }
     }
@@ -107,17 +95,54 @@ async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
 }
 
 /**
- * Poll `recover_funds` until it yields something.
+ * Read THIS card's org-wallet mint transfer (race-free money identity).
  *
- * Closing a card does NOT immediately free recoverable headroom — the release settles
- * asynchronously, so a recovery fired straight after `close_card` legitimately answers
- * `insufficient_headroom`. This is a real property of the provider, not flake: the production
- * top-up calls recovery opportunistically and simply gets nothing on that pass.
+ * Prefer transfer status over pool balance / residual sweeps: the sandbox org is shared, and
+ * AgentCard may reclaim the mint transfer directly on close without ever exposing cardholder
+ * residual for `recover_funds`.
+ */
+async function readCardTransfer(
+  cardId: string
+): Promise<{ status: string; releasedCents: number } | undefined> {
+  const transfers =
+    (
+      (await callOrgTool('list_transfers', { limit: 100 })) as {
+        structuredContent?: { transfers?: Array<Record<string, unknown>> };
+      }
+    ).structuredContent?.transfers ?? [];
+  const mine = transfers.find((t) => t.card_id === cardId);
+  if (mine === undefined) return undefined;
+  return {
+    status: String(mine.status ?? 'unknown'),
+    releasedCents: Number(mine.released_cents ?? 0),
+  };
+}
+
+function isFullyReclaimedTransfer(
+  transfer: { status: string; releasedCents: number } | undefined,
+  minReleasedCents: number
+): transfer is { status: string; releasedCents: number } {
+  return (
+    transfer !== undefined &&
+    transfer.releasedCents >= minReleasedCents &&
+    (transfer.status === 'reclaimed' || transfer.status === 'released')
+  );
+}
+
+/**
+ * Wait until unused mint value is observably back (recover_funds residual OR transfer reclaim).
+ *
+ * Closing a card does NOT always free recoverable cardholder headroom first — the release can
+ * settle by flipping the mint transfer straight to `reclaimed`/`released`. In that path
+ * `recover_funds` keeps answering `insufficient_headroom` even though the pool already has the
+ * money back. Requiring a recover_funds yield alone false-fails that real provider behavior
+ * (observed: transfer `reclaimed` + `released_cents` full while sweep stayed at 0 for 240s).
  */
 async function waitForRecoverable(
   cardId: string,
+  minReleasedCents: number,
   timeoutMs = 240_000
-): Promise<{ settledCents: number; pendingCents: number }> {
+): Promise<{ settledCents: number; pendingCents: number; via: 'recover_funds' | 'transfer' }> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
   for (;;) {
@@ -125,23 +150,22 @@ async function waitForRecoverable(
     const sweep = await recoverAllCardholderResiduals(callOrgTool);
     if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
       console.log(`  (recovery yielded on attempt ${attempt})`);
-      return sweep;
+      return { ...sweep, via: 'recover_funds' };
+    }
+    const transfer = await readCardTransfer(cardId);
+    if (isFullyReclaimedTransfer(transfer, minReleasedCents)) {
+      console.log(
+        `  (transfer already ${transfer.status} with ${usd(transfer.releasedCents)} on attempt ${attempt}; ` +
+          `recover_funds not needed)`
+      );
+      return { settledCents: transfer.releasedCents, pendingCents: 0, via: 'transfer' };
     }
     if (Date.now() >= deadline) {
-      // Surface the transfer state so a timeout is diagnosable rather than just "nothing happened".
-      // `consumed` here means the release has not settled yet; `reclaimed` means it has.
-      const transfers =
-        (
-          (await callOrgTool('list_transfers', { limit: 10 })) as {
-            structuredContent?: { transfers?: Array<Record<string, unknown>> };
-          }
-        ).structuredContent?.transfers ?? [];
-      const mine = transfers.find((t) => t.card_id === cardId);
       console.error(
         `  recovery never yielded after ${attempt} attempts; transfer for ${cardId}: ` +
-          (mine === undefined ? '(not found)' : JSON.stringify(mine))
+          (transfer === undefined ? '(not found)' : JSON.stringify(transfer))
       );
-      return sweep;
+      return { ...sweep, via: 'recover_funds' };
     }
     if (attempt % 3 === 0)
       console.log(`  (still waiting for release to settle, attempt ${attempt})`);
@@ -293,13 +317,17 @@ async function main(): Promise<void> {
   assert.equal(closed.structuredContent?.status, 'CLOSED', 'close_card did not report CLOSED');
   record('closed the card unused');
 
-  const sweep = await waitForRecoverable(cardId);
+  const sweep = await waitForRecoverable(cardId, mintCents);
   assert.ok(
     sweep.settledCents > 0 || sweep.pendingCents > 0,
     'recovery reported nothing within the settle window after closing a funded card — the ' +
-      'unused value never became recoverable headroom'
+      'unused value never became recoverable headroom or a reclaimed mint transfer'
   );
-  record(`recovery: settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)}`);
+  record(
+    sweep.via === 'transfer'
+      ? `recovery: mint transfer already settled (${usd(sweep.settledCents)}) without residual headroom`
+      : `recovery: settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)}`
+  );
 
   // Assert on OUR transfer, not the pool balance. The sandbox org is shared with running
   // benchmarks that mint and consume cards continuously, so the absolute pool balance moves
