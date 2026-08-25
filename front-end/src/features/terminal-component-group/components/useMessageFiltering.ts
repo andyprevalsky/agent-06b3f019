@@ -72,6 +72,57 @@ export interface FilteredStreamingState {
   isGpt: boolean;
 }
 
+/** Per-sub-agent streaming byte totals keyed by subAgentId (empty string = root). */
+export interface SubAgentStreamingMetrics {
+  charCount: number;
+  streamStartedAtMs?: number;
+}
+
+function accumulateSubAgentMetrics(
+  map: Map<string, SubAgentStreamingMetrics>,
+  subAgentId: string | undefined,
+  charDelta: number,
+  startedAtMs?: number,
+): void {
+  const key = subAgentId ?? '';
+  const existing = map.get(key) ?? { charCount: 0 };
+  existing.charCount += charDelta;
+  if (startedAtMs) {
+    existing.streamStartedAtMs = Math.min(
+      existing.streamStartedAtMs ?? startedAtMs,
+      startedAtMs,
+    );
+  }
+  map.set(key, existing);
+}
+
+/** Build per-sub-agent char totals from raw streaming maps (before view filtering). */
+export function buildStreamingMetricsBySubAgentId(
+  streamingBubbles: Map<string, StreamingBubble>,
+  streamingTools: Map<string, StreamingTool>,
+): Map<string, SubAgentStreamingMetrics> {
+  const metrics = new Map<string, SubAgentStreamingMetrics>();
+  streamingBubbles.forEach((bubble) => {
+    accumulateSubAgentMetrics(
+      metrics,
+      bubble.subAgentId,
+      Math.max(bubble.charCount ?? 0, bubble.text.length),
+      bubble.startedAtMs,
+    );
+  });
+  streamingTools.forEach((tool) => {
+    accumulateSubAgentMetrics(metrics, tool.subAgentId, tool.charCount ?? 0, tool.startedAtMs);
+  });
+  return metrics;
+}
+
+export function resolveSubAgentStreamingMetrics(
+  subAgentId: string | null | undefined,
+  metricsBySubAgentId: Map<string, SubAgentStreamingMetrics>,
+): SubAgentStreamingMetrics {
+  return metricsBySubAgentId.get(subAgentId ?? '') ?? { charCount: 0 };
+}
+
 interface UseFilteredStreamingOptions {
   subAgentId: string | undefined;
   persistedMessages: Message[];

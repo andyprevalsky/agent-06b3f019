@@ -4,6 +4,7 @@
 import type { ComponentProps } from 'react';
 import type { Message } from '../../hooks';
 import type { WaitForCheck } from '../../types';
+import type { SubAgentStreamingMetrics } from '../useMessageFiltering';
 import WaitForChip from '../WaitForChip';
 
 type WaitForChipMetadata = ComponentProps<typeof WaitForChip>['metadata'];
@@ -13,6 +14,7 @@ interface WaitForBubbleProps {
   waitForChecks?: WaitForCheck[];
   thinkingStreamTokenCount?: number;
   thinkingStreamStartedAtMs?: number;
+  streamingMetricsBySubAgentId?: Map<string, SubAgentStreamingMetrics>;
   onTypingComplete?: () => void;
 }
 
@@ -21,6 +23,7 @@ export function WaitForBubble({
   waitForChecks,
   thinkingStreamTokenCount,
   thinkingStreamStartedAtMs,
+  streamingMetricsBySubAgentId,
   onTypingComplete,
 }: WaitForBubbleProps) {
   const metadata = message.metadata;
@@ -36,6 +39,7 @@ export function WaitForBubble({
       startTimestamp={message.timestamp}
       thinkingStreamTokenCount={thinkingStreamTokenCount}
       thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+      streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
       onTypingComplete={onTypingComplete}
     />
   );
