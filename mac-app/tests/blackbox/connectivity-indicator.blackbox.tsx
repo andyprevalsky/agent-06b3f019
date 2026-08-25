@@ -59,6 +59,11 @@ describe('ConnectivityIndicator — module boundary', () => {
     renderWithProviders(<ConnectivityIndicator />);
 
     expect(screen.getByText('No connection')).toBeInTheDocument();
+    const label = screen.getByText('No connection');
+    expect(label.className).toContain('text-red-700');
+    const chip = label.parentElement;
+    expect(chip?.className).toContain('bg-red-50');
+    expect(chip?.querySelector('svg')).not.toBeNull();
   });
 
   it('shows the chip after an offline event and hides it on online', () => {
