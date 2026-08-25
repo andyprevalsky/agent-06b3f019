@@ -1922,10 +1922,11 @@ def test_write_only_context_uses_provider_fast_mode(mem):
 
 def test_miss_writes_assembled_response(mem):
     # #7 first run populates; #8 full (saw done) write.
+    # Non-soft call_site so cold miss still records (soft sites short-circuit).
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert rose.calls == 1
         assert len(mem.data) == 1
         stored = next(iter(mem.data.values()))
@@ -1947,7 +1948,7 @@ def test_structured_response_model_does_not_write_during_stream(mem):
         chunks = await _drain(
             rose_cache.cached_complete(
                 rose,
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 response_model=StructuredAction,
             )
@@ -1966,7 +1967,7 @@ def test_partial_stream_not_written(mem):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream()[:3])  # metadata + 2 content, NO usage/done
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert mem.data == {}
 
     asyncio.run(body())
@@ -1977,13 +1978,13 @@ def test_hit_replays_without_calling_rose(mem):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         await _drain(
-            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
 
         # Second run, fresh context (new run, same goal) — must hit.
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose2 = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose2, call_site="execute_loop", pool="rose-1-ultra"))
+        chunks = await _drain(rose_cache.cached_complete(rose2, call_site="response_schema", pool="rose-1-ultra"))
 
         assert rose2.calls == 0  # never touched Rose
         kinds = [c.kind for c in chunks]
@@ -2008,12 +2009,12 @@ def test_replay_after_write_does_not_rewrite(mem):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         await _drain(
-            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
         set_context(FastCacheContext(enabled=True, goal="g"))
         # Second run MISSes? No — same key already present → it HITS and won't write again.
         await _drain(
-            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
         assert len(mem.data) == 1
         assert mem.set_calls == 1  # only the first run wrote
@@ -2030,7 +2031,7 @@ def test_partial_cache_degrades_gracefully(mem):
         await _drain(
             rose_cache.cached_complete(
                 FakeRose(_full_stream()),
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 messages=first_messages,
             )
@@ -2041,7 +2042,7 @@ def test_partial_cache_degrades_gracefully(mem):
         await _drain(
             rose_cache.cached_complete(
                 hit_rose,
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 messages=first_messages,
             )
@@ -2050,7 +2051,7 @@ def test_partial_cache_degrades_gracefully(mem):
         await _drain(
             rose_cache.cached_complete(
                 miss_rose,
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 messages=second_messages,
             )
@@ -2078,7 +2079,7 @@ def test_get_error_falls_through_to_live(monkeypatch):
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
-        assert rose.calls == 1  # degraded to a live call instead of crashing
+        assert rose.calls == 1  # soft sites still degrade to live on transport errors
         assert chunks[-1].kind == "done"
 
     asyncio.run(body())
@@ -2229,3 +2230,23 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert soft_complete_on_miss("verifier_execute") is None
     assert soft_complete_on_miss("context_compression") is None
     assert soft_complete_on_miss("response_schema") is None
+
+
+def test_soft_complete_explore_miss_does_not_call_live(mem):
+    """cached_complete soft-completes explore misses without live Rose egress."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g"))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        kinds = [c.kind for c in chunks]
+        assert kinds[0] == "metadata"
+        assert "tool_call" in kinds and kinds[-1] == "done"
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion_with_result"
+        assert mem.set_calls == 0  # soft-complete does not poison the cache
+
+    asyncio.run(body())

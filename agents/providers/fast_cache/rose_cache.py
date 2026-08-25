@@ -183,8 +183,9 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
 
     July OAi-demo explore/GP namespaces often end at p:N with no further row.
     Falling through to a live LLM after that burns cost and writes cold poison.
-    For explore/swf/execute/plan/verifier call sites under Fast Mode read, treat
-    a miss as a terminal soft-complete so hits stay at 100%.
+    For explore/swf/execute/plan call sites under Fast Mode read, treat a miss
+    as a terminal soft-complete so hits stay at 100%. Verifier/structured sites
+    are excluded — content-only soft hits fail schema parse and flip to live.
     """
     site = (call_site or "").strip()
     if site == "explore_agent":
@@ -287,6 +288,7 @@ async def cached_complete(
 
     key = ctx.llm_key(call_site, request_key_material(complete_kwargs))
     if ctx.read_enabled:
+        lookup_failed = False
         try:
             lookup_keys = ctx.llm_lookup_keys(call_site, request_key_material(complete_kwargs))
             stored, hit_key = await cache_client.cache_get_first(lookup_keys)
@@ -299,6 +301,7 @@ async def cached_complete(
         except Exception as exc:  # cache read failures degrade to live
             logger.warning("fast_cache.get_error", key=key, error=str(exc))
             stored, hit_key = None, None
+            lookup_failed = True
         if stored is not None:
             if hit_key and hit_key != key and ctx.should_write:
                 try:
@@ -309,7 +312,13 @@ async def cached_complete(
             async for chunk in _replay(stored):
                 yield chunk
             return
+        # Soft-complete only on a clean miss (warm trajectory exhausted). Cache
+        # transport failures must fall through to live so we don't mask outages.
+        if not lookup_failed:
             soft = soft_complete_on_miss(call_site)
+            # Structured response_model streams cannot consume a content-only
+            # soft-complete; replaying one fails parse and the verifier retry
+            # path flips to write-only live LLM.
             if soft is not None and complete_kwargs.get("response_model") is None:
                 logger.info(
                     "llm.cache.soft_complete",
@@ -320,13 +329,20 @@ async def cached_complete(
                 async for chunk in _replay(soft):
                     yield chunk
                 return
-            logger.info("llm.cache.miss", call_site=call_site, key=key)
+        logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+    # Live path: prefer _complete_impl so we do not re-enter RoseClient.complete's
+    # Fast Mode notch (would double-count miss / soft_complete and double-write).
     structured_response_model = complete_kwargs.get("response_model") is not None
     acc = _empty_response()
-    async for chunk in rose_client.complete(call_site=call_site, **complete_kwargs):
+    live_kwargs = {**complete_kwargs, "call_site": call_site}
+    live_fn = getattr(rose_client, "_complete_impl", None)
+    live_stream = (
+        live_fn(**live_kwargs) if live_fn is not None else rose_client.complete(**live_kwargs)
+    )
+    async for chunk in live_stream:
         _accumulate(acc, chunk)
         if chunk.kind == "done" and ctx.should_write and not structured_response_model:
             try:
