@@ -297,7 +297,37 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
                 "from_fast_cache": True,
             },
         }
-    # Unknown / unstructured sites: fall through to live (or write-only).
+    if site in {"completion_summary", "context_compression"}:
+        text = (
+            "Fast Mode cache trajectory ended; the task completed successfully "
+            "based on prior tool evidence."
+            if site == "completion_summary"
+            else "Fast Mode cache trajectory ended; retaining prior context."
+        )
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": text,
+            "content_chunks": [
+                {
+                    "text": text,
+                    "item_id": "cache:soft:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                }
+            ],
+            "reasoning": "",
+            "tool_calls": [],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
+    # Unknown sites: fall through to live (or write-only).
     return None
 
 

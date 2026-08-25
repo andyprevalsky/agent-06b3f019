@@ -2234,7 +2234,8 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert soft_complete_on_miss("verifier_browser") is not None
     v = soft_complete_on_miss("verifier_execute")
     assert json.loads(v["content"])["score"] == 1.0
-    assert soft_complete_on_miss("context_compression") is None
+    assert soft_complete_on_miss("completion_summary") is not None
+    assert soft_complete_on_miss("context_compression") is not None
     assert soft_complete_on_miss("response_schema") is None
 
 

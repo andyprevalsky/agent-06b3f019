@@ -5399,14 +5399,15 @@ async def check_progress(
                                 "actual_model": "fast-mode-soft-complete",
                             },
                         }
-                    if fast_mode_goal and fast_cache_should_write:
-                        set_fast_cache_context(
-                            FastCacheContext(
-                                enabled=False,
-                                goal=fast_mode_goal,
-                                base_step=fast_mode_step,
-                                write_enabled=True,
-                            )
+                    # Never flip Fast Mode contexts to write-only on verifier
+                    # retry — that contextvar leak forced later execute_loop
+                    # calls onto live LLM (verify11 write_only cost spike).
+                    if fast_mode_goal:
+                        logger.warning(
+                            "Verifier call failed under Fast Mode; retrying with reads still enabled",
+                            attempt=attempt + 1,
+                            call_site=call_site,
+                            error=extract_error_message(e),
                         )
                     delay = base_delay * (2**attempt)
                     jitter = random.uniform(0, delay * 0.5)
@@ -5419,7 +5420,7 @@ async def check_progress(
                         attempt=attempt + 1,
                         max_retries=max_retries,
                         delay=round(sleep_s, 3),
-                        fast_cache_read_enabled=False if fast_mode_goal and fast_cache_should_write else None,
+                        fast_cache_read_enabled=True if fast_mode_goal else None,
                         error=extract_error_message(e),
                     )
                     await asyncio.sleep(sleep_s)
