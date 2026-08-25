@@ -24,6 +24,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from types import SimpleNamespace
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
@@ -361,6 +362,79 @@ def _status_matches(status: Any, failed: Any, status_filter: str) -> bool:
     if status_filter.isdigit():
         return status == int(status_filter)
     return False
+
+
+_CONSOLE_RESOURCE_STATUS_RE = re.compile(
+    r"Failed to load resource: the server responded with a status of (\d+)",
+    re.IGNORECASE,
+)
+_CONSOLE_APOLLO_STATUS_RE = re.compile(
+    r"Response not successful: Received status code (\d+)",
+    re.IGNORECASE,
+)
+_CONSOLE_STATUS_CODE_RE = re.compile(r"\bstatus code (\d+)\b", re.IGNORECASE)
+
+
+def _parse_console_http_status(text: str) -> Optional[int]:
+    """Extract an HTTP status code from a browser console/network error line."""
+    if not text:
+        return None
+    for pattern in (
+        _CONSOLE_RESOURCE_STATUS_RE,
+        _CONSOLE_APOLLO_STATUS_RE,
+        _CONSOLE_STATUS_CODE_RE,
+    ):
+        match = pattern.search(text)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _compile_log_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile a user-supplied regex; invalid patterns raise ValueError."""
+    stripped = (pattern or "").strip()
+    if not stripped:
+        return re.compile(r".*", re.DOTALL)
+    try:
+        return re.compile(stripped, re.IGNORECASE | re.DOTALL)
+    except re.error as exc:
+        raise ValueError(f"Invalid regex pattern: {exc}") from exc
+
+
+def _log_row_search_text(row: Dict[str, Any]) -> str:
+    parts = [
+        str(row.get("source") or ""),
+        str(row.get("level") or ""),
+        str(row.get("text") or ""),
+        str(row.get("url") or ""),
+        str(row.get("method") or ""),
+        str(row.get("status") or ""),
+        str(row.get("status_text") or ""),
+        str(row.get("failure") or ""),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def _network_log_summary(row: Dict[str, Any]) -> str:
+    method = str(row.get("method") or "GET")
+    url = str(row.get("url") or "")
+    status = row.get("status")
+    failed = row.get("failed")
+    if isinstance(status, int):
+        suffix = f" -> {status}"
+        if row.get("status_text"):
+            suffix += f" {row['status_text']}"
+    elif failed:
+        suffix = f" -> FAILED {row.get('failure') or ''}".strip()
+    else:
+        suffix = " -> (no response status yet)"
+    resource_type = row.get("resource_type")
+    if resource_type:
+        suffix += f" ({resource_type})"
+    return f"{method} {url}{suffix}".strip()
 
 
 def _media_extension(url: str, default: str) -> str:
@@ -2419,6 +2493,7 @@ class BrowserNetworkRecorder:
         self._generic_script_provider_exits = 0
         self._api_challenge_provider_exits = 0
         self._cdp_client: Any = None
+        self._network_cdp_session_id: str | None = None
         # CDP requestId values are scoped to one remote browser connection and
         # can repeat after challenge recovery promotes another provider/session.
         # Namespace every internal request key by the connection generation so
@@ -2507,9 +2582,16 @@ class BrowserNetworkRecorder:
         # page data unsuitable for the attached redacted bundle.
         self.network_dir.mkdir(parents=True, exist_ok=True)
         self.console_dir.mkdir(parents=True, exist_ok=True)
-        cdp_session = await self.browser_session.get_or_create_cdp_session()
+        if self._cdp_client is not None and self._network_cdp_session_id:
+            with contextlib.suppress(Exception):
+                await self._cdp_client.send.Network.disable(session_id=self._network_cdp_session_id)
+        # Attach to the focused page target so Network.responseReceived events
+        # arrive on the same CDP session as requestWillBeSent. Without focus=True
+        # Kernel sessions often capture outbound requests but never response status.
+        cdp_session = await self.browser_session.get_or_create_cdp_session(focus=True)
         cdp_client = getattr(self.browser_session, "cdp_client", None) or cdp_session.cdp_client
         self._cdp_client = cdp_client
+        self._network_cdp_session_id = cdp_session.session_id
         self._network_generation += 1
         generation = self._network_generation
         cdp = cdp_client.register
@@ -2615,6 +2697,105 @@ class BrowserNetworkRecorder:
         overflow = len(self.console_entries) - self._max_console_entries
         if overflow > 0:
             del self.console_entries[:overflow]
+        self._correlate_console_http_status(entry)
+
+    def _correlate_console_http_status(self, console_entry: Dict[str, Any]) -> None:
+        """Backfill network status from console lines when CDP responses are missing."""
+        text = str(console_entry.get("text") or "")
+        status = _parse_console_http_status(text)
+        if status is None:
+            return
+        page_url = str(console_entry.get("url") or "")
+        resource_match = _CONSOLE_RESOURCE_STATUS_RE.search(text)
+        if resource_match and page_url:
+            self._apply_console_status_to_url(status=status, url=page_url)
+            return
+        self._apply_console_status_to_recent_graphql(status=status, page_url=page_url)
+
+    def _apply_console_status_to_url(self, *, status: int, url: str) -> None:
+        target = url.split("?", 1)[0].rstrip("/").lower()
+        for entry in reversed(list(self.entries.values())):
+            if entry.get("status") is not None:
+                continue
+            entry_url = str(entry.get("url") or "")
+            if not entry_url:
+                continue
+            normalized = entry_url.split("?", 1)[0].rstrip("/").lower()
+            if normalized == target or target.endswith(normalized) or normalized.endswith(target):
+                entry["status"] = status
+                entry["status_text"] = f"HTTP {status}"
+                entry["status_source"] = "console"
+                entry["terminal"] = True
+                return
+
+    def _apply_console_status_to_recent_graphql(self, *, status: int, page_url: str) -> None:
+        host_hint = ""
+        if page_url:
+            host_hint = (urlparse(page_url).hostname or "").lower()
+        candidates: List[tuple[int, Dict[str, Any]]] = []
+        for entry in self.entries.values():
+            if entry.get("status") is not None:
+                continue
+            url = str(entry.get("url") or "").lower()
+            if "graphql" not in url:
+                continue
+            if host_hint and host_hint not in url:
+                continue
+            ts = int(entry.get("response_ts_ms") or entry.get("request_ts_ms") or 0)
+            candidates.append((ts, entry))
+        if not candidates:
+            return
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        entry = candidates[0][1]
+        entry["status"] = status
+        entry["status_text"] = f"HTTP {status}"
+        entry["status_source"] = "console"
+        entry["terminal"] = True
+
+    def replay_console_status_hints(self) -> None:
+        """Re-run console→network status correlation over the full console buffer."""
+        for entry in getattr(self, "console_entries", []):
+            self._correlate_console_http_status(entry)
+
+    @classmethod
+    def from_diagnostic_indexes(
+        cls,
+        *,
+        network_index_path: Path,
+        console_index_path: Path,
+        agent_id: str = "fixture-agent",
+        task_id: str = "fixture-task",
+        output_dir: Optional[Path] = None,
+    ) -> "BrowserNetworkRecorder":
+        """Rehydrate a recorder from persisted production/dev diagnostic indexes."""
+        network_payload = json.loads(network_index_path.read_text(encoding="utf-8"))
+        console_payload = json.loads(console_index_path.read_text(encoding="utf-8"))
+        root_dir = output_dir or network_index_path.parent.parent
+        recorder = cls(
+            browser_session=SimpleNamespace(),
+            agent_id=str(network_payload.get("agent_id") or agent_id),
+            task_id=str(network_payload.get("task_id") or task_id),
+            session_id=str(network_payload.get("session_id") or "fixture-session"),
+            output_dir=root_dir,
+            persist_network_log=True,
+        )
+        recorder.entries = {}
+        for entry in network_payload.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            request_id = str(entry.get("request_id") or "")
+            if not request_id:
+                continue
+            generation = int(entry.get("browser_generation") or 0)
+            request_key = (
+                request_id if generation == 0 else f"{generation}:{request_id}"
+            )
+            recorder.entries[request_key] = dict(entry)
+        recorder.console_entries = [
+            dict(item) for item in (console_payload.get("entries") or []) if isinstance(item, dict)
+        ]
+        recorder.replay_console_status_hints()
+        return recorder
 
     def _on_console_api_called(
         self,
@@ -3388,6 +3569,7 @@ class BrowserNetworkRecorder:
         every step; bodies and query strings are only worth that context when the
         agent actually asked for them.
         """
+        self.replay_console_status_hints()
         pattern = (url_pattern or "").lower().strip()
         method_filter = (method or "").upper().strip()
         status_filter = (status or "").lower().strip()
@@ -3417,11 +3599,17 @@ class BrowserNetworkRecorder:
             }
             if entry.get("status_text"):
                 row["status_text"] = entry.get("status_text")
+            if entry.get("status_source"):
+                row["status_source"] = entry.get("status_source")
             if entry.get("mime_type"):
                 row["mime_type"] = entry.get("mime_type")
             duration_ms = _duration_ms(entry)
             if duration_ms is not None:
                 row["duration_ms"] = duration_ms
+            if entry.get("request_ts_ms") is not None:
+                row["request_ts_ms"] = entry.get("request_ts_ms")
+            if entry.get("response_ts_ms") is not None:
+                row["response_ts_ms"] = entry.get("response_ts_ms")
             if entry.get("encoded_data_length") is not None:
                 row["size_bytes"] = entry.get("encoded_data_length")
             if entry.get("redirects"):
@@ -3476,6 +3664,112 @@ class BrowserNetworkRecorder:
             self._body_byte_sizes.clear()
             self._body_bytes = 0
         return rows
+
+    def query_logs(  # noqa: C901
+        self,
+        *,
+        pattern: str = "",
+        limit: int = 100,
+        clear: bool = False,
+        sources: Optional[List[str]] = None,
+        level: str = "",
+        status: str = "",
+        url_pattern: str = "",
+        method: str = "",
+        resource_type: str = "",
+        include_query: bool = False,
+        include_headers: bool = False,
+        include_bodies: bool = False,
+        max_body_chars: int = 4000,
+    ) -> List[Dict[str, Any]]:
+        """Return merged console + network log rows, newest first, regex-filterable."""
+        compiled = _compile_log_pattern(pattern)
+        source_filter = {item.lower() for item in (sources or ["console", "network"])}
+        level_filter = (level or "").lower().strip()
+        rows: List[tuple[int, Dict[str, Any]]] = []
+
+        if "console" in source_filter:
+            for entry in self.console_entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_level = str(entry.get("level") or entry.get("kind") or "log").lower()
+                if level_filter and entry_level != level_filter and str(entry.get("kind") or "").lower() != level_filter:
+                    continue
+                text = str(entry.get("text") or "")
+                url = str(entry.get("url") or "")
+                row = {
+                    "source": "console",
+                    "timestamp_ms": entry.get("timestamp"),
+                    "level": entry_level,
+                    "text": text,
+                    "url": _redact_url_query(url) if url and not include_query else url or None,
+                    "kind": entry.get("kind"),
+                }
+                if not compiled.search(_log_row_search_text(row)):
+                    continue
+                ts = int(entry.get("timestamp") or 0)
+                rows.append((ts, row))
+
+        if "network" in source_filter:
+            network_rows = self.query_requests(
+                url_pattern=url_pattern,
+                method=method,
+                status=status,
+                resource_type=resource_type,
+                limit=self._max_entries,
+                clear=False,
+                include_query=include_query,
+                include_headers=include_headers,
+                include_bodies=include_bodies,
+                max_body_chars=max_body_chars,
+            )
+            for entry in network_rows:
+                summary = _network_log_summary(entry)
+                row = {
+                    "source": "network",
+                    "timestamp_ms": entry.get("response_ts_ms") or entry.get("request_ts_ms"),
+                    "level": "error" if entry.get("failed") or (
+                        isinstance(entry.get("status"), int) and entry.get("status") >= 400
+                    ) else "info",
+                    "text": summary,
+                    "url": entry.get("url"),
+                    "status": entry.get("status"),
+                    "method": entry.get("method"),
+                    "resource_type": entry.get("resource_type"),
+                    "request_id": entry.get("id"),
+                }
+                if entry.get("status_source"):
+                    row["status_source"] = entry.get("status_source")
+                if entry.get("failed"):
+                    row["failed"] = True
+                    row["failure"] = entry.get("failure")
+                if include_headers:
+                    row["request_headers"] = entry.get("request_headers")
+                    row["response_headers"] = entry.get("response_headers")
+                if include_bodies:
+                    for key in (
+                        "request_body",
+                        "response_body",
+                        "request_body_truncated",
+                        "response_body_truncated",
+                        "response_body_note",
+                        "body_available",
+                    ):
+                        if key in entry:
+                            row[key] = entry[key]
+                if not compiled.search(_log_row_search_text(row)):
+                    continue
+                ts = int(row.get("timestamp_ms") or 0)
+                rows.append((ts, row))
+
+        rows.sort(key=lambda item: item[0], reverse=True)
+        selected = [row for _, row in rows[: max(1, min(int(limit or 100), self._max_entries))]]
+        if clear:
+            if "network" in source_filter:
+                self.query_requests(clear=True, limit=1)
+            if "console" in source_filter:
+                self.console_entries.clear()
+        return selected
 
     def _diagnostics_payloads(
         self,

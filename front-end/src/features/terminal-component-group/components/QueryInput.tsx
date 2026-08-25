@@ -28,7 +28,7 @@ import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { cn } from '@/lib/utils';
 import { useAuth, useToast } from '../hooks';
-import { IS_DEV_MODE, ADMIN_USER_IDS, DEFAULT_RESTART_THRESHOLD } from '../config';
+import { IS_DEV_MODE, ADMIN_USER_IDS, DEFAULT_RESTART_THRESHOLD, DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
 import { type QueryInputProps, DEFAULT_DRIP_STYLES } from './query-input/types';
 import { useAttachments } from './query-input/useAttachments';
 import { usePriceLimit, type UsePriceLimitResult } from './query-input/usePriceLimit';
@@ -50,7 +50,7 @@ export default function QueryInput(props: QueryInputProps) {
   const attachments = useAttachments({ textareaRef });
   const priceLimit = usePriceLimit({
     agentDetail: props.agentDetail,
-    pendingPriceLimitCents: props.pendingPriceLimitCents ?? 100,
+    pendingPriceLimitCents: props.pendingPriceLimitCents ?? DEFAULT_PENDING_PRICE_LIMIT_CENTS,
     onPendingPriceLimitChange: props.onPendingPriceLimitChange,
     onAgentUpdate: props.onAgentUpdate,
   });
@@ -141,7 +141,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
     canSubmit = true,
     onPause,
     isPausing = false,
-    pendingPriceLimitCents = 100,
+    pendingPriceLimitCents = DEFAULT_PENDING_PRICE_LIMIT_CENTS,
     attachments,
     priceLimit,
     textareaRef,

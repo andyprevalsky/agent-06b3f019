@@ -5,21 +5,32 @@ import type { Browser } from 'playwright';
 import {
   buildPreferredBrowserConfig,
   browserRecoveryCandidates,
+  challengeDetectionReason,
   compatiblePreferredBrowserConfig,
+  isUsableDocumentTitle,
   pageLooksChallenged,
   recoveryConfigKeyForSession,
-  runParallelBrowserConfigSearch,
+  runLaneConfigSearch,
+  orderConfigsForLane,
+  sameSiteNavigationUrl,
   shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
+import {
+  challengeClassifierCostCents,
+  CHALLENGE_LLM_MODEL,
+} from '../../providers/browser/challengeLlmClassifier';
 import {
   createSessionWithContextUsingDependencies,
   type BrowserSessionCreationDependencies,
 } from '../../providers/browser';
 import { kernelCaptchaTelemetryConfig } from '../../providers/browser/captchaTelemetry';
 import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
-import { recoverChallengeSchema } from '../../domains/browser-session/types';
+import {
+  probeCookieVariantSchema,
+  recoverChallengeSchema,
+} from '../../domains/browser-session/types';
 
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
   return {
@@ -110,7 +121,7 @@ function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
   );
 }
 
-async function testParallelSearchPromotesStableFastestAndReleasesLosers(): Promise<void> {
+async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
   const created: string[] = [];
   const probed: string[] = [];
@@ -119,93 +130,157 @@ async function testParallelSearchPromotesStableFastestAndReleasesLosers(): Promi
   let activeCreates = 0;
   let maxActiveCreates = 0;
 
-  const winner = await runParallelBrowserConfigSearch(configs, {
-    create: async (config) => {
-      activeCreates += 1;
-      maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      created.push(config.key);
-      activeCreates -= 1;
-      return fakeSession(config);
-    },
-    probe: async (config) => {
-      probed.push(config.key);
-      if (config.key === 'kernel_mobile') {
-        return { stablePasses: 1, attempts: 2, latencyMs: 1, paymentCdnOk: false };
-      }
-      return {
-        stablePasses: 2,
-        attempts: 2,
-        latencyMs: config.key === 'steel_fixed' ? 10 : 100,
-        paymentCdnOk: false,
-      };
-    },
-    promote: async (candidate) => {
-      promoted.push(candidate.config.key);
-      assert.strictEqual(
-        released.length,
-        0,
-        'winner is promoted before any live candidate is released'
-      );
-    },
-    release: async (config) => {
-      released.push(config.key);
-    },
-  });
-
-  assert.strictEqual(
-    maxActiveCreates,
-    configs.length,
-    'all provider browsers must spawn concurrently'
+  const winner = await runLaneConfigSearch(
+    configs,
+    [{ key: 'auth_kept', storageState: {} }],
+    {
+      create: async (config) => {
+        activeCreates += 1;
+        maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        created.push(config.key);
+        activeCreates -= 1;
+        return fakeSession(config);
+      },
+      probe: async (config, _session, lane) => {
+        assert.strictEqual(lane.key, 'auth_kept');
+        probed.push(config.key);
+        // First config fails; second fully clears — sequential, no partial promote.
+        if (probed.length === 1) {
+          return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+      },
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async (config) => {
+        released.push(config.key);
+      },
+    }
   );
-  assert.deepStrictEqual(new Set(created), new Set(configs.map((candidate) => candidate.key)));
-  assert.deepStrictEqual(new Set(probed), new Set(configs.map((candidate) => candidate.key)));
-  assert.strictEqual(winner.config.key, 'steel_fixed');
-  assert.deepStrictEqual(promoted, ['steel_fixed']);
-  assert.strictEqual(released.length, configs.length - 1);
-  assert.ok(!released.includes('steel_fixed'));
+
+  assert.strictEqual(maxActiveCreates, 1, 'configs within a lane must be sequential');
+  assert.strictEqual(probed.length, 2);
+  assert.strictEqual(winner.config.key, probed[1]);
+  assert.deepStrictEqual(promoted, [winner.config.key]);
+  assert.ok(released.includes(probed[0]!));
+}
+
+async function testParallelCookieLanesFirstFullClearWins(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 2);
+  const promoted: string[] = [];
+  const probedLanes: string[] = [];
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: { cookies: [{ name: 'a' }] } },
+      { key: 'stripped', storageState: { cookies: [] } },
+    ],
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config, _session, lane) => {
+        probedLanes.push(`${lane.key}:${config.key}`);
+        await new Promise((resolve) => setTimeout(resolve, lane.key === 'stripped' ? 1 : 30));
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        return { stablePasses: 0, attempts: 2, latencyMs: 50, paymentCdnOk: true };
+      },
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    }
+  );
+  assert.ok(probedLanes.some((entry) => entry.startsWith('stripped:')));
+  assert.deepStrictEqual(promoted, [winner.config.key]);
+}
+
+async function testLaneSearchReturnsBeforeSlowSiblingFinishes(): Promise<void> {
+  /** Hotels.com: sibling auth_kept probe held recover-challenge HTTP open after
+   * promote released the live CDP — agent reconnect had no ws_url yet. */
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
+  let slowSiblingFinished = false;
+  const started = Date.now();
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: {} },
+      { key: 'stripped', storageState: {} },
+    ],
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (_config, _session, lane) => {
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        slowSiblingFinished = true;
+        return { stablePasses: 0, attempts: 2, latencyMs: 400, paymentCdnOk: true };
+      },
+      promote: async () => undefined,
+      release: async () => undefined,
+    }
+  );
+  const elapsed = Date.now() - started;
+  assert.strictEqual(winner.config.key, configs[0]!.key);
+  assert.ok(elapsed < 250, `must return right after promote, not wait for sibling (${elapsed}ms)`);
+  assert.equal(slowSiblingFinished, false, 'sibling probe must still be in flight when we return');
 }
 
 async function testNoStableCandidateCleansEverything(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US' });
   const released: string[] = [];
   await assert.rejects(
-    runParallelBrowserConfigSearch(configs, {
-      create: async (config) => fakeSession(config),
-      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: false }),
-      promote: async () => assert.fail('zero-pass candidate must never be promoted'),
-      release: async (config) => {
-        released.push(config.key);
-      },
-    }),
+    runLaneConfigSearch(
+      configs,
+      [{ key: 'default', storageState: {} }],
+      {
+        create: async (config) => fakeSession(config),
+        probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true }),
+        promote: async () => assert.fail('zero-pass candidate must never be promoted'),
+        release: async (config) => {
+          released.push(config.key);
+        },
+      }
+    ),
     /No stable browser configuration/
   );
   assert.strictEqual(released.length, configs.length);
 }
 
-async function testPartialStableCandidateIsPromotedWhenNoneFullyStable(): Promise<void> {
+async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
   const configs = browserRecoveryCandidates({ country: 'US' });
   const promoted: string[] = [];
-  const released: string[] = [];
-  const winner = await runParallelBrowserConfigSearch(configs, {
-    create: async (config) => fakeSession(config),
-    probe: async (config) => ({
-      stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
-      attempts: 2,
-      latencyMs: config.key === 'kernel_mobile' ? 5 : 1,
-      paymentCdnOk: false,
-    }),
-    promote: async (candidate) => {
-      promoted.push(candidate.config.key);
-    },
-    release: async (config) => {
-      released.push(config.key);
-    },
-  });
-  assert.strictEqual(winner.config.key, 'kernel_mobile');
-  assert.deepStrictEqual(promoted, ['kernel_mobile']);
-  assert.strictEqual(released.length, configs.length - 1);
-  assert.ok(!released.includes('kernel_mobile'));
+  await assert.rejects(
+    runLaneConfigSearch(
+      configs,
+      [{ key: 'default', storageState: {} }],
+      {
+        create: async (config) => fakeSession(config),
+        probe: async (config) => ({
+          stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
+          attempts: 2,
+          latencyMs: 1,
+          paymentCdnOk: true,
+        }),
+        promote: async (candidate) => {
+          promoted.push(candidate.config.key);
+        },
+        release: async () => undefined,
+      }
+    ),
+    /No stable browser configuration/
+  );
+  assert.deepStrictEqual(promoted, []);
+}
+
+function testOrderConfigsForLane(): void {
+  const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
+  const ordered = orderConfigsForLane(configs, 'kernel_residential_city');
+  assert.strictEqual(ordered[ordered.length - 1]?.key, 'kernel_residential_city');
+  assert.ok(ordered[0]?.key !== 'kernel_residential_city');
 }
 
 function testRecoveryConfigKeyForSession(): void {
@@ -325,6 +400,51 @@ function testChallengeDetection(): void {
         '<main>General Admission</main>',
     }),
     'generic challenge prose in script bundles must not flag a cleared page'
+  );
+
+  // Soft-wall navigation shells (any vendor): empty / bare-hostname /
+  // Loading-URL titles must not win probes even with long body text.
+  const shellBody =
+    'Boutique hotel description that already appears in meta/noscript while the soft-wall has not produced a real document title yet.';
+  assert.ok(!isUsableDocumentTitle(''));
+  assert.ok(!isUsableDocumentTitle('www.example.com'));
+  assert.ok(!isUsableDocumentTitle('example.com'));
+  assert.ok(!isUsableDocumentTitle('Loading https://www.example.com/rooms'));
+  assert.ok(isUsableDocumentTitle('Boutique Hotel Near Downtown'));
+  assert.strictEqual(
+    challengeDetectionReason({
+      status: null,
+      title: '',
+      bodyText: shellBody,
+      html: '<main>shell</main>',
+    }),
+    'unusable_title'
+  );
+  assert.strictEqual(
+    challengeDetectionReason({
+      status: null,
+      title: 'www.example.com',
+      bodyText: shellBody,
+      html: '<main>shell</main>',
+    }),
+    'unusable_title'
+  );
+  assert.strictEqual(
+    challengeDetectionReason({
+      status: null,
+      title: 'Loading https://www.example.com/path',
+      bodyText: shellBody,
+      html: '<main>shell</main>',
+    }),
+    'unusable_title'
+  );
+  assert.ok(
+    !pageLooksChallenged({
+      status: 200,
+      title: 'Boutique Hotel Near Downtown',
+      bodyText: shellBody,
+      html: '<main>Real inventory copy for rooms and rates.</main>',
+    })
   );
 }
 
@@ -592,19 +712,82 @@ function testRecoveryRequestSchema(): void {
     }).success,
     false
   );
+  const cookieProbe = probeCookieVariantSchema.parse({
+    task_id: '00000000-0000-4000-8000-000000000001',
+    current_url: 'https://order.online/store/blue-bottle',
+    storage_state: { cookies: [{ name: 'cf_clearance', value: 'x' }], origins: [] },
+  });
+  assert.strictEqual(cookieProbe.storage_state.cookies.length, 1);
+  assert.strictEqual(
+    probeCookieVariantSchema.safeParse({
+      task_id: '00000000-0000-4000-8000-000000000001',
+      current_url: 'https://order.online/store/blue-bottle',
+    }).success,
+    false
+  );
+  const routeSource = readFileSync(
+    new URL('../../domains/browser-session/routes.challenge-recovery.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(routeSource, /\/probe-cookie-variant/);
+  assert.match(routeSource, /probeBrowserCookieVariant/);
+}
+
+function testSameSiteNavigationUrl(): void {
+  const kabuki =
+    'https://www.hotels.com/Hotel-Search?destination=Hotel%20Kabuki%2C%20San%20Francisco';
+  const city =
+    'https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California';
+  assert.equal(sameSiteNavigationUrl(kabuki, city), city);
+  assert.equal(
+    sameSiteNavigationUrl(kabuki, 'https://hotels.com/Hotel-Search?destination=SF'),
+    'https://hotels.com/Hotel-Search?destination=SF'
+  );
+  assert.equal(sameSiteNavigationUrl(kabuki, 'https://evil.example/x'), null);
+  assert.equal(sameSiteNavigationUrl(kabuki, 'not-a-url'), null);
+  assert.equal(sameSiteNavigationUrl(kabuki, ''), null);
+}
+
+function testChallengeLlmClassifierCostRouting(): void {
+  assert.equal(CHALLENGE_LLM_MODEL, 'rose-labs/rose-1-mini');
+  const paid = challengeClassifierCostCents({
+    call_site: 'challenge_llm_classifier',
+    prompt_tokens: 1_000,
+    completion_tokens: 100,
+    total_tokens: 1_100,
+    actual_model: 'anthropic/claude-haiku-4.5',
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+  assert.ok(paid > 0, 'waterfall classifier usage must have positive cost');
+  const free = challengeClassifierCostCents({
+    call_site: 'challenge_llm_classifier',
+    prompt_tokens: 1_000,
+    completion_tokens: 100,
+    total_tokens: 1_100,
+    actual_model: 'claude-haiku-4-5-claude',
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+  assert.equal(free, 0, 'direct compute-token classifier usage is $0');
 }
 
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
-  await testParallelSearchPromotesStableFastestAndReleasesLosers();
+  await testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear();
+  await testParallelCookieLanesFirstFullClearWins();
+  await testLaneSearchReturnsBeforeSlowSiblingFinishes();
   await testNoStableCandidateCleansEverything();
-  await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
+  await testPartialStableCandidateIsNeverPromoted();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
+  testOrderConfigsForLane();
   testRecoveryConfigKeyForSession();
+  testSameSiteNavigationUrl();
   testChallengeDetection();
+  testChallengeLlmClassifierCostRouting();
   testSteelPreferredWhenCdnHardFilterActive();
   testPreferredConfigCompatibility();
   await testLearnedConfigSeedsTheNextSession();

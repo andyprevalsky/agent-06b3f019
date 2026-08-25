@@ -59,11 +59,11 @@ export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 /** Default context-restart threshold for the context meter. */
 export const DEFAULT_RESTART_THRESHOLD = 100000;
 
-/** Default pending price limit (cents) when no agent is selected. */
-export const DEFAULT_PENDING_PRICE_LIMIT_CENTS = 100;
+/** Default pending price limit (cents) when no agent is selected ($10.00). */
+export const DEFAULT_PENDING_PRICE_LIMIT_CENTS = 1000;
 
-/** Default price limit (cents) falls back to this when an agent has none set. */
-export const DEFAULT_AGENT_PRICE_LIMIT_CENTS = 100;
+/** Fallback when an agent row has no stored limit ($10.00). */
+export const DEFAULT_AGENT_PRICE_LIMIT_CENTS = 1000;
 
 /** Warning threshold (fraction of limit) that flips the cost chip to amber. */
 export const COST_WARNING_RATIO = 0.8;

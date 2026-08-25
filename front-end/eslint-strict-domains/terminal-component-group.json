@@ -47,6 +47,8 @@
   "src/features/terminal-component-group/components/browserBorderGlow/glow.ts",
   "src/features/terminal-component-group/components/browserBorderGlow/dots.ts",
   "src/features/terminal-component-group/components/browserBorderGlow/render.ts",
+  "src/features/terminal-component-group/components/browserBorderGlow/tones.ts",
+  "src/features/terminal-component-group/components/browserBorderGlow/resolveTone.ts",
   "src/features/terminal-component-group/components/BrowserCursorOverlay.tsx",
   "src/features/terminal-component-group/components/BrowserStatusBar.tsx",
   "src/features/terminal-component-group/components/browser-status-bar/types.ts",

@@ -4771,7 +4771,8 @@ def test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted(
     assert "exhausted" in reason
     assert snapshot["email_otp"]["attempted"] is True
     assert snapshot["minted"]["attempted"] is True
-    assert snapshot["guest"]["unavailable"] is True
+    assert snapshot["guest"]["exhausted_or_unavailable"] is True
+    assert snapshot["guest"]["option_seen"] is False
 
 def test_auth_runtime_state_does_not_block_on_unmatched_connected_email():
     from domains.spawn_browser_agent_v3.service import AuthRuntimeState
@@ -13597,6 +13598,8 @@ async def test_execute_goto_err_aborted_persists_attachment_download():
 
 async def test_live_tab_looks_challenged_helpers():
     """Clean live tabs must skip recovery; challenged tabs must still recover."""
+    from unittest.mock import AsyncMock, patch
+
     from domains.spawn_browser_agent_v3.challenge_recovery import (
         live_tab_looks_challenged,
         page_looks_challenged,
@@ -13639,8 +13642,12 @@ async def test_live_tab_looks_challenged_helpers():
         body_text="Attention Required! | Cloudflare",
         html="",
     )
-    assert await live_tab_looks_challenged(_CleanPage()) is False
-    assert await live_tab_looks_challenged(_ChallengedPage()) is True
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(side_effect=[{"clean": True}, {"clean": False}]),
+    ):
+        assert await live_tab_looks_challenged(_CleanPage()) is False
+        assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
 def test_url_looks_like_api_surface_guard():
@@ -16106,6 +16113,8 @@ async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
     assert "Only accepting scheduled orders" in message
 
 async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
+    from contextlib import ExitStack
+
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
     class _FakeDomSession:
@@ -16223,7 +16232,7 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         auth_boundary_calls.append("create_assistance")
         return await create_auth_mock(*args, **kwargs)
 
-    with (
+    patch_targets = [
         patch(
             "domains.spawn_browser_agent_v3.handler.load_config",
             return_value=_fake_config(),
@@ -16317,7 +16326,15 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
             "playwright.async_api.async_playwright",
             return_value=_FakeAsyncPlaywright(fake_playwright),
         ),
-    ):
+        patch(
+            "domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged",
+            AsyncMock(return_value=False),
+        ),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
         result = await spawn_browser_agent_activity_v3(
             user_id="user-1",
             agent_id="agent-1",
