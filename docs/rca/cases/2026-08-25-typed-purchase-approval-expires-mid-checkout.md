@@ -22,8 +22,8 @@ tags:
   - site-unlock
 sources:
   - agent 2c475824-4bd6-48d2-85f8-239f024af808
-repro: none-recorded
-status: open
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py test_user_granted_purchase_survives_past_timeout_like_2c475824
+status: fixed
 ---
 
 ## Problem
@@ -76,21 +76,23 @@ a recurrence of a prior duplicate-approval case. Searches:
 
 ## Solution
 
-Proposed (awaiting approval): when the user grants a typed `purchase`
-write-lock approval, also call `grant_site_write_lock_approvals` for the
-merchant grant URL — unify with the payment-card path so the same browser
-activity does not re-prompt purchase on Buy Now / Place order after auth or
-address friction. Keep `email_send` / `social_post` on the 120s one-off timeout.
-Cement with a blackbox using the 273.518s prod delta + checkout URL. Do not
-bump `WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS`.
+Landed: `apply_user_write_lock_grant` in
+`agents/domains/spawn_browser_agent_v3/service_actions.py` records the typed
+entry and, for `purchase` (or when payment refs / site unlock already exist),
+calls `grant_site_write_lock_approvals`. The write-lock resume path in
+`handler.py` uses that helper. `email_send` / `social_post` stay on the 120s
+one-off timeout. `WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS` is unchanged.
 
-10k-agent: O(1) dict write on an existing resume-state map; no new fan-in,
-polling, or shared locks.
+Sibling prevented: checkout Place-order re-prompt after the same purchase grant
+in the same browser activity (third attention on agent 2c475824).
+
+10k-agent: O(1) dict write on existing resume-state; no new fan-in.
 
 ## Human feedback
 
 User reported agent `2c475824-4bd6-48d2-85f8-239f024af808` had 2 approval
-requests when it should have been 1, and asked for `/rca`.
+requests when it should have been 1, asked for `/rca`, then approved
+`rca-2c475824-purchase-site-unlock` and `/deploy`.
 
 ## Reusable lesson
 
