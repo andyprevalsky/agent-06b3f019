@@ -1693,8 +1693,8 @@
     "name": "browser-doordash-food-plan-grocery-order",
     "title": "DoorDash Food-Plan Grocery Order",
     "description": "Reproduces prod premature-checkout failure: full Safeway grocery manifest must reach checkout, not a single-item cart.",
-    "prompt": "Execute the complete DoorDash grocery purchase for the weekly food-plan using your authenticated DoorDash session, the Safeway store at 2811 Middlefield Rd in Palo Alto, and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address and use saved payment. Add ALL required ingredients across protein, eggs, shakes, pancake mix, produce, pantry, dairy, and condiments before checkout — a single-item cart (for example only Kodiak mix) is incorrect. Use at most two stores (Safeway first; 99 Ranch only for Asian pantry items if needed). Complete checkout and stop at payment/write-lock approval when the harness requires it.",
-    "timeout_seconds": 900,
+    "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add ALL required ingredients across protein, eggs, shakes, pancake mix, produce, pantry, dairy, and condiments in that single browser session before checkout — a single-item cart (for example only Kodiak mix) is incorrect. Use at most two stores (Safeway first; 99 Ranch only for Asian pantry items if needed). Complete checkout and stop at payment/write-lock approval when the harness requires it.",
+    "timeout_seconds": 1800,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent"

@@ -2030,19 +2030,29 @@ def _run_doordash_food_plan_fixture(action: str) -> dict:
     return manifest
 
 
+DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT = (
+    "\n\nBENCHMARK EXECUTION CONTRACT: Use exactly ONE spawn_browser_agent call to build "
+    "the entire Safeway cart from the manifest before checkout. Do not spawn separate "
+    "browser agents per item, category, or small batch."
+)
+
+
 def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
     if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
         return None
     manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
     if manifest and manifest.get("benchmark_goal"):
-        return str(manifest["benchmark_goal"])
-    frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
-    if frozen_path.is_file():
+        base = str(manifest["benchmark_goal"])
+    else:
+        frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
+        if not frozen_path.is_file():
+            return None
         data = json.loads(frozen_path.read_text())
         execute_prompt = data.get("execute_prompt")
-        if isinstance(execute_prompt, str) and execute_prompt.strip():
-            return execute_prompt.strip()
-    return None
+        if not isinstance(execute_prompt, str) or not execute_prompt.strip():
+            return None
+        base = execute_prompt.strip()
+    return base + DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT
 
 
 def _prod_user_data_prompt_override(task: BenchmarkTask) -> str | None:

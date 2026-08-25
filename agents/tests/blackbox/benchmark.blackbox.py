@@ -3063,8 +3063,7 @@ def test_doordash_food_plan_grocery_repro_contract():
     task = get_task_by_name("browser-doordash-food-plan-grocery-order")
     assert task.group == "daily"
     assert task.harness == "rose"
-    assert "safeway" in task.prompt.lower()
-    assert "kodiak" in task.prompt.lower()
+    assert "exactly one browser agent" in task.prompt.lower()
     assert "single-item cart" in task.prompt.lower()
     assert task.pinned_facts["minimum_distinct_grocery_categories"] >= 8
     assert task.pinned_facts["prod_user_id"] == "5824c58c-7f11-4c92-8f81-33eb3c324a2f"
