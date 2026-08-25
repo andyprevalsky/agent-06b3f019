@@ -275,10 +275,14 @@ async function fetchTelemetryLogs(
       nextEndTime?: unknown;
       logs?: unknown;
     };
-    if (!Array.isArray(body.logs)) {
+    // Render returns `logs: null` (not `[]`) for empty windows — same contract
+    // prod-health.ts already tolerates via `data.logs || []`.
+    const pageLogs =
+      body.logs == null ? [] : Array.isArray(body.logs) ? body.logs : null;
+    if (pageLogs === null) {
       throw new Error('Render logs query returned no logs array');
     }
-    for (const log of body.logs as Array<{ message?: unknown }>) {
+    for (const log of pageLogs as Array<{ message?: unknown }>) {
       if (typeof log.message !== 'string') continue;
       try {
         const parsed = JSON.parse(log.message) as ParsedTelemetryLog;
