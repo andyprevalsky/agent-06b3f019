@@ -875,20 +875,28 @@ def build_usage_items(
     `cost_cents` on llm rows is informational only — the workflow recomputes
     from `model` + tokens and remains the single source of cost truth, applying
     the cache discount to the `cache_*` counters each row now carries.
+
+    When every LLM decision in this browser session was a Fast Mode
+    replay/soft-complete (`from_fast_cache`), zero the Kernel/Steel service
+    row so OAi-demo warm paths stay ~$0 (session wall-clock would otherwise
+    still bill ~cents while decisions were free).
     """
     browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
     service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
     cost_per_ms = KERNEL_COST_CENTS_PER_MS if browser_provider == "kernel" else STEEL_COST_CENTS_PER_MS
+    llm_items = build_browser_llm_usage_items(
+        total_input_tokens,
+        total_output_tokens,
+        model_pricing,
+        usage_by_model,
+    )
+    all_fast_cache = bool(llm_items) and all(bool(item.get("from_fast_cache")) for item in llm_items)
+    service_cost = 0.0 if all_fast_cache else round(execution_time_ms * cost_per_ms, 4)
     return [
-        *build_browser_llm_usage_items(
-            total_input_tokens,
-            total_output_tokens,
-            model_pricing,
-            usage_by_model,
-        ),
+        *llm_items,
         {
             "type": "service",
-            "cost_cents": round(execution_time_ms * cost_per_ms, 4),
+            "cost_cents": service_cost,
             "provider": service_provider,
         },
     ]
