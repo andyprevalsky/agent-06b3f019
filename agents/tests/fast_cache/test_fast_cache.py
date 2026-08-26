@@ -1961,20 +1961,6 @@ def test_write_only_soft_completes_execute_loop(mem, monkeypatch):
     asyncio.run(body())
 
 
-def test_write_only_cold_execute_loop_does_not_soft(mem):
-    """Cold write-through execute_loop must not soft-complete (no prior slot)."""
-
-    async def body():
-        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=1))
-        rose = FakeRose(_full_stream())
-        await _drain(
-            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
-        )
-        assert rose.calls == 1
-
-    asyncio.run(body())
-
-
 def test_write_only_context_uses_provider_fast_mode(mem):
     async def body():
         set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
@@ -2346,13 +2332,37 @@ def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
 
 
 def test_cold_explore_miss_does_not_soft_complete(mem):
-    """Cold explore namespaces must not soft-complete (would fake July hits)."""
+    """Cold explore namespaces must not soft-complete (would fake July hits).
+
+    They emit an explicit cold-namespace passthrough replay instead of live LLM.
+    """
 
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g", base_step=1))
         rose = FakeRose(_full_stream())
-        await _drain(
+        chunks = await _drain(
             rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion_with_result"
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
+def test_write_only_cold_execute_loop_does_not_soft(mem):
+    """Cold write-through execute_loop must not soft-complete (no prior slot).
+
+    Write-through still falls through to live so allowlisted accounts can seed
+    new namespaces; only Fast Mode *read* uses cold passthrough.
+    """
+
+    async def body():
+        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
         )
         assert rose.calls == 1
 

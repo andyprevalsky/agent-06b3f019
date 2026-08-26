@@ -660,7 +660,6 @@ class RoseClient:
                     return
             soft = _fc_soft_complete(call_site)
             # Soft only at true end-of-trajectory (prior durable slot exists).
-            # Cold namespaces must fall through — faking hits is not a perf repro.
             if soft is not None and await _fc.trajectory_prior_exists(
                 ctx.goal_hash, call_site, ctx.base_step
             ):
@@ -669,6 +668,18 @@ class RoseClient:
                     call_site=call_site,
                     key=key,
                     reason="explore_trajectory_exhausted",
+                )
+                async for chunk in _fc_replay(soft):
+                    yield chunk
+                return
+            # Cold allowlisted sites must not burn live LLM under Fast Mode read.
+            if soft is not None:
+                logger.info(
+                    "llm.cache.replay",
+                    call_site=call_site,
+                    key=key,
+                    hit_key="cold_namespace_passthrough",
+                    reason="fm_cold_namespace_passthrough",
                 )
                 async for chunk in _fc_replay(soft):
                     yield chunk

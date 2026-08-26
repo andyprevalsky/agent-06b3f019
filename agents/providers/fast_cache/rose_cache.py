@@ -452,6 +452,21 @@ async def cached_complete(
                 async for chunk in _replay(soft):
                     yield chunk
                 return
+            # Cold allowlisted sites: never fall through to live LLM under Fast
+            # Mode read (verify22 burned cents on cold execute/verifier/explore).
+            # Emit the terminal schema payload as an explicit cold passthrough
+            # replay — not soft_complete — so soft≈true-exhaustion only.
+            if soft is not None:
+                logger.info(
+                    "llm.cache.replay",
+                    call_site=call_site,
+                    key=key,
+                    hit_key="cold_namespace_passthrough",
+                    reason="fm_cold_namespace_passthrough",
+                )
+                async for chunk in _replay(soft):
+                    yield chunk
+                return
         logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
         # Write-through: soft-complete only when the warm trajectory is truly
