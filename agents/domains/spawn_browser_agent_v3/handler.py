@@ -8245,6 +8245,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 if browser_recorder
                                 else None
                             ),
+                            bool(fast_mode_cache_enabled),
+                            goal if fast_mode_cache_enabled else None,
+                            int(iteration or 0),
                         ],
                         start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
                     )
@@ -9098,6 +9101,9 @@ Based on this feedback, I need to continue working on the task and address the i
                             if browser_recorder
                             else None
                         ),
+                        bool(fast_mode_cache_enabled),
+                        goal if fast_mode_cache_enabled else None,
+                        int(iteration or 0),
                     ],
                     start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
                 )
