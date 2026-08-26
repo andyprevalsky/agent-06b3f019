@@ -152,8 +152,7 @@ export async function commitStartNewAgent(
   const startedAgent = agent;
   // Prefer the persisted row value (create path + P2002 recovery); default on.
   const resolvedFastMode =
-    'fastModeCacheEnabled' in startedAgent &&
-    typeof startedAgent.fastModeCacheEnabled === 'boolean'
+    'fastModeCacheEnabled' in startedAgent && typeof startedAgent.fastModeCacheEnabled === 'boolean'
       ? startedAgent.fastModeCacheEnabled
       : true;
 
