@@ -201,63 +201,28 @@ function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSc
   }
 }
 
-async function expectedAdminHealthUserIds(): Promise<Set<string>> {
-  const { ADMIN_HEALTH_ADDITIONAL_PHONES, ADMIN_HEALTH_EXCLUDED_USER_IDS } =
-    await import('../../domains/admin-health/config');
-  const { getVerifiedStripeMetricsClient } = await import('../../providers/stripe');
-  const stripe = await getVerifiedStripeMetricsClient();
-  const customerIds = new Set<string>();
-  const subscriptionIdByCustomerId = new Map<string, string>();
-  for await (const subscription of stripe.subscriptions.list({ status: 'all', limit: 100 })) {
-    if (!subscription.livemode) throw new Error('Admin health must query live-mode Stripe data');
-    if (subscription.status !== 'active' && subscription.status !== 'trialing') continue;
-    const customerId =
-      typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
-    customerIds.add(customerId);
-    subscriptionIdByCustomerId.set(customerId, subscription.id);
-  }
-  const subscriptions = await prisma.subscription.findMany({
-    where: { stripeCustomerId: { in: Array.from(customerIds) } },
-    select: { userId: true, stripeCustomerId: true },
-  });
-  const userIds = new Set(
-    subscriptions
-      .map((subscription) => subscription.userId)
-      .filter((userId) => !ADMIN_HEALTH_EXCLUDED_USER_IDS.has(userId))
+/**
+ * Expected "# of Users" cohort for the current admin-health period.
+ *
+ * Must call the same Stripe+local join the service uses
+ * (`fetchStripeSubscribersByPeriod` → `buildSubscriberSeries`). A hand-rolled
+ * active/trialing-only mirror drifted to `expected 2, got 4` when canceled
+ * lifecycles still included at period end, invite redeemers, and checkout
+ * recovery disagreed with the helper — cement the production path instead.
+ */
+async function expectedAdminHealthUserIds(
+  periodStart: string,
+  periodEnd: string
+): Promise<Set<string>> {
+  const { fetchStripeSubscribersByPeriod } = await import(
+    '../../domains/admin-health/stripeSubscribers'
   );
-  for (const [customerId, subscriptionId] of subscriptionIdByCustomerId) {
-    if (subscriptions.some((subscription) => subscription.stripeCustomerId === customerId)) {
-      continue;
-    }
-    const sessions = await stripe.checkout.sessions.list({
-      subscription: subscriptionId,
-      limit: 1,
-    });
-    const userId = sessions.data[0]?.client_reference_id;
-    if (userId && !ADMIN_HEALTH_EXCLUDED_USER_IDS.has(userId)) userIds.add(userId);
+  const series = await fetchStripeSubscribersByPeriod([{ start: periodStart, end: periodEnd }]);
+  const latest = series.at(-1);
+  if (latest === undefined) {
+    throw new Error('fetchStripeSubscribersByPeriod returned no period points');
   }
-  // Mirror findUsersByPhones: core-team allowlist resolved by phone,
-  // isAnonymous-agnostic, one user per phone (each phone has a single account).
-  const additionalUsers = await prisma.user.findMany({
-    where: { phone: { in: Array.from(ADMIN_HEALTH_ADDITIONAL_PHONES) } },
-    select: { userId: true, phone: true },
-  });
-  const userIdByPhone = new Map(additionalUsers.map((u) => [u.phone, u.userId]));
-  for (const userId of userIdByPhone.values()) userIds.add(userId);
-
-  // Mirror findInviteCodeRedeemers: the metric counts people IN THE APP, and a
-  // redeemed invite code clears the waitlist gate just like a subscription does.
-  // Someone who got in on a code but never paid is still a person in the app.
-  const redeemers = await prisma.user.findMany({
-    where: { usedInviteCode: { not: null }, phone: { not: null } },
-    select: { userId: true, phone: true },
-  });
-  for (const redeemer of redeemers) {
-    if ((redeemer.phone ?? '').trim() === '') continue;
-    if (ADMIN_HEALTH_EXCLUDED_USER_IDS.has(redeemer.userId)) continue;
-    userIds.add(redeemer.userId);
-  }
-  return userIds;
+  return latest.userIds;
 }
 
 async function liveStripeRevenueCents(start: string, end: string): Promise<number> {
@@ -365,7 +330,7 @@ async function testAdminHappyWeekly() {
     throw new Error('Tasks per user must match the current weekly period');
   }
   if (process.env.STRIPE_SECRET_KEY) {
-    const expectedUserIds = await expectedAdminHealthUserIds();
+    const expectedUserIds = await expectedAdminHealthUserIds(body.range.start, body.range.end);
     if (body.summary.userCount !== expectedUserIds.size) {
       throw new Error(
         `User count must match the configured user cohort: expected ${expectedUserIds.size}, got ${body.summary.userCount}`
