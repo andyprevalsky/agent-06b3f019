@@ -640,9 +640,18 @@ if $IS_CLOUD; then
             CLOUD_KILLED=true
         fi
     done
+    # Pattern kills only apply to the non-isolated cloud stack. Even then, never
+    # SIGKILL a live isolated benchmark sibling (run-bench --local / predeploy
+    # smoke): those share this worktree and record ACTIVE services.json PIDs.
+    # Without this guard, a Step 5 semantic run.sh murders in-flight smoke
+    # workers that kill_stale_same_worktree_benchmark_stack just preserved.
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                if pid_belongs_to_active_isolated_benchmark "$pid"; then
+                    echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
+                    continue
+                fi
                 echo "🧹 Killing $pattern (PID $pid)"
                 kill -9 "$pid" 2>/dev/null || true
                 CLOUD_KILLED=true
