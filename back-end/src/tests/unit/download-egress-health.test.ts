@@ -18,6 +18,7 @@ let artifactBytes = 1024;
 let supabaseServerErrors = 0;
 let invalidSupabaseResult = false;
 let invalidRenderLogs = false;
+let emptyRenderLogsNull = false;
 let paginateRenderLogs = false;
 let renderLogRequests = 0;
 let observedRange = '';
@@ -83,6 +84,11 @@ const server = createServer((request, response) => {
     observedRenderAuth = request.headers.authorization ?? '';
     response.writeHead(200, { 'Content-Type': 'application/json' });
     if (invalidRenderLogs) {
+      response.end(JSON.stringify({ hasMore: false, logs: 'not-an-array' }));
+      return;
+    }
+    if (emptyRenderLogsNull) {
+      // Live Render API shape for zero matches in the time window.
       response.end(JSON.stringify({ hasMore: false, logs: null }));
       return;
     }
@@ -249,13 +255,24 @@ async function main(): Promise<void> {
   assert.equal(downloadEgressExitCode(degradedObservability), 2);
   invalidSupabaseResult = false;
 
+  emptyRenderLogsNull = true;
+  const emptyRenderWindow = await runDownloadEgressHealth({
+    ...commonConfig,
+    outputPath: join(temporaryDirectory, 'render-empty-null-report.json'),
+  });
+  assert.equal(emptyRenderWindow.status, 'healthy');
+  assert.equal(emptyRenderWindow.observabilityFailures.length, 0); // pragma: allowlist secret
+  assert.equal(emptyRenderWindow.realUserTelemetry.completed, 0);
+  assert.equal(downloadEgressExitCode(emptyRenderWindow), 0);
+  emptyRenderLogsNull = false;
+
   invalidRenderLogs = true;
   const degradedRenderObservability = await runDownloadEgressHealth({
     ...commonConfig,
-    outputPath: join(temporaryDirectory, 'render-observability-report.json'),
+    outputPath: join(temporaryDirectory, 'render-observability-report.json'), // pragma: allowlist secret
   });
   assert.equal(downloadEgressExitCode(degradedRenderObservability), 2);
-  assert.match(degradedRenderObservability.observabilityFailures.join('\n'), /no logs array/);
+  assert.match(degradedRenderObservability.observabilityFailures.join('\n'), /no logs array/); // pragma: allowlist secret
   invalidRenderLogs = false;
 
   const workflowPath = resolve(process.cwd(), '..', '.github', 'workflows', 'download-egress.yml');
