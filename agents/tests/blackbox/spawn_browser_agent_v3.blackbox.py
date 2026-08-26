@@ -16628,6 +16628,33 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
     assert start_calls[0][1]["start_to_close_timeout"] == timedelta(
         minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
     )
+
+
+async def test_fast_mode_soft_completes_browser_without_kernel_session():
+    """Fast Mode must not open Kernel for warm OAi demos (verify20 hang storm)."""
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+        AsyncMock(),
+    ) as save, patch(
+        "domains.spawn_browser_agent_v3.handler.init_browser_session",
+        AsyncMock(side_effect=AssertionError("must not open Kernel under FM")),
+    ):
+        out = await _spawn_browser_agent_activity_v3_real(
+            user_id="u",
+            agent_id="a",
+            goal="Browse youtube",
+            tool_call_id="tc1",
+            fast_mode_cache_enabled=True,
+        )
+
+    assert out["success"] is True
+    assert out["status"] == "completed"
+    assert out["session_id"] is None
+    service = next(i for i in out["usage_items"] if i["type"] == "service")
+    assert service["cost_cents"] == 0.0
+    assert save.await_count == 1
 async def test_manager_posts_output_files_after_finished_tool_event():
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from tools.base import AssistantEvent, MessageStatus
@@ -19470,6 +19497,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_passes_fast_mode_cache",
         test_manager_passes_fast_mode_cache_for_browser_activity,
+    )
+    await r.record_async(
+        "fast_mode_soft_completes_browser_without_kernel",
+        test_fast_mode_soft_completes_browser_without_kernel_session,
     )
     await r.record_async(
         "manager_output_files_after_finished",
