@@ -122,7 +122,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     localStorage.clear();
   });
 
-  it('defaults Andy to Fast Mode on and still allows switching off', async () => {
+  it('defaults allow-listed accounts to Fast Mode on and still allows switching off', async () => {
     const { result } = renderHook(() => useTerminalAgents('agents', vi.fn(), vi.fn()));
 
     await waitFor(() => expect(result.current.fastMode).toBe(true));
@@ -132,11 +132,11 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     expect(result.current.fastMode).toBe(false);
   });
 
-  it('does not default other allow-listed accounts on', async () => {
+  it('defaults other allow-listed accounts on as well', async () => {
     mocks.authState.user.id = '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9';
     const { result } = renderHook(() => useTerminalAgents('agents', vi.fn(), vi.fn()));
 
-    await waitFor(() => expect(result.current.fastMode).toBe(false));
+    await waitFor(() => expect(result.current.fastMode).toBe(true));
   });
 
   it('sends the current Fast Mode button state in create-agent payloads', async () => {

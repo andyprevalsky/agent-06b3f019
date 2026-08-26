@@ -105,7 +105,7 @@ def build_openrouter_body(
     temperature: Optional[float],
     max_tokens: Optional[int],
     seed: Optional[int],
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
 ) -> Dict[str, Any]:
     """Assemble the OpenRouter /chat/completions request body for one model.
 
@@ -152,7 +152,7 @@ async def waterfall_complete(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     seed: Optional[int] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     openrouter_key: str,
     request_id: str,
     agent_id: Optional[str] = None,
