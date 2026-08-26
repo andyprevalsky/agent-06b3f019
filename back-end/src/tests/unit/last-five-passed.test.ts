@@ -3,6 +3,7 @@
 /**
  * Unit tests for lastFiveAttemptsPassed — the helper that drives the
  * query-box green check when the last 5 runs in history all passed.
+ * Deploy review-cycle trigger: no behavior change.
  */
 
 import assert from 'node:assert';
