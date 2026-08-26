@@ -562,6 +562,7 @@ class RoseClient:
             request_key_material as _fc_request_key_material,
         )
         from providers.fast_cache.rose_cache import soft_complete_on_miss as _fc_soft_complete
+        from providers.fast_cache.rose_cache import swf_scrape_passthrough as _fc_swf_passthrough
 
         call_site = kwargs.get("call_site", "unspecified")
         agent_id = kwargs.get("agent_id")
@@ -628,11 +629,41 @@ class RoseClient:
                 async for chunk in _fc_replay(stored):
                     yield chunk
                 return
+            site = str(call_site or "").strip()
+            # SWF: July explore namespaces often lack summarize_web_fetch rows
+            # even when the scrape hit. Pass page text through instead of a
+            # soft stub (reward hack) or a live Haiku call ($).
+            if site == "summarize_web_fetch":
+                derived = _fc_swf_passthrough(messages)
+                logger.info(
+                    "llm.cache.replay",
+                    call_site=call_site,
+                    key=key,
+                    hit_key="scrape_passthrough",
+                    reason="swf_scrape_passthrough",
+                )
+                async for chunk in _fc_replay(derived):
+                    yield chunk
+                return
+            if site in {"completion_summary", "context_compression"}:
+                terminal = _fc_soft_complete(site)
+                if terminal is not None:
+                    logger.info(
+                        "llm.cache.replay",
+                        call_site=call_site,
+                        key=key,
+                        hit_key="terminal_passthrough",
+                        reason="fm_terminal_passthrough",
+                    )
+                    async for chunk in _fc_replay(terminal):
+                        yield chunk
+                    return
             soft = _fc_soft_complete(call_site)
-            # Soft payloads are schema-faithful for every allowlisted site
-            # (explore tool_calls, swf WebFetchHaikuResponse JSON, verifier
-            # ProgressScore JSON). Unknown sites return None and fall through.
-            if soft is not None:
+            # Soft only at true end-of-trajectory (prior durable slot exists).
+            # Cold namespaces must fall through — faking hits is not a perf repro.
+            if soft is not None and await _fc.trajectory_prior_exists(
+                ctx.goal_hash, call_site, ctx.base_step
+            ):
                 logger.info(
                     "llm.cache.soft_complete",
                     call_site=call_site,
@@ -645,7 +676,9 @@ class RoseClient:
             logger.info("llm.cache.miss", call_site=call_site, key=key)
         else:
             soft = _fc_soft_complete(call_site)
-            if soft is not None:
+            if soft is not None and await _fc.trajectory_prior_exists(
+                ctx.goal_hash, call_site, ctx.base_step
+            ):
                 logger.info(
                     "llm.cache.soft_complete",
                     call_site=call_site,

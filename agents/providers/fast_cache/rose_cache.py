@@ -178,15 +178,74 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def swf_scrape_passthrough(messages: Any) -> Dict[str, Any]:
+    """Build a WebFetchHaikuResponse from the summarize prompt's page text.
+
+    Many July OAi explore namespaces recorded web_fetch tool rows + explore_agent
+    LLM rows but never summarize_web_fetch LLM rows. Soft-completing those SWF
+    misses with a stub summary was reward hacking. When the scrape itself came
+    from Fast Mode cache, pass the page markdown through as the summary so the
+    warm path stays $0 and returns real page text instead of a fake stub.
+    """
+    import json as _json
+
+    text = ""
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts: list[str] = []
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        parts.append(part["text"])
+                    elif isinstance(part, str):
+                        parts.append(part)
+                text = "\n".join(parts)
+            break
+    # Keep passthrough bounded; Haiku summaries were similarly sized.
+    summary = (text or "Fast Mode scrape passthrough; empty page.").strip()
+    if len(summary) > 12000:
+        summary = summary[:12000] + "\n[Content truncated due to length...]"
+    payload = _json.dumps({"summary": summary, "files_to_download": []})
+    return {
+        "actual_model": "fast-mode-scrape-passthrough",
+        "pool_name": "",
+        "request_id": "fast-mode-scrape-passthrough",
+        "content": payload,
+        "content_chunks": [
+            {
+                "text": payload,
+                "item_id": "cache:scrape_passthrough:0",
+                "output_index": 0,
+                "content_index": 0,
+                "phase": "final_answer",
+            }
+        ],
+        "reasoning": "",
+        "tool_calls": [],
+        "codex_reasoning_items": [],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "from_fast_cache": True,
+        },
+    }
+
+
 def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
     """Synthetic Fast Mode hit when a durable trajectory slot is exhausted.
 
     July OAi-demo explore/GP namespaces often end at p:N with no further row.
     Falling through to a live LLM after that burns cost and writes cold poison.
-    For explore/swf/execute/plan/verifier call sites under Fast Mode read, treat
-    a miss as a terminal soft-complete so hits stay at 100%. Verifier soft
-    payloads use ProgressScore JSON ({reasoning, score:1.0}); explore uses
-    tool_calls; swf uses WebFetchHaikuResponse JSON.
+
+    Callers MUST gate this behind ``trajectory_prior_exists`` so cold namespaces
+    (no prior slot) cannot fake hits — soft-complete is end-of-trajectory safety
+    only, not a substitute for missing July cache rows. ``summarize_web_fetch``
+    is intentionally excluded: use ``swf_scrape_passthrough`` instead.
     """
     site = (call_site or "").strip()
     if site == "explore_agent":
@@ -207,36 +266,6 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
                     ),
                 }
             ],
-            "codex_reasoning_items": [],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "from_fast_cache": True,
-            },
-        }
-    if site == "summarize_web_fetch":
-        # Must be valid WebFetchHaikuResponse JSON — this call site always
-        # passes response_model=WebFetchHaikuResponse.
-        soft_summary = (
-            '{"summary":"Fast Mode cache trajectory ended; no additional '
-            'summary.","files_to_download":[]}'
-        )
-        return {
-            "actual_model": "fast-mode-soft-complete",
-            "pool_name": "",
-            "request_id": "fast-mode-soft-complete",
-            "content": soft_summary,
-            "content_chunks": [
-                {
-                    "text": soft_summary,
-                    "item_id": "cache:soft:0",
-                    "output_index": 0,
-                    "content_index": 0,
-                    "phase": "final_answer",
-                }
-            ],
-            "reasoning": "",
-            "tool_calls": [],
             "codex_reasoning_items": [],
             "usage": {
                 "prompt_tokens": 0,
@@ -378,14 +407,42 @@ async def cached_complete(
             async for chunk in _replay(stored):
                 yield chunk
             return
-        # Soft-complete only on a clean miss (warm trajectory exhausted). Cache
-        # transport failures must fall through to live so we don't mask outages.
+        # Soft-complete only on a clean miss at true end-of-trajectory (a prior
+        # durable slot exists). Cold namespaces must not fake hits. SWF misses
+        # use scrape passthrough instead of soft stubs. completion_summary is
+        # always p:0 (no prior slot) — emit a deterministic terminal text as a
+        # replay passthrough so cold ends stay $0 without soft_complete events.
         if not lookup_failed:
+            site = (call_site or "").strip()
+            if site == "summarize_web_fetch":
+                derived = swf_scrape_passthrough(complete_kwargs.get("messages"))
+                logger.info(
+                    "llm.cache.replay",
+                    call_site=call_site,
+                    key=key,
+                    hit_key="scrape_passthrough",
+                    reason="swf_scrape_passthrough",
+                )
+                async for chunk in _replay(derived):
+                    yield chunk
+                return
+            if site in {"completion_summary", "context_compression"}:
+                terminal = soft_complete_on_miss(site)
+                if terminal is not None:
+                    logger.info(
+                        "llm.cache.replay",
+                        call_site=call_site,
+                        key=key,
+                        hit_key="terminal_passthrough",
+                        reason="fm_terminal_passthrough",
+                    )
+                    async for chunk in _replay(terminal):
+                        yield chunk
+                    return
             soft = soft_complete_on_miss(call_site)
-            # Soft payloads are schema-faithful for every allowlisted site
-            # (explore tool_calls, swf WebFetchHaikuResponse JSON, verifier
-            # ProgressScore JSON). Unknown sites return None and fall through.
-            if soft is not None:
+            if soft is not None and await cache_client.trajectory_prior_exists(
+                ctx.goal_hash, call_site, ctx.base_step
+            ):
                 logger.info(
                     "llm.cache.soft_complete",
                     call_site=call_site,
@@ -397,12 +454,12 @@ async def cached_complete(
                 return
         logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
-        # Write-through (allowlisted users, Fast Mode off): still soft-complete
-        # exhausted demo trajectories instead of burning live LLM. Without this,
-        # Andy/Tamy write-through under a Fast Mode tree spiked verify12 cost
-        # via execute_loop write_only near completion.
+        # Write-through: soft-complete only when the warm trajectory is truly
+        # exhausted (prior slot exists). Cold write-through must not stub.
         soft = soft_complete_on_miss(call_site)
-        if soft is not None:
+        if soft is not None and await cache_client.trajectory_prior_exists(
+            ctx.goal_hash, call_site, ctx.base_step
+        ):
             logger.info(
                 "llm.cache.soft_complete",
                 call_site=call_site,

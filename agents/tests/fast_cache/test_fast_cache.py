@@ -96,6 +96,31 @@ def mem(monkeypatch):
     store = MemStore()
     monkeypatch.setattr(rose_cache.cache_client, "cache_get", store.get)
     monkeypatch.setattr(rose_cache.cache_client, "cache_set", store.set)
+
+    async def _get_first(keys):
+        for key in keys or []:
+            value = await store.get(key)
+            if value is not None:
+                return value, key
+        return None, None
+
+    async def _position_fallback(goal_hash, call_site, step=None):
+        del goal_hash, call_site, step
+        return None, None
+
+    async def _prior_exists(goal_hash, call_site, step):
+        del goal_hash, call_site
+        # Default cold; tests that need true exhaustion stub this True.
+        return bool(step is not None and int(step) > 0 and False)
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_first", _get_first)
+    monkeypatch.setattr(
+        rose_cache.cache_client, "cache_get_position_fallback", _position_fallback
+    )
+    monkeypatch.setattr(
+        rose_cache.cache_client, "trajectory_prior_exists", _prior_exists
+    )
+    store.prior_exists = _prior_exists
     return store
 
 
@@ -1908,11 +1933,17 @@ def test_write_only_context_writes_without_reading(mem):
     asyncio.run(body())
 
 
-def test_write_only_soft_completes_execute_loop(mem):
-    """Write-through on soft sites must not burn live LLM (OAi demo)."""
+def test_write_only_soft_completes_execute_loop(mem, monkeypatch):
+    """Write-through soft-completes only when a prior trajectory slot exists."""
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
 
     async def body():
-        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
+        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=3))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
@@ -1926,6 +1957,20 @@ def test_write_only_soft_completes_execute_loop(mem):
             for c in chunks
             if c.kind == "tool_call"
         )
+
+    asyncio.run(body())
+
+
+def test_write_only_cold_execute_loop_does_not_soft(mem):
+    """Cold write-through execute_loop must not soft-complete (no prior slot)."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 1
 
     asyncio.run(body())
 
@@ -2244,18 +2289,21 @@ def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():
 
 
 def test_soft_complete_on_miss_for_explore_sites_only():
-    from providers.fast_cache.rose_cache import soft_complete_on_miss
+    from providers.fast_cache.rose_cache import soft_complete_on_miss, swf_scrape_passthrough
 
     explore = soft_complete_on_miss("explore_agent")
     assert explore is not None
     assert explore["tool_calls"][0]["name"] == "attempt_completion_with_result"
     assert explore["usage"]["from_fast_cache"] is True
 
-    swf = soft_complete_on_miss("summarize_web_fetch")
-    assert swf is not None
-    assert "trajectory ended" in swf["content"]
+    # SWF is no longer soft-completed — scrape passthrough returns real page text.
+    assert soft_complete_on_miss("summarize_web_fetch") is None
+    swf = swf_scrape_passthrough(
+        [{"role": "user", "content": "PAGE MARKDOWN FOR OBJECTIVE\n" + ("x" * 20)}]
+    )
+    assert swf["usage"]["from_fast_cache"] is True
     parsed = json.loads(swf["content"])
-    assert parsed["summary"]
+    assert "PAGE MARKDOWN" in parsed["summary"]
     assert parsed["files_to_download"] == []
 
     execute = soft_complete_on_miss("execute_loop")
@@ -2271,11 +2319,17 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert soft_complete_on_miss("response_schema") is None
 
 
-def test_soft_complete_explore_miss_does_not_call_live(mem):
-    """cached_complete soft-completes explore misses without live Rose egress."""
+def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
+    """Warm end-of-trajectory explore miss soft-completes without live Rose egress."""
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g"))
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=5))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
@@ -2287,5 +2341,42 @@ def test_soft_complete_explore_miss_does_not_call_live(mem):
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "attempt_completion_with_result"
         assert mem.set_calls == 0  # soft-complete does not poison the cache
+
+    asyncio.run(body())
+
+
+def test_cold_explore_miss_does_not_soft_complete(mem):
+    """Cold explore namespaces must not soft-complete (would fake July hits)."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+
+    asyncio.run(body())
+
+
+def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
+    """summarize_web_fetch miss returns page text passthrough, not soft stub."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=2))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(
+                rose,
+                call_site="summarize_web_fetch",
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "SCRAPED PAGE BODY ABOUT CREATOR"}],
+            )
+        )
+        assert rose.calls == 0
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        parsed = json.loads(content)
+        assert "SCRAPED PAGE BODY" in parsed["summary"]
+        assert mem.set_calls == 0
 
     asyncio.run(body())

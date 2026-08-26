@@ -451,6 +451,23 @@ async def cache_get_position_fallback(
     return data.get("value"), data.get("key")
 
 
+async def trajectory_prior_exists(
+    goal_hash: str,
+    call_site: str,
+    step: Optional[int],
+) -> bool:
+    """True when an earlier durable slot exists for this goal/site.
+
+    Soft-complete is only valid at true end-of-trajectory (warm namespace ran
+    out of rows). Cold namespaces (no prior slot) must not soft-complete —
+    that fakes hits and diverges from July replay.
+    """
+    if not goal_hash or step is None or int(step) <= 0:
+        return False
+    prior, _ = await cache_get_position_fallback(goal_hash, call_site, int(step) - 1)
+    return prior is not None
+
+
 # Per-process memo of (read_enabled, goal, write_enabled, root_agent_id) keyed by agent_id, so
 # auto-resolution costs at most one backend lookup per agent per worker process.
 _AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str]]] = {}
