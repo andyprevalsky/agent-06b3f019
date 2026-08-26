@@ -148,6 +148,7 @@ from .service_actions import (
     execute_action,
     get_domain_from_url,
     get_element_description,
+    apply_user_write_lock_grant,
     grant_site_write_lock_approvals,
     resolve_site_write_lock_grant_url,
     wait_for_navigation_ready,
@@ -9626,7 +9627,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                         approval_type = result.get("approval_type", "unknown")
-                        current_approvals = dict(result.get("write_lock_approvals") or {})
                         approved_at = workflow.now().timestamp()
                         # Prefer merchant checkout URL over Kernel live-view current_url
                         # so a write-lock approval after payment does not re-key the
@@ -9640,22 +9640,20 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             )
                             or result.get("current_url", "")
                         )
-                        current_approvals[approval_type] = {
-                            "domain": get_domain_from_url(grant_url),
-                            "approved_at": approved_at,
-                        }
-                        # Payment-card mint already unlocked the site for this
-                        # activity — keep that session-scoped site unlock alive
-                        # across later write-lock approvals on the same page.
+                        # Purchase grants unlock the merchant for this activity
+                        # (same helper as payment-card). Typed-only 120s expiry
+                        # re-prompted Amazon Buy Now after auth/address friction
+                        # (agent 2c475824).
                         prior_resume = write_lock_resume_state or {}
                         prior_payment_refs = prior_resume.get("payment_card_refs")
                         prior_payment_last4 = prior_resume.get("payment_card_last4")
-                        if prior_payment_refs or current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY):
-                            current_approvals = grant_site_write_lock_approvals(
-                                current_approvals,
-                                grant_url,
-                                approved_at,
-                            )
+                        current_approvals = apply_user_write_lock_grant(
+                            result.get("write_lock_approvals"),
+                            approval_type,
+                            grant_url,
+                            approved_at,
+                            prior_payment_refs=prior_payment_refs,
+                        )
 
                         write_lock_resume_state = {
                             "pending_action": result.get("pending_action"),
