@@ -330,6 +330,7 @@ def test_build_browser_use_system_prompt_requires_ordered_option_set_capture():
 def test_build_browser_use_tools_preserves_catalog_descriptions():
     tools = build_browser_use_tools(
         [
+            "read_browser_state",
             "click",
             "request_user_assistance_for_authentication",
             "request_payment_card",
@@ -338,26 +339,33 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
         ]
     )
     assert [tool["name"] for tool in tools] == [
+        "read_browser_state",
         "click",
         "request_user_assistance_for_authentication",
         "request_payment_card",
         "generate_write_lock_notification",
     ]
 
-    click = tools[0]
+    read_state = tools[0]
+    assert read_state["description"] == BROWSER_USE_TOOLS["read_browser_state"]["description"]
+    assert "auto-injected" not in read_state["description"].lower()
+    assert "NOT injected" not in read_state["description"]
+    assert "# Current Browser State" in read_state["description"]
+
+    click = tools[1]
     assert click["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert click["input_schema"]["properties"]["index"]["type"] == "integer"
     assert "Element index" in click["input_schema"]["properties"]["index"]["description"]
     assert click["input_schema"]["required"] == ["index"]
 
-    auth_help = tools[1]
+    auth_help = tools[2]
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
     assert "Never use this for CAPTCHA" in auth_help["description"]
     assert "Bot or Not" in auth_help["description"]
     assert auth_help["input_schema"]["properties"] == {}
     assert auth_help["input_schema"]["required"] == []
 
-    payment = tools[2]
+    payment = tools[3]
     assert "only if checkout requires you to enter new card details" in payment["description"]
     assert "valid saved payment method is already selected" in payment["description"]
     line_items = payment["input_schema"]["properties"]["line_items"]
@@ -372,7 +380,7 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     ]
     assert "checkout" in line_items["items"]["properties"]["product_url"]["description"]
 
-    write_lock = tools[3]
+    write_lock = tools[4]
     purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
     assert purchase_item["required"] == ["title", "rating", "review_count", "product_url"]
     review_count_description = purchase_item["properties"]["review_count"]["description"]

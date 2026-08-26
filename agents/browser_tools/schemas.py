@@ -73,9 +73,9 @@ Interactive elements:
 
 _READ_BROWSER_STATE_TOOL_DESCRIPTION = (
     "Read the current browser page state: URL, viewport, scroll position, tabs, page stats, "
-    "and indexed interactive DOM tree. Call this before click/input_text/scroll when you need "
-    "element [index] values or to see what changed after navigation. Returns the same formatted "
-    "snapshot that was previously auto-injected each turn.\n\n"
+    "and indexed interactive DOM tree. Call before click/input_text/scroll when you need "
+    "element [index] values or to see what changed after navigation. Returns formatted text "
+    "beginning with '# Current Browser State' (same shape as the old per-turn snapshot).\n\n"
     "Example output:\n"
     "```\n"
     f"{_READ_BROWSER_STATE_EXAMPLE}\n"
