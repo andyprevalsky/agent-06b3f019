@@ -23,7 +23,7 @@ tags:
 sources:
   - agent 263d5568-541b-418c-94f5-e24531421001
   - agent f9702ff9-5f91-4d13-b649-5fce225ccad3
-  - relative 2026-08-22-write-lock-rejected-never-closed-browser-status-chip
+  - case 2026-08-22-write-lock-rejected-never-closed-browser-status-chip
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_browser_spawn_goal_preserves_benchmark_food_plan_contract; scripts/run-bench --local browser-doordash-food-plan-grocery-order (outcome gate, still failing on cart completeness)
 status: open
 ---
