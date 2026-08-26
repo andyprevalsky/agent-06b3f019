@@ -46,15 +46,9 @@ test('exactly 5 with one fail → false', () => {
 
 test('more than 5: only the most recent 5 matter', () => {
   // Older fails, recent 5 all pass
-  assert.strictEqual(
-    lastFiveAttemptsPassed([false, false, true, true, true, true, true]),
-    true
-  );
+  assert.strictEqual(lastFiveAttemptsPassed([false, false, true, true, true, true, true]), true);
   // Older passes, recent 5 include a fail
-  assert.strictEqual(
-    lastFiveAttemptsPassed([true, true, true, true, true, false]),
-    false
-  );
+  assert.strictEqual(lastFiveAttemptsPassed([true, true, true, true, true, false]), false);
 });
 
 test('last of the window failing → false', () => {

@@ -276,9 +276,7 @@ async function testPrompts_lastFivePassedReflectsRunHistory() {
   const massLedgerLastFiveFail =
     massFlags.length >= 5 && massFlags.slice(-5).every((p) => p === false);
   if (massLedgerLastFiveFail && mass.lastFivePassed) {
-    throw new Error(
-      'Test Mass Agent Run - 0 has last-5 ledger fails but lastFivePassed=true'
-    );
+    throw new Error('Test Mass Agent Run - 0 has last-5 ledger fails but lastFivePassed=true');
   }
   if (mass.lastFivePassed) {
     throw new Error('Test Mass Agent Run - 0 unexpectedly has lastFivePassed=true');
@@ -295,9 +293,7 @@ async function testPrompts_lastFivePassedReflectsRunHistory() {
     // Hub may have recorded a newer fail — allow false, but require some green.
     const anyGreen = body.prompts.some((p) => p.lastFivePassed);
     if (!anyGreen) {
-      throw new Error(
-        'chat-mode ledger last-5 all passed and no prompt has lastFivePassed=true'
-      );
+      throw new Error('chat-mode ledger last-5 all passed and no prompt has lastFivePassed=true');
     }
   }
   if (chatLedgerLastFivePass && chat.lastFivePassed !== true && chat.lastFivePassed !== false) {
