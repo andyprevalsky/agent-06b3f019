@@ -8194,66 +8194,11 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
-_DECLARED_JUDGE_METADATA_KEYS = (
-    "action_type",
-    "toolName",
-    "toolStatus",
-    "url",
-    "title",
-    "browser_session_metadata",
-    "requestUserApproval",
-    "completionSummary",
-    "toolCallId",
-    "subAgentId",
-    "task_id",
-    "browser_url",
-)
-
-
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge."""
-    evidence: list[dict] = []
-    for message in (data.get("messages") or [])[-120:]:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "").upper()
-        if role in {"USER", "SYSTEM"}:
-            continue
-        text_value = message.get("text", message.get("message", message.get("content", "")))
-        if not isinstance(text_value, str):
-            text_value = json.dumps(text_value, default=str)
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        evidence_metadata = {
-            key: metadata[key] for key in _DECLARED_JUDGE_METADATA_KEYS if key in metadata
-        }
-        evidence.append(
-            {
-                "role": role or "UNKNOWN",
-                "text": text_value[:12000],
-                "metadata": evidence_metadata,
-            }
-        )
-    # The frontend renders completionSummary metadata as the root agent's final
-    # answer card, while its backing TOOL message normally has empty text. Give
-    # the semantic judge the same summary + outputs as one normalized assistant
-    # row; omit tool usage and cost metadata that are not part of that answer.
-    summaries = _final_completion_summaries(data)
-    if summaries:
-        completion = summaries[-1]
-        outputs = completion.get("outputs")
-        payload = {
-            "summary": str(completion.get("summary") or "")[:12000],
-            "outputs": outputs[:100] if isinstance(outputs, list) else [],
-        }
-        evidence.append(
-            {
-                "role": "ASSISTANT",
-                "text": json.dumps(payload, default=str),
-                "metadata": {"evidence_type": "final_completion"},
-            }
-        )
-    evidence.append({"benchmark_state": data.get("_benchmark", {})})
-    return evidence
+    from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence
+
+    return build_single_turn_evidence(data)
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -8279,47 +8224,33 @@ _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
 
 def _declared_agentic_evaluator_evidence(data: dict) -> dict[str, Any]:
     """Build a full trajectory bundle for an agentic Codex judge."""
-    messages: list[dict[str, Any]] = []
-    for message in (data.get("messages") or [])[-500:]:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "").upper() or "UNKNOWN"
-        text_value = message.get("text", message.get("message", message.get("content", "")))
-        if not isinstance(text_value, str):
-            text_value = json.dumps(text_value, default=str)
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        evidence_metadata = {key: metadata[key] for key in _DECLARED_JUDGE_METADATA_KEYS if key in metadata}
-        messages.append(
-            {
-                "role": role,
-                "text": text_value[:50000],
-                "metadata": evidence_metadata,
-            }
-        )
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
 
-    summaries = _final_completion_summaries(data)
-    completion_cards: list[dict[str, Any]] = []
-    if summaries:
-        completion = summaries[-1]
-        outputs = completion.get("outputs")
-        completion_cards.append(
-            {
-                "summary": str(completion.get("summary") or "")[:50000],
-                "outputs": outputs[:200] if isinstance(outputs, list) else [],
-            }
-        )
+    return build_agentic_evidence(data)
 
+
+async def _hydrate_semantic_evaluator_tree(data: dict, base_url: str) -> None:
+    """Attach full agent-tree transcripts for semantic evaluators (best-effort)."""
+    if data.get("_semantic_evaluator_tree") is not None:
+        return
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
-    return {
-        "agent": {
-            key: agent.get(key)
-            for key in ("agent_id", "id", "status", "progress")
-            if agent.get(key) is not None
-        },
-        "messages": messages,
-        "completion_cards": completion_cards,
-        "benchmark_state": data.get("_benchmark", {}),
-    }
+    root_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+    if not root_id or not base_url:
+        data["_semantic_evaluator_tree"] = None
+        return
+    try:
+        tree_agents = await get_agent_tree(base_url, root_id)
+        if len(tree_agents) <= 1:
+            data["_semantic_evaluator_tree"] = None
+            return
+        data["_semantic_evaluator_tree"] = await collect_tree_messages(
+            root_id,
+            tree_agents,
+            lambda agent_id: get_agent(base_url, agent_id),
+        )
+    except Exception as exc:
+        data["_semantic_evaluator_tree"] = None
+        data.setdefault("_benchmark", {})["_semantic_evaluator_tree_error"] = str(exc)[:300]
 
 
 def _build_agentic_judge_goal(task: BenchmarkTask, evaluator: dict) -> str:
@@ -8476,6 +8407,7 @@ async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
     data: dict,
+    evidence: list[dict] | None = None,
 ) -> dict:
     """Execute one catalog-declared single-turn judge against grounded run evidence."""
     from helpers.llm import check_progress
@@ -8495,7 +8427,8 @@ Criteria:
 {criteria}
 Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
-    evidence = _declared_evaluator_evidence(data)
+    if evidence is None:
+        evidence = _declared_evaluator_evidence(data)
     return await check_progress(
         context=[
             {
@@ -9419,6 +9352,7 @@ def _run_declared_static_check(
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
+    base_url: str | None = None,
 ) -> tuple[bool, Optional[str], list[dict]]:
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
     if not task.enforce_declared_evaluators:
@@ -9432,17 +9366,35 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    needs_tree_evidence = any(
+        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge"}
+        for evaluator in task.evaluators
+    )
+    if needs_tree_evidence and base_url:
+        await _hydrate_semantic_evaluator_tree(data, base_url)
+
     results: list[dict] = []
     for evaluator in task.evaluators:
         evaluator_id = evaluator.get("id", "unnamed")
         method = evaluator.get("method")
         usage = None
+        evidence_mode = method
         try:
             if method == "static_check":
                 passed, reasoning = _run_declared_static_check(task, evaluator, data)
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
-                judged = await _call_declared_llm_judge(task, evaluator, data)
+                from benchmarks.semantic_evaluator_evidence import (
+                    build_single_turn_evidence,
+                    single_turn_evidence_exceeds_budget,
+                )
+
+                evidence = build_single_turn_evidence(data)
+                if single_turn_evidence_exceeds_budget(evidence):
+                    judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
+                    evidence_mode = "agentic_llm_judge"
+                else:
+                    judged = await _call_declared_llm_judge(task, evaluator, data, evidence=evidence)
                 score = float(judged.get("score", 0.0))
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
@@ -9468,6 +9420,8 @@ async def _run_declared_evaluators(
             "passed": passed,
             "reasoning": reasoning,
         }
+        if evidence_mode != method:
+            result["evidence_mode"] = evidence_mode
         if usage is not None:
             result["usage"] = usage
         results.append(result)
@@ -10058,6 +10012,7 @@ async def run_single_task(
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,
                 data,
+                base_url=base_url,
             )
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),

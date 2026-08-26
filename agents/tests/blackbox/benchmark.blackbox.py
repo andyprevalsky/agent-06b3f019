@@ -3977,11 +3977,41 @@ def _load_blue_bottle_k5_fixture(agent_id: str) -> dict:
 
 
 def _blue_bottle_k5_eval_data(fixture: dict) -> dict:
-    return {
+    data = {
         "agent": {"agent_id": fixture["agent_id"], "status": fixture["status"]},
         "messages": fixture["messages"],
         "_benchmark": fixture["benchmark_state"],
     }
+    if fixture.get("tree"):
+        data["_semantic_evaluator_tree"] = fixture["tree"]
+    return data
+
+
+async def _assert_blue_bottle_tree_proof_semantics_passes():
+    """Prove tree-aware evidence: payment facts live only on the browser sub-agent."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _call_declared_llm_judge,
+        _run_declared_static_check,
+    )
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2] / "benchmarks/fixtures/blue_bottle_k5/trial_tree_proof.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    data = _blue_bottle_k5_eval_data(fixture)
+    static, semantics = task.evaluators[0], task.evaluators[1]
+
+    static_passed, static_reason = _run_declared_static_check(task, static, data)
+    assert static_passed is True, static_reason
+
+    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    single_score = float(single_turn.get("score") or 0)
+    assert single_score >= 1.0, (
+        f"Expected tree-aware single-turn judge to pass; got score={single_score}: "
+        f"{single_turn.get('reasoning')}"
+    )
 
 
 async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
@@ -4024,6 +4054,10 @@ async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
     await _assert_blue_bottle_k5_replay_single_turn_passes(
         "7d282652-2c5b-4dd3-b8c8-461929a37bf8",
     )
+
+
+async def test_blue_bottle_tree_proof_passes_with_subagent_evidence():
+    await _assert_blue_bottle_tree_proof_semantics_passes()
 
 
 def test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal():
@@ -15976,6 +16010,10 @@ async def run_all_tests():
     await r.record_async(
         "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
         test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
+    )
+    await r.record_async(
+        "blue_bottle_tree_proof_passes_with_subagent_evidence",
+        test_blue_bottle_tree_proof_passes_with_subagent_evidence,
     )
     r.record(
         "blue_bottle_spawn_contract_seeds_live_target",

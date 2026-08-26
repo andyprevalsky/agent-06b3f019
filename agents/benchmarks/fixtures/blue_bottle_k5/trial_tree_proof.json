@@ -1,0 +1,99 @@
+{
+  "agent_id": "tree-proof-0000-0000-0000-000000000001",
+  "status": "ACTIVE",
+  "messages": [
+    {
+      "role": "TOOL",
+      "message": "",
+      "metadata": {
+        "toolName": "spawn_browser_agent",
+        "toolStatus": "FINISHED",
+        "action_type": "browser_session_complete",
+        "title": "Browser agent finished",
+        "subAgentId": "browser-sub-001"
+      }
+    }
+  ],
+  "benchmark_state": {
+    "approvals_triggered": 1,
+    "approvals_resolved": 0,
+    "attention_request_kind_seen": "payment_approval",
+    "expected_attention_kind_seen": "payment_approval",
+    "attention_requests_seen": [
+      {
+        "kind": "payment_approval",
+        "question": "Pay Blue Bottle Coffee $8.75?",
+        "requestPaymentCard": {
+          "merchant": "Blue Bottle Coffee",
+          "totalCents": 875,
+          "pickupLocation": "Blue Bottle Coffee Ferry Building",
+          "pickupTime": "Today, 4:15 PM"
+        }
+      }
+    ]
+  },
+  "tree": {
+    "tree-proof-0000-0000-0000-000000000001": {
+      "parent_agent_id": null,
+      "goal": "Order Blue Bottle pickup",
+      "status": "ACTIVE",
+      "messages": [
+        {
+          "role": "TOOL",
+          "message": "",
+          "metadata": {
+            "toolName": "spawn_browser_agent",
+            "toolStatus": "FINISHED",
+            "action_type": "browser_session_complete",
+            "title": "Browser agent finished",
+            "subAgentId": "browser-sub-001"
+          }
+        }
+      ]
+    },
+    "browser-sub-001": {
+      "parent_agent_id": "tree-proof-0000-0000-0000-000000000001",
+      "goal": "Complete Blue Bottle guest checkout",
+      "status": "ACTIVE",
+      "messages": [
+        {
+          "role": "TOOL",
+          "message": "Selected guest checkout and continued without account login.",
+          "metadata": {
+            "toolName": "spawn_browser_agent",
+            "toolStatus": "FINISHED",
+            "action_type": "guest_checkout",
+            "title": "Guest checkout"
+          }
+        },
+        {
+          "role": "TOOL",
+          "message": "",
+          "metadata": {
+            "toolName": "spawn_browser_agent",
+            "toolStatus": "FINISHED",
+            "action_type": "request_payment_card",
+            "title": "Payment card requested ($8.75)",
+            "requestUserApproval": {
+              "requestPaymentCard": {
+                "merchant": "Blue Bottle Coffee",
+                "currency": "USD",
+                "lineItems": [
+                  {
+                    "name": "16oz Iced Vanilla Bean Shakerato",
+                    "modifiers": ["Oat milk"],
+                    "lineTotalCents": 875
+                  }
+                ],
+                "subtotalCents": 875,
+                "totalCents": 875,
+                "pickupLocation": "Blue Bottle Coffee Ferry Building",
+                "pickupTime": "Today, 4:15 PM"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
