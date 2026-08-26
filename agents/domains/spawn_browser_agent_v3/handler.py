@@ -9534,7 +9534,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     active_gpt_account_id,
                     active_gpt_source,
                     active_gpt_pool_id,
-                    False,
+                    bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
                 ]
                 world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
                 if world_model_mode != "real":
