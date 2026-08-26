@@ -108,7 +108,7 @@ test('batch-created sub-agents use parent Fast Mode inheritance', () => {
   );
 });
 
-test('SMS start_new_agent persists Fast Mode on and passes it into Temporal', () => {
+test('SMS start_new_agent persists Fast Mode on and passes resolved flag into Temporal', () => {
   const startAgent = readFileSync(
     join(process.cwd(), 'src', 'providers', 'smsSupervisor', 'supervisorTools.startAgent.ts'),
     'utf8'
@@ -118,8 +118,12 @@ test('SMS start_new_agent persists Fast Mode on and passes it into Temporal', ()
     'SMS agent create must set Fast Mode on the Agent row'
   );
   assert.ok(
-    /startAgentWorkflow\(\{[\s\S]*fastModeCacheEnabled:\s*true/.test(startAgent),
-    'SMS startAgentWorkflow must pass Fast Mode so Rose complete gets provider_fast_mode'
+    startAgent.includes('fastModeCacheEnabled: existing.fastModeCacheEnabled'),
+    'SMS P2002 recovery must adopt the persisted Fast Mode flag'
+  );
+  assert.ok(
+    /startAgentWorkflow\(\{[\s\S]*fastModeCacheEnabled:\s*resolvedFastMode/.test(startAgent),
+    'SMS startAgentWorkflow must pass the resolved Fast Mode flag'
   );
 });
 
@@ -135,6 +139,33 @@ test('Temporal workflow args default Fast Mode on when callers omit the flag', (
   assert.strictEqual(args[15], true);
 });
 
+test('Temporal workflow args force Fast Mode off for simulate mode', () => {
+  const args = buildAgentWorkflowArgs({
+    agentId: 'a',
+    userId: 'u',
+    goal: 'g',
+    model: 'rose-labs/rose-1-lite',
+    reasoningMaxTokens: 2048,
+    verifier: { type: 'FLOAT_LLM_JUDGE' },
+    worldModelMode: 'simulate',
+  });
+  assert.strictEqual(args[15], false);
+});
+
+test('Temporal workflow args force Fast Mode off for shadow mode even if explicitly true', () => {
+  const args = buildAgentWorkflowArgs({
+    agentId: 'a',
+    userId: 'u',
+    goal: 'g',
+    model: 'rose-labs/rose-1-lite',
+    reasoningMaxTokens: 2048,
+    verifier: { type: 'FLOAT_LLM_JUDGE' },
+    worldModelMode: 'shadow',
+    fastModeCacheEnabled: true,
+  });
+  assert.strictEqual(args[15], false);
+});
+
 test('Rose createStreamingCompletion defaults provider_fast_mode on', () => {
   const client = readFileSync(join(process.cwd(), 'src', 'providers', 'rose', 'client.ts'), 'utf8');
   assert.ok(
@@ -143,7 +174,7 @@ test('Rose createStreamingCompletion defaults provider_fast_mode on', () => {
   );
 });
 
-test('Python Rose complete defaults provider_fast_mode on', () => {
+test('Python Rose complete defaults provider_fast_mode on and forwards it to OpenAI API-key fallback', () => {
   const client = readFileSync(
     join(process.cwd(), '..', 'agents', 'providers', 'rose', 'client.py'),
     'utf8'
@@ -155,6 +186,14 @@ test('Python Rose complete defaults provider_fast_mode on', () => {
   assert.ok(
     !client.includes('provider_fast_mode: bool = False'),
     'Python Rose client must not keep a False default for provider_fast_mode'
+  );
+  assert.ok(
+    client.includes('provider_fast_mode=provider_fast_mode'),
+    'OpenAI API-key fallback must receive the caller provider_fast_mode'
+  );
+  assert.ok(
+    !/_try_openai_api_key\([\s\S]*provider_fast_mode=True/.test(client),
+    'OpenAI API-key fallback must not hardcode provider_fast_mode=True'
   );
 });
 

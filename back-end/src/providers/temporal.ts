@@ -312,6 +312,13 @@ export async function readAgentWorkflowLaunchConfig(
 }
 
 export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknown[] {
+  // Simulator/shadow must never inherit the real-mode Fast Mode default — those
+  // modes race different providers and Fast Mode would poison cache keys/tiers.
+  const fastModeCacheEnabled =
+    params.worldModelMode !== undefined && params.worldModelMode !== 'real'
+      ? false
+      : (params.fastModeCacheEnabled ?? true);
+
   const args: unknown[] = [
     params.agentId,
     params.userId,
@@ -328,7 +335,7 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
     params.maxIterations || null,
     params.priceLimitCents || 100,
     params.contextGates || null,
-    params.fastModeCacheEnabled ?? true,
+    fastModeCacheEnabled,
   ];
   // Keep ordinary real-mode starts compatible with the previous 16-argument
   // worker. Deployment state remains #17; Simulator mode uses #18 so it does

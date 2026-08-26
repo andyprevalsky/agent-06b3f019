@@ -92,6 +92,18 @@ export function useMessageSending({
       return;
     }
 
+    // Simulator agents must never show/send Fast Mode on — even when the
+    // detail payload omits fast_mode_cache_enabled (legacy rows / partial loads).
+    if (
+      selectedAgentId !== null &&
+      agentDetail?.agent_id === selectedAgentId &&
+      agentDetail.world_model_mode === 'simulate'
+    ) {
+      fastModeUserOverrideRef.current = false;
+      setFastModeState(false);
+      return;
+    }
+
     if (
       selectedAgentId !== null &&
       agentDetail?.agent_id === selectedAgentId &&
@@ -107,6 +119,7 @@ export function useMessageSending({
   }, [
     agentDetail?.agent_id,
     agentDetail?.fast_mode_cache_enabled,
+    agentDetail?.world_model_mode,
     selectedAgentId,
     userCanUseFastMode,
     userId,

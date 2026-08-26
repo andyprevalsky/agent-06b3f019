@@ -1271,7 +1271,7 @@ class RoseClient:
                             response_format=None if gpt_api_key_tools else openrouter_response_format,
                             temperature=temperature,
                             effort=effort,
-                            provider_fast_mode=True,
+                            provider_fast_mode=provider_fast_mode,
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
