@@ -866,6 +866,8 @@ def build_usage_items(
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
+    *,
+    fast_mode_cache_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
@@ -876,10 +878,11 @@ def build_usage_items(
     from `model` + tokens and remains the single source of cost truth, applying
     the cache discount to the `cache_*` counters each row now carries.
 
-    When every LLM decision in this browser session was a Fast Mode
-    replay/soft-complete (`from_fast_cache`), zero the Kernel/Steel service
-    row so OAi-demo warm paths stay ~$0 (session wall-clock would otherwise
-    still bill ~cents while decisions were free).
+    When Fast Mode is on for this browser session — or every LLM decision was
+    a replay/soft-complete (`from_fast_cache`) — zero the Kernel/Steel service
+    row so OAi-demo warm paths stay ~$0. Mixed ledgers (soft + mislabeled live
+    rows) previously still billed wall-clock cents under the live-LLM check
+    alone (verify19 ~4.5¢ Kernel on child d24898d1).
     """
     browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
     service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
@@ -890,11 +893,12 @@ def build_usage_items(
         model_pricing,
         usage_by_model,
     )
-    # Zero Kernel/Steel when there is no live LLM decision in the session
+    # Zero Kernel/Steel under Fast Mode or when there is no live LLM decision
     # (all replay/soft-complete, or empty ledger after soft-done). Warm OAi
     # demos otherwise pick up residual wall-clock cents.
     has_live_llm = any(not bool(item.get("from_fast_cache")) for item in llm_items)
-    service_cost = 0.0 if not has_live_llm else round(execution_time_ms * cost_per_ms, 4)
+    zero_service = bool(fast_mode_cache_enabled) or not has_live_llm
+    service_cost = 0.0 if zero_service else round(execution_time_ms * cost_per_ms, 4)
     return [
         *llm_items,
         {

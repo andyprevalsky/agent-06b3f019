@@ -71,6 +71,7 @@ from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+    ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_MAX_RECOVERIES,
@@ -6009,6 +6010,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         recording_output_dir = browser_recording_output_dir(agent_id, task_id) if task_id else None
 
         async def _create_network_recorder():
+            # Fast Mode warm demos: skip CDP Network.enable capture. YouTube /
+            # Instagram navigations flood the recorder and stall the activity
+            # for tens of minutes while every LLM decision was already a cache
+            # hit (verify19 Huberman hang).
+            if fast_mode_cache_enabled:
+                return None
             if not recording_output_dir:
                 return None
             recorder = await BrowserNetworkRecorder.create(
@@ -7668,6 +7675,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     model_pricing,
                     execution_time_ms,
                     usage_by_model,
+                    fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                 )
                 await _propagate_browser_credentials_with_progress(
                     config=config,
@@ -8371,6 +8379,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             model_pricing,
                             execution_time_ms,
                             usage_by_model,
+                            fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
                         )
                         await _propagate_browser_credentials_with_progress(
                             config=config,
@@ -9162,6 +9171,7 @@ Based on this feedback, I need to continue working on the task and address the i
             model_pricing,
             execution_time_ms,
             usage_by_model,
+            fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
         )
         await _propagate_browser_credentials_with_progress(
             config=config,
@@ -9554,10 +9564,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     span_source="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
                     span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
                 ):
+                    fm_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+                    browser_timeout_minutes = (
+                        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
+                        if fm_enabled
+                        else ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+                    )
                     activity_handle = workflow.start_activity(
                         spawn_browser_agent_activity_v3,
                         args=activity_args,
-                        start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
+                        start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                         cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                         retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
