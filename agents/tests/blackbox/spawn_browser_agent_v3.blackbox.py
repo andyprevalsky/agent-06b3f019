@@ -207,6 +207,22 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert "timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES)" in execute_source
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
 
+
+def test_browser_spawn_goal_preserves_benchmark_food_plan_contract():
+    """Food-plan benchmarks must pass the root manifest goal verbatim to the browser."""
+    from domains.spawn_browser_agent_v3.handler import _browser_spawn_goal_from_parent
+
+    parent_goal = (
+        "Execute SAFEWAY MANIFEST lines now.\n\n"
+        "BENCHMARK EXECUTION CONTRACT: Use exactly ONE spawn_browser_agent call."
+    )
+    workflow = type("Workflow", (), {"goal": parent_goal})()
+    paraphrased = "Use the authenticated DoorDash session to buy groceries."
+    assert _browser_spawn_goal_from_parent({"goal": paraphrased}, workflow) == parent_goal
+    plain_parent = type("Workflow", (), {"goal": "Book a hotel in SF."})()
+    assert _browser_spawn_goal_from_parent({"goal": "book hotel"}, plain_parent) == "book hotel"
+
+
 def test_transient_session_init_failure_classification():
     """RCA (agent 53feac08): the first two browser spawns died on Kernel's
     `400 Proxy is marked unavailable from the last health check` because

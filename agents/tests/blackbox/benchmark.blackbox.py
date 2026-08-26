@@ -3060,6 +3060,7 @@ def test_doordash_food_plan_grocery_repro_contract():
     """DoorDash food-plan grocery repro requires manifest-exact Safeway cart, not one SKU."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
+        DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT,
         _doordash_food_plan_manifest_context_for_judge,
         _doordash_food_plan_supplemental_cart_evidence,
     )
@@ -3086,6 +3087,7 @@ def test_doordash_food_plan_grocery_repro_contract():
     judge_prompt = cart_evaluator["judge_prompt"].lower()
     assert "one item" in judge_prompt
     assert "large item count" in judge_prompt or "high subtotal" in judge_prompt
+    assert "FIRST open Safeway and remove every item" in DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT
     manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
     manifest_lower = manifest_context.lower()
     assert "checkout-ready one-week manifest" in manifest_lower

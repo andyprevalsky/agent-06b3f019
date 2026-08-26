@@ -2033,7 +2033,12 @@ def _run_doordash_food_plan_fixture(action: str) -> dict:
 DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT = (
     "\n\nBENCHMARK EXECUTION CONTRACT: Use exactly ONE spawn_browser_agent call to build "
     "the entire Safeway cart from the manifest before checkout. Do not spawn separate "
-    "browser agents per item, category, or small batch."
+    "browser agents per item, category, or small batch. "
+    "FIRST open Safeway and remove every item from any existing server-side cart — prior "
+    "sessions may leave a partial cart that must not be checked out. "
+    "Before clicking Checkout, evaluate/dump the full cart itemization and confirm every "
+    "required manifest line is present with manifest-valid quantities or a documented "
+    "manifest-allowed omission/substitution."
 )
 
 
