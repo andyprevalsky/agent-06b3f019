@@ -1934,7 +1934,7 @@ def test_write_only_context_writes_without_reading(mem):
 
 
 def test_write_only_soft_completes_execute_loop(mem, monkeypatch):
-    """Write-through soft-completes only when a prior trajectory slot exists."""
+    """Write-through ends via trajectory-end passthrough when a prior slot exists."""
 
     async def prior_true(goal_hash, call_site, step):
         del goal_hash, call_site
@@ -2306,7 +2306,7 @@ def test_soft_complete_on_miss_for_explore_sites_only():
 
 
 def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
-    """Warm end-of-trajectory explore miss soft-completes without live Rose egress."""
+    """Warm end-of-trajectory explore miss ends via passthrough replay, no live Rose."""
 
     async def prior_true(goal_hash, call_site, step):
         del goal_hash, call_site
@@ -2326,7 +2326,7 @@ def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
         assert "tool_call" in kinds and kinds[-1] == "done"
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "attempt_completion_with_result"
-        assert mem.set_calls == 0  # soft-complete does not poison the cache
+        assert mem.set_calls == 0  # end-notch does not poison the cache
 
     asyncio.run(body())
 

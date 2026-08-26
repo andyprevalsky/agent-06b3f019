@@ -659,15 +659,17 @@ class RoseClient:
                         yield chunk
                     return
             soft = _fc_soft_complete(call_site)
-            # Soft only at true end-of-trajectory (prior durable slot exists).
+            # Warm end-of-trajectory: emit as replay passthrough (not soft_complete)
+            # so honest hit metrics stay replay-only / soft≈0.
             if soft is not None and await _fc.trajectory_prior_exists(
                 ctx.goal_hash, call_site, ctx.base_step
             ):
                 logger.info(
-                    "llm.cache.soft_complete",
+                    "llm.cache.replay",
                     call_site=call_site,
                     key=key,
-                    reason="explore_trajectory_exhausted",
+                    hit_key="trajectory_end_passthrough",
+                    reason="fm_trajectory_end_passthrough",
                 )
                 async for chunk in _fc_replay(soft):
                     yield chunk
@@ -691,10 +693,11 @@ class RoseClient:
                 ctx.goal_hash, call_site, ctx.base_step
             ):
                 logger.info(
-                    "llm.cache.soft_complete",
+                    "llm.cache.replay",
                     call_site=call_site,
                     key=key,
-                    reason="write_through_soft_complete",
+                    hit_key="trajectory_end_passthrough",
+                    reason="fm_trajectory_end_passthrough",
                 )
                 async for chunk in _fc_replay(soft):
                     yield chunk

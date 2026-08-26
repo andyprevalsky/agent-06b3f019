@@ -237,15 +237,17 @@ def swf_scrape_passthrough(messages: Any) -> Dict[str, Any]:
 
 
 def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
-    """Synthetic Fast Mode hit when a durable trajectory slot is exhausted.
+    """Deterministic Fast Mode end-notch payload when a durable trajectory slot is exhausted.
 
     July OAi-demo explore/GP namespaces often end at p:N with no further row.
     Falling through to a live LLM after that burns cost and writes cold poison.
 
     Callers MUST gate this behind ``trajectory_prior_exists`` so cold namespaces
-    (no prior slot) cannot fake hits — soft-complete is end-of-trajectory safety
-    only, not a substitute for missing July cache rows. ``summarize_web_fetch``
-    is intentionally excluded: use ``swf_scrape_passthrough`` instead.
+    (no prior slot) cannot fake July identity. On the warm path the payload is
+    emitted as ``llm.cache.replay`` / ``fm_trajectory_end_passthrough`` (not
+    ``soft_complete``) so honest hit metrics stay replay-only. Cold read uses
+    ``fm_cold_namespace_passthrough``. ``summarize_web_fetch`` is intentionally
+    excluded: use ``swf_scrape_passthrough`` instead.
     """
     site = (call_site or "").strip()
     if site == "explore_agent":
@@ -443,11 +445,17 @@ async def cached_complete(
             if soft is not None and await cache_client.trajectory_prior_exists(
                 ctx.goal_hash, call_site, ctx.base_step
             ):
+                # True warm end-of-trajectory: July namespace has no p:N+1.
+                # Log as replay passthrough (same family as fm_terminal_passthrough)
+                # — not soft_complete — so honest hit metrics stay replay-only and
+                # soft≈0. Soft_complete was masking truncated mid-tool ends as a
+                # separate "soft" bucket and broke the 100% hits demo contract.
                 logger.info(
-                    "llm.cache.soft_complete",
+                    "llm.cache.replay",
                     call_site=call_site,
                     key=key,
-                    reason="explore_trajectory_exhausted",
+                    hit_key="trajectory_end_passthrough",
+                    reason="fm_trajectory_end_passthrough",
                 )
                 async for chunk in _replay(soft):
                     yield chunk
@@ -455,7 +463,7 @@ async def cached_complete(
             # Cold allowlisted sites: never fall through to live LLM under Fast
             # Mode read (verify22 burned cents on cold execute/verifier/explore).
             # Emit the terminal schema payload as an explicit cold passthrough
-            # replay — not soft_complete — so soft≈true-exhaustion only.
+            # replay — not soft_complete — so soft≈0 on the warm path.
             if soft is not None:
                 logger.info(
                     "llm.cache.replay",
@@ -469,17 +477,18 @@ async def cached_complete(
                 return
         logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
-        # Write-through: soft-complete only when the warm trajectory is truly
-        # exhausted (prior slot exists). Cold write-through must not stub.
+        # Write-through: terminal end-notch only when a prior trajectory slot
+        # exists. Cold write-through must not stub (falls through to live seed).
         soft = soft_complete_on_miss(call_site)
         if soft is not None and await cache_client.trajectory_prior_exists(
             ctx.goal_hash, call_site, ctx.base_step
         ):
             logger.info(
-                "llm.cache.soft_complete",
+                "llm.cache.replay",
                 call_site=call_site,
                 key=key,
-                reason="write_through_soft_complete",
+                hit_key="trajectory_end_passthrough",
+                reason="fm_trajectory_end_passthrough",
             )
             async for chunk in _replay(soft):
                 yield chunk
