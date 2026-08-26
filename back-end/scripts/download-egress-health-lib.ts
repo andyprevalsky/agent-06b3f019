@@ -277,8 +277,7 @@ async function fetchTelemetryLogs(
     };
     // Render returns `logs: null` (not `[]`) for empty windows — same contract
     // prod-health.ts already tolerates via `data.logs || []`.
-    const pageLogs =
-      body.logs == null ? [] : Array.isArray(body.logs) ? body.logs : null;
+    const pageLogs = body.logs == null ? [] : Array.isArray(body.logs) ? body.logs : null;
     if (pageLogs === null) {
       throw new Error('Render logs query returned no logs array');
     }
