@@ -5227,13 +5227,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
-    if fast_mode_cache_enabled:
-        logger.info(
-            "Browser Fast Mode cache disabled; ignoring requested browser fast_mode_cache_enabled",
-            agent_id=agent_id,
-            task_id=task_id,
-        )
-    fast_mode_cache_enabled = False
 
     from browser_tools.dom_service import ActionHistory, DOMService
     from browser_tools.humanizer import BrowserHumanizer
@@ -7010,9 +7003,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 rose_client.set_thinking_stream(browser_stream)
                 decision_succeeded = False
                 try:
+                    # Fast Mode: replay July OAi-demo browser decisions; on miss
+                    # soft-complete with done (see browser_use_cache) so we never
+                    # fall through to live rose-1-browser-use (verify13 stall).
+                    fm_write_through = write_through_enabled_for_user(user_id)
                     llm_result = await asyncio.wait_for(
                         cached_browser_decision(
-                            enabled=False,
+                            enabled=bool(fast_mode_cache_enabled),
                             goal=goal,
                             request={
                                 "task": task_prompt,
@@ -7025,7 +7022,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 },
                             },
                             call_llm=_live_browser_decision,
-                            write_enabled=False,
+                            write_enabled=bool(
+                                fast_mode_cache_enabled or fm_write_through
+                            ),
                         ),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
