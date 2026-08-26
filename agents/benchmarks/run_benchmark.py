@@ -2037,22 +2037,107 @@ DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT = (
 )
 
 
+def _doordash_food_plan_frozen_fixture() -> dict | None:
+    manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
+    if manifest and manifest.get("benchmark_goal"):
+        return {
+            "execute_prompt": manifest["benchmark_goal"],
+            "checkout_manifest": "",
+        }
+    frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
+    if not frozen_path.is_file():
+        return None
+    data = json.loads(frozen_path.read_text())
+    execute_prompt = data.get("execute_prompt")
+    if not isinstance(execute_prompt, str) or not execute_prompt.strip():
+        return None
+    checkout_manifest = data.get("checkout_manifest")
+    return {
+        "execute_prompt": execute_prompt.strip(),
+        "checkout_manifest": checkout_manifest.strip() if isinstance(checkout_manifest, str) else "",
+    }
+
+
 def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
     if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
         return None
-    manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
-    if manifest and manifest.get("benchmark_goal"):
-        base = str(manifest["benchmark_goal"])
-    else:
-        frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
-        if not frozen_path.is_file():
-            return None
-        data = json.loads(frozen_path.read_text())
-        execute_prompt = data.get("execute_prompt")
-        if not isinstance(execute_prompt, str) or not execute_prompt.strip():
-            return None
-        base = execute_prompt.strip()
-    return base + DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return None
+    return frozen["execute_prompt"] + DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT
+
+
+def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
+    override = _doordash_food_plan_prompt_override(task)
+    return override if override else task.prompt
+
+
+def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        return ""
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return ""
+    sections: list[str] = []
+    if frozen.get("checkout_manifest"):
+        sections.append(
+            "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "
+            "99 Ranch line must be satisfied or manifest-allowed omitted/substituted):\n"
+            + frozen["checkout_manifest"]
+        )
+    sections.append(
+        "Authoritative execute manifest text (same source the agent received):\n"
+        + frozen["execute_prompt"]
+    )
+    return "\n\n".join(sections)
+
+
+def _doordash_food_plan_supplemental_cart_evidence(data: dict) -> str:
+    """Collect full cart itemization from write-lock and browser evaluate dumps.
+
+    DoorDash write-lock approvals often summarize only the first handful of SKUs while
+    reporting a larger cart count. For manifest-exact judging, surface every grounded
+    cart dump the trajectory captured.
+    """
+    snippets: list[str] = []
+    benchmark_state = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    for req in benchmark_state.get("attention_requests_seen") or []:
+        if not isinstance(req, dict):
+            continue
+        question = str(req.get("question") or req.get("message") or "").strip()
+        if len(question) < 80:
+            continue
+        kind = req.get("kind") or "attention"
+        snippets.append(f"Attention request ({kind}):\n{question[:20000]}")
+
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        text = str(message.get("message") or message.get("text") or "").strip()
+        if not text:
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = metadata.get("toolName")
+        action_type = metadata.get("action_type")
+        if tool_name == "request_user_approval":
+            snippets.append(f"Approval tool message:\n{text[:20000]}")
+            continue
+        if action_type != "evaluate":
+            continue
+        lowered = text.lower()
+        if "result:" not in text:
+            continue
+        if (
+            "×" in text
+            or "in cart" in lowered
+            or "ground beef" in lowered
+            or "safeway" in lowered
+        ):
+            snippets.append(f"Browser cart evaluate dump:\n{text[:20000]}")
+
+    if not snippets:
+        return ""
+    return "\n\n---\n\n".join(snippets)
 
 
 def _prod_user_data_prompt_override(task: BenchmarkTask) -> str | None:
@@ -8282,6 +8367,17 @@ async def _call_declared_llm_judge(
     from helpers.llm import check_progress
 
     criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    task_requirement = (
+        _doordash_food_plan_task_requirement_for_judge(task)
+        if task.name == DOORDASH_FOOD_PLAN_TASK_NAME
+        else task.prompt
+    )
+    manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
+    manifest_block = (
+        f"\n\nCanonical manifest checklist (ground truth for item matching):\n{manifest_context}"
+        if manifest_context
+        else ""
+    )
     verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
 
 The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
@@ -8291,12 +8387,22 @@ terminal gate; it does not prove item, price, date, address, quantity, or select
 assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
 eligible orders fail unless a criterion explicitly defines that state as success.
 
-Task requirement: {task.prompt}
+Task requirement: {task_requirement}{manifest_block}
 Criteria:
 {criteria}
 Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     evidence = _declared_evaluator_evidence(data)
+    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+        cart_evidence = _doordash_food_plan_supplemental_cart_evidence(data)
+        if cart_evidence:
+            evidence.append(
+                {
+                    "role": "TOOL",
+                    "text": cart_evidence,
+                    "metadata": {"evidence_type": "doordash_food_plan_cart_itemization"},
+                }
+            )
     return await check_progress(
         context=[
             {

@@ -1692,8 +1692,8 @@
   {
     "name": "browser-doordash-food-plan-grocery-order",
     "title": "DoorDash Food-Plan Grocery Order",
-    "description": "Reproduces prod premature-checkout failure: full Safeway grocery manifest must reach checkout, not a single-item cart.",
-    "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add ALL required ingredients across protein, eggs, shakes, pancake mix, produce, pantry, dairy, and condiments in that single browser session before checkout — a single-item cart (for example only Kodiak mix) is incorrect. Use at most two stores (Safeway first; 99 Ranch only for Asian pantry items if needed). Complete checkout and stop at payment/write-lock approval when the harness requires it.",
+    "description": "Reproduces prod premature-checkout failure: cart must match the prod-derived weekly manifest at checkout, not a single-item or partial basket.",
+    "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout — a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it.",
     "timeout_seconds": 1800,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1725,7 +1725,7 @@
     "harness": "rose",
     "bench": "rose-bench",
     "pinned_facts": {
-      "minimum_distinct_grocery_categories": 8,
+      "manifest_source": "doordash-food-plan-grocery-fixture.json",
       "store": "Safeway",
       "platform": "DoorDash",
       "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1",
@@ -1759,13 +1759,14 @@
         "id": "doordash-food-plan-cart-completeness",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The cart contains items from at least eight distinct required grocery categories from the prompt (protein, eggs, shakes, pancake mix, produce, pantry, dairy, condiments) — not a single SKU",
-          "Checkout or write-lock evidence shows multiple line items or a multi-item subtotal, not an order summary for exactly one item",
-          "The trajectory does not treat DoorDash Shop your list chrome as a populated cart without adding manifest items",
-          "Safeway is the store and delivery uses the saved Palo Alto address",
-          "Terminal state is payment/write-lock approval or completed checkout with the broad basket — not a rejected single-item premature checkout"
+          "Grounded cart or write-lock itemization includes every required Safeway manifest line from the canonical checklist (proteins, eggs/egg whites, 42g Elite shakes, dairy, Kodiak mix, sweet potatoes, rice, PB2 or allowed tahini fallback, produce, pantry spices/oils, condiments such as Valentina and coconut aminos, Creami inputs, and lime sparkling water) with quantities that satisfy the manifest",
+          "Any missing Safeway line is only absent when the trajectory documents manifest-allowed omission (for example no wrap under 250 mg sodium) or an allowed substitution that still satisfies the line's P0/P1 label constraints",
+          "If 99 Ranch is used, it contains only the Asian pantry manifest lines (plain noodles without seasoning packets, gochugaru, whole Sichuan peppercorns, sesame oil) and does not duplicate Safeway items",
+          "P0 constraints are satisfied in grounded evidence: 93/7 or leaner beef, 42 g protein shakes, no-salt-added tomatoes, unsalted/plain rice, zero-cal butter spray, coconut aminos not soy sauce, no seasoning-packet noodles, and no prohibited items (taco packets, Buldak, chili crisp, diet soda, etc.)",
+          "Checkout or write-lock evidence is not a single-SKU order (for example only Kodiak mix)",
+          "Safeway is the primary store, delivery uses the saved Palo Alto address, and terminal state is write-lock or checkout with the manifest-aligned basket"
         ],
-        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full weekly food-plan grocery manifest. Pass when grounded checkout or write-lock evidence shows a broad multi-item Safeway basket before terminal approval: for example an explicit cart/count of many items (8+), a multi-hundred-dollar grocery subtotal, and delivery to the saved Palo Alto address. A write-lock or checkout summary that states dozens of items with a large subtotal is sufficient even if the transcript does not enumerate every category line-by-line. Fail only if checkout evidence is for exactly one item (for example one Kodiak box), if Shop your list list-count UI was mistaken for cart contents, or if checkout was attempted before most manifest categories were added."
+        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full prod-derived weekly grocery manifest. Pass only when grounded cart, write-lock itemization, or checkout summary proves every required manifest line is present with manifest-valid quantities or an explicitly allowed substitution/omission documented in the trajectory. Compare item names, brands, and constraints against the canonical manifest checklist supplied above — a large item count or high subtotal alone is insufficient if required manifest lines are missing or wrong. Fail if any required manifest line is missing without allowed fallback, if P0 label constraints are violated, if prohibited items appear, if Shop your list chrome is mistaken for cart contents, or if checkout is for exactly one item."
       },
       {
         "id": "doordash-food-plan-runtime",

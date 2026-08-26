@@ -3057,15 +3057,20 @@ def test_instacart_catalog_uses_complete_weekly_grocery_basket():
 
 
 def test_doordash_food_plan_grocery_repro_contract():
-    """DoorDash food-plan grocery repro targets multi-item Safeway checkout, not one SKU."""
+    """DoorDash food-plan grocery repro requires manifest-exact Safeway cart, not one SKU."""
     from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _doordash_food_plan_manifest_context_for_judge,
+        _doordash_food_plan_supplemental_cart_evidence,
+    )
 
     task = get_task_by_name("browser-doordash-food-plan-grocery-order")
     assert task.group == "daily"
     assert task.harness == "rose"
     assert "exactly one browser agent" in task.prompt.lower()
-    assert "single-item cart" in task.prompt.lower()
-    assert task.pinned_facts["minimum_distinct_grocery_categories"] >= 8
+    assert "partial cart" in task.prompt.lower()
+    assert "manifest line item" in task.prompt.lower()
+    assert task.pinned_facts["manifest_source"] == "doordash-food-plan-grocery-fixture.json"
     assert task.pinned_facts["prod_user_id"] == "5824c58c-7f11-4c92-8f81-33eb3c324a2f"
     assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
     assert task.environment["required_injectable_cookie_domains"] == ["doordash.com"]
@@ -3075,7 +3080,49 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert task.tool_count_scope == "root"
     cart_evaluator = task.evaluators[0]
     assert cart_evaluator["id"] == "doordash-food-plan-cart-completeness"
-    assert "one item" in cart_evaluator["judge_prompt"].lower()
+    criteria = " ".join(cart_evaluator["criteria"]).lower()
+    assert "every required safeway manifest line" in criteria
+    assert "large item count" not in criteria
+    judge_prompt = cart_evaluator["judge_prompt"].lower()
+    assert "one item" in judge_prompt
+    assert "large item count" in judge_prompt or "high subtotal" in judge_prompt
+    manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
+    manifest_lower = manifest_context.lower()
+    assert "checkout-ready one-week manifest" in manifest_lower
+    assert "93/7 lean ground beef" in manifest_lower
+    supplemental = _doordash_food_plan_supplemental_cart_evidence(
+        {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": "Executed JS, result: [{'text': 'Ground Beef 93% Lean\\n3 ×'}]",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "action_type": "evaluate",
+                    },
+                },
+                {
+                    "role": "TOOL",
+                    "message": "**Approval Needed**\n47-item Safeway order\n1. Kodiak mix",
+                    "metadata": {"toolName": "request_user_approval"},
+                },
+            ],
+            "_benchmark": {
+                "attention_requests_seen": [
+                    {
+                        "kind": "write_lock",
+                        "question": (
+                            "47-item Safeway grocery delivery order at checkout "
+                            "with grounded itemization for manifest verification"
+                        ),
+                    }
+                ]
+            },
+        }
+    )
+    assert "Browser cart evaluate dump" in supplemental
+    assert "Approval tool message" in supplemental
+    assert "Attention request (write_lock)" in supplemental
 
 
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
