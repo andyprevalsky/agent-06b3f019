@@ -19,9 +19,15 @@
  *     |       |       |
  *     |       |       +--> (confirm) --> [DELETING] <-- isDeleting: true
  *     |       |       +--> (cancel) --> [IDLE]
+ *     |
+ *     +--> [REPORT_BUG] <-- admin only; composer open for bug description
+ *             |
+ *             +--> (submit) --> Cursor cloud agent "Bug | <title>"
+ *             +--> (cancel) --> [IDLE]
  *
  * Delete-flow state is owned by useDeleteFlow; price-limit editing state is
- * owned by usePriceLimitEdit; anchor position is owned by useModalPosition.
+ * owned by usePriceLimitEdit; report-bug state is owned by useReportBug;
+ * anchor position is owned by useModalPosition.
  */
 
 import { useRef, useState } from 'react';
@@ -33,13 +39,17 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Settings } from 'lucide-react';
+import { isAdminOperator } from '@/lib/adminAccounts';
+import { useAuth } from '../hooks';
 import type { AgentSettingsDialogProps } from './agent-settings-dialog/types';
 import MetricsSection from './agent-settings-dialog/MetricsSection';
 import ResponseSchemaSection from './agent-settings-dialog/ResponseSchemaSection';
 import DeleteSection from './agent-settings-dialog/DeleteSection';
+import ReportBugSection from './agent-settings-dialog/ReportBugSection';
 import { useDeleteFlow } from './agent-settings-dialog/useDeleteFlow';
 import { usePriceLimitEdit } from './agent-settings-dialog/usePriceLimitEdit';
 import { useModalPosition } from './agent-settings-dialog/useModalPosition';
+import { useReportBug } from './agent-settings-dialog/useReportBug';
 
 export default function AgentSettingsDialog({
   agent,
@@ -49,6 +59,8 @@ export default function AgentSettingsDialog({
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const modalPosition = useModalPosition(open, triggerRef);
+  const { user: authUser } = useAuth();
+  const showReportBug = isAdminOperator(authUser);
 
   const deleteFlow = useDeleteFlow({
     agent,
@@ -63,6 +75,8 @@ export default function AgentSettingsDialog({
     agent,
     onUpdated: () => onUpdate?.(),
   });
+
+  const reportBug = useReportBug({ agent, open });
 
   return (
     <Dialog open={open} onOpenChange={setOpen} modal={false}>
@@ -107,6 +121,7 @@ export default function AgentSettingsDialog({
             <div className="space-y-6">
               <MetricsSection agent={agent} priceLimitEdit={priceLimitEdit} />
               <ResponseSchemaSection agent={agent} />
+              {showReportBug ? <ReportBugSection flow={reportBug} /> : null}
               <DeleteSection flow={deleteFlow} />
             </div>
           )}

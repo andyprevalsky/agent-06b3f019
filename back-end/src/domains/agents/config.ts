@@ -16,3 +16,24 @@ export function getBenchmarkRunSecret(): string | undefined {
   const key = process.env.BACKEND_API_KEY;
   return key !== undefined && key !== '' ? key : undefined;
 }
+
+/** Cursor API key used to spawn cloud RCA agents from Report Bug. */
+export function getCursorApiKey(): string | undefined {
+  const key = process.env.CURSOR_API_KEY;
+  return key !== undefined && key !== '' ? key : undefined;
+}
+
+/** Cursor Cloud Agents API base (no trailing slash required). */
+export function getCursorApiBaseUrl(): string {
+  const base = process.env.CURSOR_API_BASE_URL;
+  return base !== undefined && base !== '' ? base : 'https://api.cursor.com/v1';
+}
+
+/**
+ * Named Cursor-hosted environment for Report Bug cloud agents.
+ * Prefer the named env over raw repos so RCA agents inherit secrets/setup.
+ */
+export function getCursorCloudEnvName(): string {
+  const name = process.env.CURSOR_CLOUD_ENV_NAME;
+  return name !== undefined && name !== '' ? name : 'rose-ai-labs/rose';
+}

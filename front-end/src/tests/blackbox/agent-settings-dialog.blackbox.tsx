@@ -1,7 +1,7 @@
 /**
  * Blackbox tests for AgentSettingsDialog.
  * Covers open/close, no-agent state, metrics rendering, price-limit edit/save/cancel,
- * response-schema rendering, and the 1.8s delete-confirmation timer.
+ * response-schema rendering, the 1.8s delete-confirmation timer, and admin Report Bug.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
@@ -14,18 +14,27 @@ import AgentSettingsDialog from '@/features/terminal-component-group/components/
 import type { AgentDetail } from '@/lib/api';
 
 const API_BASE = 'http://localhost:3001/api';
+const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
-function mockSession() {
+function mockSession(userId = 'test-user') {
+  const isAdmin = userId === ANDY_USER_ID;
   const session = {
     access_token: 'test-token',
     refresh_token: 'test-refresh',
     expires_in: 3600,
     expires_at: Math.floor(Date.now() / 1000) + 3600,
     token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
+    user: { id: userId, is_anonymous: false, phone: isAdmin ? '+19729777432' : undefined },
   };
   localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
+  localStorage.setItem(
+    'app-user',
+    JSON.stringify({
+      id: userId,
+      is_anonymous: false,
+      phone: isAdmin ? '+19729777432' : undefined,
+    }),
+  );
 }
 
 function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
@@ -258,5 +267,57 @@ describe('AgentSettingsDialog', () => {
       expect(screen.getByText('Metrics')).toBeInTheDocument();
     });
     expect(screen.queryByText('Price Limit')).not.toBeInTheDocument();
+  });
+
+  it('hides Report Bug for non-admin users', async () => {
+    const u = userEvent.setup();
+    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
+    await u.click(document.querySelector('button')!);
+    await waitFor(() => {
+      expect(screen.getByText('Metrics')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('report-bug-open')).toBeNull();
+  });
+
+  it('opens Report Bug composer and submits description for admins', async () => {
+    mockSession(ANDY_USER_ID);
+    const u = userEvent.setup();
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/report-bug`, async ({ request, params }) => {
+        const body = (await request.json()) as { description?: string };
+        expect(params.agentId).toBe('agent-xyz');
+        expect(body.description).toBe('Checkout never finished');
+        return HttpResponse.json(
+          {
+            success: true,
+            name: 'Bug | Checkout never finished',
+            url: 'https://cursor.com/agents/bc-bug-1',
+            cursor_agent_id: 'bc-bug-1',
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
+    await u.click(document.querySelector('button')!);
+    await u.click(await screen.findByTestId('report-bug-open'));
+
+    const textarea = await screen.findByTestId('report-bug-description');
+    await u.type(textarea, 'Checkout never finished');
+    await u.click(screen.getByTestId('report-bug-submit'));
+
+    await waitFor(() => {
+      expect(
+        capturedRequests.some((r) => r.method === 'POST' && r.url.includes('/report-bug')),
+      ).toBe(true);
+    });
+    expect(openSpy).toHaveBeenCalledWith(
+      'https://cursor.com/agents/bc-bug-1',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    openSpy.mockRestore();
   });
 });
