@@ -890,8 +890,11 @@ def build_usage_items(
         model_pricing,
         usage_by_model,
     )
-    all_fast_cache = bool(llm_items) and all(bool(item.get("from_fast_cache")) for item in llm_items)
-    service_cost = 0.0 if all_fast_cache else round(execution_time_ms * cost_per_ms, 4)
+    # Zero Kernel/Steel when there is no live LLM decision in the session
+    # (all replay/soft-complete, or empty ledger after soft-done). Warm OAi
+    # demos otherwise pick up residual wall-clock cents.
+    has_live_llm = any(not bool(item.get("from_fast_cache")) for item in llm_items)
+    service_cost = 0.0 if not has_live_llm else round(execution_time_ms * cost_per_ms, 4)
     return [
         *llm_items,
         {
