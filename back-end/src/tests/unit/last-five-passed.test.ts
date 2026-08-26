@@ -8,6 +8,7 @@
 import assert from 'node:assert';
 import {
   LAST_FIVE_PASS_WINDOW,
+  compareAttemptTimestamps,
   lastFiveAttemptsPassed,
 } from '../../domains/benchmarks/hubCatalogService';
 
@@ -57,6 +58,31 @@ test('last of the window failing → false', () => {
 
 test('first of the window failing → false', () => {
   assert.strictEqual(lastFiveAttemptsPassed([false, true, true, true, true]), false);
+});
+
+test('compareAttemptTimestamps: equal → 0 (both argument orders)', () => {
+  assert.strictEqual(compareAttemptTimestamps('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), 0);
+  const t = '2026-08-26T06:00:00.000Z';
+  assert.strictEqual(compareAttemptTimestamps(t, t), 0);
+});
+
+test('compareAttemptTimestamps: chronological order', () => {
+  assert.strictEqual(compareAttemptTimestamps('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'), -1);
+  assert.strictEqual(compareAttemptTimestamps('2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z'), 1);
+});
+
+test('equal-timestamp sort preserves insertion order (stable)', () => {
+  const list = [
+    { timestamp: '2026-01-01T00:00:00Z', passed: false },
+    { timestamp: '2026-01-02T00:00:00Z', passed: true },
+    { timestamp: '2026-01-02T00:00:00Z', passed: false },
+    { timestamp: '2026-01-03T00:00:00Z', passed: true },
+  ];
+  list.sort((a, b) => compareAttemptTimestamps(a.timestamp, b.timestamp));
+  assert.deepStrictEqual(
+    list.map((s) => s.passed),
+    [false, true, false, true]
+  );
 });
 
 console.log(`\nlast-five-passed: ${passed} passed, ${failures.length} failed`);

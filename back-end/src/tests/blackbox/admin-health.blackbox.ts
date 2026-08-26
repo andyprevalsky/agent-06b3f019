@@ -214,9 +214,8 @@ async function expectedAdminHealthUserIds(
   periodStart: string,
   periodEnd: string
 ): Promise<Set<string>> {
-  const { fetchStripeSubscribersByPeriod } = await import(
-    '../../domains/admin-health/stripeSubscribers'
-  );
+  const { fetchStripeSubscribersByPeriod } =
+    await import('../../domains/admin-health/stripeSubscribers');
   const series = await fetchStripeSubscribersByPeriod([{ start: periodStart, end: periodEnd }]);
   const latest = series.at(-1);
   if (latest === undefined) {

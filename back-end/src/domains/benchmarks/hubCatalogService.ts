@@ -36,6 +36,15 @@ export function lastFiveAttemptsPassed(passedFlagsOldestFirst: boolean[]): boole
   return recent.every((passed) => passed);
 }
 
+/**
+ * Chronological comparator for attempt timestamps (ISO strings).
+ * Equal timestamps return 0 so Array.sort stays stable / deterministic.
+ */
+export function compareAttemptTimestamps(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 function percentile(sorted: number[], p: number): number | null {
   if (sorted.length === 0) return null;
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
@@ -83,7 +92,7 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
   }
   const stats = new Map<string, TaskStats>();
   for (const [task, list] of samples) {
-    list.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+    list.sort((a, b) => compareAttemptTimestamps(a.timestamp, b.timestamp));
     const passes = list.filter((s) => s.passed);
     const passDurations = passes
       .map((s) => s.duration)
