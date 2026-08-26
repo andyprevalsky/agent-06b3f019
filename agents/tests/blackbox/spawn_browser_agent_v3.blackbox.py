@@ -423,6 +423,26 @@ async def test_action_history_resume_preserves_monotonic_step_numbers():
     )
     assert fresh_entry.step == 1
 
+def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state():
+    """No-cache refactor removed loop-level browser_state but left observe_page_text
+    reading browser_state.get('title') before any assignment — UnboundLocalError at
+    browser init (handler.py ~6676). Guard the explicit observe_page_state fetch."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    marker = "Resolve URL for realm prep / handoff without auto-injecting DOM"
+    assert marker in src
+    block = src[src.index(marker) : src.index(marker) + 1200]
+    assert "observe_page_state = await dom_service.get_browser_state" in block
+    assert (
+        "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
+        in block
+    )
+    assert "auth_runtime_state.observe_page_text(browser_state.get(\"title\")" not in block
+
+
 def test_max_steps_return_declares_best_effort_and_final_verifier():
     """The max_iterations exit must wire the best-effort field AND run the final
     verifier salvage — guards against a silent revert of the RCA fix. Asserts on
@@ -17972,6 +17992,10 @@ async def run_all_tests():
     r.record(
         "read_browser_state_history_keeps_formatted_state",
         test_read_browser_state_tool_result_keeps_formatted_state_in_history,
+    )
+    r.record(
+        "auth_title_observation_fetches_fresh_state",
+        test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state,
     )
 
     # service_crypto — pure

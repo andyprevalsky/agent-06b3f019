@@ -2,7 +2,7 @@
 id: 2026-08-21-password-input-humanize-missing-coords-after-account-switch
 date: 2026-08-21
 title: Password secret-ref typing failed humanize when indexed password had no coordinates after account switch
-surface: browser-agent
+surface: agents
 component: spawn_browser_agent_v3-input_text
 classification: our-bug
 problem_class: other
@@ -19,7 +19,6 @@ tags:
   - no-tool-failures
 sources:
   - agent fbc36706-4093-4bb4-a457-d4a8f486e62b
-  - 'agents/benchmarks/runs/20260821_225850_browser-amazon-return,browser-amazon-return,browser-amazon-return,browser-amazon-return,browser-amazon-return.json'
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py — test_execute_input_text_password_secret_ref_resolves_visible_password_coords
 status: fixed
 ---
