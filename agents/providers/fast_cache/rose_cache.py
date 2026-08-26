@@ -397,6 +397,21 @@ async def cached_complete(
                 return
         logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
+        # Write-through (allowlisted users, Fast Mode off): still soft-complete
+        # exhausted demo trajectories instead of burning live LLM. Without this,
+        # Andy/Tamy write-through under a Fast Mode tree spiked verify12 cost
+        # via execute_loop write_only near completion.
+        soft = soft_complete_on_miss(call_site)
+        if soft is not None:
+            logger.info(
+                "llm.cache.soft_complete",
+                call_site=call_site,
+                key=key,
+                reason="write_through_soft_complete",
+            )
+            async for chunk in _replay(soft):
+                yield chunk
+            return
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
     # Live path: prefer _complete_impl so we do not re-enter RoseClient.complete's

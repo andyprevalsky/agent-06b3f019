@@ -1888,10 +1888,18 @@ def test_passthrough_when_disabled(mem):
 
 
 def test_write_only_context_writes_without_reading(mem):
+    """WRITE_ONLY: skip cache read, call provider, write (non-soft call_site).
+
+    Soft allowlist sites soft-complete even on write-through so Andy/Tamy
+    demo warm paths stay ~$0 (see test_write_only_soft_completes_execute_loop).
+    """
+
     async def body():
         set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra")
+        )
         assert rose.calls == 1
         assert mem.get_calls == 0
         assert mem.set_calls == 1
@@ -1900,15 +1908,39 @@ def test_write_only_context_writes_without_reading(mem):
     asyncio.run(body())
 
 
+def test_write_only_soft_completes_execute_loop(mem):
+    """Write-through on soft sites must not burn live LLM (OAi demo)."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        assert mem.get_calls == 0
+        assert mem.set_calls == 0
+        assert any(c.kind == "tool_call" for c in chunks)
+        assert any(
+            getattr(c, "data", None) and c.data.get("name") == "attempt_completion"
+            for c in chunks
+            if c.kind == "tool_call"
+        )
+
+    asyncio.run(body())
+
+
 def test_write_only_context_uses_provider_fast_mode(mem):
     async def body():
         set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra")
+        )
         assert rose.calls == 1
         assert mem.set_calls == 1
         assert next(iter(mem.data.keys())) == FastCacheContext(enabled=True, goal="g").llm_key(
-            "execute_loop",
+            "response_schema",
             rose_cache.request_key_material(
                 {
                     "pool": "rose-1-ultra",

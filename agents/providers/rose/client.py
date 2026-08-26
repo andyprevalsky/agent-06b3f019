@@ -629,9 +629,9 @@ class RoseClient:
                     yield chunk
                 return
             soft = _fc_soft_complete(call_site)
-            # soft_complete_on_miss already excludes verifier_* / unknown sites.
-            # Explore + summarize_web_fetch both pass response_model; their soft
-            # payloads are schema-faithful (tool_calls / WebFetchHaikuResponse JSON).
+            # Soft payloads are schema-faithful for every allowlisted site
+            # (explore tool_calls, swf WebFetchHaikuResponse JSON, verifier
+            # ProgressScore JSON). Unknown sites return None and fall through.
             if soft is not None:
                 logger.info(
                     "llm.cache.soft_complete",
@@ -644,6 +644,17 @@ class RoseClient:
                 return
             logger.info("llm.cache.miss", call_site=call_site, key=key)
         else:
+            soft = _fc_soft_complete(call_site)
+            if soft is not None:
+                logger.info(
+                    "llm.cache.soft_complete",
+                    call_site=call_site,
+                    key=key,
+                    reason="write_through_soft_complete",
+                )
+                async for chunk in _fc_replay(soft):
+                    yield chunk
+                return
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
         structured_response_model = kwargs.get("response_model") is not None
