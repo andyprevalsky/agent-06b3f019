@@ -49,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
         call_llm_activity,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
+        release_compute_token_lineage_activity,
         set_response_schema_activity,
     )
     from helpers.messages import update_agent_tree_state
@@ -2106,11 +2107,13 @@ class AgentWorkflow:
         self.compute_token_fetched_at = now
         return True
 
-    async def _refresh_compute_token(self, user_id: str) -> None:
+    async def _refresh_compute_token(
+        self, user_id: str, *, force: bool = False, token_type: Optional[str] = None
+    ) -> None:
         """Fetch or refresh the selected direct compute token if missing or expired."""
         now = workflow.now()
         fetched_at = self.compute_token_fetched_at or self.claude_max_token_fetched_at
-        if fetched_at:
+        if not force and fetched_at:
             age = now - fetched_at
             if age < self.COMPUTE_TOKEN_TTL:
                 return  # Still fresh
@@ -2125,6 +2128,7 @@ class AgentWorkflow:
                     self.agent_id,
                     self.agent_id,
                     self.compute_token_fast_cache_affinity_key,
+                    token_type,
                 ],
                 start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -2139,6 +2143,29 @@ class AgentWorkflow:
             workflow.logger.warning(f"Failed to fetch compute token: {e}")
 
         self._clear_compute_token()
+
+    async def _rotate_compute_token(self, user_id: str) -> None:
+        """Release lineage, clear the cached token, and fetch the next available compute token."""
+        failed_provider = self.compute_token_provider
+        rotate_token_type: Optional[str] = None
+        if failed_provider == "claude":
+            rotate_token_type = "gpt"
+        elif failed_provider == "gpt":
+            rotate_token_type = "claude"
+        if self.compute_token_lineage_key:
+            try:
+                await workflow.execute_activity(
+                    release_compute_token_lineage_activity,
+                    args=[self.compute_token_lineage_key],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as release_error:
+                workflow.logger.warning(
+                    f"Failed to release compute token lineage during rotation: {release_error}"
+                )
+        self._clear_compute_token()
+        await self._refresh_compute_token(user_id, force=True, token_type=rotate_token_type)
 
     def _active_claude_token(self) -> Optional[str]:
         return self.claude_max_token if self.compute_token_provider == "claude" else None
@@ -3269,10 +3296,9 @@ class AgentWorkflow:
                 and not compute_token_used
             ):
                 workflow.logger.info("🔁 Claude token rotated inside RoseClient; refreshing workflow cached token")
-                self._clear_compute_token()
                 if self.user_id:
                     try:
-                        await self._refresh_compute_token(self.user_id)
+                        await self._rotate_compute_token(self.user_id)
                     except Exception as refresh_error:
                         workflow.logger.warning(
                             f"Rotation refetch failed after successful claudeAuth call: {refresh_error}"
@@ -3316,14 +3342,9 @@ class AgentWorkflow:
                             )
                         except Exception as mark_error:
                             workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
-                    # Clear cache to force refetch on next call → rotation kicks in
-                    self._clear_compute_token()
-                    # Proactively refetch so subsequent LLM calls in this phase use the
-                    # rotated token (otherwise they'd fall through to the waterfall until
-                    # the next phase boundary calls _refresh_compute_token).
                     if self.user_id:
                         try:
-                            await self._refresh_compute_token(self.user_id)
+                            await self._rotate_compute_token(self.user_id)
                         except Exception as refresh_error:
                             workflow.logger.warning(f"Rotation refetch failed: {refresh_error}")
                 else:
@@ -3339,10 +3360,9 @@ class AgentWorkflow:
                 and not compute_token_used
             ):
                 workflow.logger.info("🔁 GPT token rotated inside RoseClient; refreshing workflow cached token")
-                self._clear_compute_token()
                 if self.user_id:
                     try:
-                        await self._refresh_compute_token(self.user_id)
+                        await self._rotate_compute_token(self.user_id)
                     except Exception as refresh_error:
                         workflow.logger.warning(
                             f"GPT rotation refetch failed after successful gptAuth call: {refresh_error}"
@@ -3377,10 +3397,9 @@ class AgentWorkflow:
                             )
                         except Exception as mark_error:
                             workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
-                    self._clear_compute_token()
                     if self.user_id:
                         try:
-                            await self._refresh_compute_token(self.user_id)
+                            await self._rotate_compute_token(self.user_id)
                         except Exception as refresh_error:
                             workflow.logger.warning(f"GPT rotation refetch failed: {refresh_error}")
                 else:

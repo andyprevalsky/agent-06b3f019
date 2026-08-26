@@ -120,6 +120,7 @@ from helpers.llm import (
     mark_claude_token_rate_limited_activity,
     mark_compute_token_rate_limited_activity,
     mark_gpt_token_rate_limited_activity,
+    release_compute_token_lineage_activity,
     set_response_schema_activity,
 )
 from helpers.messages import update_agent_tree_state
@@ -1073,6 +1074,7 @@ async def main():
         mark_claude_token_rate_limited_activity,
         mark_compute_token_rate_limited_activity,
         mark_gpt_token_rate_limited_activity,
+        release_compute_token_lineage_activity,
         update_agent_status,
         acknowledge_workflow_replacement_bootstrap,
         finalize_workflow_replacement_bootstrap,

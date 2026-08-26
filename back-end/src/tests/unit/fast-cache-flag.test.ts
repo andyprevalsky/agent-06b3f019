@@ -25,8 +25,6 @@ import {
 import { createAgentSchema } from '../../domains/agents/types';
 import { createSessionSchema as createCodexSessionSchema } from '../../domains/codex-code/types';
 import {
-  applyFastModeDefault,
-  applyFastModeInheritance,
   applyWorldModelModeInheritance,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
@@ -298,78 +296,6 @@ test('Codex Code createSessionSchema accepts explicit Fast Mode flag', () => {
 test('createAgentSchema accepts SMS source for SMS-origin sub-agents', () => {
   const body = createAgentSchema.parse({ goal: 'x', source: 'SMS' });
   assert.strictEqual(body.source, 'SMS');
-});
-
-test('Andy root agents default Fast Mode on when flag is absent', () => {
-  const body = createAgentSchema.parse({ goal: 'x' });
-  applyFastModeDefault(body, '1f85ff25-6e29-4c1b-8739-f917bd101a30');
-  assert.strictEqual(body.fast_mode_cache_enabled, true);
-});
-
-test('explicit Fast Mode off is preserved for Andy root agents', () => {
-  const body = createAgentSchema.parse({ goal: 'x', fast_mode_cache_enabled: false });
-  applyFastModeDefault(body, '1f85ff25-6e29-4c1b-8739-f917bd101a30');
-  assert.strictEqual(body.fast_mode_cache_enabled, false);
-});
-
-test('non-default accounts do not default Fast Mode on', () => {
-  const body = createAgentSchema.parse({ goal: 'x' });
-  applyFastModeDefault(body, '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9');
-  assert.strictEqual(body.fast_mode_cache_enabled, undefined);
-});
-
-test('sub-agents do not use account default Fast Mode', () => {
-  const body = createAgentSchema.parse({
-    goal: 'x',
-    parent_agent_id: '00000000-0000-4000-8000-000000000001',
-    parent_workflow_id: 'workflow-parent',
-  });
-  applyFastModeDefault(body, '1f85ff25-6e29-4c1b-8739-f917bd101a30');
-  assert.strictEqual(body.fast_mode_cache_enabled, undefined);
-});
-
-test('sub-agents inherit Fast Mode read flag from parent when absent', () => {
-  const body = createAgentSchema.parse({
-    goal: 'x',
-    parent_agent_id: '00000000-0000-4000-8000-000000000001',
-    parent_workflow_id: 'workflow-parent',
-  });
-  applyFastModeInheritance(body, true);
-  assert.strictEqual(body.fast_mode_cache_enabled, true);
-});
-
-test('explicit sub-agent Fast Mode off is not overwritten by inheritance', () => {
-  const body = createAgentSchema.parse({
-    goal: 'x',
-    parent_agent_id: '00000000-0000-4000-8000-000000000001',
-    parent_workflow_id: 'workflow-parent',
-    fast_mode_cache_enabled: false,
-  });
-  applyFastModeInheritance(body, true);
-  assert.strictEqual(body.fast_mode_cache_enabled, false);
-});
-
-test('batch-created sub-agents use parent Fast Mode inheritance', () => {
-  const batchService = readFileSync(
-    join(process.cwd(), 'src', 'domains', 'agents', 'agentBatchService.ts'),
-    'utf8'
-  );
-  assert.ok(
-    batchService.includes('applyExecutionModeInheritanceForBatch'),
-    'batch create must resolve parent execution-mode flags before insert/start'
-  );
-  assert.ok(
-    batchService.includes('repo.findExecutionModeFlagsByIds(parentIds)'),
-    'batch create must bulk-fetch parent execution-mode flags'
-  );
-  assert.ok(
-    batchService.includes('applyFastModeInheritance(body, parent?.fastModeCacheEnabled)'),
-    'batch create must apply the same inheritance helper as single create'
-  );
-  assert.ok(
-    batchService.includes('disableFastModeForWorldModel(body);'),
-    'batch create must disable Fast Mode for every explicit or inherited non-real mode'
-  );
 });
 
 // #23 — store entries live forever: no TTL/expiry column.

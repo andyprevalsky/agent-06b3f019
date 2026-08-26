@@ -69,8 +69,8 @@ export function useMessageSending({
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [pendingPriceLimitCents, setPendingPriceLimitCents] = useState(DEFAULT_PRICE_LIMIT_CENTS);
-  // Fast Mode aggressive cache — session-only, account-scoped default, never persisted client-side.
-  const [fastMode, setFastModeState] = useState(false);
+  // Fast Mode aggressive cache — session-only; defaults on for allowlisted accounts.
+  const [fastMode, setFastModeState] = useState(true);
   // World Model simulator — session-only, account-scoped, default off, never persisted client-side.
   const [simulatorMode, setSimulatorModeState] = useState(false);
 
@@ -92,6 +92,18 @@ export function useMessageSending({
       return;
     }
 
+    // Simulator agents must never show/send Fast Mode on — even when the
+    // detail payload omits fast_mode_cache_enabled (legacy rows / partial loads).
+    if (
+      selectedAgentId !== null &&
+      agentDetail?.agent_id === selectedAgentId &&
+      agentDetail.world_model_mode === 'simulate'
+    ) {
+      fastModeUserOverrideRef.current = false;
+      setFastModeState(false);
+      return;
+    }
+
     if (
       selectedAgentId !== null &&
       agentDetail?.agent_id === selectedAgentId &&
@@ -107,6 +119,7 @@ export function useMessageSending({
   }, [
     agentDetail?.agent_id,
     agentDetail?.fast_mode_cache_enabled,
+    agentDetail?.world_model_mode,
     selectedAgentId,
     userCanUseFastMode,
     userId,
