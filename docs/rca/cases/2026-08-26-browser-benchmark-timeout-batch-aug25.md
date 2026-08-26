@@ -26,9 +26,33 @@ sources:
   - agent 21a308f5-4a31-41d7-b98a-2c0c005ce945
   - agent aad61420-3982-463b-871b-1b42fbc20050
   - agent 45f3eb68-a3e1-4f7d-8cc3-6c0a8f8960b1
-repro: none-recorded — outcome repro is the full live benchmark task (600–900s); no smaller owning-boundary test isolates checkout flake
+repro: bash scripts/k5-browser-ab.sh presync|postsync — pass@5 per task via scripts/run-bench --local --max-concurrency 5 with each task name repeated 5×
 status: open
 ---
+
+## k=5 pre/post-sync A/B (2026-08-26)
+
+Controlled pass@5 on the same seven browser tasks, max-concurrency 5, isolated local stacks:
+
+| Task | Pre-sync `1ce6fd652` | Post-sync `690e14ce9` | Δ |
+|------|---------------------|----------------------|---|
+| browser-1015-eventim-request-card | 0/5 | 2/5 | +2 |
+| browser-alchemy-springs-sauna | 1/5 | 3/5 | +2 |
+| browser-amazon-return | 0/5 | 0/5 | 0 |
+| browser-doordash-usb-c-cable | 0/5 | 2/5 | +2 |
+| browser-event-ticket | 0/5 | 0/5 | 0 |
+| browser-file-upload-tinypng | 0/5 | 0/5 | 0 |
+| browser-imax-group-tickets | 0/5 | 0/5 | 0 |
+| **TOTAL** | **1/35 (3%)** | **7/35 (20%)** | **+6** |
+
+Run JSONs: pre `20260826_201633_*.json` (worktree); post `20260826_220431_*.json`.
+Logs: `.context/k5-ab/presync-k5-20260826_183600.log`, `postsync-k5-20260826_202407.log`.
+
+**Verdict:** No task regressed under post-sync. Three tasks improved. The single-run
+6/7 pre-sync vs 2/7 post-sync snapshot was **flake**, not a `read_browser_state` /
+main-merge regression. Under k=5 load, both revisions mostly timeout before checkout
+gates; post-sync is **better**, not worse. Chronic 0/5 under k5: amazon-return,
+event-ticket, tinypng, imax (model/flake + concurrency stress, not harness-specific).
 
 ## Problem
 
@@ -97,6 +121,8 @@ None recorded.
 
 ## Reusable lesson
 
-When a browser bench batch regresses after a harness refactor, separate
-deterministic crashes (instant activity failure, action_count=0) from timeout
-flakes (no attention gate) before attributing all failures to the refactor.
+When a browser bench batch regresses after a harness refactor, run pass@k (repeat
+each task k times at max-concurrency k) on pre- and post-sync SHAs before calling
+it a regression — single-run n=1 snapshots are often flake. Separate deterministic
+crashes (instant activity failure, action_count=0) from timeout flakes (no
+attention gate) before attributing failures to the refactor.
