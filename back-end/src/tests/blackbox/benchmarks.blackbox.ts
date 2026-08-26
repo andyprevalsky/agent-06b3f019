@@ -178,6 +178,7 @@ const KNOWN_TASK_NAMES = [
   'user-data-prod-grep',
   'gate-subscription-free-credit',
   'gate-subscription-card-mint',
+  'gate-subscription-webhook-resume',
   'gate-kyc-card-mint',
   'gate-source-connect-gmail',
 ];

@@ -194,6 +194,7 @@ USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-free-credit"
 FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000101"
 PURCHASE_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-card-mint"
+SUBSCRIPTION_WEBHOOK_RESUME_TASK_NAME = "gate-subscription-webhook-resume"
 PURCHASE_KYC_GATE_TASK_NAME = "gate-kyc-card-mint"
 SOURCE_CONNECT_GATE_TASK_NAME = "gate-source-connect-gmail"
 # Admin-bypass counterpart to gate-subscription-card-mint: same depleted (no-subscription) fixture,
@@ -251,6 +252,7 @@ CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_W
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
+    SUBSCRIPTION_WEBHOOK_RESUME_TASK_NAME: "purchase-subscription",
     # Admin bypass reuses the same depleted fixture; only the run user (an admin) differs.
     PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME: "purchase-subscription",
     PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
@@ -258,6 +260,7 @@ GATE_FIXTURE_TASK_MODES = {
 }
 GATE_FIXTURE_TASK_USER_IDS = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: PURCHASE_SUBSCRIPTION_GATE_USER_ID,
+    SUBSCRIPTION_WEBHOOK_RESUME_TASK_NAME: PURCHASE_SUBSCRIPTION_GATE_USER_ID,
     PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME: ADMIN_SUBSCRIPTION_BYPASS_USER_ID,
     PURCHASE_KYC_GATE_TASK_NAME: PURCHASE_KYC_GATE_USER_ID,
     SOURCE_CONNECT_GATE_TASK_NAME: SOURCE_CONNECT_GATE_USER_ID,
@@ -1673,6 +1676,7 @@ def _default_timeout_for_task(task: BenchmarkTask, max_seconds: int | None = Non
 _cached_headers: Optional[dict] = None
 _cached_headers_user_id: Optional[str] = None
 _auth_mode: Optional[str] = None  # "jwt" or "api_key"
+_subscription_webhook_stripe_customers: Dict[str, str] = {}
 
 
 def _current_benchmark_user_id() -> str:
@@ -2592,6 +2596,66 @@ async def _agentcard_setup_attention_still_open_after_terminal(
     ) from last_error
 
 
+async def _simulate_subscription_checkout_webhook(base_url: str, user_id: str) -> None:
+    """Replay checkout.session.completed so subscription gates clear and agents resume."""
+    import hashlib
+    import hmac
+    import json
+    import time
+
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError("STRIPE_WEBHOOK_SECRET is required to simulate subscription webhook")
+
+    stripe_customer_id = _subscription_webhook_stripe_customers.get(user_id)
+    if not stripe_customer_id:
+        raise RuntimeError(
+            "gate-subscription-webhook-resume requires a provisioned Stripe billing customer; "
+            "run gate-subscription-webhook-fixture before simulating the webhook"
+        )
+
+    sub_id = f"sub_bench_{user_id[:8]}"
+    payload = json.dumps(
+        {
+            "id": f"evt_bench_{user_id[:8]}",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": f"cs_bench_{user_id[:8]}",
+                    "object": "checkout.session",
+                    "mode": "subscription",
+                    "livemode": False,
+                    "client_reference_id": user_id,
+                    "subscription": sub_id,
+                    "customer": stripe_customer_id,
+                }
+            },
+        },
+        separators=(",", ":"),
+    )
+    timestamp = int(time.time())
+    signed = hmac.new(
+        secret.encode(),
+        f"{timestamp}.{payload}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    signature = f"t={timestamp},v1={signed}"
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"{base_url}/webhooks/stripe",
+            headers={
+                "Content-Type": "application/json",
+                "stripe-signature": signature,
+            },
+            content=payload.encode(),
+        )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Simulated subscription webhook failed ({response.status_code}): {response.text[:300]}"
+        )
+
+
 async def respond_to_attention_request(base_url: str, request_id: str, response: str) -> None:
     """POST /api/attention-requests/:id/respond"""
     headers = await _api_headers()
@@ -3446,6 +3510,20 @@ async def poll_agent(
             )
             print(f"    ⏰ {reason}")
             data = await get_agent(base_url, agent_id)
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "approvals_triggered": approvals_triggered,
+                "approvals_resolved": approvals_resolved,
+                "attention_requests_seen": list(attention_requests_seen),
+            }
+            if expected_gate_evidence:
+                data["_benchmark"]["expected_gate_seen"] = True
+                data["_benchmark"]["expected_gate"] = expected_gate_evidence["gate"]
+                data["_benchmark"]["expected_gate_request_id"] = expected_gate_evidence["request_id"]
+            if validated_payment_receipt_request_id:
+                data["_benchmark"]["expected_payment_receipt_seen"] = True
+                data["_benchmark"]["expected_payment_receipt_request_id"] = validated_payment_receipt_request_id
+            _mark_expected_gate_from_data(task, data)
             return data, approvals_triggered, approvals_resolved, reason
 
         # Hot-path HTTP — fetch root agent and (if the task handles approvals)
@@ -3965,6 +4043,19 @@ async def poll_agent(
                                     "expected_gate": expected_gate_evidence["gate"],
                                     "expected_gate_request_id": req_id,
                                 }
+                                if task.simulate_gate_webhook == "subscription":
+                                    await _simulate_subscription_checkout_webhook(
+                                        base_url,
+                                        _current_benchmark_user_id(),
+                                    )
+                                    data["_benchmark"] = {
+                                        **data.get("_benchmark", {}),
+                                        "subscription_webhook_simulated": True,
+                                    }
+                                    print(
+                                        f"    ✅ Simulated subscription webhook after gate {req_id[:8]}"
+                                    )
+                                    continue
                                 print(f"    ✅ Expected gate observed {req_id[:8]}")
                                 return data, approvals_triggered, approvals_resolved, None
                             if observed_kind == "payment_approval":
@@ -4442,10 +4533,18 @@ def evaluate_task(
             return True, None
         return False, "Expected validated payment-card request but none was observed"
 
-    if task.expected_gate:
+    if task.expected_gate and not task.simulate_gate_webhook:
         if _mark_expected_gate_from_data(task, data):
             return True, None
         return False, f"Expected gate {task.expected_gate} but none was observed"
+
+    if task.simulate_gate_webhook:
+        _mark_expected_gate_from_data(task, data)
+        benchmark_state = data.get("_benchmark", {})
+        if benchmark_state.get("expected_gate_seen") is not True:
+            return False, f"Expected gate {task.expected_gate} before webhook resume"
+        if benchmark_state.get("subscription_webhook_simulated") is not True:
+            return False, "Expected simulated subscription webhook after gate"
 
     # Agent mode: must complete
     if status != "COMPLETED":
@@ -5318,6 +5417,31 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
             f"gate benchmark fixture {action} failed for {task_name}: {(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
+
+
+def _run_subscription_webhook_resume_fixture(task_name: str) -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/gate-subscription-webhook-fixture.ts"],
+        cwd=REPO_ROOT / "back-end",
+        env=_gate_fixture_env(task_name),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "gate-subscription-webhook fixture failed for "
+            f"{task_name}: {(result.stderr or result.stdout).strip()}"
+        )
+    manifest = _parse_last_json_line(result.stdout)
+    customer_id = str(manifest.get("stripe_customer_id") or "").strip()
+    user_id = str(manifest.get("user_id") or "").strip()
+    if customer_id == "" or user_id == "":
+        raise RuntimeError(
+            f"gate-subscription-webhook fixture returned incomplete manifest: {manifest}"
+        )
+    _subscription_webhook_stripe_customers[user_id] = customer_id
+    return manifest
 
 
 def _seed_output_text(value: object) -> str:
@@ -9213,6 +9337,13 @@ async def run_single_task(
             f"mode={gate_fixture_manifest.get('fixture_mode')} "
             f"user={gate_fixture_manifest.get('user_id')}"
         )
+        if task.name == SUBSCRIPTION_WEBHOOK_RESUME_TASK_NAME:
+            webhook_fixture_manifest = _run_subscription_webhook_resume_fixture(task.name)
+            print(
+                "    💳 Prepared subscription-webhook billing fixture: "
+                f"user={webhook_fixture_manifest.get('user_id')} "
+                f"stripe_customer={str(webhook_fixture_manifest.get('stripe_customer_id', ''))[:12]}"
+            )
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         if not _is_local_base_url(base_url):
             raise RuntimeError("grep-explore-stress must run against the local benchmark stack")
@@ -9554,7 +9685,11 @@ async def run_single_task(
             "agent_class_step_counts": agent_class_step_counts,
             "min_steps": dict(task.min_steps),
         }
-        expected_gate_terminal = task.expected_gate and data["_benchmark"].get("expected_gate_seen") is True
+        expected_gate_terminal = (
+            task.expected_gate
+            and data["_benchmark"].get("expected_gate_seen") is True
+            and not task.simulate_gate_webhook
+        )
         if not expected_gate_terminal:
             min_steps_error = _validate_agent_class_min_steps(
                 task.min_steps,

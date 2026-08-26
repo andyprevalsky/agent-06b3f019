@@ -7615,6 +7615,81 @@ def test_payment_site_unlock_survives_write_lock_timeout():
     assert is_approval_valid(typed_only, "purchase", "https://roselabs.ai/test_payment") is False
 
 
+def test_user_granted_purchase_survives_past_timeout_like_2c475824():
+    """User-granted purchase write-lock must unlock the site like payment (agent 2c475824).
+
+    Prod: same browser task re-prompted Buy Now 273.518s after the user approved
+    the first purchase write-lock (Amazon sign-in + address friction), then again
+    on checkout. Amazon saved-payment never mints a card, so only the purchase
+    grant path can unlock the merchant for the activity.
+    """
+    from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        apply_user_write_lock_grant,
+        is_approval_valid,
+    )
+
+    grant_url = (
+        "https://www.amazon.com/THORNE-Creatine-Micronized-Monohydrate-Unflavored/"
+        "dp/B0DVWKPJ32?th=1"
+    )
+    second_buy_url = "https://www.amazon.com/dp/B0DVWKPJ32?th=1"
+    checkout_url = (
+        "https://www.amazon.com/checkout/p/p-106-4775000-5293821/spc"
+        "?pipelineType=Chewbacca&hasWorkingJavascript=1"
+    )
+    # Measured prod delta: write_lock_granted → second Buy Now click.
+    age_seconds = 273.518
+    assert age_seconds > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+
+    approved_at = time_module.time() - age_seconds
+    approvals = apply_user_write_lock_grant(
+        {},
+        "purchase",
+        grant_url,
+        approved_at,
+    )
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY].get("persistent") is True
+    assert is_approval_valid(approvals, "purchase", second_buy_url) is True
+    assert is_approval_valid(approvals, "purchase", checkout_url) is True
+
+    # email_send without a purchase/payment site unlock still expires at 120s.
+    email_only = apply_user_write_lock_grant(
+        {},
+        "email_send",
+        "https://mail.example.com/compose",
+        approved_at,
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in email_only
+    assert is_approval_valid(email_only, "email_send", "https://mail.example.com/compose") is False
+
+    # Non-purchase approval must not re-key an existing payment site unlock onto
+    # a different merchant (CodeRabbit: prior_payment_refs / existing site grant).
+    amazon_site = apply_user_write_lock_grant(
+        {},
+        "purchase",
+        grant_url,
+        time_module.time(),
+    )
+    amazon_base = amazon_site[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"]
+    after_email = apply_user_write_lock_grant(
+        amazon_site,
+        "email_send",
+        "https://other-merchant.example/checkout",
+        time_module.time(),
+        prior_payment_refs={"card_number": "ref"},
+    )
+    assert after_email[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == amazon_base
+    assert is_approval_valid(after_email, "purchase", second_buy_url) is True
+    assert (
+        is_approval_valid(
+            after_email, "purchase", "https://other-merchant.example/checkout"
+        )
+        is False
+    )
+
+
 def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
     """write_lock_approvals are resume-state only; a new browser activity starts empty."""
     from domains.spawn_browser_agent_v3.service_actions import (
@@ -8059,6 +8134,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     }
     filtered = recorder.query_requests(url_pattern="/api/", limit=10)
     # Query string + fragment (token/sig) redacted by default; path preserved.
+    # response_ts_ms is part of the DevTools-grade summary when present.
     assert filtered == [
         {
             "id": "1",
@@ -18470,6 +18546,10 @@ async def run_all_tests():
     r.record(
         "payment_site_unlock_survives_write_lock_timeout",
         test_payment_site_unlock_survives_write_lock_timeout,
+    )
+    r.record(
+        "user_granted_purchase_survives_past_timeout_like_2c475824",
+        test_user_granted_purchase_survives_past_timeout_like_2c475824,
     )
     r.record(
         "fresh_browser_session_no_site_unlock_inherit",

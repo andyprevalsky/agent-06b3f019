@@ -19,7 +19,6 @@ import { useUpdateIndicator } from '../hooks';
 import type { UpdateStatusPayload } from '../types';
 import { CheckIcon, GiftIcon, WarningIcon } from './Icons';
 
-const CHIP_SLOT = 'fixed bottom-6 left-6 z-[9999]';
 const CHIP_LABEL = 'text-xs font-medium text-neutral-600';
 const BTN_SECONDARY =
   'text-xs font-medium text-neutral-500 hover:text-neutral-700 transition-colors';
@@ -32,9 +31,7 @@ const renderInPortal = (
   children: React.ReactNode
 ): React.ReactElement =>
   createPortal(
-    <div className={`${interactive ? 'pointer-events-auto' : 'pointer-events-none'} ${CHIP_SLOT}`}>
-      {children}
-    </div>,
+    <div className={interactive ? 'pointer-events-auto' : 'pointer-events-none'}>{children}</div>,
     container
   );
 
