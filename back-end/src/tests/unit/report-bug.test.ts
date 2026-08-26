@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   buildBugReportChatName,
   buildBugReportPrompt,
+  buildBugReportSms,
   buildBugReportTitle,
 } from '../../domains/agents/reportBugService';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
@@ -34,6 +35,16 @@ function testPromptIncludesRcaAndAgentId(): void {
     prompt,
     '/rca the following bug for agent with ID: [abc-123]\n\nIt crashed after pause.'
   );
+}
+
+function testSmsIncludesDeepLink(): void {
+  const sms = buildBugReportSms(
+    'Bug | stalled checkout',
+    'https://cursor.com/agents/bc-abc'
+  );
+  assert.ok(sms.includes('Bug | stalled checkout'));
+  assert.ok(sms.includes('https://cursor.com/agents/bc-abc'));
+  assert.ok(sms.toLowerCase().includes('rose inbox'));
 }
 
 async function testLaunchPostsNamedEnvPayload(): Promise<void> {
@@ -87,6 +98,7 @@ async function main(): Promise<void> {
     ['title truncates long descriptions at a word', testTitleTruncatesAtWord],
     ['chat name uses Bug | prefix', testChatNamePrefix],
     ['prompt embeds /rca + agent id', testPromptIncludesRcaAndAgentId],
+    ['SMS includes Cursor deep link + inbox note', testSmsIncludesDeepLink],
     ['launch posts named-env Cursor payload', testLaunchPostsNamedEnvPayload],
   ];
 

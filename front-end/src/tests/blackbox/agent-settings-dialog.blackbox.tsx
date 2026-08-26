@@ -313,11 +313,23 @@ describe('AgentSettingsDialog', () => {
         capturedRequests.some((r) => r.method === 'POST' && r.url.includes('/report-bug')),
       ).toBe(true);
     });
+    // Sticky launched panel — required because post-await window.open is blocked on iOS
+    // and API agents (source:api) often skip the native mobile rose inbox.
+    expect(await screen.findByTestId('report-bug-launched')).toBeInTheDocument();
+    expect(screen.getByTestId('report-bug-url')).toHaveAttribute(
+      'href',
+      'https://cursor.com/agents/bc-bug-1',
+    );
+    expect(screen.getByText('Bug | Checkout never finished')).toBeInTheDocument();
     expect(openSpy).toHaveBeenCalledWith(
       'https://cursor.com/agents/bc-bug-1',
       '_blank',
       'noopener,noreferrer',
     );
+
+    await u.click(screen.getByTestId('report-bug-open-link'));
+    expect(openSpy).toHaveBeenCalledTimes(2);
+
     openSpy.mockRestore();
   });
 });

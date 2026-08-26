@@ -3,9 +3,13 @@
  *
  * Admin-only: expands into a description textarea that launches a Cursor
  * cloud agent named "Bug | <short title>" to /rca the Rose agent.
+ *
+ * After launch, keep Open + Copy on screen — API agents (source:api) often
+ * do not show in the native mobile rose inbox, and post-await window.open
+ * is blocked on iOS.
  */
 
-import { Bug, Loader2 } from 'lucide-react';
+import { Bug, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
@@ -16,6 +20,63 @@ interface ReportBugSectionProps {
 }
 
 export default function ReportBugSection({ flow }: ReportBugSectionProps) {
+  if (flow.launched !== null) {
+    return (
+      <div className="space-y-3 pt-4 border-t border-border/60" data-testid="report-bug-launched">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Check className="h-4 w-4 text-emerald-500" />
+            Cursor agent launched
+          </div>
+          <p className="text-sm text-foreground/90 break-words">{flow.launched.name}</p>
+          <p className="text-xs text-muted-foreground">
+            API agents do not appear in the phone&apos;s main rose inbox. Tap Open (or the SMS we
+            texted you) to manage this chat.
+          </p>
+          <a
+            href={flow.launched.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block text-xs text-primary underline break-all"
+            data-testid="report-bug-url"
+          >
+            {flow.launched.url}
+          </a>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            onClick={() => void flow.copyLink()}
+            variant="outline"
+            className="flex-1"
+            data-testid="report-bug-copy"
+          >
+            <Copy className="h-4 w-4 mr-2" />
+            Copy link
+          </Button>
+          <Button
+            type="button"
+            onClick={flow.openLink}
+            className="flex-1"
+            data-testid="report-bug-open-link"
+          >
+            <ExternalLink className="h-4 w-4 mr-2" />
+            Open in Cursor
+          </Button>
+        </div>
+        <Button
+          type="button"
+          onClick={flow.dismissLaunched}
+          variant="ghost"
+          className="w-full"
+          data-testid="report-bug-dismiss"
+        >
+          Done
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3 pt-4 border-t border-border/60">
       {!flow.showComposer ? (
@@ -44,8 +105,8 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
               className="resize-y min-h-[100px]"
             />
             <p className="text-xs text-muted-foreground">
-              Launches a Cursor cloud agent to /rca this agent. Manage it from the Cursor
-              dashboard on your phone.
+              Launches a Cursor cloud agent to /rca this agent. You&apos;ll get an Open link here
+              and an SMS — API chats skip the phone&apos;s rose inbox list.
             </p>
           </div>
           <div className="flex gap-2">

@@ -11,6 +11,7 @@
 import { isAdminUser } from '../../utils/adminAccess';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
 import { createLogger } from '../../providers/logger';
+import { getUserPhone, sendSms } from '../../providers/smsQueue';
 import { getCursorApiBaseUrl, getCursorApiKey, getCursorCloudEnvName } from './config';
 import * as repo from './repo';
 
@@ -73,6 +74,46 @@ export function buildBugReportChatName(description: string): string {
   return `Bug | ${buildBugReportTitle(description)}`;
 }
 
+/** SMS body with the Cursor deep link — API agents skip the native mobile inbox. */
+export function buildBugReportSms(name: string, url: string): string {
+  return `Rose bug report launched: ${name}\n\nOpen in Cursor (API chats skip the phone rose inbox):\n${url}`;
+}
+
+/**
+ * Best-effort SMS so the admin can tap the deep link on phone.
+ * Never fails the report if SMS is unavailable.
+ */
+export async function notifyBugReportSms(
+  userId: string,
+  name: string,
+  url: string,
+  roseAgentId: string
+): Promise<boolean> {
+  try {
+    const phone = await getUserPhone(userId);
+    if (phone === null || phone === '') {
+      log.warn('No phone for bug-report SMS', { userId });
+      return false;
+    }
+    const result = await sendSms(phone, buildBugReportSms(name, url), {
+      archiveRootAgentId: roseAgentId,
+      archiveContext: { kind: 'report_bug_cursor_link' },
+    });
+    if (!result.success) {
+      log.warn('Bug-report SMS failed', { error: result.error, userId });
+      return false;
+    }
+    log.info('Bug-report SMS sent', { userId, messageSid: result.messageSid });
+    return true;
+  } catch (error) {
+    log.warn('Bug-report SMS threw', {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
 export async function reportAgentBug(
   userId: string | undefined,
   agentId: string,
@@ -121,6 +162,12 @@ export async function reportAgentBug(
     promptText,
     envName: getCursorCloudEnvName(),
   });
+
+  // Phone manageability: native Cursor iOS inbox often omits source:api agents.
+  // SMS the deep link so the admin can open the chat without finding it in-list.
+  if (userId !== undefined) {
+    await notifyBugReportSms(userId, launched.name, launched.url, agentId);
+  }
 
   return {
     success: true,
