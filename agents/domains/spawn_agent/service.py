@@ -543,6 +543,9 @@ async def spawn_explore_agent_activity(
                 tool_call_id=tool_call_id,
                 agent_id=agent_id,
                 user_id=user_id,
+                fast_mode_cache_enabled=_explore_fast_mode_enabled,
+                fast_mode_goal=_explore_fast_mode_goal,
+                fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
                 world_model_mode=world_model_mode,
             )
         elif tool_name == "web_fetch":
