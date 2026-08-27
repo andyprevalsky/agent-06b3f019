@@ -26,6 +26,7 @@ from domains.spawn_agent.config import (
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
     explore_limits_for_depth,
+    is_oai_demo_mass_agent_task,
     resolve_explore_depth,
 )
 from domains.spawn_agent.service import (
@@ -245,12 +246,32 @@ class SpawnAgentManager(ToolManager):
             )
             return
 
+        fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+        parent_depth = int(getattr(workflow_instance, "depth", 0) or 0)
+        # Scoped to test-mass-agent-run-0 only: first-level for_each GPs spawn,
+        # but those children must not recurse more GPs.
+        if (
+            fm
+            and agent_type in {"general_purpose", "for_each"}
+            and parent_depth >= 1
+            and is_oai_demo_mass_agent_task(workflow_instance)
+        ):
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="spawn_agent complete",
+                message=(
+                    "Fast Mode cache trajectory already gathered this research; "
+                    "skipping nested spawn so the main sub-agent handles it."
+                ),
+                status=MessageStatus.FINISHED,
+                metadata={"agentType": agent_type, "skippedNestedSpawn": True},
+            )
+            return
+
         blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
         if blocked_reason:
-            fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
             # Fast Mode must still spawn general_purpose / for_each so each child
-            # Agent row exists and can replay execute_loop cache. FINISH-without-
-            # spawn leaves empty "spinning up..." chips on the Hub FE.
+            # Agent row exists and can replay execute_loop cache.
             skip_without_spawn = not (fm and agent_type in {"general_purpose", "for_each"})
             if skip_without_spawn:
                 yield ToolEvent(

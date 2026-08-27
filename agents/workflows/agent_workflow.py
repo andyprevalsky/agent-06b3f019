@@ -230,7 +230,19 @@ def coalesce_structured_response(
         return merged
     for message in reversed(context or []):
         text = str(message.get("text") or message.get("message") or "")
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if not text:
+            text = str(
+                metadata.get("result")
+                or metadata.get("content")
+                or metadata.get("message")
+                or ""
+            )
         extracted = structured_response_from_schema_headings(text, schema)
+        if not extracted:
+            extracted = _structured_from_payload(message, names)
+        if not extracted:
+            extracted = _structured_from_payload(metadata, names)
         if not extracted:
             continue
         for key, value in extracted.items():
@@ -239,6 +251,26 @@ def coalesce_structured_response(
         if not _missing(merged):
             break
     return merged or structured_response
+
+
+def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
+    """Pull schema keys off a dict / JSON string without inventing values."""
+    if not names:
+        return {}
+    obj = payload
+    if isinstance(obj, str):
+        raw = obj.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                obj = _json.loads(raw)
+            except _json.JSONDecodeError:
+                return {}
+    if not isinstance(obj, dict):
+        return {}
+    nested = obj.get("structured_response") or obj.get("structuredResponse") or obj
+    if not isinstance(nested, dict):
+        return {}
+    return {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
 
 
 @workflow.defn
