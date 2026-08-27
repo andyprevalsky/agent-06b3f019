@@ -29,6 +29,12 @@ STUB_MARKERS = (
     "fm_trajectory_end_passthrough",
     "the task completed successfully based on prior tool evidence",
 )
+# Successful July replays finish with the Fast Mode completion_summary line
+# after a full research traj. That phrase is a stub only when it is the work.
+COLD_STUB_MARKERS = (
+    "fm_cold_namespace_passthrough",
+    "fm_trajectory_end_passthrough",
+)
 RESEARCH_TOOLS = frozenset(
     {
         "web_search",
@@ -115,6 +121,22 @@ def _text_blob(node: dict) -> str:
 def _is_stub_text(text: str) -> bool:
     lowered = _lower(text)
     return any(marker in lowered for marker in STUB_MARKERS)
+
+
+def _is_cold_stub_text(text: str) -> bool:
+    lowered = _lower(text)
+    return any(marker in lowered for marker in COLD_STUB_MARKERS)
+
+
+def _is_short_stub(node: dict, *, spawned_explore: bool = False) -> bool:
+    """True when the trajectory is the forbidden 24s TOOLS-1 traj-end stub."""
+    messages = _messages(node)
+    if not _is_stub_text(_text_blob(node)):
+        return False
+    tools = set(_tool_names(messages))
+    if tools & RESEARCH_TOOLS or spawned_explore:
+        return False
+    return len(messages) <= GP_STUB_MAX_MESSAGES
 
 
 def _from_fast_cache(node: dict) -> bool:
@@ -221,7 +243,7 @@ def grade_oai_demo_rubric(data: dict) -> tuple[bool, str]:
     explore_fails: list[str] = []
     for agent_id, node in explores:
         tools = set(_tool_names(_messages(node)))
-        if _is_stub_text(_text_blob(node)):
+        if _is_short_stub(node) or _is_cold_stub_text(_text_blob(node)):
             explore_fails.append(f"{agent_id[:8]} stub")
         elif not (tools & RESEARCH_TOOLS):
             explore_fails.append(f"{agent_id[:8]} tools={sorted(tools) or ['none']}")
@@ -243,7 +265,7 @@ def grade_oai_demo_rubric(data: dict) -> tuple[bool, str]:
             and _agent_type(child_id, child, raw_by_id) == "explore"
             for child_id, child in tree.items()
         )
-        if _is_stub_text(_text_blob(node)):
+        if _is_short_stub(node) or _is_cold_stub_text(_text_blob(node)):
             gp_fails.append(f"{agent_id[:8]} traj-end stub")
         elif msg_count <= GP_STUB_MAX_MESSAGES and not (tools & RESEARCH_TOOLS) and not spawned_explore:
             gp_fails.append(f"{agent_id[:8]} {msg_count} msgs tools={sorted(tools) or ['none']}")
@@ -254,7 +276,10 @@ def grade_oai_demo_rubric(data: dict) -> tuple[bool, str]:
     else:
         rows.append(("T4", True, f"{len(first_level_gps)} GPs have full trajectories"))
 
-    if any(_is_stub_text(_text_blob(node)) for _, node in first_level_gps + explores):
+    if any(
+        _is_short_stub(node, spawned_explore=False) or _is_cold_stub_text(_text_blob(node))
+        for _, node in first_level_gps + explores
+    ):
         rows.append(("T5", False, "traj-end / cold-passthrough stub present (soft-as-hit)"))
     elif first_level_gps and not any(_from_fast_cache(node) for _, node in first_level_gps):
         rows.append(("T5", False, "no from_fast_cache replay evidence on first-level GPs"))
@@ -299,7 +324,7 @@ def grade_oai_demo_rubric(data: dict) -> tuple[bool, str]:
     structured = agent.get("structured_output") or root.get("structured_output")
     if isinstance(structured, dict):
         outputs.append(_blob(structured))
-    if _is_stub_text(root_blob):
+    if _is_short_stub(root) or _is_cold_stub_text(root_blob):
         rows.append(("T8", False, "root final is a traj-end stub"))
     else:
         missing = [needle for needle in DELIVERABLE_NEEDLES if needle not in _lower(root_blob + "\n".join(outputs))]

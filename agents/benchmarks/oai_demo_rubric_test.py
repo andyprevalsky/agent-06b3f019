@@ -30,7 +30,11 @@ def _gp_node(parent: str, creator: str, *, stub: bool = False) -> dict:
                 "usage": {"from_fast_cache": True},
             },
         },
-        {"role": "TOOL", "message": "done", "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED"}},
+        {
+            "role": "TOOL",
+            "message": "Fast Mode cache trajectory ended; prior tool evidence is sufficient to treat the goal as complete.",
+            "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED"},
+        },
     ]
     return {
         "parent_agent_id": parent,
