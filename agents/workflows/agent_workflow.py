@@ -25,7 +25,10 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/general_purpose/explore
+    from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
+        drain_fast_mode_explores,
+        spawn_agent,
+    )
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers import (
         check_user_usage,
@@ -2133,6 +2136,7 @@ class AgentWorkflow:
 
         # The canonical continuation contract also carries mutable counters,
         # credentials, and signal state so compaction cannot reset billing/limits.
+        await self._drain_fast_mode_explores()
         await self._flush_pending_messages()
         workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
@@ -2362,6 +2366,12 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.error(f"Failed to post message: {e}")
 
+    async def _drain_fast_mode_explores(self) -> None:
+        """Wait for fire-and-track OAi-demo explores before terminal status."""
+        if not getattr(self, "fast_mode_cache_enabled", False):
+            return
+        await drain_fast_mode_explores(self)
+
     async def _post_message(
         self,
         text: str,
@@ -2580,6 +2590,10 @@ class AgentWorkflow:
         role_alternation and causes the LLM to re-emit the same tool_calls
         (regression: smoke task `parallel-tool-calls`).
         """
+        if tool_name == "attempt_completion":
+            # OAi-demo Fast Mode fire-and-track explores must finish before
+            # this agent claims completion (T3 full trajs, T9 no leftovers).
+            await self._drain_fast_mode_explores()
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
             await self._handle_tool_event(
@@ -3947,6 +3961,7 @@ class AgentWorkflow:
             # resets this workflow instance's revision counters.
             await self._wait_for_response_schema_refresh()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
+            await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
             workflow.continue_as_new(args=self._continuation_args(result.get("context")))
             return result
@@ -4125,6 +4140,9 @@ class AgentWorkflow:
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
+        # Drain fire-and-track explores before latching so leftover ACTIVE
+        # children cannot survive a FAILED parent (T9).
+        await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
@@ -4308,6 +4326,9 @@ class AgentWorkflow:
         7. Save blueprint (fire-and-forget, no UI)
         """
         workflow.logger.info("✓ Marking task complete")
+        # Drain fire-and-track explores before latching COMPLETED so T9 sees
+        # no leftover ACTIVE children under a finished GP.
+        await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST so any late child_cost_update signal
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.

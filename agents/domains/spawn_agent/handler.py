@@ -22,6 +22,7 @@ from domains.spawn_agent.config import (
     EXPLORE_DEFAULT_MODEL,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
+    FM_EXPLORE_INFLIGHT_CAP,
     FOR_EACH_MAX_DEPTH,
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
@@ -49,6 +50,92 @@ from utils.source_connect_gates import raise_source_connect_gates
 from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
+
+_FM_EXPLORE_HANDLES_ATTR = "_fm_explore_handles"
+
+
+def _fm_explore_handles(workflow_instance) -> List[Dict[str, Any]]:
+    handles = getattr(workflow_instance, _FM_EXPLORE_HANDLES_ATTR, None)
+    if handles is None:
+        handles = []
+        setattr(workflow_instance, _FM_EXPLORE_HANDLES_ATTR, handles)
+    return handles
+
+
+def _activity_handle_done(handle: Any) -> bool:
+    done = getattr(handle, "done", None)
+    return bool(done()) if callable(done) else False
+
+
+def prune_fast_mode_explores(workflow_instance) -> None:
+    handles = _fm_explore_handles(workflow_instance)
+    handles[:] = [item for item in handles if not _activity_handle_done(item.get("handle"))]
+
+
+async def wait_for_fast_mode_explore_slot(
+    workflow_instance,
+    cap: int = FM_EXPLORE_INFLIGHT_CAP,
+) -> None:
+    """Block only when this GP already has `cap` in-flight Fast Mode explores."""
+    handles = _fm_explore_handles(workflow_instance)
+
+    def _has_slot() -> bool:
+        prune_fast_mode_explores(workflow_instance)
+        return len(handles) < cap
+
+    if _has_slot():
+        return
+    await workflow.wait_condition(_has_slot)
+
+
+def track_fast_mode_explore(
+    workflow_instance,
+    handle: Any,
+    *,
+    task_id: str,
+    tool_call_id: str,
+    ui_goal: str,
+) -> None:
+    _fm_explore_handles(workflow_instance).append(
+        {
+            "handle": handle,
+            "task_id": task_id,
+            "tool_call_id": tool_call_id,
+            "ui_goal": ui_goal,
+        }
+    )
+
+
+async def drain_fast_mode_explores(workflow_instance) -> None:
+    """Await fire-and-track Fast Mode explores before this agent completes.
+
+    T3 still requires each explore activity to run its full cached trajectory.
+    T9 requires no leftover ACTIVE children, so the parent must drain before
+    attempt_completion / terminal status. Safe when nothing is tracked.
+    """
+    items = list(_fm_explore_handles(workflow_instance))
+    _fm_explore_handles(workflow_instance).clear()
+    for item in items:
+        handle = item.get("handle")
+        if handle is None:
+            continue
+        try:
+            await handle
+        except (asyncio.CancelledError, ActivityError) as exc:
+            if isinstance(exc, ActivityError) and not isinstance(
+                exc.cause, (asyncio.CancelledError, TemporalCancelledError)
+            ):
+                logger.error(
+                    "Fast Mode parallel explore failed",
+                    task_id=item.get("task_id"),
+                    error=str(exc)[:200],
+                )
+        except Exception as exc:
+            logger.error(
+                "Fast Mode parallel explore failed",
+                task_id=item.get("task_id"),
+                error=str(exc)[:200],
+            )
 
 
 def _combined_goal_text(workflow_instance, tool_call: Dict[str, Any]) -> str:
@@ -471,6 +558,69 @@ class SpawnAgentManager(ToolManager):
                 else getattr(workflow_instance, "gpt_code_token_pool_id", None)
             )
             world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+            activity_args = [
+                workflow_instance.agent_id,
+                workflow_instance.user_id,
+                goal,
+                model,
+                task_id,
+                tool_call_id,
+                claude_token,
+                gpt_token,
+                gpt_account_id,
+                gpt_token_source,
+                gpt_token_pool_id,
+                attachment_texts,
+                getattr(workflow_instance, "max_context_tokens", None) or 200_000,
+                depth,
+                explore_max_iterations,
+                world_model_mode,
+                local_data_summary,
+            ]
+            activity_handle = workflow.start_activity(
+                spawn_explore_agent_activity,
+                args=activity_args,
+                start_to_close_timeout=explore_activity_timeout,
+                heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
+                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            # OAi-demo Fast Mode: start the explore (T3 full trajectory) but
+            # do not block the parent execute_loop. July GPs replay by
+            # get-position step, not conversation prefix, so a parallel
+            # FINISH chip does not break cache hits. Drain before
+            # attempt_completion so T9 has no leftover ACTIVE children.
+            # wait_for / capture_tool_results still need the real result.
+            if (
+                bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+                and capture_tool_results is None
+                and is_oai_demo_mass_agent_task(workflow_instance)
+            ):
+                await wait_for_fast_mode_explore_slot(workflow_instance)
+                track_fast_mode_explore(
+                    workflow_instance,
+                    activity_handle,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    ui_goal=ui_goal,
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+                    message=(
+                        "Fast Mode parallel replay: explore started and will "
+                        "run its full cached trajectory before this agent completes."
+                    ),
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "agentType": "explore",
+                        "taskId": task_id,
+                        "fullGoal": ui_goal,
+                        "fastModeParallel": True,
+                    },
+                )
+                return
+
             async with span(
                 "explore_activity_wait",
                 agent_id=workflow_instance.agent_id,
@@ -480,34 +630,6 @@ class SpawnAgentManager(ToolManager):
                 span_source="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
                 span_key="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
             ):
-                activity_args = [
-                    workflow_instance.agent_id,
-                    workflow_instance.user_id,
-                    goal,
-                    model,
-                    task_id,
-                    tool_call_id,
-                    claude_token,
-                    gpt_token,
-                    gpt_account_id,
-                    gpt_token_source,
-                    gpt_token_pool_id,
-                    attachment_texts,
-                    getattr(workflow_instance, "max_context_tokens", None) or 200_000,
-                    depth,
-                    explore_max_iterations,
-                    world_model_mode,
-                    local_data_summary,
-                ]
-                activity_handle = workflow.start_activity(
-                    spawn_explore_agent_activity,
-                    args=activity_args,
-                    start_to_close_timeout=explore_activity_timeout,
-                    heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
-                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
-
                 # Wait for activity completion or pause signal
                 was_cancelled = False
                 await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)

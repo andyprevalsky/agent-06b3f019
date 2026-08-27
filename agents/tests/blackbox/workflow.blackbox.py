@@ -5679,6 +5679,59 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
         _restore_workflow(original)
 
 
+async def test_workflow_attempt_completion_drains_fast_mode_explores():
+    """attempt_completion must await fire-and-track OAi-demo explores first."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.fast_mode_cache_enabled = True
+    wf.current_phase = "EXECUTE"
+
+    class _Pending:
+        def __init__(self):
+            self.awaited = False
+            self._done = False
+
+        def done(self):
+            return self._done
+
+        def __await__(self):
+            async def _inner():
+                self.awaited = True
+                self._done = True
+                return {"result": "explore done"}
+
+            return _inner().__await__()
+
+    pending = _Pending()
+    wf._fm_explore_handles = [
+        {"handle": pending, "task_id": "t1", "tool_call_id": "tc", "ui_goal": "g"}
+    ]
+
+    async def fake_complete(**_kwargs):
+        return {"result": "done"}
+
+    async def fake_tree():
+        return None
+
+    wf._update_tree_state = fake_tree
+
+    import workflows.agent_workflow as workflow_module
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    original_executor = workflow_module.TOOL_EXECUTORS["attempt_completion"]
+    workflow_module.TOOL_EXECUTORS["attempt_completion"] = fake_complete
+    try:
+        result = await wf._execute_tool("attempt_completion", {}, "tc-complete")
+        assert result.get("success") is True
+        assert pending.awaited is True
+        assert not wf._fm_explore_handles
+    finally:
+        workflow_module.TOOL_EXECUTORS["attempt_completion"] = original_executor
+        _restore_workflow(original)
+
+
 async def test_workflow_approval_text_repopulates_same_tool_then_executes_once():
     """Approved-with-text refreshes only the pending call's params and does not gate twice."""
     wf = _bare_workflow_instance()
@@ -6693,6 +6746,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_web_fetch_fast_mode_kwargs",
         test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs,
+    )
+    await r.record_async(
+        "wf_attempt_completion_drains_fast_mode_explores",
+        test_workflow_attempt_completion_drains_fast_mode_explores,
     )
     await r.record_async(
         "wf_approval_text_repopulates_same_tool",
