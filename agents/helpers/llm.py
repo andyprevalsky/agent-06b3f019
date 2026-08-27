@@ -5193,12 +5193,23 @@ async def check_progress(
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
     fast_cache_should_write = fast_mode_cache_enabled or write_through_enabled
     if fast_mode_goal and fast_cache_should_write:
+        root_goal = fast_mode_goal
+        if agent_id:
+            try:
+                from providers.fast_cache.client import resolve_agent_fast_mode as _resolve_fm
+
+                _e, _g, _w, _r, resolved_root_goal = await _resolve_fm(agent_id)
+                if resolved_root_goal:
+                    root_goal = resolved_root_goal
+            except Exception:
+                pass
         set_fast_cache_context(
             FastCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
                 write_enabled=fast_cache_should_write,
+                root_goal=root_goal,
             )
         )
 
@@ -5370,14 +5381,18 @@ async def check_progress(
                     # LLM. That path was the verify8/10 cost bleed when a cache
                     # miss/parse failure exhausted the warm trajectory. Soft-pass
                     # instead so hits stay at 100% and tree cost stays ~$0.
+                    from providers.fast_cache.context import current_context as _fm_ctx
                     from providers.fast_cache.rose_cache import soft_complete_on_miss
 
                     # Gate on Fast Mode *read* (not merely goal / write-through).
-                    # Andy smoke uses write-through with FM off; soft-passing
-                    # verifier failures there masks real errors and was conflated
-                    # with the write-through execute_loop stub that zeroed the
-                    # browser-smoke repeatable cache ratchet.
-                    if fast_mode_cache_enabled and soft_complete_on_miss(call_site) is not None:
+                    # Soft-pass stubs are further restricted to exact-match
+                    # fast_cache:on bench trees (mass-agent OAi demo) via context.
+                    _ctx = _fm_ctx()
+                    if (
+                        fast_mode_cache_enabled
+                        and soft_complete_on_miss(call_site) is not None
+                        and (_ctx.soft_complete_allowed if _ctx is not None else False)
+                    ):
                         logger.warning(
                             "Verifier Fast Mode soft-pass after failure",
                             attempt=attempt + 1,
@@ -5464,9 +5479,14 @@ async def check_progress(
             and float(score or 0) < 1.0
             and bool((usage or {}).get("from_fast_cache"))
         ):
+            from providers.fast_cache.context import current_context as _fm_ctx
             from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
-            if _fm_soft(call_site) is not None:
+            _ctx = _fm_ctx()
+            if (
+                _fm_soft(call_site) is not None
+                and (_ctx.soft_complete_allowed if _ctx is not None else False)
+            ):
                 logger.warning(
                     "Verifier Fast Mode soft-pass after cached reject",
                     call_site=call_site,
@@ -5507,9 +5527,15 @@ async def check_progress(
         logger.error("Failed to check progress", error=error_message)
         # Fast Mode: never return the 0.5 error soft-fail that keeps browser/
         # execute loops spinning on soft-complete trajectories (verify15).
+        from providers.fast_cache.context import current_context as _fm_ctx
         from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
-        if fast_mode_cache_enabled and _fm_soft(call_site) is not None:
+        _ctx = _fm_ctx()
+        if (
+            fast_mode_cache_enabled
+            and _fm_soft(call_site) is not None
+            and (_ctx.soft_complete_allowed if _ctx is not None else False)
+        ):
             return {
                 "score": 1.0,
                 "reasoning": (
@@ -5638,12 +5664,16 @@ async def call_llm_activity(
     # Keys are canonical request fingerprints, so prompt/schema/message changes miss.
     write_through_enabled = write_through_enabled_for_user(user_id)
     if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
+        from providers.fast_cache.client import resolve_soft_complete_root_goal
+
+        root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
         set_fast_cache_context(
             FastCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
                 write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                root_goal=root_goal,
             )
         )
     elif fast_mode_step is not None:
@@ -5985,7 +6015,7 @@ async def set_response_schema_activity(
     if not write_through_enabled and agent_id:
         from providers.fast_cache import client as _fc_client
 
-        _, _, write_through_enabled, _ = await _fc_client.resolve_agent_fast_mode(agent_id)
+        _, _, write_through_enabled, _, _ = await _fc_client.resolve_agent_fast_mode(agent_id)
     if goal and (fast_mode_cache_enabled or write_through_enabled):
         from providers.fast_cache import client as _fc_client
         from providers.fast_cache import normalize as _fc_norm
@@ -6539,12 +6569,16 @@ async def call_planner_llm_activity(
     # request fingerprint. call_site "planner" keeps it distinct.
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
     if fast_mode_goal and (fast_mode_cache_enabled or write_through_enabled):
+        from providers.fast_cache.client import resolve_soft_complete_root_goal
+
+        root_goal = await resolve_soft_complete_root_goal(agent_id, fast_mode_goal)
         set_fast_cache_context(
             FastCacheContext(
                 enabled=fast_mode_cache_enabled,
                 goal=fast_mode_goal,
                 base_step=fast_mode_step,
                 write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                root_goal=root_goal,
             )
         )
 

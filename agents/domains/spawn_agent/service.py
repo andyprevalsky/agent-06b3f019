@@ -335,6 +335,7 @@ async def spawn_explore_agent_activity(
         _explore_fast_mode_goal,
         _explore_fast_mode_write_enabled,
         _,
+        _,
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
 

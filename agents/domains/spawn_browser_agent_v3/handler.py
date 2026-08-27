@@ -5235,8 +5235,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # soft-complete (verify19), and the 3m FM ceiling then failed for_each
     # finalize for dozens of children (verify20). Soft-complete the tool
     # without a provider session so warm paths stay ~$0 and finish. Write-lock
-    # / resume still need the live browser.
-    if fast_mode_cache_enabled and not is_resume and not write_lock_resume_state:
+    # / resume still need the live browser. Restricted to exact-match
+    # fast_cache:on bench trees (test-mass-agent-run-0 / OAi demo).
+    from providers.fast_cache.client import soft_complete_allowed_for_agent
+
+    if (
+        fast_mode_cache_enabled
+        and not is_resume
+        and not write_lock_resume_state
+        and await soft_complete_allowed_for_agent(agent_id, goal)
+    ):
         message = (
             "Fast Mode soft-completed browser goal without a live Kernel/Steel "
             "session; treating cached trajectory evidence as sufficient."
@@ -7090,6 +7098,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             write_enabled=bool(
                                 fast_mode_cache_enabled or fm_write_through
                             ),
+                            agent_id=agent_id,
                         ),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
