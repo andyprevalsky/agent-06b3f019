@@ -69,5 +69,22 @@ SUB_ACTIVITY_MAX_ATTEMPTS = 2
 FOR_EACH_MAX_DEPTH = 4
 FOR_EACH_MAX_INFLIGHT = 5
 
+# test-mass-agent-run-0 / July OAi demo only. Nested GP skip and the Andy
+# name rewrite must not apply to other Fast Mode trees.
+OAI_DEMO_ROOT_GOAL_PREFIX = (
+    "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+)
+OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+
+
+def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
+    """True only for the mass-agent-0 root or its per-creator for_each children."""
+    chunks = (
+        getattr(workflow_instance, "fast_cache_goal", None) or "",
+        getattr(workflow_instance, "goal", None) or "",
+    )
+    text = "\n".join(str(chunk) for chunk in chunks)
+    return OAI_DEMO_ROOT_GOAL_PREFIX in text or OAI_DEMO_CHILD_WINDOW in text
+
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0

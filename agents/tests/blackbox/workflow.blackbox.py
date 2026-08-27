@@ -1669,6 +1669,35 @@ def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
     assert outputs[0]["value"] == "Aman as the founder-operator."
 
 
+def test_workflow_coalesce_structured_response_from_metadata_payload():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "positioning_statement"},
+            {"name": "weekly_engagement_target_creators"},
+        ]
+    }
+    context = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "structured_response": {
+                    "positioning_statement": "Andy as the founder-operator.",
+                    "weekly_engagement_target_creators": ["Huberman"],
+                }
+            },
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    assert [row["key"] for row in outputs] == [
+        "positioning_statement",
+        "weekly_engagement_target_creators",
+    ]
+    assert outputs[0]["value"] == "Andy as the founder-operator."
+
+
 def test_workflow_coalesce_structured_response_without_schema_uses_headings():
     wf = _bare_workflow_instance()
     wf.output_schema = None
@@ -6286,6 +6315,10 @@ async def run_all_tests():
     r.record(
         "wf_coalesce_structured_response_from_headings",
         test_workflow_coalesce_structured_response_fills_outputs_from_headings,
+    )
+    r.record(
+        "wf_coalesce_structured_response_from_metadata_payload",
+        test_workflow_coalesce_structured_response_from_metadata_payload,
     )
     r.record(
         "wf_coalesce_structured_response_without_schema",
