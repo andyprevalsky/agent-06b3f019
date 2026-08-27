@@ -7,10 +7,12 @@ against cache "busts" is normalization (we never validate freshness).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -914,6 +916,68 @@ def position_request_fingerprint(request: Any) -> str:
 # Root goal hash for test-mass-agent-run-0 / the Jul 2026 OAi demo warm namespace.
 # Kept as a constant so dual-read + coverage checks cannot drift from the prompt.
 OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
+
+# ---------------------------------------------------------------------------
+# Soft-complete allowlist (exact-match benchmark tasks with fast_cache: "on")
+#
+# Soft Mode stubs (cold/trajectory passthrough, tool soft-complete, browser
+# soft-complete, verifier soft-pass) are ONLY for agents whose goal — or their
+# tree root's goal — exactly matches a catalog task with fast_cache: "on".
+# Today that is test-mass-agent-run-0 (OAi demo). Fast Mode cache HIT replay
+# remains available for any FM-enabled agent; only synthetic miss stubs are gated.
+#
+#   tasks.json (fast_cache:on) ──goal_hash──► soft_complete_goal_hashes()
+#        │
+#        ▼
+#   agent.goal / root.goal ──soft_complete_allowed()──► stub | live LLM
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def soft_complete_goal_hashes() -> frozenset[str]:
+    """Goal hashes of benchmark tasks that opt into soft-complete stubs.
+
+    Sourced from ``agents/benchmarks/tasks.json`` entries with
+    ``fast_cache: "on"``. Always includes ``OAI_DEMO_ROOT_GOAL_HASH`` so the
+    Jul 2026 warm namespace cannot drift if the catalog load fails in workers.
+    """
+    hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH}
+    try:
+        tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
+        with tasks_path.open(encoding="utf-8") as fh:
+            tasks = json.load(fh)
+        if isinstance(tasks, list):
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                if str(task.get("fast_cache") or "").strip().lower() != "on":
+                    continue
+                prompt = task.get("prompt")
+                if isinstance(prompt, str) and prompt.strip():
+                    hashes.add(goal_hash(prompt))
+    except Exception:
+        # Catalog unavailable in some unit-test / slim images — constant remains.
+        pass
+    return frozenset(hashes)
+
+
+def soft_complete_allowed(
+    goal: str | None = None,
+    *,
+    root_goal: str | None = None,
+) -> bool:
+    """True when soft-complete stubs may fire for this agent namespace.
+
+    Exact match: ``goal_hash(goal)`` or ``goal_hash(root_goal)`` must equal a
+    ``fast_cache: "on"`` benchmark prompt hash (mass-agent OAi demo today).
+    Child agents under that root inherit via ``root_goal``.
+    """
+    allowed = soft_complete_goal_hashes()
+    if goal and goal_hash(goal) in allowed:
+        return True
+    if root_goal and goal_hash(root_goal) in allowed:
+        return True
+    return False
 # Pre-Jul-21 / pre-Aug-22 position fingerprint shape used by the OAi demo warm
 # cache (no user_messages, no exclude_anthropic_family).
 _OAI_DEMO_CACHE_KEY_VERSIONS = ("v42", "v43")

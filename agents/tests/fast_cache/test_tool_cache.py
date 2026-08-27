@@ -18,6 +18,17 @@ import pytest
 from providers.fast_cache import normalize
 import tools.web_search.handler as ws
 import domains.web_fetch.handler as wf
+import json
+from pathlib import Path
+
+
+def _soft_complete_bench_goal() -> str:
+    tasks = json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
 def _without_fast_cache_hit(value: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,17 +127,38 @@ def test_web_search_write_only_stores_without_read(mem, monkeypatch):
 def test_web_search_miss_soft_completes_without_provider(mem, monkeypatch):
     async def body():
         calls = {"n": 0}
+        bench = _soft_complete_bench_goal()
 
         async def fake_search(query, max_tokens):
             calls["n"] += 1
             return {"answer": "live", "query": query}
 
         monkeypatch.setattr(ws, "execute_search", fake_search)
-        out = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
+        out = await ws.web_search_activity(
+            "weather", 100, fast_mode_cache_enabled=True, fast_mode_goal=bench
+        )
         assert calls["n"] == 0
         assert out.pop(ws.FAST_CACHE_HIT_FIELD) is True
         assert out["provider"] == "fast-mode-soft-complete"
         assert mem.data == {}
+
+    asyncio.run(body())
+
+
+def test_web_search_miss_non_bench_calls_provider(mem, monkeypatch):
+    async def body():
+        calls = {"n": 0}
+
+        async def fake_search(query, max_tokens):
+            calls["n"] += 1
+            return {"answer": "live", "query": query, "sources": [], "provider": "parallel"}
+
+        monkeypatch.setattr(ws, "execute_search", fake_search)
+        out = await ws.web_search_activity(
+            "weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="Order coffee"
+        )
+        assert calls["n"] == 1
+        assert out["answer"] == "live"
 
     asyncio.run(body())
 
@@ -200,13 +232,14 @@ def memwf(monkeypatch):
 def test_web_fetch_miss_soft_completes_without_provider(memwf, monkeypatch):
     async def body():
         calls = {"n": 0}
+        bench = _soft_complete_bench_goal()
 
         async def fake_scrape(url):
             calls["n"] += 1
             return {"markdown": "live", "links": [], "metadata": {}}
 
         monkeypatch.setattr(wf, "scrape_url", fake_scrape)
-        out = await wf.web_fetch_activity("https://x.com/a", True, "g")
+        out = await wf.web_fetch_activity("https://x.com/a", True, bench)
         assert calls["n"] == 0
         assert out.pop(wf.FAST_CACHE_HIT_FIELD) is True
         assert out["metadata"]["provider"] == "fast-mode-soft-complete"

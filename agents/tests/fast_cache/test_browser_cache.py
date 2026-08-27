@@ -25,6 +25,17 @@ from domains.spawn_browser_agent_v3.handler import (
     _install_fast_mode_network_cache,
     _remap_cached_browser_action_target,
 )
+import json
+from pathlib import Path
+
+
+def _soft_complete_bench_goal() -> str:
+    tasks = json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
 class MemStore:
@@ -301,6 +312,7 @@ def test_browser_use_record_then_replay(mem):
 def test_browser_use_soft_completes_on_miss(mem):
     async def body():
         calls = {"n": 0}
+        bench = _soft_complete_bench_goal()
 
         async def live():
             calls["n"] += 1
@@ -308,7 +320,7 @@ def test_browser_use_soft_completes_on_miss(mem):
 
         out = await browser_use_cache.cached_browser_decision(
             enabled=True,
-            goal="g",
+            goal=bench,
             request={"task": "x", "browser_state": {"url": "https://x.com"}},
             call_llm=live,
         )
@@ -320,6 +332,26 @@ def test_browser_use_soft_completes_on_miss(mem):
     asyncio.run(body())
 
 
+def test_browser_use_miss_non_bench_calls_live(mem):
+    async def body():
+        calls = {"n": 0}
+
+        async def live():
+            calls["n"] += 1
+            return {"action": "click", "index": 1}
+
+        out = await browser_use_cache.cached_browser_decision(
+            enabled=True,
+            goal="Order Blue Bottle",
+            request={"task": "x", "browser_state": {"url": "https://x.com"}},
+            call_llm=live,
+        )
+        assert calls["n"] == 1
+        assert out["action"] == "click"
+
+    asyncio.run(body())
+
+
 def test_browser_use_soft_completes_on_lookup_error(monkeypatch, mem):
     """Cache-read errors must not fall through to live browser LLM under FM read."""
 
@@ -327,6 +359,7 @@ def test_browser_use_soft_completes_on_lookup_error(monkeypatch, mem):
         raise RuntimeError("backend down")
 
     monkeypatch.setattr(browser_use_cache.cache_client, "cache_get", boom)
+    bench = _soft_complete_bench_goal()
 
     async def body():
         calls = {"n": 0}
@@ -337,7 +370,7 @@ def test_browser_use_soft_completes_on_lookup_error(monkeypatch, mem):
 
         out = await browser_use_cache.cached_browser_decision(
             enabled=True,
-            goal="g",
+            goal=bench,
             request={"task": "x", "browser_state": {"url": "https://x.com"}},
             call_llm=live,
         )

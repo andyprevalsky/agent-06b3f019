@@ -473,16 +473,29 @@ export async function agentFastMode(agentId: string): Promise<{
   goal: string | null;
   writeEnabled: boolean;
   rootAgentId: string | null;
+  rootGoal: string | null;
 }> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     select: { fastModeCacheEnabled: true, goal: true, userId: true, busId: true },
   });
   const enabled = agent?.fastModeCacheEnabled ?? false;
+  const rootAgentId = agent?.busId ?? agentId;
+  let rootGoal = agent?.goal ?? null;
+  // Soft-complete stubs gate on the tree root's exact bench prompt match; child
+  // agents keep their own goal for cache keys but inherit stub eligibility via rootGoal.
+  if (agent?.busId && agent.busId !== agentId) {
+    const root = await prisma.agent.findUnique({
+      where: { id: agent.busId },
+      select: { goal: true },
+    });
+    rootGoal = root?.goal ?? null;
+  }
   return {
     enabled,
     goal: agent?.goal ?? null,
     writeEnabled: enabled || shouldWriteFastModeCacheForUser(agent?.userId),
-    rootAgentId: agent?.busId ?? agentId,
+    rootAgentId,
+    rootGoal,
   };
 }

@@ -3658,6 +3658,18 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "set_plan" not in rendered
 
 
+
+def _soft_complete_bench_goal() -> str:
+    from pathlib import Path
+    import json as _json
+    tasks = _json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
+
+
 async def test_check_progress_disables_fast_cache_read_after_verifier_parse_failure():
     """Verifier retries should not replay the same invalid cached response repeatedly."""
     from helpers.llm import check_progress
@@ -3688,7 +3700,7 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
                 model="rose",
                 call_site="verifier_execute",
                 fast_mode_cache_enabled=True,
-                fast_mode_goal="finish the task",
+                fast_mode_goal=_soft_complete_bench_goal(),
                 fast_mode_step=2,
             )
     finally:
@@ -3732,7 +3744,7 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
                 model="rose",
                 call_site="verifier_execute",
                 fast_mode_cache_enabled=True,
-                fast_mode_goal="finish the task",
+                fast_mode_goal=_soft_complete_bench_goal(),
                 fast_mode_step=3,
             )
     finally:

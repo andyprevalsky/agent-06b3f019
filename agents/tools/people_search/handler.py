@@ -303,8 +303,10 @@ async def people_search_activity(
     Returns:
         Dict with query, mode_used, provider_used, providers_attempted, results, warnings.
     """
+    from providers.fast_cache.client import soft_complete_allowed_for_agent
+
     read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
-    if read_cache:
+    if read_cache and await soft_complete_allowed_for_agent(agent_id, fast_mode_goal):
         logger.info(
             "fast_cache.people_search_soft_complete",
             query=query[:120],

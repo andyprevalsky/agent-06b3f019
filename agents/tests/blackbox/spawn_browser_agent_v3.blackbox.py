@@ -16724,10 +16724,21 @@ async def test_fast_mode_soft_completes_browser_without_kernel_session():
         "domains.spawn_browser_agent_v3.handler.init_browser_session",
         AsyncMock(side_effect=AssertionError("must not open Kernel under FM")),
     ):
+        from pathlib import Path as _P
+        import json as _json
+        _bench = next(
+            t["prompt"]
+            for t in _json.loads(
+                (_P(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            if t["name"] == "test-mass-agent-run-0"
+        )
         out = await _spawn_browser_agent_activity_v3_real(
             user_id="u",
             agent_id="a",
-            goal="Browse youtube",
+            goal=_bench,
             tool_call_id="tc1",
             fast_mode_cache_enabled=True,
         )

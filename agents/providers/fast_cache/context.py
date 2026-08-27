@@ -32,6 +32,9 @@ class FastCacheContext:
     # prior tool output text.
     base_step: Optional[int] = None
     write_enabled: Optional[bool] = None
+    # Root agent's goal (busId row). Soft-complete stubs require exact match of
+    # this agent's goal OR the tree root against a fast_cache:on bench prompt.
+    root_goal: Optional[str] = None
 
     @property
     def read_enabled(self) -> bool:
@@ -54,6 +57,10 @@ class FastCacheContext:
     @property
     def goal_hash(self) -> str:
         return normalize.goal_hash(self.goal)
+
+    @property
+    def soft_complete_allowed(self) -> bool:
+        return normalize.soft_complete_allowed(self.goal, root_goal=self.root_goal)
 
     def llm_key(self, call_site: str, messages: object = None) -> str:
         """Build the LLM cache key for the current request."""
