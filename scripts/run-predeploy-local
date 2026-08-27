@@ -199,22 +199,89 @@ trap 'forward_signal HUP 129' HUP
 trap 'forward_signal INT 130' INT
 trap 'forward_signal TERM 143' TERM
 
-# This launcher promises a per-run isolated stack. Do not let a caller's remote
-# cache override—or run.sh's shared-cache default—turn startup into a production
-# pooler dependency. run.sh creates the same cache schema in this run's local DB.
-unset FAST_MODE_CACHE_DATABASE_URL
+# Split the smoke set so Tokyo/other FM-off tasks stay on the isolated local
+# cache, while fast_cache:on tasks (test-mass-agent-run-0) read the shared July
+# cache with write-through disabled. One shared stack would either empty-cache
+# the OAi replay or let Andy write-through poison prod.
+LOCAL_CACHE_TASKS=()
+SHARED_CACHE_TASKS=()
+while IFS= read -r task; do
+    [ -n "$task" ] || continue
+    cache_mode="$(
+        python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" "$task" <<'PY'
+import json
+import sys
+
+name = sys.argv[2]
+with open(sys.argv[1]) as handle:
+    tasks = json.load(handle)
+for task in tasks:
+    if task.get("name") == name:
+        print("on" if task.get("fast_cache") == "on" else "off")
+        break
+else:
+    print("off")
+PY
+    )"
+    if [ "$cache_mode" = "on" ]; then
+        SHARED_CACHE_TASKS+=("$task")
+    else
+        LOCAL_CACHE_TASKS+=("$task")
+    fi
+done < <(printf '%s\n' "${SCHEDULED_TASKS[@]}")
+
+shared_fast_mode_cache_url() {
+    grep -E '^FAST_MODE_CACHE_DATABASE_URL=' "$ROOT_DIR/back-end/.env" 2>/dev/null \
+        | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"
+}
+
+run_smoke_batch() {
+    local cache_mode="$1"
+    shift
+    local -a batch=("$@")
+    [ "${#batch[@]}" -gt 0 ] || return 0
+    echo "🧪 Pre-Deploy smoke batch ($cache_mode cache): ${batch[*]}"
+    # This launcher promises a per-run isolated stack. Do not let a caller's remote
+    # cache override—or run.sh's shared-cache default—turn startup into a production
+    # pooler dependency. run.sh creates the same cache schema in this run's local DB.
+    unset FAST_MODE_CACHE_DATABASE_URL
+    if [ "$cache_mode" = "shared" ]; then
+        FAST_MODE_CACHE_DATABASE_URL="$(shared_fast_mode_cache_url)"
+        export FAST_MODE_CACHE_DATABASE_URL
+        [ -n "$FAST_MODE_CACHE_DATABASE_URL" ] || {
+            echo "FAST_MODE_CACHE_DATABASE_URL is required for fast_cache:on smoke tasks" >&2
+            return 2
+        }
+        FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1 \
+        BENCHMARK_SKIP_WMH_BUILD=1 \
+        BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
+        BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 \
+        BENCHMARK_COMPUTE_TOKEN_TYPE=claude \
+        python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
+            bash "$ROOT_DIR/scripts/run-bench" --local "${batch[@]}" \
+            --max-concurrency "$LOCAL_CONCURRENCY"
+        return $?
+    fi
+    FAST_MODE_CACHE_USE_LOCAL=1 \
+    BENCHMARK_SKIP_WMH_BUILD=1 \
+    BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
+    BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 \
+    BENCHMARK_COMPUTE_TOKEN_TYPE=claude \
+    python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
+        bash "$ROOT_DIR/scripts/run-bench" --local "${batch[@]}" \
+        --max-concurrency "$LOCAL_CONCURRENCY"
+}
+
 # Infra-fix /deploy must not hard-require a usable Claude Code pool token:
 # when the sole pooled OAuth credential is rate-limited, Claude Code smoke
 # tasks become the deploy-approved loud SKIP instead of failing the whole
 # compute-token sync / preflight. Fleet/cloud require-pass does NOT set this.
-FAST_MODE_CACHE_USE_LOCAL=1 \
-BENCHMARK_SKIP_WMH_BUILD=1 \
-BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
-BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 \
-BENCHMARK_COMPUTE_TOKEN_TYPE=claude \
-python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
-    bash "$ROOT_DIR/scripts/run-bench" --local "${SCHEDULED_TASKS[@]}" \
-    --max-concurrency "$LOCAL_CONCURRENCY" &
+(
+    run_smoke_batch local "${LOCAL_CACHE_TASKS[@]}"
+    local_ec=$?
+    [ "$local_ec" -eq 0 ] || exit "$local_ec"
+    run_smoke_batch shared "${SHARED_CACHE_TASKS[@]}"
+) &
 SUPERVISOR_PID=$!
 if [ -n "$PENDING_SIGNAL" ]; then
     pending_signal="$PENDING_SIGNAL"

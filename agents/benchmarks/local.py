@@ -34,6 +34,22 @@ if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
 from benchmarks.benchmark_tasks import RUNNABLE_TASK_RUNNERS, all_tasks, selected_tasks_require_gate_type
+
+
+def selected_tasks_need_shared_fast_cache(task_names: Sequence[str]) -> bool:
+    """True when a selected task must read the shared July Fast Mode cache."""
+    selected = set(task_names)
+    return any(task.fast_cache == "on" and task.name in selected for task in all_tasks())
+
+
+def _dotenv_fast_mode_cache_database_url() -> str:
+    env_path = REPO_ROOT / "back-end" / ".env"
+    if not env_path.is_file():
+        return ""
+    for line in env_path.read_text().splitlines():
+        if line.startswith("FAST_MODE_CACHE_DATABASE_URL="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
 from benchmarks.results import bounded_path_component
 from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
@@ -1228,15 +1244,23 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
-        # The benchmark owns a fresh isolated Postgres. Its Fast Mode cache is
-        # task-local state, so routing schema setup through the shared production
-        # pooler only adds an external startup dependency. A closed or saturated
-        # pooler previously aborted the stack before either task could run.
-        # Clear any ambient FAST_MODE_CACHE_DATABASE_URL too, so a caller cannot
-        # accidentally retain the prod pooler despite the local opt-in; run.sh
-        # binds the concrete local URL after it starts Postgres.
-        env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
-        env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
+        # Default isolated stacks keep Fast Mode cache on the local Postgres so
+        # Tokyo / other smokes cannot write through Andy into the shared pooler.
+        # fast_cache:on tasks (test-mass-agent-run-0) must read the July cache,
+        # so those batches keep FAST_MODE_CACHE_DATABASE_URL and disable writes.
+        if selected_tasks_need_shared_fast_cache(tasks):
+            shared_url = (env.get("FAST_MODE_CACHE_DATABASE_URL") or "").strip() or _dotenv_fast_mode_cache_database_url()
+            if not shared_url:
+                raise RuntimeError(
+                    "fast_cache:on isolated benches require FAST_MODE_CACHE_DATABASE_URL "
+                    "(shared July cache). Set it in back-end/.env."
+                )
+            env["FAST_MODE_CACHE_DATABASE_URL"] = shared_url
+            env.pop("FAST_MODE_CACHE_USE_LOCAL", None)
+            env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "1"
+        else:
+            env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+            env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
         # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
         # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
         # parent shell; if that leaks into an isolated run, every local smoke /

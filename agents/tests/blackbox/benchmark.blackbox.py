@@ -9998,6 +9998,54 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] = prior_cf_timeout
 
 
+def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
+    """test-mass-agent-run-0 must read the July cache without Andy write-through."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    original_popen = local_bench.subprocess.Popen
+    original_wait = local_bench.wait_for_services
+    prior_cache_database_url = os.environ.get("FAST_MODE_CACHE_DATABASE_URL")
+    os.environ["FAST_MODE_CACHE_DATABASE_URL"] = "postgresql://july.example.test:6543/postgres"
+    try:
+        local_bench.subprocess.Popen = fake_popen
+        local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            local_bench, "_prime_local_seed_dump_from_shared_stack"
+        ):
+            context_dir = Path(tmp) / "july-cache-run"
+            stack = local_bench.ServiceStack(
+                run_id="july-cache-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-july-cache-run",
+                base_port=55140,
+            )
+            local_bench.start_services(stack, clean_first=False, tasks=["test-mass-agent-run-0"])
+            assert captured["env"]["FAST_MODE_CACHE_DATABASE_URL"] == "postgresql://july.example.test:6543/postgres"
+            assert captured["env"]["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] == "1"
+            assert "FAST_MODE_CACHE_USE_LOCAL" not in captured["env"]
+    finally:
+        local_bench.subprocess.Popen = original_popen
+        local_bench.wait_for_services = original_wait
+        if prior_cache_database_url is None:
+            os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+        else:
+            os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
 def test_local_cold_seed_bootstrap_extends_service_start_timeout():
     """An explicitly allowed cold seed must not exhaust the warm-start watchdog."""
     from unittest.mock import patch
@@ -12951,6 +12999,16 @@ def test_unified_catalog_delineates_bench_axes():
     assert {"test-mass-agent-run-0", "browser-agent", "job-applications"} <= rose
     for name in ("chat-mode", "browser-smoke", "spawn-sub-agents", "single-creator-arm", "cache-coverage"):
         assert by_name[name]["bench"] == "pipeline-e2e"
+    mass = by_name["test-mass-agent-run-0"]
+    assert "smoke" in mass["tags"]
+    assert mass["group"] == "pre-deploy"
+    assert mass["fast_cache"] == "on"
+    assert mass["enforce_declared_evaluators"] is True
+    assert any(
+        check.get("type") == "oai_demo_rubric"
+        for evaluator in mass["evaluators"]
+        for check in evaluator.get("checks", [])
+    )
     # Live capability eval keeps its live environment contract
     live = by_name["browser-agent"]
     assert live["environment"]["mode"] == "live"
@@ -15217,6 +15275,10 @@ async def run_all_tests():
         test_canonical_base_cache_token_is_revisioned_not_daily,
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "local_isolated_july_cache_read_only",
+        test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only,
+    )
     r.record(
         "local_cold_seed_extended_start_timeout",
         test_local_cold_seed_bootstrap_extends_service_start_timeout,

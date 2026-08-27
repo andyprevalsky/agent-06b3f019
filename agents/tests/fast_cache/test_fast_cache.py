@@ -2259,6 +2259,17 @@ def test_goal_hash_collapses_run_local_message_refs():
     assert normalize.goal_hash(base) == normalize.sha256(base)[:16]
 
 
+def test_write_through_disabled_by_isolated_shared_cache_flag(monkeypatch):
+    """Isolated July-cache smokes must not write through Andy/Tamy into prod."""
+    from providers.fast_cache.context import write_through_enabled_for_user
+
+    monkeypatch.delenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", raising=False)
+    assert write_through_enabled_for_user("1f85ff25-6e29-4c1b-8739-f917bd101a30") is True
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+    assert write_through_enabled_for_user("1f85ff25-6e29-4c1b-8739-f917bd101a30") is False
+    assert write_through_enabled_for_user("43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9") is False
+
+
 def test_oai_demo_root_goal_hash_constant():
     assert normalize.OAI_DEMO_ROOT_GOAL_HASH == "4ae3193053ac1d8f"
 

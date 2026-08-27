@@ -185,6 +185,8 @@ require_text "$ROOT_DIR/agents/benchmarks/hub_upload.py" 'def resolve_hub_upload
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_COMPUTE_TOKEN_TYPE=claude' "local predeploy smoke must pin one provider for repeatable cache measurement"
 require_text "$RUN_PREDEPLOY_LOCAL" 'unset FAST_MODE_CACHE_DATABASE_URL' "local predeploy smoke must reject an inherited remote fast-cache database"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_USE_LOCAL=1 \' "local predeploy smoke must isolate fast-cache schema startup from the production pooler"
+require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1' "local predeploy must disable Andy write-through when the July cache is shared"
+require_text "$RUN_PREDEPLOY_LOCAL" 'run_smoke_batch shared' "local predeploy must isolate fast_cache:on smoke onto the shared July cache batch"
 require_text "$RUN_PREDEPLOY_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "cloud predeploy smoke must request the narrow Claude Code cache-ratchet skip"
 require_text "$RUN_BENCH_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}' "cloud benchmark controller must pass the Claude Code cache-ratchet skip into benchmark machines"
 require_text "$CLOUDBENCH_RUN" 'STACK_ENV+=("BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY")' "cloud benchmark stack must inherit the Claude Code cache-ratchet skip"

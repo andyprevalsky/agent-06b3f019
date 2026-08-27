@@ -11,7 +11,8 @@
     "tags": [
       "mass-agent",
       "load-test",
-      "research"
+      "research",
+      "smoke"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": false,
@@ -21,8 +22,46 @@
     "start_phase": null,
     "min_agent_count": 50,
     "bench": "rose-bench",
-    "group": "rose-bench",
-    "fast_cache": "on"
+    "group": "pre-deploy",
+    "fast_cache": "on",
+    "enforce_declared_evaluators": true,
+    "description": "July OAi mass-agent Fast Mode recreation: 50 real GP trajectories, Andy-only, populated Task Complete.",
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [
+        "FAST_MODE_CACHE_DATABASE_URL"
+      ],
+      "live_targets": [],
+      "context_notes": "Grades T1-T9 against the Hub tree. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+    },
+    "evaluators": [
+      {
+        "id": "oai_demo_rubric",
+        "method": "static_check",
+        "criteria": [
+          "T1 Andy Prevalsky only, Fast Mode on",
+          "T2 Root actually spawned 50 first-level general-purpose children with transcripts",
+          "T3 Every explore child plays a full research trajectory",
+          "T4 Every first-level GP plays a full July-class trajectory",
+          "T5 Honest Fast Mode replay only",
+          "T6 No nested general-purpose children",
+          "T7 No ERROR chips and no leftover in-progress children",
+          "T8 Real deliverable: positioning, 90-day calendar, hooks, engagement targets",
+          "T9 Output schema / Task Complete populated"
+        ],
+        "checks": [
+          {
+            "type": "oai_demo_rubric"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "oai-demo:july-mass-agent-0"
+    ]
   },
   {
     "name": "single-creator-arm",

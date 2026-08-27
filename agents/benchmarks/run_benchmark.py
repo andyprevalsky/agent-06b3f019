@@ -9033,6 +9033,13 @@ def _run_declared_static_check(
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
             continue
+        if check_type == "oai_demo_rubric":
+            from benchmarks.oai_demo_rubric import grade_oai_demo_rubric
+
+            passed, reasoning = grade_oai_demo_rubric(data)
+            if not passed:
+                return False, reasoning
+            continue
         if check_type == "completion_summary_length":
             summaries = _final_completion_summaries(data)
             if not summaries:
@@ -9813,6 +9820,24 @@ async def run_single_task(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
+        if task.enforce_declared_evaluators and passed:
+            try:
+                tree_agents = await get_agent_tree(base_url, agent_id)
+                tree = canonicalize_agent_tree(
+                    await collect_tree_messages(agent_id, tree_agents, lambda a: get_agent(base_url, a))
+                )
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "tree": tree,
+                    "all_agents": tree_agents,
+                }
+            except Exception as tree_err:
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "tree": data.get("_benchmark", {}).get("tree") or {},
+                    "all_agents": tree_stats.get("all_agents", []),
+                    "tree_capture_error": str(tree_err),
+                }
         if task.enforce_declared_evaluators and passed:
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,
