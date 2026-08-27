@@ -277,14 +277,74 @@ def test_browser_use_record_then_replay(mem):
             calls["n"] += 1
             return {"action": "goto", "url": "https://x.com", "thinking": "navigate"}
 
-        # record (miss)
         request = {"task": "go to x", "browser_state": {"url": "https://x.com"}}
-        r1 = await browser_use_cache.cached_browser_decision(enabled=True, goal="g", request=request, call_llm=live)
-        # replay (hit) — live must NOT be called again
-        r2 = await browser_use_cache.cached_browser_decision(enabled=True, goal="g", request=request, call_llm=live)
-        assert calls["n"] == 1  # #11 replay = no second LLM call
-        assert r1 == r2
-        assert r2["action"] == "goto"
+        # Seed via write-only (read path soft-completes on miss).
+        r1 = await browser_use_cache.cached_browser_decision(
+            enabled=False,
+            write_enabled=True,
+            goal="g",
+            request=request,
+            call_llm=live,
+        )
+        assert calls["n"] == 1
+        assert r1["action"] == "goto"
+        # Replay under Fast Mode read — live must NOT be called again.
+        r2 = await browser_use_cache.cached_browser_decision(
+            enabled=True, goal="g", request=request, call_llm=live
+        )
+        assert calls["n"] == 1
+        assert r2 == r1
+
+    asyncio.run(body())
+
+
+def test_browser_use_soft_completes_on_miss(mem):
+    async def body():
+        calls = {"n": 0}
+
+        async def live():
+            calls["n"] += 1
+            return {"action": "click", "index": 1}
+
+        out = await browser_use_cache.cached_browser_decision(
+            enabled=True,
+            goal="g",
+            request={"task": "x", "browser_state": {"url": "https://x.com"}},
+            call_llm=live,
+        )
+        assert calls["n"] == 0
+        assert mem.set_calls == 0
+        assert out["action"]["action"] == "done"
+        assert out.get("from_fast_cache") is True
+
+    asyncio.run(body())
+
+
+def test_browser_use_soft_completes_on_lookup_error(monkeypatch, mem):
+    """Cache-read errors must not fall through to live browser LLM under FM read."""
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(browser_use_cache.cache_client, "cache_get", boom)
+
+    async def body():
+        calls = {"n": 0}
+
+        async def live():
+            calls["n"] += 1
+            return {"action": "click", "index": 1}
+
+        out = await browser_use_cache.cached_browser_decision(
+            enabled=True,
+            goal="g",
+            request={"task": "x", "browser_state": {"url": "https://x.com"}},
+            call_llm=live,
+        )
+        assert calls["n"] == 0
+        assert mem.set_calls == 0
+        assert out["action"]["action"] == "done"
+        assert out.get("from_fast_cache") is True
 
     asyncio.run(body())
 

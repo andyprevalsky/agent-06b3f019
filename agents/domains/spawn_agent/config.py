@@ -20,6 +20,10 @@ EXPLORE_DEPTH_LIMITS = {
     "deep": (50, timedelta(seconds=1800)),
 }
 EXPLORE_DEFAULT_DEPTH = "quick"
+# Fast Mode replays July OAi-demo explore trajectories whose attempt_completion
+# typically lands around turn ~14 (many namespaces run to p:20–49). The live
+# default "quick" (5) aborts mid-replay before that turn → max-iter + loops.
+EXPLORE_FAST_MODE_DEPTH = "deep"
 # Turns before the cap at which the graceful wind-down nudge is injected.
 EXPLORE_WINDDOWN_WINDOW = 1
 
@@ -31,6 +35,25 @@ def explore_limits_for_depth(depth: str | None) -> tuple[int, timedelta]:
     may batch multiple parallel searches.
     """
     return EXPLORE_DEPTH_LIMITS.get(depth or EXPLORE_DEFAULT_DEPTH, EXPLORE_DEPTH_LIMITS[EXPLORE_DEFAULT_DEPTH])
+
+
+def resolve_explore_depth(
+    requested_depth: str | None,
+    *,
+    fast_mode_cache_enabled: bool = False,
+) -> str:
+    """Pick explore thoroughness for a spawn.
+
+    Under Fast Mode, always use EXPLORE_FAST_MODE_DEPTH: July OAi-demo explore
+    caches often reach attempt_completion at turn ~26–36, so both the live
+    default (quick=5) and an explicit medium=20 abort mid-replay. Outside Fast
+    Mode, explicit medium/deep win; otherwise the live default applies.
+    """
+    if fast_mode_cache_enabled:
+        return EXPLORE_FAST_MODE_DEPTH
+    if requested_depth in EXPLORE_DEPTH_LIMITS:
+        return requested_depth
+    return EXPLORE_DEFAULT_DEPTH
 
 # ── Network metadata ──
 NETWORK_CACHE_TTL_MINUTES = 5

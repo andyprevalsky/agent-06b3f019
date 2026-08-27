@@ -384,6 +384,109 @@ async def cache_get(key: str) -> Optional[Any]:
     return record.get("value") if record.get("hit") else None
 
 
+async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]]:
+    """Return `(value, hit_key)` for the first hitting key in `keys`, else `(None, None)`."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    if not ordered:
+        return None, None
+    if len(ordered) == 1:
+        value = await cache_get(ordered[0])
+        return (value, ordered[0]) if value is not None else (None, None)
+
+    # Prefer get-many so alias lookups stay one RTT; fall back to serial gets.
+    try:
+        records = await _fetch_cache_records_many(ordered)
+        for key in ordered:
+            record = records.get(key) or {}
+            if record.get("hit") and record.get("value") is not None:
+                return record.get("value"), key
+        return None, None
+    except _BatchUnsupported:
+        for key in ordered:
+            value = await cache_get(key)
+            if value is not None:
+                return value, key
+        return None, None
+    except Exception as exc:
+        # Transport / 5xx after get-many: try serial, but if every key still
+        # misses, re-raise so callers set lookup_failed and skip passthroughs.
+        for key in ordered:
+            try:
+                value = await cache_get(key)
+            except Exception:
+                continue
+            if value is not None:
+                return value, key
+        raise RuntimeError(f"fast-cache get-first failed: {exc}") from exc
+
+
+async def cache_get_position_fallback(
+    goal_hash: str,
+    call_site: str,
+    step: Optional[int] = None,
+) -> tuple[Optional[Any], Optional[str]]:
+    """Oldest matching entry for goal/site/step when exact keys miss.
+
+    Restores the Jul 2026 OAi demo warm cache after fingerprint drift: prefer the
+    earliest row under that durable trajectory slot (the original warm write).
+
+    When ``step is None`` (content-addressed contexts), return a miss — the
+    backend position query does not compare the request fingerprint, so a
+    fallback would replay another request's value for the same call site.
+    Transport / non-404 errors raise so callers can set ``lookup_failed`` and
+    skip synthetic passthroughs.
+    """
+    if step is None:
+        return None, None
+    api_url, api_key = _backend()
+    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
+    try:
+        resp = await _shared_client().post(
+            f"{api_url}/api/fast-cache/get-position",
+            headers=backend_api_headers(api_key),
+            json=body,
+            timeout=_GET_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warning("fast_cache.get_position_error", error=str(exc)[:300])
+        raise
+    if resp.status_code != 200:
+        if resp.status_code in {404, 405}:
+            return None, None
+        logger.warning("fast_cache.get_position_failed", status=resp.status_code)
+        raise RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
+    data = resp.json()
+    if not data.get("hit"):
+        return None, None
+    return data.get("value"), data.get("key")
+
+
+async def trajectory_prior_exists(
+    goal_hash: str,
+    call_site: str,
+    step: Optional[int],
+) -> bool:
+    """True when an earlier durable slot exists for this goal/site.
+
+    Soft-complete is only valid at true end-of-trajectory (warm namespace ran
+    out of rows). Cold namespaces (no prior slot) must not soft-complete —
+    that fakes hits and diverges from July replay.
+    """
+    if not goal_hash or step is None or int(step) <= 0:
+        return False
+    try:
+        prior, _ = await cache_get_position_fallback(goal_hash, call_site, int(step) - 1)
+    except Exception:
+        return False
+    return prior is not None
+
+
 # Per-process memo of (read_enabled, goal, write_enabled, root_agent_id) keyed by agent_id, so
 # auto-resolution costs at most one backend lookup per agent per worker process.
 _AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str]]] = {}

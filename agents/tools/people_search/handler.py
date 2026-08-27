@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from tools.people_search.types import ExecuteActivityCallable
 
 logger = structlog.get_logger()
+FAST_CACHE_HIT_FIELD = "_fast_cache_hit"
 
 
 def _safe_time() -> float:
@@ -62,6 +63,9 @@ class PeopleSearchManager(ToolManager):
         tool_call_id: str,
         agent_id: str,
         user_id: Optional[str] = None,
+        fast_mode_cache_enabled: bool = False,
+        fast_mode_goal: Optional[str] = None,
+        fast_mode_cache_write_enabled: bool = False,
         world_model_mode: str = "real",
     ) -> dict[str, Any]:
         """Execute people search and post events via handle_tool_event.
@@ -73,6 +77,9 @@ class PeopleSearchManager(ToolManager):
             tool_call_id: Unique ID for this tool call.
             agent_id: Agent ID for event routing.
             user_id: User ID for usage tracking.
+            fast_mode_cache_enabled / fast_mode_goal: Fast Mode read switch.
+            fast_mode_cache_write_enabled: Reserved for write-through (unused until
+                people_search durable cache lands); Soft-complete still applies on read.
 
         Returns:
             Result dict with normalized people-search output and usage.
@@ -109,9 +116,18 @@ class PeopleSearchManager(ToolManager):
         # 2. Execute people search activity
         try:
             logger.info("Calling people_search_activity", mode=mode, provider=provider, query_len=len(query))
-            activity_args = [query, mode, provider, limit, fields]
-            if world_model_mode != "real":
-                activity_args.extend([agent_id, world_model_mode])
+            activity_args = [
+                query,
+                mode,
+                provider,
+                limit,
+                fields,
+                agent_id,
+                world_model_mode,
+                fast_mode_cache_enabled,
+                fast_mode_goal,
+                fast_mode_cache_write_enabled,
+            ]
             result = await execute_activity(
                 people_search_activity,
                 args=activity_args,
@@ -125,9 +141,12 @@ class PeopleSearchManager(ToolManager):
             )
 
             elapsed_time = _safe_time() - start_time
+            cache_hit = isinstance(result, dict) and bool(result.get(FAST_CACHE_HIT_FIELD))
+            if cache_hit:
+                result = {k: v for k, v in result.items() if k != FAST_CACHE_HIT_FIELD}
             provider_used = result.get("provider_used", "") if isinstance(result, dict) else ""
             simulated = isinstance(result, dict) and bool(result.get("world_model_simulated"))
-            total_cost_cents = 0.0 if simulated else _cost_for_provider(provider_used)
+            total_cost_cents = 0.0 if cache_hit or simulated else _cost_for_provider(provider_used)
 
             message = format_tool_message(
                 params=tool_call, result=result, time_elapsed=elapsed_time, cost_cents=total_cost_cents
@@ -151,14 +170,16 @@ class PeopleSearchManager(ToolManager):
                 "result": result,
                 "usage": {
                     "llm": [],
-                    "service": []
-                    if simulated
-                    else [
-                        {
-                            "cost_cents": total_cost_cents,
-                            "provider": f"People Search ({provider_used})" if provider_used else "People Search",
-                        }
-                    ],
+                    "service": (
+                        []
+                        if cache_hit or simulated
+                        else [
+                            {
+                                "cost_cents": total_cost_cents,
+                                "provider": f"People Search ({provider_used})" if provider_used else "People Search",
+                            }
+                        ]
+                    ),
                 },
             }
 
@@ -253,6 +274,9 @@ async def people_search_activity(
     fields: Optional[List[str]] = None,
     agent_id: Optional[str] = None,
     world_model_mode: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    fast_mode_goal: Optional[str] = None,
+    fast_mode_cache_write_enabled: bool = False,
 ) -> dict[str, Any]:
     """Activity: Find or enrich people via Exa or Parallel (sync, sub-minute).
 
@@ -260,16 +284,44 @@ async def people_search_activity(
     rate-limit or transport error the tool auto-retries the other provider.
     Returns one normalized envelope regardless of provider.
 
+    Fast Mode read: soft-complete without a live Exa/Parallel call. There is no
+    durable people_search Fast Mode namespace yet (unlike web_search/web_fetch);
+    falling through burned OAi-demo warm-path cents via People Search (parallel).
+
     Args:
         query: Natural-language people request.
         mode: 'enrich' (one person, field-level) or 'discover' (a list).
         provider: 'exa' or 'parallel'.
         limit: discover only; clamped to the public 1..25 range.
         fields: enrich only; the attributes to return for the person.
+        agent_id / world_model_mode: World-model harness routing (precedes Fast
+            Mode flags so older seven-arg payloads stay compatible).
+        fast_mode_cache_enabled / fast_mode_goal: Fast Mode read switch.
+        fast_mode_cache_write_enabled: Reserved; write-through still live until
+            a people_search cache key exists.
 
     Returns:
         Dict with query, mode_used, provider_used, providers_attempted, results, warnings.
     """
+    read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
+    if read_cache:
+        logger.info(
+            "fast_cache.people_search_soft_complete",
+            query=query[:120],
+            mode=mode,
+            provider=provider,
+        )
+        return {
+            "query": query,
+            "mode_used": mode,
+            "provider_used": "fast-mode-soft-complete",
+            "providers_attempted": [],
+            "results": [],
+            "warnings": [
+                "Fast Mode cache miss for people_search. Returning without a live provider call."
+            ],
+            FAST_CACHE_HIT_FIELD: True,
+        }
 
     async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:
         return await execute_people_search(
@@ -280,16 +332,18 @@ async def people_search_activity(
             fields=fields,
         )
 
+    # Preserve the pre-FM contract: omitted / "real" mode allows live fallback.
+    effective_wm = None if world_model_mode in (None, "real") else world_model_mode
     try:
         return await WorldModelToolExecutionAdapter.from_env(
             agent_id=agent_id,
-            mode=world_model_mode,
+            mode=effective_wm,
         ).execute(
             "people_search",
             {"query": query, "mode": mode, "provider": provider, "limit": limit, "fields": fields},
             "people_search_activity",
             real_executor,
-            allow_real_fallback=world_model_mode is None,
+            allow_real_fallback=effective_wm is None,
         )
     except Exception:
         logger.error("People search failed", query=query, mode=mode, provider=provider)

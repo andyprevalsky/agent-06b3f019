@@ -15,7 +15,10 @@ from typing import Optional
 
 from . import normalize
 
-WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
+WRITE_THROUGH_USER_IDS = {
+    "1f85ff25-6e29-4c1b-8739-f917bd101a30",  # Andy
+    "43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9",  # Tamy
+}
 
 
 @dataclass
@@ -57,6 +60,12 @@ class FastCacheContext:
         if self.base_step is not None:
             return normalize.position_key(self.goal, call_site, self.base_step, messages)
         return normalize.content_key(self.goal, call_site, messages)
+
+    def llm_lookup_keys(self, call_site: str, messages: object = None) -> list[str]:
+        """Exact keys to try for a cache read (current + OAi-demo aliases)."""
+        if self.base_step is not None:
+            return normalize.position_lookup_keys(self.goal, call_site, self.base_step, messages)
+        return [self.llm_key(call_site, messages)]
 
 
 _CTX: contextvars.ContextVar[Optional[FastCacheContext]] = contextvars.ContextVar(
