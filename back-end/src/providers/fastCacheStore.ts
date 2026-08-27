@@ -385,7 +385,7 @@ export async function cacheGetPosition(args: {
   // Prefer explicit CACHE_KEY_VERSION values (v42/v43) over `fastmode:%:llm:` —
   // a middle `%` also matches `fastmode:vN:sim.<model>:llm:...` and would
   // cross-replay world-model-scoped entries into real runs (and vice versa).
-  const VERSION_PREFIXES = ["v42", "v43"] as const;
+  const VERSION_PREFIXES = ['v42', 'v43'] as const;
   const patterns: Array<{ like: string; minStep: number | null }> =
     step === null
       ? VERSION_PREFIXES.map((v) => ({
