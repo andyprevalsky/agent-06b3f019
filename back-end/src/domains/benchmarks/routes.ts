@@ -69,7 +69,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       await service.ensureBenchmarkTasksSeeded().catch(() => undefined);
-      const prompts = service.getTestPrompts();
+      const prompts = await service.getTestPrompts();
       res.json({ prompts });
     } catch (error) {
       if (error instanceof TasksUnavailableError) {

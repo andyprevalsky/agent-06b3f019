@@ -3,7 +3,7 @@
  *
  * Proves checklist items:
  *  - #2  the toggle is hidden unless the user is in FAST_MODE_USER_IDS
- *  - #4  default off (controlled value starts false; toggling flips it)
+ *  - #4  default on for allowlisted accounts (controlled value; toggling flips it)
  *  - #3  the toggle drives the boolean threaded into the create-agent payload
  */
 import React from 'react';

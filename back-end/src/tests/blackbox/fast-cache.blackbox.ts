@@ -291,6 +291,26 @@ async function main(): Promise<void> {
     await fetch(`${BASE_URL}/api/agents/${agentId}`, { method: 'DELETE', headers });
   });
 
+  await test('create-agent defaults fast_mode_cache_enabled on when omitted', async () => {
+    const create = await post('/api/agents', {
+      goal: `fastmode default bbtest ${Date.now()}`,
+    });
+    assert(create.status === 200 || create.status === 201, `create status ${create.status}`);
+    const agentId = create.json.agent_id ?? create.json.id;
+    assert(typeof agentId === 'string', 'agent_id returned');
+    assert(
+      create.json.fast_mode_cache_enabled === true,
+      'create response must default Fast Mode on'
+    );
+    const res = await fetch(`${BASE_URL}/api/agents/${agentId}`, { headers });
+    const detail = await res.json();
+    assert(
+      detail.agent?.fast_mode_cache_enabled === true,
+      'persisted Fast Mode must default on when omitted'
+    );
+    await fetch(`${BASE_URL}/api/agents/${agentId}`, { method: 'DELETE', headers });
+  });
+
   if (failures.length > 0) {
     console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
     process.exit(1);

@@ -105,6 +105,7 @@ const CatalogTaskSchema = z.object({
       last_attempt_at: z.string().nullable(),
       last_status: z.string().nullable(),
       last_fast_mode: z.boolean(),
+      last_five_passed: z.boolean().optional(),
     })
     .nullable(),
 });

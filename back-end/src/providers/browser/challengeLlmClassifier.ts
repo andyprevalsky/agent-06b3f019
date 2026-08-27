@@ -38,9 +38,7 @@ const ChallengeClassificationSchema = z.object({
     .describe(
       'True when the page is still an anti-bot / CAPTCHA / access wall or otherwise unusable for the intended site task. False only when the real destination UI is visible and interactive.'
     ),
-  reason: z
-    .string()
-    .describe('One short sentence explaining the challenged/clean decision.'),
+  reason: z.string().describe('One short sentence explaining the challenged/clean decision.'),
 });
 
 export type ChallengeClassification = z.infer<typeof ChallengeClassificationSchema>;
@@ -90,9 +88,7 @@ export interface ChallengeClassifierBilling {
   userId?: string;
 }
 
-async function collectCompletion(
-  stream: AsyncIterable<CompletionChunk>
-): Promise<{
+async function collectCompletion(stream: AsyncIterable<CompletionChunk>): Promise<{
   text: string;
   usage: ChallengeClassifierLlmUsage;
   actualModel: string;
@@ -133,14 +129,12 @@ export async function waitForDomSettled(
   timeoutMs: number = CHALLENGE_LLM_SETTLE_MS
 ): Promise<void> {
   const started = Date.now();
-  await page.waitForLoadState('domcontentloaded', { timeout: Math.min(15_000, timeoutMs) }).catch(
-    () => undefined
-  );
+  await page
+    .waitForLoadState('domcontentloaded', { timeout: Math.min(15_000, timeoutMs) })
+    .catch(() => undefined);
   const remaining = Math.max(0, timeoutMs - (Date.now() - started));
   if (remaining > 0) {
-    await page
-      .waitForLoadState('networkidle', { timeout: remaining })
-      .catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: remaining }).catch(() => undefined);
   }
   // Short quiet period so late title/body hydration can land.
   await page.waitForTimeout(1_500);
@@ -182,7 +176,10 @@ type NetworkSummaryEntry = {
   response_body_truncated?: boolean;
 };
 
-function truncateBody(text: string, cap: number = NETWORK_BODY_CHAR_CAP): {
+function truncateBody(
+  text: string,
+  cap: number = NETWORK_BODY_CHAR_CAP
+): {
   snippet: string;
   truncated: boolean;
 } {
@@ -203,7 +200,8 @@ export function formatNetworkSummaryLines(entries: NetworkSummaryEntry[]): strin
       parts.push(`status=${status}`);
       if (statusText) parts.push(statusText);
     }
-    if (duration !== null && duration !== undefined) parts.push(`${Math.round(Number(duration))}ms`);
+    if (duration !== null && duration !== undefined)
+      parts.push(`${Math.round(Number(duration))}ms`);
     if (size !== null && size !== undefined) parts.push(`${Math.round(Number(size))}B`);
     if (url) parts.push(url);
     if (parts.length === 0) continue;
@@ -358,9 +356,7 @@ export function buildChallengeClassifierMessages(
     'Classify challenged true/false for this page state.',
   ].join('\n');
 
-  const userContent: CompletionMessage['content'] = [
-    { type: 'text', text: textBlock },
-  ];
+  const userContent: CompletionMessage['content'] = [{ type: 'text', text: textBlock }];
   if (context.screenshotBase64Png) {
     userContent.push({
       type: 'image_url',
