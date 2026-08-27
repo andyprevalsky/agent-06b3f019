@@ -699,6 +699,64 @@ async def fetch_supabase_logs(
 
 
 # ---------------------------------------------------------------------------
+# Canonical logs.tree (agent-id → parent/goal/status/messages)
+# ---------------------------------------------------------------------------
+
+# `/api/tool-usage/tree` returns a cost-rollup object. A previous Hub upload
+# stuffed that shape into `logs.tree`, so getRunAgent keyed nodes as
+# `agent_count` / `tool_usage_count` and every for_each child rendered as
+# "spinning up..." with message_count=0.
+TOOL_USAGE_TREE_KEYS = frozenset(
+    {
+        "root_agent_id",
+        "agent_count",
+        "tool_usage_count",
+        "llm_call_count",
+        "tokens_in",
+        "tokens_out",
+        "total_cost_cents",
+        "total_cost_dollars",
+        "total_tokens_from_tools",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    }
+)
+
+
+def canonicalize_agent_tree(raw: Any) -> Dict[str, dict]:
+    """Keep only agent-id-keyed nodes with parent/goal/status/messages.
+
+    Drops tool-usage rollup keys and any non-dict values so archive/Hub
+    adapters never invent empty chips from `/api/tool-usage/tree`.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, dict] = {}
+    for key, value in raw.items():
+        if not key or key in TOOL_USAGE_TREE_KEYS or not isinstance(value, dict):
+            continue
+        if not (
+            isinstance(value.get("messages"), list)
+            or "parent_agent_id" in value
+            or isinstance(value.get("goal"), str)
+            or isinstance(value.get("status"), str)
+        ):
+            continue
+        out[str(key)] = value
+    return out
+
+
+def tree_child_transcript_count(tree: Any, root_id: Optional[str]) -> int:
+    """How many non-root tree nodes carry at least one message."""
+    canonical = canonicalize_agent_tree(tree)
+    return sum(
+        1
+        for agent_id, info in canonical.items()
+        if agent_id != root_id and isinstance(info.get("messages"), list) and info["messages"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # Message transcript (from agent GET response)
 # ---------------------------------------------------------------------------
 

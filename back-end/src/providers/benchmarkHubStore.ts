@@ -435,6 +435,42 @@ function agentSummaryFromTask(
   };
 }
 
+const TOOL_USAGE_TREE_KEYS = new Set([
+  'root_agent_id',
+  'agent_count',
+  'tool_usage_count',
+  'llm_call_count',
+  'tokens_in',
+  'tokens_out',
+  'total_cost_cents',
+  'total_cost_dollars',
+  'total_tokens_from_tools',
+  'cache_read_input_tokens',
+  'cache_creation_input_tokens',
+]);
+
+function isAgentTreeNode(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const node = value as Record<string, unknown>;
+  return (
+    Array.isArray(node.messages) ||
+    'parent_agent_id' in node ||
+    typeof node.goal === 'string' ||
+    typeof node.status === 'string'
+  );
+}
+
+/** Keep agent-id-keyed transcript nodes; drop `/api/tool-usage/tree` rollups. */
+export function canonicalAgentTree(raw: unknown): Record<string, Record<string, unknown>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!key || TOOL_USAGE_TREE_KEYS.has(key) || !isAgentTreeNode(value)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 /**
  * Adapt a run bundle to the frontend agent-detail shape for one agent in the
  * run (root or any sub-agent captured by logs.tree), plus the fan-out tree.
@@ -449,7 +485,7 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
     const rootId = typeof task.agent_id === 'string' ? task.agent_id : '';
     if (!rootId) continue;
     const logs = (task.logs ?? {}) as Record<string, unknown>;
-    const tree = (logs.tree ?? {}) as Record<string, Record<string, unknown>>;
+    const tree = canonicalAgentTree(logs.tree);
     const isRoot = agentId === rootId;
     const inTree = Object.prototype.hasOwnProperty.call(tree, agentId);
     if (!isRoot && !inTree) continue;

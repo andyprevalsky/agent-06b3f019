@@ -4,7 +4,7 @@ not just the root."""
 
 import asyncio
 
-from benchmarks.logs import collect_tree_messages
+from benchmarks.logs import canonicalize_agent_tree, collect_tree_messages, tree_child_transcript_count
 
 
 def _run(coro):
@@ -64,6 +64,28 @@ def test_collect_tree_messages_tolerates_fetch_failure():
     tree = _run(collect_tree_messages("x", tree_agents, _boom))
     assert tree["x"]["messages"] == []
     assert tree["x"]["status"] == "ACTIVE"
+
+
+def test_canonicalize_agent_tree_drops_tool_usage_rollup():
+    tree = canonicalize_agent_tree(
+        {
+            "root_agent_id": "root-1",
+            "agent_count": 54,
+            "tool_usage_count": 9,
+            "llm_call_count": 4,
+            "tokens_in": 1,
+            "child-a": {
+                "parent_agent_id": "root-1",
+                "goal": "research A",
+                "status": "COMPLETED",
+                "messages": [{"role": "ASSISTANT", "message": "A done"}],
+            },
+        }
+    )
+    assert set(tree.keys()) == {"child-a"}
+    assert tree_child_transcript_count(tree, "root-1") == 1
+    assert canonicalize_agent_tree({"agent_count": 2, "tool_usage_count": 1}) == {}
+    assert tree_child_transcript_count({"agent_count": 2}, "root-1") == 0
 
 
 def test_collect_tree_messages_status_falls_back_to_agent_obj():

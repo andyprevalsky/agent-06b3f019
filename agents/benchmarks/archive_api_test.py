@@ -380,6 +380,47 @@ def test_tree_endpoint_returns_full_fanout(tmp_path):
         configure_archive_handler(None)
 
 
+def test_load_archive_ignores_tool_usage_shaped_tree(tmp_path):
+    """`/api/tool-usage/tree` rollups must not become empty child chips."""
+    run_path = tmp_path / "run.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "t",
+                "tasks": [
+                    {
+                        "name": "test-mass-agent-run-0",
+                        "passed": True,
+                        "agent_id": "root-1",
+                        "logs": {
+                            "messages": [{"role": "USER", "message": "fan out", "created_at": "t0"}],
+                            "tree": {
+                                "root_agent_id": "root-1",
+                                "agent_count": 54,
+                                "tool_usage_count": 9,
+                                "llm_call_count": 4,
+                                "tokens_in": 1,
+                                "tokens_out": 1,
+                                "total_cost_cents": 0,
+                                "child-a": {
+                                    "parent_agent_id": "root-1",
+                                    "goal": "research A",
+                                    "status": "COMPLETED",
+                                    "messages": [{"role": "ASSISTANT", "message": "A done", "created_at": "t1"}],
+                                },
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    archive = load_archive(run_path)
+    assert set(archive.keys()) == {"root-1", "child-a"}
+    assert archive["child-a"].agent["message_count"] == 1
+    assert archive["child-a"].messages[0]["text"] == "A done"
+
+
 def test_tree_endpoint_backward_compat_root_only(tmp_path):
     # A run.json WITHOUT logs.tree (predates the fix) still serves the lone root.
     run_path = tmp_path / "run.json"

@@ -356,13 +356,20 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
     const root = rootView.data as {
       agent: { agent_id: string; busId: string };
       messages: Array<{ text: string }>;
-      tree: Array<{ agent_id: string; parent_agent_id: string | null }>;
+      tree: Array<{
+        agent_id: string;
+        parent_agent_id: string | null;
+        message_count: number;
+        status: string;
+      }>;
     };
     assert(root.agent.agent_id === ROOT_AGENT, 'root agent id mismatch');
     assert(root.messages.length === 2, `root messages ${root.messages.length} != 2`);
     assert(root.tree.length === 2, `tree size ${root.tree.length} != 2`);
     const sub = root.tree.find((n) => n.agent_id === SUB_AGENT);
     assert(sub?.parent_agent_id === ROOT_AGENT, 'sub-agent parent link missing');
+    assert((sub?.message_count ?? 0) > 0, 'sub-agent tree node must carry a transcript');
+    assert(sub?.status === 'COMPLETED', `sub-agent status ${sub?.status} != COMPLETED`);
 
     // sub-agent transcript (the fan-out renders)
     const subView = await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}/agents/${SUB_AGENT}`, {
@@ -444,18 +451,99 @@ async function testAgents_mainPanelFallbackServesBenchmarkAgents(): Promise<void
       headers: internalHeaders,
     });
     assertStatus(tree.status, 200, tree.data);
-    const ids = (tree.data as { agents: Array<{ agent_id: string }> }).agents.map(
-      (a) => a.agent_id
-    );
+    const ids = (
+      tree.data as { agents: Array<{ agent_id: string; message_count: number; status: string }> }
+    ).agents.map((a) => a.agent_id);
     assert(ids.includes(ROOT_AGENT) && ids.includes(SUB_AGENT), `tree fallback wrong: ${ids}`);
+    const subNode = (
+      tree.data as { agents: Array<{ agent_id: string; message_count: number; status: string }> }
+    ).agents.find((a) => a.agent_id === SUB_AGENT);
+    assert((subNode?.message_count ?? 0) > 0, 'tree fallback child must not be spinning-up empty');
+    assert(subNode?.status === 'COMPLETED', 'tree fallback child status');
 
     // sub-agent transcript through the normal route too
     const sub = await request(`${BASE_URL}/api/agents/${SUB_AGENT}`, {
       headers: internalHeaders,
     });
     assertStatus(sub.status, 200, sub.data);
+    const subBody = sub.data as { messages: Array<{ text: string }> };
+    assert((subBody.messages?.length ?? 0) > 0, 'sub-agent fallback transcript missing');
   } finally {
     await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}`, {
+      method: 'DELETE',
+      headers: internalHeaders,
+    });
+  }
+}
+
+async function testRuns_toolUsageShapedTreeDoesNotInventEmptyChips(): Promise<void> {
+  const runId = `${RUN_ID}-tool-usage-tree`;
+  const bundle = syntheticBundle();
+  bundle.run_id = runId;
+  const tasks = bundle.tasks as Array<Record<string, unknown>>;
+  const logs = tasks[0].logs as Record<string, unknown>;
+  logs.tree = {
+    root_agent_id: ROOT_AGENT,
+    agent_count: 54,
+    tool_usage_count: 9,
+    llm_call_count: 4,
+    tokens_in: 1,
+    tokens_out: 1,
+    total_cost_cents: 0,
+    total_cost_dollars: 0,
+    total_tokens_from_tools: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    [SUB_AGENT]: {
+      parent_agent_id: ROOT_AGENT,
+      goal: 'sub research goal',
+      status: 'COMPLETED',
+      messages: [
+        {
+          role: 'ASSISTANT',
+          message: 'cached child trajectory',
+          created_at: '2026-07-10T00:00:03Z',
+        },
+      ],
+    },
+  };
+
+  try {
+    const upload = await request(`${BASE_URL}/api/benchmarks/runs`, {
+      method: 'POST',
+      headers: internalHeaders,
+      body: JSON.stringify(bundle),
+    });
+    assertStatus(upload.status, 201, upload.data);
+
+    const rootView = await request(`${BASE_URL}/api/benchmarks/runs/${runId}/agents/${ROOT_AGENT}`, {
+      headers: internalHeaders,
+    });
+    assertStatus(rootView.status, 200, rootView.data);
+    const tree = (
+      rootView.data as {
+        tree: Array<{ agent_id: string; message_count: number; status: string }>;
+      }
+    ).tree;
+    const ids = tree.map((n) => n.agent_id);
+    assert(!ids.includes('agent_count'), `tool-usage keys leaked into tree: ${ids}`);
+    assert(!ids.includes('tool_usage_count'), `tool-usage keys leaked into tree: ${ids}`);
+    assert(ids.includes(ROOT_AGENT) && ids.includes(SUB_AGENT), `canonical children missing: ${ids}`);
+    const sub = tree.find((n) => n.agent_id === SUB_AGENT);
+    assert((sub?.message_count ?? 0) > 0, 'child transcript dropped from mixed tool-usage tree');
+    assert(sub?.status === 'COMPLETED', 'child must not render as spinning up');
+
+    const subView = await request(`${BASE_URL}/api/benchmarks/runs/${runId}/agents/${SUB_AGENT}`, {
+      headers: internalHeaders,
+    });
+    assertStatus(subView.status, 200, subView.data);
+    const subMessages = (subView.data as { messages: Array<{ text: string }> }).messages;
+    assert(
+      subMessages.length === 1 && subMessages[0].text === 'cached child trajectory',
+      'child trajectory missing after tool-usage rollup mix-in'
+    );
+  } finally {
+    await request(`${BASE_URL}/api/benchmarks/runs/${runId}`, {
       method: 'DELETE',
       headers: internalHeaders,
     });
@@ -633,6 +721,10 @@ async function runAll(): Promise<void> {
     ['patch: task edits rejected (read-only catalog)', testPatch_rejectsEdits],
     ['runs: upload→list→detail→agents round-trip', testRuns_uploadListDetailAgentRoundTrip],
     ['runs: blank agent ids normalize to null', testRuns_blankAgentIdNormalizesToNull],
+    [
+      'runs: tool-usage logs.tree does not invent empty chips',
+      testRuns_toolUsageShapedTreeDoesNotInventEmptyChips,
+    ],
     ['runs: upload requires run_id', testRuns_uploadRequiresRunId],
     [
       'agents API fallback: benchmark agents open in the main panel',

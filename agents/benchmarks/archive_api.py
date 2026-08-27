@@ -251,7 +251,9 @@ def load_archive(run_path: Path) -> dict[str, ArchivedAgent]:
         # Index every spawned sub-agent in the tree so the archive renders the full
         # fan-out (not just the root). Each carries busId=<root> + parent_agent_id so
         # GET /api/agents/tree?busId=<root> returns the whole tree.
-        tree = (task.get("logs") or {}).get("tree") or {}
+        from benchmarks.logs import canonicalize_agent_tree
+
+        tree = canonicalize_agent_tree((task.get("logs") or {}).get("tree") or {})
         for sub_id, info in tree.items():
             sub_id = str(sub_id)
             if not sub_id or sub_id == agent_id:

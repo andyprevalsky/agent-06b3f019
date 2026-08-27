@@ -247,22 +247,24 @@ class SpawnAgentManager(ToolManager):
 
         blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
         if blocked_reason:
-            # Fast Mode: the July tree already gathered this research. Replaying
-            # the post-July explore-only guard as ERROR leaves chips; allowing
-            # the spawn then hits max nesting depth (4). Finish instead.
             fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="spawn_agent complete" if fm else "spawn_agent failed",
-                message=(
-                    "Fast Mode cache trajectory already gathered this research; skipping further spawn."
-                    if fm
-                    else blocked_reason
-                ),
-                status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
-                metadata={"agentType": agent_type},
-            )
-            return
+            # Fast Mode must still spawn general_purpose / for_each so each child
+            # Agent row exists and can replay execute_loop cache. FINISH-without-
+            # spawn leaves empty "spinning up..." chips on the Hub FE.
+            skip_without_spawn = not (fm and agent_type in {"general_purpose", "for_each"})
+            if skip_without_spawn:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="spawn_agent complete" if fm else "spawn_agent failed",
+                    message=(
+                        "Fast Mode cache trajectory already gathered this research; skipping further spawn."
+                        if fm
+                        else blocked_reason
+                    ),
+                    status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
+                    metadata={"agentType": agent_type},
+                )
+                return
 
         reserved_explore_slot = False
         if agent_type == "explore" and _explore_only_research_instruction(workflow_instance, tool_call):
