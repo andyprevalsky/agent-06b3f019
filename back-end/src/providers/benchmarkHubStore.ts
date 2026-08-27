@@ -19,6 +19,11 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3
 import fs from 'fs';
 import path from 'path';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
+import {
+  completionOutputsFromMessages,
+  schemaFromCompletionOutputs,
+  structuredFromCompletionOutputs,
+} from './benchmarkHubOutputs';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -381,69 +386,6 @@ function frontendMessage(
     metadata: raw.metadata ?? {},
     file_pointer: raw.file_pointer ?? null,
   };
-}
-
-function inferOutputSchemaType(value: unknown): string {
-  if (typeof value === 'boolean') return 'bool';
-  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
-  if (Array.isArray(value)) {
-    if (value.length > 0 && value.every((item) => item !== null && typeof item === 'object')) {
-      return 'list[object]';
-    }
-    if (value.every((item) => typeof item === 'number' && Number.isInteger(item))) {
-      return 'list[int]';
-    }
-    return 'list[str]';
-  }
-  if (value !== null && typeof value === 'object') return 'object';
-  return 'str';
-}
-
-function completionOutputsFromMessages(
-  messages: Array<Record<string, unknown>>
-): Array<Record<string, unknown>> {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const metadata = (messages[index]?.metadata ?? {}) as Record<string, unknown>;
-    const summary = (metadata.completionSummary ?? metadata.completion_summary) as
-      Record<string, unknown> | undefined;
-    const outputs = summary?.outputs;
-    if (Array.isArray(outputs) && outputs.length > 0) {
-      return outputs.filter(
-        (row): row is Record<string, unknown> => !!row && typeof row === 'object'
-      );
-    }
-  }
-  return [];
-}
-
-function schemaFromCompletionOutputs(
-  outputs: Array<Record<string, unknown>>
-): Record<string, unknown> | null {
-  const fields = outputs
-    .map((row) => {
-      const name = String(row.key ?? row.name ?? '');
-      if (!name) return null;
-      const label = String(row.label ?? name.replace(/_/g, ' '));
-      return {
-        name,
-        type: inferOutputSchemaType(row.value),
-        required: true,
-        description: label,
-      };
-    })
-    .filter((field): field is NonNullable<typeof field> => field !== null);
-  return fields.length > 0 ? { fields } : null;
-}
-
-function structuredFromCompletionOutputs(
-  outputs: Array<Record<string, unknown>>
-): Record<string, unknown> | null {
-  const populated: Record<string, unknown> = {};
-  for (const row of outputs) {
-    const name = String(row.key ?? row.name ?? '');
-    if (name) populated[name] = row.value;
-  }
-  return Object.keys(populated).length > 0 ? populated : null;
 }
 
 function agentSummaryFromTask(
