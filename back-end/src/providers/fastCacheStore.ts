@@ -360,8 +360,7 @@ export async function cacheGetPosition(args: {
   step?: number | null;
 }): Promise<CacheGetResult & { key: string | null }> {
   const site = args.callSite.trim();
-  const step =
-    args.step === null || args.step === undefined ? null : Math.trunc(args.step);
+  const step = args.step === null || args.step === undefined ? null : Math.trunc(args.step);
   if (!args.goalHash || !site || (step !== null && (!Number.isFinite(step) || step < 0))) {
     return { hit: false, value: null, blobPath: null, key: null };
   }
@@ -434,9 +433,7 @@ export async function cacheGetPosition(args: {
             ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
             LIMIT 1
           `,
-        ...(minStep === null
-          ? [args.goalHash, pattern]
-          : [args.goalHash, pattern, minStep])
+        ...(minStep === null ? [args.goalHash, pattern] : [args.goalHash, pattern, minStep])
       );
       const row = rows[0];
       if (!row) continue;

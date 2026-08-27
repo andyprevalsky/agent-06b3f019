@@ -159,7 +159,10 @@ async function main(): Promise<void> {
     });
     assert(pos.status === 200, `get-position status ${pos.status}`);
     assert(pos.json.hit === true, 'expected content-slot hit');
-    assert((pos.json.value as JsonObject).content === 'SCHEMA_OLD', 'must prefer oldest schema write');
+    assert(
+      (pos.json.value as JsonObject).content === 'SCHEMA_OLD',
+      'must prefer oldest schema write'
+    );
     await post('/api/fast-cache/purge', { goalHash: posGoal });
   });
 
