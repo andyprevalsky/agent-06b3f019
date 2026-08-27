@@ -65,6 +65,7 @@ def test_usage_model_falls_back_when_cache_provenance_is_unknown():
     assert _resolve_usage_model("", requested) == requested
     assert _resolve_usage_model(None, requested) == requested
     assert _resolve_usage_model("gpt-5.6-sol-gpt", requested) == "gpt-5.6-sol-gpt"
+    assert _resolve_usage_model("fast-cache", requested) == "fast-cache"
 
 
 def test_task_dag_sequential():
@@ -6254,6 +6255,83 @@ async def test_workflow_query_parent_state_exception_returns_empty():
         _restore_workflow(original)
 
 
+async def test_workflow_query_parent_state_throttles_repeat_queries():
+    """Children must not query the parent on every loop tick under fan-out."""
+    from datetime import timedelta
+
+    from workflows.agent_workflow import _PARENT_STATE_QUERY_MIN_INTERVAL, _QUERY_PARENT_STATE_TIMEOUT
+
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["query_parent_state_activity"] = {"is_paused": False, "is_cost_limit_reached": False}
+    original = _patch_workflow(fake)
+    try:
+        first = await wf._query_parent_state()
+        second = await wf._query_parent_state()
+        assert first == {"is_paused": False, "is_cost_limit_reached": False}
+        assert second == first
+        assert [c[0] for c in fake.activity_calls] == ["query_parent_state_activity"]
+        fake.now_value = fake.now_value + _PARENT_STATE_QUERY_MIN_INTERVAL
+        third = await wf._query_parent_state()
+        assert third == first
+        assert [c[0] for c in fake.activity_calls] == [
+            "query_parent_state_activity",
+            "query_parent_state_activity",
+        ]
+        assert _QUERY_PARENT_STATE_TIMEOUT >= timedelta(seconds=60)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_query_parent_state_skips_throttle_when_paused_by_parent():
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["query_parent_state_activity"] = {"is_paused": True, "is_cost_limit_reached": False}
+    original = _patch_workflow(fake)
+    try:
+        await wf._query_parent_state()
+        await wf._query_parent_state()
+        assert [c[0] for c in fake.activity_calls] == [
+            "query_parent_state_activity",
+            "query_parent_state_activity",
+        ]
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_post_message_throttles_tree_updates():
+    """Per-message tree broadcasts under 50-way fan-out must coalesce."""
+    from datetime import timedelta
+
+    from workflows.agent_workflow import _TREE_STATE_EMIT_MIN_INTERVAL
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-1"
+    wf.bus_id = "bus-1"
+    wf.parent_agent_id = "root-1"
+    wf.goal = "analyze"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._post_message("first", "ASSISTANT", {"toolCallId": "tc-1"})
+        await wf._post_message("second", "TOOL", {"toolCallId": "tc-1"})
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 1
+        fake.now_value = fake.now_value + _TREE_STATE_EMIT_MIN_INTERVAL
+        await wf._post_message("third", "ASSISTANT", {})
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 2
+        await wf._update_tree_state(status="COMPLETED")
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 3
+        assert _TREE_STATE_EMIT_MIN_INTERVAL == timedelta(seconds=3)
+    finally:
+        _restore_workflow(original)
+
+
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
@@ -6636,6 +6714,12 @@ async def run_all_tests():
     await r.record_async("wf_on_tokens_transient_keeps_gpt", test_workflow_on_tokens_transient_error_keeps_gpt_token)
     await r.record_async("wf_check_parent_state_no_parent", test_workflow_check_parent_state_no_parent_returns_early)
     await r.record_async("wf_query_parent_state_exception", test_workflow_query_parent_state_exception_returns_empty)
+    await r.record_async("wf_query_parent_state_throttles", test_workflow_query_parent_state_throttles_repeat_queries)
+    await r.record_async(
+        "wf_query_parent_state_skips_throttle_when_paused",
+        test_workflow_query_parent_state_skips_throttle_when_paused_by_parent,
+    )
+    await r.record_async("wf_post_message_throttles_tree", test_workflow_post_message_throttles_tree_updates)
 
     # Temporal workflow tests (all run inside one shared environment)
     wf_results = await _run_all_workflow_tests()

@@ -100,6 +100,14 @@ logger = structlog.get_logger()
 # is unreachable in a way that can't be classified as terminal. With the loop's 1s
 # floor sleep this is ~30s+ of continuous unreachability before giving up.
 _ORPHAN_TRANSIENT_FAILURE_LIMIT = 30
+# 50-way Fast Mode fan-out was flooding the parent workflow and the backend
+# with per-message tree broadcasts + per-iteration parent queries. Those
+# activities timed out (10s parent query, 10s tree update) and left children
+# ACTIVE when the 900s harness cap hit. Coalesce to one emit/query per
+# interval so cost stays O(1) per agent per window, not O(messages).
+_TREE_STATE_EMIT_MIN_INTERVAL = timedelta(seconds=3)
+_PARENT_STATE_QUERY_MIN_INTERVAL = timedelta(seconds=15)
+_QUERY_PARENT_STATE_TIMEOUT = timedelta(seconds=60)
 
 CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 CREATING_CLOUD_AGENT_TITLE = "Creating Cloud Agent"
@@ -377,6 +385,9 @@ class AgentWorkflow:
         # Coalesce bursts to at most one emit per _TREE_COST_EMIT_MIN_INTERVAL;
         # terminal/cost-limit transitions force-flush so the final value lands.
         self._last_tree_cost_emit_at: Optional[datetime] = None
+        self._last_tree_state_emit_at: Optional[datetime] = None
+        self._last_parent_state_query_at: Optional[datetime] = None
+        self._last_parent_state: Dict = {}
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
         # Tree token tracking (hierarchical relay: child → parent → root)
@@ -585,6 +596,10 @@ class AgentWorkflow:
         if runtime_start_time is not None:
             self.start_time = runtime_start_time
         self._last_tree_cost_emit_at = self._restored_datetime(runtime.get("last_tree_cost_emit_at"))
+        self._last_tree_state_emit_at = self._restored_datetime(runtime.get("last_tree_state_emit_at"))
+        self._last_parent_state_query_at = self._restored_datetime(runtime.get("last_parent_state_query_at"))
+        last_parent_state = runtime.get("last_parent_state")
+        self._last_parent_state = dict(last_parent_state) if isinstance(last_parent_state, dict) else {}
         for field_name in (
             "compute_token_lineage_key",
             "compute_token_fast_cache_affinity_key",
@@ -704,6 +719,9 @@ class AgentWorkflow:
                 "output_schema": self.output_schema,
                 "start_time": self._serialized_datetime(self.start_time),
                 "last_tree_cost_emit_at": self._serialized_datetime(self._last_tree_cost_emit_at),
+                "last_tree_state_emit_at": self._serialized_datetime(self._last_tree_state_emit_at),
+                "last_parent_state_query_at": self._serialized_datetime(self._last_parent_state_query_at),
+                "last_parent_state": dict(self._last_parent_state),
                 "compute_token_lineage_key": self.compute_token_lineage_key,
                 "compute_token_fast_cache_affinity_key": (self.compute_token_fast_cache_affinity_key),
                 "input_cents_per_1k": self.input_cents_per_1k,
@@ -3247,16 +3265,29 @@ class AgentWorkflow:
         """
         if not self.parent_workflow_id:
             return {}
+        now = workflow.now()
+        if (
+            not self._paused_by_parent
+            and self._last_parent_state_query_at is not None
+            and (now - self._last_parent_state_query_at) < _PARENT_STATE_QUERY_MIN_INTERVAL
+        ):
+            return dict(self._last_parent_state)
         try:
-            return await workflow.execute_activity(
+            state = await workflow.execute_activity(
                 query_parent_state_activity,
                 args=[self.parent_workflow_id],
-                start_to_close_timeout=timedelta(seconds=10),
+                start_to_close_timeout=_QUERY_PARENT_STATE_TIMEOUT,
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to query parent state: {e}")
-            return {}
+            self._last_parent_state_query_at = now
+            return dict(self._last_parent_state)
+        self._last_parent_state_query_at = now
+        if isinstance(state, dict):
+            self._last_parent_state = dict(state)
+            return state
+        return dict(self._last_parent_state)
 
     async def _check_parent_state(self) -> None:
         """Pull-based parent state check. Mirrors parent's pause/cost-limit state.
@@ -3808,6 +3839,20 @@ class AgentWorkflow:
         """
         if not self.bus_id:
             return
+
+        # Per-message broadcasts from 50 parallel children melt the 10s tree
+        # activity. Keep status transitions and the first message (so FE can
+        # leave "spinning up...") immediate; coalesce the rest.
+        explicit_status = status is not None
+        now = workflow.now()
+        if (
+            not explicit_status
+            and self.message_count != 1
+            and self._last_tree_state_emit_at is not None
+            and (now - self._last_tree_state_emit_at) < _TREE_STATE_EMIT_MIN_INTERVAL
+        ):
+            return
+        self._last_tree_state_emit_at = now
 
         tools_list = list(self.tools_in_use)
 

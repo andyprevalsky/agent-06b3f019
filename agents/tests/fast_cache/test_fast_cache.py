@@ -2123,10 +2123,14 @@ def test_hit_replays_without_calling_rose(mem):
         assert tc.data["name"] == "set_plan"
         meta = next(c for c in chunks if c.kind == "metadata")
         assert meta.data.get("from_fast_cache") is True
+        assert meta.data.get("actual_model") == "fast-cache"
         usage = next(c for c in chunks if c.kind == "usage")
         assert usage.data["prompt_tokens"] == 0
         assert usage.data["cache_read_input_tokens"] == 10
         assert usage.data["cache_creation_input_tokens"] == 0
+        assert usage.data["completion_tokens"] == 0
+        assert usage.data["tokens_out"] == 0
+        assert usage.data["total_tokens"] == 0
 
     asyncio.run(body())
 
@@ -2304,6 +2308,28 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     other_andy = "Find the current professional profile of Andy Prevalsky, founder of Rose Labs."
     other_aman = other_andy.replace("Andy Prevalsky", "Aman Gottumukkala")
     assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
+
+
+def test_cache_replay_usage_zeros_live_output_tokens():
+    """Replay must not report stored completion tokens as live streamed output."""
+    usage = rose_cache._cache_replay_usage(
+        {
+            "prompt_tokens": 40,
+            "completion_tokens": 250,
+            "tokens_out": 250,
+            "total_tokens": 290,
+            "cache_read_input_tokens": 10,
+            "cache_creation_input_tokens": 8,
+            "actual_model": "claude-fable-5",
+        }
+    )
+    assert usage["prompt_tokens"] == 0
+    assert usage["cache_creation_input_tokens"] == 0
+    assert usage["cache_read_input_tokens"] == 40
+    assert usage["completion_tokens"] == 0
+    assert usage["tokens_out"] == 0
+    assert usage["total_tokens"] == 0
+    assert usage["from_fast_cache"] is True
 
 
 def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():

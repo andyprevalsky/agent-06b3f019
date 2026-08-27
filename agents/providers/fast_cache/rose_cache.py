@@ -62,6 +62,12 @@ def _cache_replay_usage(original: Dict[str, Any]) -> Dict[str, Any]:
     usage["prompt_tokens"] = 0
     usage["cache_read_input_tokens"] = replay_read
     usage["cache_creation_input_tokens"] = 0
+    # Replay never streams tokens from a provider. Leaving the stored
+    # completion/output counters in place made benchmark live_output_tokens
+    # count July Fast Mode hits as live spend.
+    usage["completion_tokens"] = 0
+    usage["tokens_out"] = 0
+    usage["total_tokens"] = 0
     usage["from_fast_cache"] = True
     return usage
 
@@ -134,7 +140,7 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     yield SimpleNamespace(
         kind="metadata",
         data={
-            "actual_model": stored.get("actual_model", "unknown"),
+            "actual_model": "fast-cache",
             "pool_name": stored.get("pool_name", ""),
             "request_id": stored.get("request_id", ""),
             "from_fast_cache": True,
