@@ -22,6 +22,7 @@ import structlog
 
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import current_context
+from providers.fast_cache.normalize import is_oai_demo_goal_text, rewrite_oai_demo_display_names
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
 
@@ -125,6 +126,11 @@ def coerce_cached_llm_payload(stored: Dict[str, Any] | None) -> Dict[str, Any]:
 async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     """Reconstruct the StreamChunk sequence from a stored response."""
     stored = coerce_cached_llm_payload(stored)
+    ctx = current_context()
+    if ctx is not None and (
+        is_oai_demo_goal_text(ctx.goal or "") or is_oai_demo_goal_text(ctx.root_goal or "")
+    ):
+        stored = rewrite_oai_demo_display_names(stored)
     yield SimpleNamespace(
         kind="metadata",
         data={

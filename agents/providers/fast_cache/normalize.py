@@ -698,16 +698,52 @@ def normalize_url(raw_url: str) -> str:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+# Display-name swap for test-mass-agent-run-0 only. Child/explore goals that
+# say Andy Prevalsky must hash as the July Aman namespace so they replay the
+# original trajectories instead of cold-passthrough stubbing.
+OAI_DEMO_ROOT_GOAL_PREFIX = (
+    "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+)
+OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
+OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
+
+
+def is_oai_demo_goal_text(text: str) -> bool:
+    blob = text or ""
+    return OAI_DEMO_ROOT_GOAL_PREFIX in blob or OAI_DEMO_CHILD_WINDOW in blob
+
+
+def canonicalize_oai_demo_goal_for_hash(goal: str) -> str:
+    """Fold Andy-named OAi-demo goals back onto the July Aman cache namespace."""
+    if not is_oai_demo_goal_text(goal):
+        return goal
+    return goal.replace(OAI_DEMO_CACHE_DISPLAY_NAME, OAI_DEMO_CACHE_SOURCE_NAME).replace("Andy's", "Aman's")
+
+
+def rewrite_oai_demo_display_names(value: Any) -> Any:
+    """Rewrite cached Aman source names to Andy on replay for this task only."""
+    if isinstance(value, str):
+        return value.replace(OAI_DEMO_CACHE_SOURCE_NAME, OAI_DEMO_CACHE_DISPLAY_NAME).replace("Aman's", "Andy's")
+    if isinstance(value, list):
+        return [rewrite_oai_demo_display_names(item) for item in value]
+    if isinstance(value, dict):
+        return {key: rewrite_oai_demo_display_names(item) for key, item in value.items()}
+    return value
+
+
 def goal_hash(goal: str) -> str:
     """Short, stable hash of a goal string.
 
-    Exact-match on user prose, with one canonicalization: run-local
-    `@ref:message:<uuid>` pointers collapse before hashing. Spawn paths append
-    a fresh message reference to sub-agent goals on every run, and namespacing
-    on those would give each rerun of the same goal an empty cache namespace.
+    Exact-match on user prose, with two scoped canonicalizations:
+    1. run-local `@ref:message:<uuid>` pointers collapse before hashing
+    2. test-mass-agent-run-0 Andy/Aman display-name swap folds onto the July
+       cache namespace so child/explore lookups hit the original trajectories
+
     Keep in sync with `goalHash` in back-end fastCacheNormalizeCore.ts.
     """
     canonical = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", goal)
+    canonical = canonicalize_oai_demo_goal_for_hash(canonical)
     return sha256(canonical)[:16]
 
 

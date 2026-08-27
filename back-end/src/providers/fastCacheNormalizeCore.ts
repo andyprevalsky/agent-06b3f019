@@ -51,21 +51,34 @@ export function sha256(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
 }
 
+const OAI_DEMO_ROOT_GOAL_PREFIX =
+  "I'm building a personal brand for health, longevity, technology, founder journey"; // pragma: allowlist secret
+const OAI_DEMO_CHILD_WINDOW = '2026-04-04 through 2026-07-03'; // pragma: allowlist secret
+const OAI_DEMO_CACHE_SOURCE_NAME = 'Aman Gottumukkala';
+const OAI_DEMO_CACHE_DISPLAY_NAME = 'Andy Prevalsky';
+
+function canonicalizeOaiDemoGoalForHash(goal: string): string {
+  if (!goal.includes(OAI_DEMO_ROOT_GOAL_PREFIX) && !goal.includes(OAI_DEMO_CHILD_WINDOW)) {
+    return goal;
+  }
+  return goal.split(OAI_DEMO_CACHE_DISPLAY_NAME).join(OAI_DEMO_CACHE_SOURCE_NAME).split("Andy's").join("Aman's");
+}
+
 /**
  * Short, stable hash of a goal string.
  *
- * Exact-match on user prose, with one canonicalization: run-local
- * `@ref:message:<uuid>` pointers collapse before hashing. Spawn paths append a
- * fresh message reference to sub-agent goals on every run, and namespacing on
- * those would give each rerun of the same goal an empty cache namespace.
+ * Exact-match on user prose, with two scoped canonicalizations:
+ * 1. run-local `@ref:message:<uuid>` pointers collapse before hashing
+ * 2. test-mass-agent-run-0 Andy/Aman display-name swap folds onto the July
+ *    cache namespace so child/explore lookups hit the original trajectories
  * Keep in sync with `goal_hash` in agents providers/fast_cache/normalize.py.
  */
 export function goalHash(goal: string): string {
-  const canonical = goal.replace(
+  const collapsed = goal.replace(
     /@ref:message:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
     '@ref:message:<uuid>'
   );
-  return sha256(canonical).slice(0, 16);
+  return sha256(canonicalizeOaiDemoGoalForHash(collapsed)).slice(0, 16);
 }
 
 /** Recursively drop secret-bearing fields from an object before it is cached. */

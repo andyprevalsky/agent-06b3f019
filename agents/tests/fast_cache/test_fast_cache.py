@@ -2263,6 +2263,58 @@ def test_oai_demo_root_goal_hash_constant():
     assert normalize.OAI_DEMO_ROOT_GOAL_HASH == "4ae3193053ac1d8f"
 
 
+def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
+    """Andy-named children must reuse the July Aman cache namespace.
+
+    The display-name swap must not mint a new goalHash: that miss path
+    cold-passthroughs explore/execute into the 24s traj-end stub.
+    """
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    aman_goal = (
+        "You are analyzing ONE creator for Aman Gottumukkala, a technology founder "  # pragma: allowlist secret
+        "building a personal brand at the intersection of health, longevity, "  # pragma: allowlist secret
+        f"technology, and founder journey. Last 90 days: {window}. "  # pragma: allowlist secret
+        "Creator: Dr. Eric Topol."
+    )
+    andy_goal = aman_goal.replace("Aman Gottumukkala", "Andy Prevalsky")
+    assert "Andy Prevalsky" in andy_goal
+    assert normalize.goal_hash(andy_goal) == normalize.goal_hash(aman_goal)
+    other_andy = "Find the current professional profile of Andy Prevalsky, founder of Rose Labs."
+    other_aman = other_andy.replace("Andy Prevalsky", "Aman Gottumukkala")
+    assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
+
+
+def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():
+    stored = {
+        "content": "Hello Aman Gottumukkala",
+        "reasoning": "Aman's brand angle",
+        "tool_calls": [{"arguments": '{"result":"Aman Gottumukkala notes"}'}],
+    }
+    rewritten = normalize.rewrite_oai_demo_display_names(stored)
+    assert rewritten["content"] == "Hello Andy Prevalsky"
+    assert rewritten["reasoning"] == "Andy's brand angle"
+    assert "Andy Prevalsky" in rewritten["tool_calls"][0]["arguments"]
+    assert "Aman Gottumukkala" not in json.dumps(rewritten)
+
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    ctx = FastCacheContext(enabled=True, goal=f"Analyze Topol. Window {window}.")
+    token = set_context(ctx)
+    try:
+        chunks: list[Any] = []
+
+        async def collect() -> None:
+            async for chunk in rose_cache._replay(stored):
+                chunks.append(chunk)
+
+        asyncio.run(collect())
+        texts = [json.dumps(getattr(chunk, "data", {}), default=str) for chunk in chunks]
+        blob = "\n".join(texts)
+        assert "Andy Prevalsky" in blob
+        assert "Aman Gottumukkala" not in blob
+    finally:
+        reset_context(token)
+
+
 def test_position_lookup_keys_include_july_demo_aliases():
     request = {
         "pool": "rose-1-ultra",
