@@ -605,6 +605,10 @@ class RoseClient:
                         call_site,
                         ctx.base_step,
                     )
+                if stored is None:
+                    from providers.fast_cache.rose_cache import july_gp_position_retry
+
+                    stored, hit_key = await july_gp_position_retry(ctx, call_site)
             except Exception as exc:
                 logger.warning("fast_cache.get_error", key=key, error=str(exc)[:200])
                 stored, hit_key = None, None
@@ -690,7 +694,15 @@ class RoseClient:
                         yield chunk
                     return
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
-                if soft is not None and ctx.soft_complete_allowed:
+                # Known July GP execute namespaces start at p:1 — do not stub them
+                # as cold when the first get-position flakes.
+                from providers.fast_cache.rose_cache import is_july_gp_execute_site
+
+                if (
+                    soft is not None
+                    and ctx.soft_complete_allowed
+                    and not is_july_gp_execute_site(ctx, call_site)
+                ):
                     logger.info(
                         "llm.cache.replay",
                         call_site=call_site,

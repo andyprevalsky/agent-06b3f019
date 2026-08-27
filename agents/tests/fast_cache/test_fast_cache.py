@@ -2685,3 +2685,177 @@ def test_swf_miss_non_bench_goes_live(mem):
         assert rose.calls == 1
 
     asyncio.run(body())
+
+
+def _july_gp_child_goal() -> str:
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    return (
+        "You are analyzing ONE creator for Andy Prevalsky, a technology founder "  # pragma: allowlist secret
+        "building a personal brand at the intersection of health, longevity, "  # pragma: allowlist secret
+        f"technology, and founder journey. Last 90 days: {window}. "  # pragma: allowlist secret
+        "Creator: Dr. Eric Topol."
+    )
+
+
+def _july_web_search_payload() -> Dict[str, Any]:
+    return {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-ultra",
+        "request_id": "july-gp-p1",
+        "content": "",
+        "content_chunks": [],
+        "reasoning": "",
+        "tool_calls": [
+            {
+                "id": "call_july_gp_web_search",
+                "name": "web_search",
+                "arguments": '{"query":"Eric Topol recent content"}',
+            }
+        ],
+        "codex_reasoning_items": [],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "from_fast_cache": True},
+    }
+
+
+def test_july_gp_execute_first_step_retries_and_replays_web_search(mem, monkeypatch):
+    """First execute_loop get-position flake on a July GP child must retry, not stub.
+
+    Prod 66732839 stubbed Sahil/Lenny/Gabrielle/DeLauer/Greg because p:1 flaked
+    and trajectory_prior_exists(step=1) is false (no p:0). Replay must be
+    web_search, never attempt_completion.
+    """
+    calls = {"n": 0}
+
+    async def flake_then_hit(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        calls["n"] += 1
+        if calls["n"] == 1 or step is None or int(step) < 1:
+            return None, None
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", flake_then_hit)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        assert calls["n"] >= 2
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    asyncio.run(body())
+
+
+def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
+    """Known July GP execute namespaces must not emit the 9-msg traj-end stub.
+
+    After retries still miss, fall through to live rather than attempt_completion.
+    Other FM trees (Tokyo / non-July execute) keep existing cold-passthrough.
+    """
+
+    async def july_goes_live():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 1
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    async def tokyo_still_stubs():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal="Find the current professional profile of Andy Prevalsky, founder of Rose Labs.",
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion"
+
+    asyncio.run(july_goes_live())
+    asyncio.run(tokyo_still_stubs())
+
+
+def test_rose_client_july_gp_execute_retry_replays_not_stub(mem, monkeypatch):
+    """Production RoseClient.complete notch must retry July GP p:1 and replay tools."""
+    from providers.rose.client import RoseClient
+
+    calls = {"n": 0}
+
+    async def flake_then_hit(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        calls["n"] += 1
+        if calls["n"] == 1 or step is None or int(step) < 1:
+            return None, None
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}"
+
+    monkeypatch.setattr("providers.fast_cache.client.cache_get_position_fallback", flake_then_hit)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", flake_then_hit)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for c in _full_stream():
+                yield c
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="execute_loop",
+                agent_id="agent-july-gp",
+                dump_context=False,
+            )
+        )
+        assert live_calls["n"] == 0
+        assert calls["n"] >= 2
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+
+    asyncio.run(body())

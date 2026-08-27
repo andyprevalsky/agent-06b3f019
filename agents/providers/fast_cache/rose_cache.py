@@ -460,6 +460,34 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
     return None
 
 
+def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
+    """True for test-mass-agent-run-0 per-creator execute/plan loops.
+
+    Those namespaces are warm (July execute_loop starts at p:1). A first-step
+    miss is a lookup flake, not a cold namespace — never emit the 9-message
+    attempt_completion stub for them.
+    """
+    if (call_site or "").strip() not in {"execute_loop", "plan_loop"}:
+        return False
+    from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
+
+    return bool(july_gp_goal_hash_for_goal(getattr(ctx, "goal", None) or ""))
+
+
+async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
+    """Retry get-position at step >= 1 for a known July GP execute namespace."""
+    if not is_july_gp_execute_site(ctx, call_site):
+        return None, None
+    step = getattr(ctx, "base_step", None)
+    retry_step = 1 if step is None or int(step) < 1 else int(step)
+    last: tuple[Any, Any] = (None, None)
+    for _ in range(3):
+        last = await cache_client.cache_get_position_fallback(ctx.goal_hash, call_site, retry_step)
+        if last[0] is not None:
+            return last
+    return last
+
+
 async def cached_complete(
     rose_client: Any,
     *,
@@ -493,6 +521,8 @@ async def cached_complete(
                     call_site,
                     ctx.base_step,
                 )
+            if stored is None:
+                stored, hit_key = await july_gp_position_retry(ctx, call_site)
         except Exception as exc:  # cache read failures degrade to live
             logger.warning("fast_cache.get_error", key=key, error=str(exc))
             stored, hit_key = None, None
@@ -567,7 +597,13 @@ async def cached_complete(
             # Mode read (verify22 burned cents on cold execute/verifier/explore).
             # Emit the terminal schema payload as an explicit cold passthrough
             # replay — not soft_complete — so soft≈0 on the warm path.
-            if soft is not None and ctx.soft_complete_allowed:
+            # Known July GP execute namespaces are warm even when p:0 is absent;
+            # a first-step miss after retry is a lookup flake, not a cold stub.
+            if (
+                soft is not None
+                and ctx.soft_complete_allowed
+                and not is_july_gp_execute_site(ctx, call_site)
+            ):
                 logger.info(
                     "llm.cache.replay",
                     call_site=call_site,
