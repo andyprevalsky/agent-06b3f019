@@ -197,6 +197,11 @@ def _explore_agent_capacity(workflow_instance, expected_explore_agents: int) -> 
 
 def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, Any]) -> str | None:
     """Return an explanatory error when an explore-only task tries to delegate incorrectly."""
+    # Fast Mode: July OAi-demo children spawned general_purpose from explore-only
+    # goals. The live guard is correct for new runs; replaying it as ERROR
+    # leaves chips the original passing tree never had.
+    if bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+        return None
     if not _explore_only_research_instruction(workflow_instance, tool_call):
         return None
 

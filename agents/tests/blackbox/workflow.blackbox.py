@@ -3560,6 +3560,48 @@ async def test_workflow_handle_incomplete_max_iterations():
         _restore_workflow(original)
 
 
+async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
+    """Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.goal = "g"
+    wf.parent_workflow_id = None
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        async def mark_complete(*_args, **_kwargs):
+            events.append("complete")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
+        wf._mark_complete = mark_complete
+        result = await wf._handle_incomplete(
+            {
+                "status": "max_iterations",
+                "context": [],
+                "verifier_progress": 1.0,
+                "verifier_reasoning": (
+                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient"
+                ),
+            },
+            phase="EXECUTE",
+        )
+        assert result["status"] == "completed"
+        assert events == ["refresh", "complete"]
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_handle_incomplete_error():
     """_handle_incomplete handles error status."""
     wf = _bare_workflow_instance()
@@ -6300,6 +6342,10 @@ async def run_all_tests():
         test_workflow_context_overflow_uses_complete_continuation_contract,
     )
     await r.record_async("wf_handle_incomplete_max_iterations", test_workflow_handle_incomplete_max_iterations)
+    await r.record_async(
+        "wf_handle_incomplete_max_iterations_fast_mode_completes",
+        test_workflow_handle_incomplete_max_iterations_fast_mode_completes,
+    )
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
     await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)

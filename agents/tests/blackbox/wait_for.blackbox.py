@@ -901,6 +901,35 @@ async def test_handler_timestamp_fast_mode_past_completes_not_errors():
     assert "past" not in events[0].message.lower()
 
 
+async def test_handler_timestamp_fast_mode_far_future_completes_not_errors():
+    """Fast Mode replay of a July wait that is now >31d ahead must FINISH, not ERROR.
+
+    A target that was a legal live wait in July (e.g. 2026-09-20 from 2026-07-17)
+    is more than 31 days in the future when replayed in late August.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 27, 2, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(fast_mode_cache_enabled=True),
+                tool_call={"until_timestamp": "2026-10-01T00:00:00+00:00"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    assert MessageStatus.ERROR not in statuses
+    assert fake.sleep_records == []
+    assert "31 days" not in events[0].message.lower()
+
+
 async def run_all_tests():
     print("wait-for blackbox tests:")
     r = BlackboxResult()
@@ -960,6 +989,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_ts_fast_mode_past",
         test_handler_timestamp_fast_mode_past_completes_not_errors,
+    )
+    await r.record_async(
+        "handler_ts_fast_mode_far_future",
+        test_handler_timestamp_fast_mode_far_future_completes_not_errors,
     )
     teardown_mock()
     return r.all_passed

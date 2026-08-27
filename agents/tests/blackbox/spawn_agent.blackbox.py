@@ -446,6 +446,7 @@ class _FakeWFInstance:
         self.is_paused = paused
         self.model = model
         self.context = context if context is not None else {}
+        self.fast_mode_cache_enabled = False
         self.context_gates = {}
         self.child_tool_ids = {}
         self.pending_children = set()
@@ -968,6 +969,43 @@ async def test_handler_blocks_recursive_general_purpose_for_explore_only_child()
     assert len(events) == 1
     assert events[0].status == MessageStatus.ERROR
     assert "explore-agent web research only" in events[0].message
+
+
+async def test_handler_fast_mode_allows_cached_general_purpose_from_explore_only_child():
+    """July OAi-demo replay must not ERROR when a cached child spawned GP from an explore-only goal."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        wf = _FakeWFInstance(
+            depth=1,
+            goal=(
+                "Find current population of Tokyo. Use explore-agent web research. "
+                "MUST NOT use browser agent, Claude Code, or code sandbox."
+            ),
+        )
+        wf.fast_mode_cache_enabled = True
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "general_purpose",
+                    "goal": "Determine Tokyo population",
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.ERROR for e in events)
 
 
 async def test_handler_allows_root_explicit_general_purpose_with_explore_research_children():
@@ -2868,6 +2906,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_blocks_recursive_general_purpose_for_explore_only_child",
         test_handler_blocks_recursive_general_purpose_for_explore_only_child,
+    )
+    await r.record_async(
+        "handler_fast_mode_allows_cached_general_purpose_from_explore_only_child",
+        test_handler_fast_mode_allows_cached_general_purpose_from_explore_only_child,
     )
     await r.record_async(
         "handler_allows_root_explicit_general_purpose_with_explore_research_children",

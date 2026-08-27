@@ -3778,12 +3778,27 @@ class AgentWorkflow:
 
         if result["status"] == "max_iterations":
             await self._wait_for_response_schema_refresh()
+            verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
+            verifier_reasoning = str(result.get("verifier_reasoning") or "")
+            fm_trajectory_complete = bool(getattr(self, "fast_mode_cache_enabled", False)) and (
+                verifier_progress >= 1.0
+                or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+            )
+            if fm_trajectory_complete:
+                # Fast Mode replay hit the step cap after the verifier already
+                # accepted the cached work (100% / trajectory-end). Mark
+                # COMPLETED so the parent for_each does not ERROR the child.
+                await self._mark_complete(
+                    result.get("context", []),
+                    result.get("partial_structured_response") or result.get("structured_response"),
+                )
+                return {"status": "completed", "goal": self.goal}
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="max_iterations",
                 message="Max Steps Reached",
-                verifier_progress=result.get("verifier_progress", 0.0),
-                verifier_reasoning=result.get("verifier_reasoning", ""),
+                verifier_progress=verifier_progress,
+                verifier_reasoning=verifier_reasoning,
                 partial_structured_response=result.get("partial_structured_response"),
             )
             return {"status": "failed", "reason": "max_iterations", "goal": self.goal}

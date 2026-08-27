@@ -141,6 +141,24 @@ class WaitForManager(ToolManager):
             return
 
         if delta_seconds > MAX_WAIT_SECONDS:
+            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            if resume or fast_mode:
+                # Live path caps waits at 31 days. Fast Mode replay of a July
+                # timestamp that was legal then (e.g. +60d from 2026-07-17) is
+                # now >31d in the future — treat it as already waited.
+                reason = (
+                    "target already elapsed during deploy"
+                    if resume
+                    else "target already elapsed (Fast Mode replay)"
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Wait complete",
+                    message=f"Reached {until_timestamp} ({reason})",
+                    status=MessageStatus.FINISHED,
+                    metadata={"waitForMode": "timestamp", "resumed": bool(resume)},
+                )
+                return
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="wait_for failed",
