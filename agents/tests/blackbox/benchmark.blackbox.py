@@ -2840,6 +2840,82 @@ def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
     )
 
 
+def test_declared_evaluator_evidence_compacts_mass_agent_tree():
+    """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    huge = "Fast Mode cache replay body " + ("x" * 40000)
+    tree = {
+        "root": {
+            "parent_agent_id": None,
+            "status": "COMPLETED",
+            "goal": "Analyze the top 50 creators for Andy Prevalsky",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": huge,
+                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                }
+            ],
+        },
+        "gp-1": {
+            "parent_agent_id": "root",
+            "status": "COMPLETED",
+            "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": huge,
+                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                },
+                {
+                    "role": "TOOL",
+                    "message": "Explore agent thinking",
+                    "metadata": {
+                        "toolName": "spawn_agent",
+                        "agentType": "explore",
+                        "toolStatus": "FINISHED",
+                        "subAgentId": "explore-1",
+                    },
+                },
+            ],
+        },
+    }
+    evidence = _declared_evaluator_evidence(
+        {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": huge,
+                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED", "title": "Searched"},
+                }
+            ],
+            "cost_cents": 0,
+            "tokens_out": 0,
+            "cache_creation_input_tokens": 0,
+            "live_output_tokens": 0,
+            "_benchmark": {
+                "tree": tree,
+                "all_agents": [
+                    {"agent_id": "root", "status": "COMPLETED", "goal": "Analyze", "message_count": 1},
+                    {"agent_id": "gp-1", "parent_agent_id": "root", "status": "COMPLETED", "goal": "ONE creator", "message_count": 2},
+                ],
+            },
+        }
+    )
+    dumped = json.dumps(evidence)
+    assert len(dumped) < 200_000
+    assert huge not in dumped
+    state = next(item["benchmark_state"] for item in evidence if "benchmark_state" in item)
+    assert state["tree"]["gp-1"]["research_tool_count"] >= 1
+    assert state["tree"]["gp-1"]["explore_spawn_count"] >= 1
+    assert state["tree"]["gp-1"]["mentions_andy"] is True
+    assert state["tree"]["gp-1"]["mentions_aman"] is False
+    assert state["tree"]["gp-1"]["has_traj_end_stub"] is False
+    assert state["usage"]["live_output_tokens"] == 0
+    assert state["usage"]["cost_cents"] == 0
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -15746,6 +15822,10 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
+    )
+    r.record(
+        "declared_evaluator_evidence_compacts_mass_agent_tree",
+        test_declared_evaluator_evidence_compacts_mass_agent_tree,
     )
     r.record(
         "opentable_static_runtime_contract",

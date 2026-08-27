@@ -8199,38 +8199,144 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
-def _declared_evaluator_evidence(data: dict) -> list[dict]:
-    """Build a bounded evidence-only context for a declared LLM judge."""
-    evidence: list[dict] = []
-    for message in (data.get("messages") or [])[-120:]:
+_JUDGE_STUB_MARKERS = (
+    "fm_cold_namespace_passthrough",
+    "fm_trajectory_end_passthrough",
+    "Fast Mode cache trajectory ended",
+)
+_JUDGE_RESEARCH_TOOLS = {"web_search", "web_fetch", "grep"}
+
+
+def _message_text_for_judge(message: dict) -> str:
+    text_value = message.get("text", message.get("message", message.get("content", "")))
+    if not isinstance(text_value, str):
+        text_value = json.dumps(text_value, default=str)
+    return text_value
+
+
+def _compact_messages_for_judge(messages: list, *, limit: int = 80, text_chars: int = 400) -> list[dict]:
+    """Keep tool/status chips, not 12k-char web_search bodies (smoke10 413'd at 35MB)."""
+    compacted: list[dict] = []
+    for message in messages[-limit:]:
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or "").upper()
         if role in {"USER", "SYSTEM"}:
             continue
-        text_value = message.get("text", message.get("content", ""))
-        if not isinstance(text_value, str):
-            text_value = json.dumps(text_value, default=str)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         evidence_metadata = {
             key: metadata[key]
-            for key in (
-                "action_type",
-                "toolName",
-                "toolStatus",
-                "url",
-                "title",
-                "browser_session_metadata",
-            )
+            for key in ("action_type", "toolName", "toolStatus", "agentType", "title", "url")
             if key in metadata
         }
-        evidence.append(
+        compacted.append(
             {
                 "role": role or "UNKNOWN",
-                "text": text_value[:12000],
+                "text": _message_text_for_judge(message)[:text_chars],
                 "metadata": evidence_metadata,
             }
         )
+    return compacted
+
+
+def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
+    messages = node.get("messages") if isinstance(node.get("messages"), list) else []
+    tool_counts: dict[str, int] = {}
+    error_tool_count = 0
+    research_tool_count = 0
+    explore_spawn_count = 0
+    has_traj_end_stub = False
+    mentions_andy = False
+    mentions_aman = False
+    blob_parts = [str(node.get("goal") or ""), str(node.get("title") or "")]
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        text_value = _message_text_for_judge(message)
+        blob_parts.append(text_value[:400])
+        if any(marker in text_value for marker in _JUDGE_STUB_MARKERS):
+            has_traj_end_stub = True
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        tool_status = str(metadata.get("toolStatus") or "").upper()
+        if tool_name and tool_status == "FINISHED":
+            tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+        if tool_name and tool_status == "ERROR":
+            error_tool_count += 1
+        if tool_name in _JUDGE_RESEARCH_TOOLS:
+            research_tool_count += 1
+        if tool_name == "spawn_agent" and metadata.get("agentType") == "explore":
+            explore_spawn_count += 1
+    blob = " ".join(blob_parts).lower()
+    mentions_andy = "andy prevalsky" in blob or "andy's" in blob
+    mentions_aman = "aman gottumukkala" in blob or "aman's" in blob
+    goal = str(node.get("goal") or "")
+    agent_type = "general_purpose" if goal.startswith("You are analyzing ONE creator") else node.get("agent_type")
+    return {
+        "agent_id": agent_id,
+        "parent_agent_id": node.get("parent_agent_id"),
+        "status": node.get("status"),
+        "agent_type": agent_type,
+        "goal": goal[:240],
+        "title": str(node.get("title") or "")[:120],
+        "message_count": len(messages) or node.get("message_count") or 0,
+        "tool_counts": tool_counts,
+        "error_tool_count": error_tool_count,
+        "research_tool_count": research_tool_count,
+        "explore_spawn_count": explore_spawn_count,
+        "has_traj_end_stub": has_traj_end_stub,
+        "mentions_andy": mentions_andy,
+        "mentions_aman": mentions_aman,
+        "response_schema": node.get("response_schema") or node.get("output_schema"),
+        "structured_output_present": bool(node.get("structured_output") or node.get("structured_response")),
+    }
+
+
+def _compact_benchmark_state_for_judge(data: dict) -> dict:
+    """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
+    raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    compact = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"tree", "all_agents"}
+    }
+    tree = raw.get("tree")
+    if isinstance(tree, dict):
+        compact["tree"] = {
+            str(agent_id): _compact_tree_node_for_judge(str(agent_id), node)
+            for agent_id, node in tree.items()
+            if isinstance(node, dict)
+        }
+    agents = raw.get("all_agents")
+    if isinstance(agents, list):
+        compact["all_agents"] = [
+            {
+                "agent_id": agent.get("agent_id") or agent.get("id"),
+                "parent_agent_id": agent.get("parent_agent_id"),
+                "status": agent.get("status"),
+                "goal": str(agent.get("goal") or "")[:240],
+                "message_count": agent.get("message_count") or 0,
+                "depth": agent.get("depth"),
+            }
+            for agent in agents
+            if isinstance(agent, dict)
+        ]
+    compact["usage"] = {
+        "cost_cents": data.get("cost_cents") or raw.get("cost_cents") or 0,
+        "tokens_out": data.get("tokens_out") or raw.get("tree_tokens_out") or 0,
+        "cache_creation_input_tokens": data.get("cache_creation_input_tokens")
+        or raw.get("cache_creation_input_tokens")
+        or 0,
+        "live_output_tokens": data.get("live_output_tokens") or raw.get("live_output_tokens") or 0,
+        "cache_read_input_tokens": data.get("cache_read_input_tokens") or raw.get("cache_read_input_tokens") or 0,
+    }
+    return compact
+
+
+def _declared_evaluator_evidence(data: dict) -> list[dict]:
+    """Build a bounded evidence-only context for a declared LLM judge."""
+    evidence: list[dict] = []
+    evidence.extend(_compact_messages_for_judge(data.get("messages") or [], limit=80, text_chars=400))
     # The frontend renders completionSummary metadata as the root agent's final
     # answer card, while its backing TOOL message normally has empty text. Give
     # the semantic judge the same summary + outputs as one normalized assistant
@@ -8250,7 +8356,7 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
                 "metadata": {"evidence_type": "final_completion"},
             }
         )
-    evidence.append({"benchmark_state": data.get("_benchmark", {})})
+    evidence.append({"benchmark_state": _compact_benchmark_state_for_judge(data)})
     return evidence
 
 
@@ -9835,6 +9941,11 @@ async def run_single_task(
                     **data.get("_benchmark", {}),
                     "tree": tree,
                     "all_agents": tree_agents,
+                    "cost_cents": cost_cents,
+                    "cache_creation_input_tokens": cache_creation_input_tokens,
+                    "cache_read_input_tokens": cache_read_input_tokens,
+                    "live_output_tokens": tokens_out,
+                    "tree_tokens_out": tree_tokens_out,
                 }
             except Exception as tree_err:
                 data["_benchmark"] = {
@@ -9842,6 +9953,11 @@ async def run_single_task(
                     "tree": data.get("_benchmark", {}).get("tree") or {},
                     "all_agents": tree_stats.get("all_agents", []),
                     "tree_capture_error": str(tree_err),
+                    "cost_cents": cost_cents,
+                    "cache_creation_input_tokens": cache_creation_input_tokens,
+                    "cache_read_input_tokens": cache_read_input_tokens,
+                    "live_output_tokens": tokens_out,
+                    "tree_tokens_out": tree_tokens_out,
                 }
         if task.enforce_declared_evaluators and passed:
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
