@@ -477,22 +477,11 @@ async def cached_complete(
                 return
         logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:
-        # Write-through: terminal end-notch only when a prior trajectory slot
-        # exists. Cold write-through must not stub (falls through to live seed).
-        soft = soft_complete_on_miss(call_site)
-        if soft is not None and await cache_client.trajectory_prior_exists(
-            ctx.goal_hash, call_site, ctx.base_step
-        ):
-            logger.info(
-                "llm.cache.replay",
-                call_site=call_site,
-                key=key,
-                hit_key="trajectory_end_passthrough",
-                reason="fm_trajectory_end_passthrough",
-            )
-            async for chunk in _replay(soft):
-                yield chunk
-            return
+        # Write-through always falls through to live LLM so allowlisted accounts
+        # can seed full multi-step trajectories. End-notch passthrough is read-path
+        # only: if we stubbed here after writing p:1, p:2 would see
+        # trajectory_prior_exists and abort with attempt_completion stubs
+        # (spawn-sub-agents smoke timeout).
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
     # Live path: prefer _complete_impl so we do not re-enter RoseClient.complete's

@@ -5372,7 +5372,12 @@ async def check_progress(
                     # instead so hits stay at 100% and tree cost stays ~$0.
                     from providers.fast_cache.rose_cache import soft_complete_on_miss
 
-                    if fast_mode_goal and soft_complete_on_miss(call_site) is not None:
+                    # Gate on Fast Mode *read* (not merely goal / write-through).
+                    # Andy smoke uses write-through with FM off; soft-passing
+                    # verifier failures there masks real errors and was conflated
+                    # with the write-through execute_loop stub that zeroed the
+                    # browser-smoke repeatable cache ratchet.
+                    if fast_mode_cache_enabled and soft_complete_on_miss(call_site) is not None:
                         logger.warning(
                             "Verifier Fast Mode soft-pass after failure",
                             attempt=attempt + 1,
@@ -5402,7 +5407,7 @@ async def check_progress(
                     # Never flip Fast Mode contexts to write-only on verifier
                     # retry — that contextvar leak forced later execute_loop
                     # calls onto live LLM (verify11 write_only cost spike).
-                    if fast_mode_goal:
+                    if fast_mode_cache_enabled:
                         logger.warning(
                             "Verifier call failed under Fast Mode; retrying with reads still enabled",
                             attempt=attempt + 1,
@@ -5420,7 +5425,7 @@ async def check_progress(
                         attempt=attempt + 1,
                         max_retries=max_retries,
                         delay=round(sleep_s, 3),
-                        fast_cache_read_enabled=True if fast_mode_goal else None,
+                        fast_cache_read_enabled=True if fast_mode_cache_enabled else None,
                         error=extract_error_message(e),
                     )
                     await asyncio.sleep(sleep_s)
@@ -5455,7 +5460,7 @@ async def check_progress(
         # any from_fast_cache reject to a soft-pass so the tree can finish at
         # 100% hits / ~$0 instead of hanging ACTIVE.
         if (
-            fast_mode_goal
+            fast_mode_cache_enabled
             and float(score or 0) < 1.0
             and bool((usage or {}).get("from_fast_cache"))
         ):
@@ -5504,7 +5509,7 @@ async def check_progress(
         # execute loops spinning on soft-complete trajectories (verify15).
         from providers.fast_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
-        if fast_mode_goal and _fm_soft(call_site) is not None:
+        if fast_mode_cache_enabled and _fm_soft(call_site) is not None:
             return {
                 "score": 1.0,
                 "reasoning": (

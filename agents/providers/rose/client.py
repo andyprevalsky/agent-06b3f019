@@ -688,20 +688,11 @@ class RoseClient:
                 return
             logger.info("llm.cache.miss", call_site=call_site, key=key)
         else:
-            soft = _fc_soft_complete(call_site)
-            if soft is not None and await _fc.trajectory_prior_exists(
-                ctx.goal_hash, call_site, ctx.base_step
-            ):
-                logger.info(
-                    "llm.cache.replay",
-                    call_site=call_site,
-                    key=key,
-                    hit_key="trajectory_end_passthrough",
-                    reason="fm_trajectory_end_passthrough",
-                )
-                async for chunk in _fc_replay(soft):
-                    yield chunk
-                return
+            # Write-through must always call live LLM. Soft/passthrough end-notches
+            # belong only on the Fast Mode *read* path. Applying them here aborts
+            # cold seeding after p:1 (prior slot = the row this run just wrote),
+            # which left spawn-sub-agents explore/execute stuck in attempt_completion
+            # loops with cache-status stubs instead of substantive tool evidence.
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
         structured_response_model = kwargs.get("response_model") is not None

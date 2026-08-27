@@ -1915,8 +1915,9 @@ def test_passthrough_when_disabled(mem):
 def test_write_only_context_writes_without_reading(mem):
     """WRITE_ONLY: skip cache read, call provider, write (non-soft call_site).
 
-    Soft allowlist sites soft-complete even on write-through so Andy/Tamy
-    demo warm paths stay ~$0 (see test_write_only_soft_completes_execute_loop).
+    Write-through never soft-completes — Andy/Tamy $0 warm paths use Fast Mode
+    *read* (enabled=True). Write-only must keep calling live LLM so multi-step
+    cold seeds (explore p:2 after writing p:1) are not aborted.
     """
 
     async def body():
@@ -1933,8 +1934,13 @@ def test_write_only_context_writes_without_reading(mem):
     asyncio.run(body())
 
 
-def test_write_only_soft_completes_execute_loop(mem, monkeypatch):
-    """Write-through ends via trajectory-end passthrough when a prior slot exists."""
+def test_write_only_continues_live_even_when_prior_slot_exists(mem, monkeypatch):
+    """Write-through must not trajectory-end-passthrough after seeding p:N.
+
+    Regression for spawn-sub-agents smoke: allowlisted write-through wrote
+    explore/execute p:1, then p:2 saw trajectory_prior_exists and stubbed
+    attempt_completion — verifier 0% loops until timeout.
+    """
 
     async def prior_true(goal_hash, call_site, step):
         del goal_hash, call_site
@@ -1948,11 +1954,60 @@ def test_write_only_soft_completes_execute_loop(mem, monkeypatch):
         chunks = await _drain(
             rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
         )
-        assert rose.calls == 0
-        assert mem.get_calls == 0
-        assert mem.set_calls == 0
-        assert any(c.kind == "tool_call" for c in chunks)
-        assert any(
+        assert rose.calls == 1
+        assert mem.set_calls == 1
+        assert chunks[0].kind == "metadata"
+        assert not any(
+            getattr(c, "data", None) and c.data.get("name") == "attempt_completion"
+            for c in chunks
+            if c.kind == "tool_call"
+        )
+
+    asyncio.run(body())
+
+
+def test_rose_client_write_only_does_not_trajectory_end_passthrough(mem, monkeypatch):
+    """RoseClient.complete write-through must match cached_complete: never stub p:N+1.
+
+    browser-smoke / spawn-sub-agents use Andy write-through with Fast Mode off.
+    Stubbing the second execute_loop as attempt_completion kills the only
+    repeatable cache_sequence_id pair and hard-fails the 40% cache ratchet.
+    """
+    from providers.rose.client import RoseClient
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(
+        "providers.fast_cache.client.trajectory_prior_exists",
+        prior_true,
+    )
+
+    async def body():
+        set_context(FastCacheContext(enabled=False, goal="browser-smoke-goal", write_enabled=True, base_step=2))
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for c in _full_stream():
+                yield c
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="execute_loop",
+                agent_id="agent-browser-smoke",
+                dump_context=False,
+            )
+        )
+        assert live_calls["n"] == 1
+        assert chunks[0].kind == "metadata"
+        assert not any(
             getattr(c, "data", None) and c.data.get("name") == "attempt_completion"
             for c in chunks
             if c.kind == "tool_call"
@@ -2365,6 +2420,49 @@ def test_write_only_cold_execute_loop_does_not_soft(mem):
             rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
         )
         assert rose.calls == 1
+
+    asyncio.run(body())
+
+
+def test_write_only_explore_continues_after_seeding_prior_step(mem, monkeypatch):
+    """After write-through stores explore p:1, p:2 must call live LLM (not stub)."""
+
+    async def prior_after_first(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 1
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_after_first)
+
+    async def body():
+        set_context(
+            FastCacheContext(
+                enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=1
+            )
+        )
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+        assert mem.set_calls == 1
+
+        set_context(
+            FastCacheContext(
+                enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=2
+            )
+        )
+        rose2 = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose2, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose2.calls == 1
+        assert mem.set_calls == 2
+        assert not any(
+            getattr(c, "data", None)
+            and c.data.get("name") == "attempt_completion_with_result"
+            for c in chunks
+            if c.kind == "tool_call"
+        )
 
     asyncio.run(body())
 
