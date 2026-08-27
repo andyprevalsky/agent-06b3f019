@@ -261,6 +261,26 @@ class WaitForTool(BaseModel):
         description="Maximum number of condition checks before giving up (1-100, default 20). Only used with condition.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_july_timestamp_description(cls, value: Any) -> Any:
+        # July Fast Mode rows recorded timestamp waits as
+        # {"tool":"wait_for","until_timestamp":"..."} before description became
+        # required. Fill a UI phrase from the timestamp so replay parses as
+        # AgentAction; condition-only calls still require an explicit description.
+        if not isinstance(value, dict):
+            return value
+        desc = value.get("description")
+        if isinstance(desc, str) and desc.strip():
+            return value
+        ts = value.get("until_timestamp")
+        if ts and not value.get("condition"):
+            phrase = f"until {ts}"
+            out = dict(value)
+            out["description"] = phrase[:80] if len(phrase) >= 3 else "scheduled wait"
+            return out
+        return value
+
     @model_validator(mode="after")
     def check_mutual_exclusion(self) -> "WaitForTool":
         if self.until_timestamp and self.condition:
