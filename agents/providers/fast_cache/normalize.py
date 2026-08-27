@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
+
 CACHE_KEY_VERSION = "v42"
 
 # Query params that vary per-request and must never participate in a key.
@@ -739,11 +741,17 @@ def goal_hash(goal: str) -> str:
     1. run-local `@ref:message:<uuid>` pointers collapse before hashing
     2. test-mass-agent-run-0 Andy/Aman display-name swap folds onto the July
        cache namespace so child/explore lookups hit the original trajectories
+    3. per-creator for_each children alias onto the July execute_loop
+       goalHash (item JSON / template drift must not mint a cold namespace)
 
     Keep in sync with `goalHash` in back-end fastCacheNormalizeCore.ts.
     """
     canonical = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", goal)
     canonical = canonicalize_oai_demo_goal_for_hash(canonical)
+    if is_oai_demo_goal_text(canonical):
+        aliased = july_gp_goal_hash_for_goal(canonical)
+        if aliased:
+            return aliased
     return sha256(canonical)[:16]
 
 

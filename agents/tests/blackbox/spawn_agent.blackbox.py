@@ -1702,6 +1702,52 @@ async def test_handler_for_each_pre_registers_child_ids_for_batch():
     assert child_ids[1] in wf.child_workflow_ids
 
 
+async def test_handler_oai_demo_for_each_pins_july_creators():
+    """test-mass-agent-run-0 Fast Mode for_each must spawn the July 50, not a live list."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+    from domains.spawn_agent.oai_demo_july import JULY_FOR_EACH_ITEMS
+
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="sub ok", message="ok", status=MessageStatus.FINISHED)]
+    )
+    fake = _FakeSpawnWF()
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        wf = _FakeWFInstance(
+            goal=(
+                "I'm building a personal brand for health, longevity, technology, founder journey "  # pragma: allowlist secret
+                "[I'll refine the angle]. Analyze the top 50 creators."
+            )
+        )
+        wf.fast_mode_cache_enabled = True
+        await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "for_each",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+                    "output_schema": {"fields": []},
+                    "items": [{"creator_name": "Kayla Barnes-Lentz", "rank": 39}],
+                },
+                tool_call_id="tc-oai-fe",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+
+    batch_call = next(call for call in fake.activity_calls if call["name"] == "spawn_sub_agents_batch_activity")
+    cfgs = batch_call["args"][1]
+    assert len(cfgs) == 50
+    assert "Andrew Huberman" in cfgs[0]["goal"]
+    assert "Kayla Barnes-Lentz" not in cfgs[0]["goal"]
+    assert "Andy Prevalsky" in cfgs[0]["goal"]
+    assert all(item["name"] in cfg["goal"] for item, cfg in zip(JULY_FOR_EACH_ITEMS, cfgs))
+
+
 async def test_handler_for_each_failed_yields_error():
     """for_each with child errors yields aggregate ERROR event with child item details."""
     from tools.base import EventType, MessageStatus, ToolEvent
@@ -3098,6 +3144,10 @@ async def run_all_tests():
     await r.record_async("handler_for_each_no_items", test_handler_for_each_no_items_raises)
     await r.record_async("handler_for_each_happy", test_handler_for_each_happy_path_all_succeed)
     await r.record_async("handler_for_each_pre_registers_ids", test_handler_for_each_pre_registers_child_ids_for_batch)
+    await r.record_async(
+        "handler_oai_demo_for_each_pins_july_creators",
+        test_handler_oai_demo_for_each_pins_july_creators,
+    )
     await r.record_async("handler_for_each_failed", test_handler_for_each_failed_yields_error)
     await r.record_async("spawn_agent_helper", test_spawn_agent_helper_tracks_usage_and_returns)
     # repo.py

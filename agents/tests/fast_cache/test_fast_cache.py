@@ -2279,6 +2279,15 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     andy_goal = aman_goal.replace("Aman Gottumukkala", "Andy Prevalsky")
     assert "Andy Prevalsky" in andy_goal
     assert normalize.goal_hash(andy_goal) == normalize.goal_hash(aman_goal)
+    from domains.spawn_agent.oai_demo_july import JULY_GP_GOAL_HASHES
+
+    assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
+    kayla = (
+        "You are analyzing ONE creator for Andy Prevalsky. "  # pragma: allowlist secret
+        f"Last 90 days: {window}. "  # pragma: allowlist secret
+        'Row item:\n{"creator_name": "Kayla Barnes-Lentz", "rank": 39}'
+    )
+    assert normalize.goal_hash(kayla) != JULY_GP_GOAL_HASHES["Eric Topol"]
     other_andy = "Find the current professional profile of Andy Prevalsky, founder of Rose Labs."
     other_aman = other_andy.replace("Andy Prevalsky", "Aman Gottumukkala")
     assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
