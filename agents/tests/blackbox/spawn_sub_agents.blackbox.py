@@ -448,6 +448,7 @@ class _FakeParentWorkflow:
         self.depth = depth
         self.is_paused = False
         self.bus_id = bus_id
+        self.fast_mode_cache_enabled = False
         self.model = "rose-labs/rose-1-lite"
         self.agent_source = "WEB"
         self.child_tool_ids = {}
@@ -511,6 +512,33 @@ async def test_execute_tool_max_depth_exceeded():
     assert events[0].status == MessageStatus.ERROR
     assert "maximum nesting depth" in events[0].message
     assert str(MAX_DEPTH) in events[0].message
+
+
+async def test_execute_tool_max_depth_fast_mode_finishes():
+    """Fast Mode replay at MAX_DEPTH must FINISH, not ERROR."""
+    from domains.spawn_sub_agents.config import MAX_DEPTH
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule()
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow(depth=MAX_DEPTH)
+        parent.fast_mode_cache_enabled = True
+        manager = SpawnSubAgentManager()
+        events = await _collect_events(
+            manager.execute_tool(
+                parent,
+                {"sub_agent": {"goal": "g"}},
+                "tc-deep-fm",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.FINISHED
+    assert "maximum nesting depth" not in events[0].message.lower() or "Fast Mode" in events[0].message
 
 
 async def test_execute_tool_empty_agents_list_yields_error():
@@ -1138,6 +1166,7 @@ async def run_all_tests():
     # execute_tool branches
     await r.record_async("exec_missing_sub_agent", test_execute_tool_missing_sub_agent_yields_error)
     await r.record_async("exec_max_depth", test_execute_tool_max_depth_exceeded)
+    await r.record_async("exec_max_depth_fast_mode_finishes", test_execute_tool_max_depth_fast_mode_finishes)
     await r.record_async("exec_empty_agents", test_execute_tool_empty_agents_list_yields_error)
     await r.record_async("exec_child_error_key", test_execute_tool_child_info_has_error_key)
     await r.record_async("exec_exception_path", test_execute_tool_exception_path_yields_error)

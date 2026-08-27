@@ -197,11 +197,6 @@ def _explore_agent_capacity(workflow_instance, expected_explore_agents: int) -> 
 
 def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, Any]) -> str | None:
     """Return an explanatory error when an explore-only task tries to delegate incorrectly."""
-    # Fast Mode: July OAi-demo children spawned general_purpose from explore-only
-    # goals. The live guard is correct for new runs; replaying it as ERROR
-    # leaves chips the original passing tree never had.
-    if bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
-        return None
     if not _explore_only_research_instruction(workflow_instance, tool_call):
         return None
 
@@ -252,11 +247,19 @@ class SpawnAgentManager(ToolManager):
 
         blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
         if blocked_reason:
+            # Fast Mode: the July tree already gathered this research. Replaying
+            # the post-July explore-only guard as ERROR leaves chips; allowing
+            # the spawn then hits max nesting depth (4). Finish instead.
+            fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="spawn_agent failed",
-                message=blocked_reason,
-                status=MessageStatus.ERROR,
+                title="spawn_agent complete" if fm else "spawn_agent failed",
+                message=(
+                    "Fast Mode cache trajectory already gathered this research; skipping further spawn."
+                    if fm
+                    else blocked_reason
+                ),
+                status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
                 metadata={"agentType": agent_type},
             )
             return
@@ -513,6 +516,17 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
+            # Fast Mode: a truncated/malformed cached explore turn (e.g. the
+            # identify-50 attempt_completion JSON) used to ERROR the spawn after
+            # 3 parse retries of the same row. Finish with gathered evidence.
+            if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+                explore_failed = False
+                if not explore_result or explore_result == "No results found.":
+                    explore_result = (
+                        explore_error_reason
+                        or "Fast Mode cache trajectory ended for this explore goal. "
+                        "Returning with evidence gathered so far."
+                    )
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted

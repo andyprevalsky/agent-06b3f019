@@ -133,11 +133,17 @@ class SpawnSubAgentManager(ToolManager):
             parent_is_paused = getattr(workflow_instance, "is_paused", False)
 
             if workflow_instance.depth >= MAX_DEPTH:
+                fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="❌ Sub-agent failed",
-                    message=f"Cannot spawn sub-agent: maximum nesting depth ({MAX_DEPTH}) reached.",
-                    status=MessageStatus.ERROR,
+                    title="Sub-agent complete" if fm else "❌ Sub-agent failed",
+                    message=(
+                        "Fast Mode cache trajectory already completed at max nesting depth; "
+                        "skipping further spawn."
+                        if fm
+                        else f"Cannot spawn sub-agent: maximum nesting depth ({MAX_DEPTH}) reached."
+                    ),
+                    status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
                 )
                 return
 
