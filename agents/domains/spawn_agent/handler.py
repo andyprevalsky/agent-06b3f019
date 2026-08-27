@@ -596,7 +596,12 @@ class SpawnAgentManager(ToolManager):
                 and capture_tool_results is None
                 and is_oai_demo_mass_agent_task(workflow_instance)
             ):
-                await wait_for_fast_mode_explore_slot(workflow_instance)
+                # Do not wait for an inflight slot here. A Huberman-class GP
+                # has 224–336 sequential spawn_agent turns; blocking the parent
+                # at cap=16 keeps 336/16 × ~32s on the execute_loop critical
+                # path (~672s) and misses the 900s harness. Start every
+                # explore (Temporal queues past the worker slot budget) and
+                # drain before attempt_completion. T3 still runs full trajs.
                 track_fast_mode_explore(
                     workflow_instance,
                     activity_handle,

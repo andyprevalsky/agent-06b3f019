@@ -1248,6 +1248,51 @@ async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
         restore()
 
 
+async def test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot():
+    """Parent must not block on the inflight cap; Temporal queues the extras."""
+    from domains.spawn_agent.config import FM_EXPLORE_INFLIGHT_CAP
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    handles = [
+        _Activity(result={"result": f"r{i}", "tool_call_results": [], "accumulated_usage": [], "llm_iteration_usage": []}, done=False)
+        for i in range(FM_EXPLORE_INFLIGHT_CAP + 2)
+    ]
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "You are analyzing ONE creator for Andy Prevalsky. "
+            "Research the creator's public activity in the last 90 days "
+            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
+        ),
+    )
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeSpawnWF(activity_results={"fetch_local_data_summary": "local"})
+    started = []
+
+    def _next_handle(*_a, **_k):
+        handle = handles[len(started)]
+        started.append(handle)
+        return handle
+
+    fake.start_activity = lambda *a, **k: _next_handle()
+    restore = _patch_spawn_workflow(fake)
+    try:
+        for i, _handle in enumerate(handles):
+            events = await _collect(
+                SpawnAgentManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={"type": "explore", "goal": f"Research creator batch {i}"},
+                    tool_call_id=f"tc-oai-uncap-{i}",
+                )
+            )
+            assert any((e.metadata or {}).get("fastModeParallel") for e in events)
+            assert _handle._awaited is False
+        assert len(getattr(wf, "_fm_explore_handles", [])) == len(handles)
+        assert all(h._awaited is False for h in handles)
+    finally:
+        restore()
+
+
 async def test_handler_fast_mode_oai_demo_capture_still_awaits_explore():
     """wait_for / capture_tool_results still needs the real explore result."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -3301,6 +3346,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_fast_mode_oai_demo_explore_does_not_await_activity",
         test_handler_fast_mode_oai_demo_explore_does_not_await_activity,
+    )
+    await r.record_async(
+        "handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot",
+        test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot,
     )
     await r.record_async(
         "handler_fast_mode_oai_demo_capture_still_awaits_explore",
