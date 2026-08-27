@@ -6302,6 +6302,30 @@ async def test_workflow_query_parent_state_skips_throttle_when_paused_by_parent(
         _restore_workflow(original)
 
 
+async def test_workflow_fast_mode_post_message_does_not_block_loop():
+    """Fast Mode replay must not await each post_message activity."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "fm-child"
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeWorkflowModule()
+    blocker = asyncio.Event()
+    fake.activity_blockers["post_agent_message"] = blocker
+    original = _patch_workflow(fake)
+    try:
+        await wf._post_message("one", "ASSISTANT", {})
+        await wf._post_message("two", "TOOL", {"toolCallId": "tc-1"})
+        assert wf.message_count == 2
+        await asyncio.sleep(0)
+        posts = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
+        assert len(posts) == 2, posts
+        assert not blocker.is_set()
+        blocker.set()
+        await wf._flush_pending_messages()
+        assert wf._pending_message_handles == []
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_post_message_throttles_tree_updates():
     """Per-message tree broadcasts under 50-way fan-out must coalesce."""
     from datetime import timedelta
@@ -6720,6 +6744,10 @@ async def run_all_tests():
         test_workflow_query_parent_state_skips_throttle_when_paused_by_parent,
     )
     await r.record_async("wf_post_message_throttles_tree", test_workflow_post_message_throttles_tree_updates)
+    await r.record_async(
+        "wf_fast_mode_post_message_nonblocking",
+        test_workflow_fast_mode_post_message_does_not_block_loop,
+    )
 
     # Temporal workflow tests (all run inside one shared environment)
     wf_results = await _run_all_workflow_tests()

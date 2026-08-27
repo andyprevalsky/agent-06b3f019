@@ -388,6 +388,7 @@ class AgentWorkflow:
         self._last_tree_state_emit_at: Optional[datetime] = None
         self._last_parent_state_query_at: Optional[datetime] = None
         self._last_parent_state: Dict = {}
+        self._pending_message_handles: List[Any] = []
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
         # Tree token tracking (hierarchical relay: child → parent → root)
@@ -1152,6 +1153,7 @@ class AgentWorkflow:
                 # workflow timers or activities until a valid signal unpauses us.
                 await workflow.wait_condition(lambda: not self.is_paused)
                 await self._wait_for_response_schema_refresh()
+                await self._flush_pending_messages()
                 workflow.continue_as_new(args=self._continuation_args(context))
                 return {"status": "paused", "goal": goal}
 
@@ -2130,6 +2132,7 @@ class AgentWorkflow:
 
         # The canonical continuation contract also carries mutable counters,
         # credentials, and signal state so compaction cannot reset billing/limits.
+        await self._flush_pending_messages()
         workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
     async def _check_paused(self) -> bool:
@@ -2348,6 +2351,16 @@ class AgentWorkflow:
         """Compatibility wrapper for older tests/callers."""
         await self._refresh_compute_token(user_id)
 
+    async def _flush_pending_messages(self) -> None:
+        """Await Fast Mode message writes started off the critical path."""
+        handles = self._pending_message_handles
+        self._pending_message_handles = []
+        for handle in handles:
+            try:
+                await handle
+            except Exception as e:
+                workflow.logger.error(f"Failed to post message: {e}")
+
     async def _post_message(
         self,
         text: str,
@@ -2358,6 +2371,25 @@ class AgentWorkflow:
     ) -> None:
         """Post message to database."""
         try:
+            # Fast Mode replay is CPU/DB local. Awaiting every post_message
+            # activity under 50-way fan-out was the 900s leftover-ACTIVE
+            # bottleneck: each July GP step blocked on a 30s write. Start the
+            # write and keep looping; flush before terminal status so the
+            # transcript is durable when COMPLETED lands.
+            if self.fast_mode_cache_enabled and not self._is_finished:
+                handle = workflow.start_activity(
+                    post_agent_message,
+                    args=[self.agent_id, text, role, metadata],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                self._pending_message_handles.append(handle)
+                self.message_count += 1
+                if len(self._pending_message_handles) >= 20:
+                    await self._flush_pending_messages()
+                if update_tree:
+                    await self._update_tree_state()
+                return
             await workflow.execute_activity(
                 post_agent_message,
                 args=[self.agent_id, text, role, metadata],
@@ -3914,6 +3946,7 @@ class AgentWorkflow:
             # resets this workflow instance's revision counters.
             await self._wait_for_response_schema_refresh()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
+            await self._flush_pending_messages()
             workflow.continue_as_new(args=self._continuation_args(result.get("context")))
             return result
 
@@ -4094,6 +4127,7 @@ class AgentWorkflow:
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
+        await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
         # stale) value is corrected to the exact terminal cost. Recalc first; do
@@ -4277,6 +4311,7 @@ class AgentWorkflow:
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
+        await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
         # stale) value is corrected to the exact terminal cost. Recalc first, then
