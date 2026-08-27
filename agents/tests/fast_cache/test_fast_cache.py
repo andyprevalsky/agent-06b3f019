@@ -2404,7 +2404,8 @@ def test_soft_complete_dag_reasoning_miss_does_not_call_live(mem, monkeypatch):
     monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=6))
+        bench = _soft_complete_bench_goal()
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=6, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(rose, call_site="dag_reasoning", pool="rose-1-ultra")
