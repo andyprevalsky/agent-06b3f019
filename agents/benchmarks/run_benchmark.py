@@ -70,7 +70,11 @@ from benchmarks.live_fixtures import (
     TAMY_IDENTITY_USER_ID,
     resolve_live_fixtures,
 )
-from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
+from benchmarks.llm_usage import (
+    aggregate_repeatable_cache_usage,
+    aggregate_usage_items,
+    live_output_tokens,
+)
 from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
     canonicalize_agent_tree,
@@ -9033,13 +9037,6 @@ def _run_declared_static_check(
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
             continue
-        if check_type == "oai_demo_rubric":
-            from benchmarks.oai_demo_rubric import grade_oai_demo_rubric
-
-            passed, reasoning = grade_oai_demo_rubric(data)
-            if not passed:
-                return False, reasoning
-            continue
         if check_type == "completion_summary_length":
             summaries = _final_completion_summaries(data)
             if not summaries:
@@ -9699,6 +9696,7 @@ async def run_single_task(
                 "cache_creation_input_tokens": int(cache_creation_input_tokens or 0),
                 "tokens_in": int(tokens_in or 0),
                 "tokens_out": int(tokens_out or 0),
+                "live_output_tokens": live_output_tokens(llm_usage_by_provider),
             },
         }
         expected_gate_terminal = (

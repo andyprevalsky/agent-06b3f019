@@ -48,7 +48,6 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "expected_payment_receipt",
     "no_browser_agent_failures",
     "no_tool_failures",
-    "oai_demo_rubric",
     # runner="sms" — trajectory checks over the literal outbound text thread.
     # Implemented in benchmarks/sms_runner.py:run_sms_static_check.
     "sms_no_forbidden_phrases",

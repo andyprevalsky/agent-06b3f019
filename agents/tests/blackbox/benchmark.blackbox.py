@@ -12988,7 +12988,7 @@ def test_unified_catalog_delineates_bench_axes():
     Rose Bench entries are harness-INDEPENDENT: fixture + prompt + evaluators
     must be portable to any harness (e.g. swap in Claude Code and measure).
     """
-    from benchmarks.long_horizon import TASK_BENCHES, validate_catalog
+    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES, TASK_BENCHES, validate_catalog
 
     tasks = validate_catalog()
     by_name = {t["name"]: t for t in tasks}
@@ -13004,11 +13004,18 @@ def test_unified_catalog_delineates_bench_axes():
     assert mass["group"] == "pre-deploy"
     assert mass["fast_cache"] == "on"
     assert mass["enforce_declared_evaluators"] is True
-    assert any(
-        check.get("type") == "oai_demo_rubric"
+    assert mass["min_agent_count"] == 50
+    static_checks = {
+        check.get("type")
         for evaluator in mass["evaluators"]
+        if evaluator.get("method") == "static_check"
         for check in evaluator.get("checks", [])
-    )
+    }
+    assert static_checks == {"agent_status", "no_tool_failures", "completion_summary_length"}
+    assert all(check_type in RUNTIME_STATIC_CHECK_TYPES for check_type in static_checks)
+    judge = next(evaluator for evaluator in mass["evaluators"] if evaluator["method"] == "single_turn_llm_judge")
+    assert any("0 tokens streamed from non-fast-cache" in criterion for criterion in judge["criteria"])
+    assert any("$0 spent" in criterion for criterion in judge["criteria"])
     # Live capability eval keeps its live environment contract
     live = by_name["browser-agent"]
     assert live["environment"]["mode"] == "live"
