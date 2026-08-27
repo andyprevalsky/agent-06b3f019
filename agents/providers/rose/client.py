@@ -605,10 +605,11 @@ class RoseClient:
                         call_site,
                         ctx.base_step,
                     )
-                if stored is None:
-                    from providers.fast_cache.rose_cache import july_gp_position_retry
+                from providers.fast_cache.rose_cache import july_gp_resolve_execute
 
-                    stored, hit_key = await july_gp_position_retry(ctx, call_site)
+                stored, hit_key = await july_gp_resolve_execute(
+                    ctx, call_site, stored, hit_key
+                )
             except Exception as exc:
                 logger.warning("fast_cache.get_error", key=key, error=str(exc)[:200])
                 stored, hit_key = None, None

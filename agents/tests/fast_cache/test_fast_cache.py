@@ -2760,6 +2760,58 @@ def test_july_gp_execute_first_step_retries_and_replays_web_search(mem, monkeypa
     asyncio.run(body())
 
 
+def test_july_gp_execute_skips_first_step_attempt_completion(mem, monkeypatch):
+    """Sahil-style July p:1 attempt_completion must not 9-msg stub the child.
+
+    Fall forward to the next research tool (web_search) instead.
+    """
+    stub = {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-ultra",
+        "request_id": "july-gp-p1-stub",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_early_complete",
+                "name": "attempt_completion",
+                "arguments": '{"result":"Fast Mode cache trajectory ended for this agent."}',
+            }
+        ],
+        "usage": {"from_fast_cache": True},
+    }
+
+    async def p1_stub_p2_search(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        if step is None or int(step) <= 1:
+            return stub, "fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:1:c:x"
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}:c:x"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", p1_stub_p2_search)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    asyncio.run(body())
+
+
 def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
     """Known July GP execute namespaces must not emit the 9-msg traj-end stub.
 
