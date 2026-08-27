@@ -1604,6 +1604,57 @@ def test_workflow_format_outputs_field_without_name_skipped():
     assert outputs == []
 
 
+def test_structured_response_from_schema_headings_parses_assemble_final():
+    from workflows.agent_workflow import structured_response_from_schema_headings
+
+    schema = {
+        "fields": [
+            {"name": "top_creators_analysis", "type": "list[object]"},
+            {"name": "positioning_statement", "type": "str"},
+            {"name": "ninety_day_content_calendar", "type": "list[object]"},
+        ]
+    }
+    text = (
+        "July Fast Mode assemble.\n\n"
+        "# top_creators_analysis\n\n"
+        "1. Andrew Huberman\n\n"
+        "# positioning_statement\n\n"
+        "Engineer approach to longevity.\n\n"
+        "# ninety_day_content_calendar\n\n"
+        "Week 1: sleep audit."
+    )
+    parsed = structured_response_from_schema_headings(text, schema)
+    assert "Huberman" in parsed["top_creators_analysis"]
+    assert parsed["positioning_statement"] == "Engineer approach to longevity."
+    assert "sleep audit" in parsed["ninety_day_content_calendar"]
+
+
+def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "positioning_statement", "description": "Positioning"},
+            {"name": "weekly_engagement_target_creators"},
+        ]
+    }
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": (
+                "# positioning_statement\n\nAman as the founder-operator.\n\n"
+                "# weekly_engagement_target_creators\n\nHuberman, Attia, Johnson."
+            ),
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    assert [row["key"] for row in outputs] == [
+        "positioning_statement",
+        "weekly_engagement_target_creators",
+    ]
+    assert outputs[0]["value"] == "Aman as the founder-operator."
+
+
 def test_workflow_extract_failure_context_empty_context():
     wf = _bare_workflow_instance()
     result = wf._extract_failure_context(context=[])
@@ -6190,6 +6241,14 @@ async def run_all_tests():
     r.record("wf_format_outputs_maps_fields", test_workflow_format_outputs_maps_fields)
     r.record("wf_format_outputs_skips_missing", test_workflow_format_outputs_skips_missing_fields)
     r.record("wf_format_outputs_field_no_name", test_workflow_format_outputs_field_without_name_skipped)
+    r.record(
+        "wf_schema_headings_parse_assemble_final",
+        test_structured_response_from_schema_headings_parses_assemble_final,
+    )
+    r.record(
+        "wf_coalesce_structured_response_from_headings",
+        test_workflow_coalesce_structured_response_fills_outputs_from_headings,
+    )
     r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
     r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)
     r.record("wf_efc_skips_reasoning_meta", test_workflow_extract_failure_context_skips_reasoning_metadata)

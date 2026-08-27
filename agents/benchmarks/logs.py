@@ -895,6 +895,11 @@ async def collect_tree_messages(
             "goal": (agent_info.get("goal") or "")[:200],
             "status": agent_info.get("status") or agent_obj.get("status") or "UNKNOWN",
             "messages": extract_message_transcript(agent_data),
+            "response_schema": agent_obj.get("response_schema"),
+            "structured_output": agent_obj.get("structured_output"),
+            "tokens_in": agent_obj.get("tokens_in") or agent_obj.get("tokensIn") or 0,
+            "tokens_out": agent_obj.get("tokens_out") or agent_obj.get("tokensOut") or 0,
+            "context_size": agent_obj.get("context_size") or agent_obj.get("contextSize") or 0,
         }
 
     results = await asyncio.gather(*[_one(a) for a in tree_agents], return_exceptions=True)

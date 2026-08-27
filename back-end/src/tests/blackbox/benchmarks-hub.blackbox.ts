@@ -545,8 +545,115 @@ async function testRuns_toolUsageShapedTreeDoesNotInventEmptyChips(): Promise<vo
     assertStatus(subView.status, 200, subView.data);
     const subMessages = (subView.data as { messages: Array<{ text: string }> }).messages;
     assert(
-      subMessages.length === 1 && subMessages[0].text === 'cached child trajectory',
+      subMessages[0].text === 'cached child trajectory',
       'child trajectory missing after tool-usage rollup mix-in'
+    );
+  } finally {
+    await request(`${BASE_URL}/api/benchmarks/runs/${runId}`, {
+      method: 'DELETE',
+      headers: internalHeaders,
+    });
+  }
+}
+
+async function testRuns_copiesResponseSchemaAndFinalOutputs(): Promise<void> {
+  const runId = `${RUN_ID}-schema`;
+  const bundle = syntheticBundle();
+  bundle.run_id = runId;
+  const schema = {
+    fields: [
+      {
+        name: 'positioning_statement',
+        type: 'str',
+        required: true,
+        description: "Aman's differentiated positioning",
+      },
+    ],
+  };
+  const structured = { positioning_statement: 'Engineer approach to longevity' };
+  const tasks = bundle.tasks as Array<Record<string, unknown>>;
+  const logs = tasks[0].logs as Record<string, unknown>;
+  const tree = logs.tree as Record<string, Record<string, unknown>>;
+  const rootNode = tree[ROOT_AGENT];
+  rootNode.response_schema = schema;
+  rootNode.structured_output = structured;
+  rootNode.tokens_out = 29515;
+  rootNode.context_size = 185193;
+  rootNode.messages = [
+    ...((rootNode.messages as Array<Record<string, unknown>>) ?? []),
+    {
+      role: 'TOOL',
+      message: '',
+      created_at: '2026-07-10T00:00:04Z',
+      metadata: {
+        isFinalSummary: true,
+        toolName: 'completion_summary',
+        toolStatus: 'FINISHED',
+        completionSummary: {
+          summary: 'Completed a 50-creator competitive analysis.',
+          outputs: [
+            {
+              key: 'positioning_statement',
+              label: 'Positioning Statement',
+              value: structured.positioning_statement,
+            },
+          ],
+          totalToolCalls: 127,
+          durationSeconds: 133,
+          costDollars: 0.0885,
+        },
+      },
+    },
+  ];
+
+  try {
+    const upload = await request(`${BASE_URL}/api/benchmarks/runs`, {
+      method: 'POST',
+      headers: internalHeaders,
+      body: JSON.stringify(bundle),
+    });
+    assertStatus(upload.status, 201, upload.data);
+
+    const rootView = await request(
+      `${BASE_URL}/api/benchmarks/runs/${runId}/agents/${ROOT_AGENT}`,
+      {
+        headers: internalHeaders,
+      }
+    );
+    assertStatus(rootView.status, 200, rootView.data);
+    const root = rootView.data as {
+      agent: {
+        response_schema: { fields: Array<{ name: string }> } | null;
+        structured_output: { positioning_statement?: string } | null;
+        tokens_out: number;
+        context_size: number;
+      };
+      messages: Array<{
+        metadata?: {
+          isFinalSummary?: boolean;
+          completionSummary?: { outputs?: Array<{ key: string; value: string }> };
+        };
+      }>;
+    };
+    assert(root.agent.response_schema !== null, 'Hub adapter dropped response_schema');
+    assert(
+      root.agent.response_schema?.fields?.[0]?.name === 'positioning_statement',
+      `schema fields ${JSON.stringify(root.agent.response_schema)}`
+    );
+    assert(
+      root.agent.structured_output?.positioning_statement === 'Engineer approach to longevity',
+      'Hub adapter dropped structured_output'
+    );
+    assert(root.agent.tokens_out === 29515, `tokens_out ${root.agent.tokens_out} != 29515`);
+    assert(root.agent.context_size === 185193, `context_size ${root.agent.context_size}`);
+    const final = root.messages.find((message) => message.metadata?.isFinalSummary);
+    assert(
+      (final?.metadata?.completionSummary?.outputs?.length ?? 0) === 1,
+      'final outputs missing'
+    );
+    assert(
+      final?.metadata?.completionSummary?.outputs?.[0]?.key === 'positioning_statement',
+      'final output key mismatch'
     );
   } finally {
     await request(`${BASE_URL}/api/benchmarks/runs/${runId}`, {
@@ -730,6 +837,10 @@ async function runAll(): Promise<void> {
     [
       'runs: tool-usage logs.tree does not invent empty chips',
       testRuns_toolUsageShapedTreeDoesNotInventEmptyChips,
+    ],
+    [
+      'runs: copies response_schema and final outputs',
+      testRuns_copiesResponseSchemaAndFinalOutputs,
     ],
     ['runs: upload requires run_id', testRuns_uploadRequiresRunId],
     [

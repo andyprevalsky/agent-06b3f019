@@ -8,7 +8,7 @@ from benchmarks.logs import canonicalize_agent_tree, collect_tree_messages, tree
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _fake_get_agent(store):
@@ -94,6 +94,27 @@ def test_collect_tree_messages_status_falls_back_to_agent_obj():
     store = {"x": {"agent": {"status": "FINISHED"}, "messages": []}}
     tree = _run(collect_tree_messages("x", tree_agents, _fake_get_agent(store)))
     assert tree["x"]["status"] == "FINISHED"
+
+
+def test_collect_tree_messages_copies_response_schema_and_structured_output():
+    tree_agents = [{"agent_id": "root-1", "parent_agent_id": None, "goal": "g", "status": "COMPLETED"}]
+    store = {
+        "root-1": {
+            "agent": {
+                "status": "COMPLETED",
+                "response_schema": {"fields": [{"name": "positioning_statement", "type": "str"}]},
+                "structured_output": {"positioning_statement": "Engineer approach"},
+                "tokens_out": 29515,
+                "context_size": 185193,
+            },
+            "messages": [{"role": "ASSISTANT", "text": "done", "timestamp": "t0"}],
+        }
+    }
+    tree = _run(collect_tree_messages("root-1", tree_agents, _fake_get_agent(store)))
+    assert tree["root-1"]["response_schema"]["fields"][0]["name"] == "positioning_statement"
+    assert tree["root-1"]["structured_output"]["positioning_statement"] == "Engineer approach"
+    assert tree["root-1"]["tokens_out"] == 29515
+    assert tree["root-1"]["context_size"] == 185193
 
 
 if __name__ == "__main__":

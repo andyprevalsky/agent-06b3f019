@@ -2501,6 +2501,39 @@ def test_write_only_explore_continues_after_seeding_prior_step(mem, monkeypatch)
     asyncio.run(body())
 
 
+def test_coerce_activity_shaped_response_schema_payload():
+    """Activity-shaped {schema, usage} rows must replay as schema JSON, not empty content."""
+    stored = {
+        "schema": {
+            "fields": [
+                {"name": "positioning_statement", "type": "str", "required": True},
+                {
+                    "name": "top_creators_analysis",
+                    "type": "list[object]",
+                    "properties": [{"name": "creator_name", "type": "str"}],
+                },
+            ]
+        },
+        "usage": {"prompt_tokens": 1885, "completion_tokens": 301},
+    }
+    coerced = rose_cache.coerce_cached_llm_payload(stored)
+    parsed = json.loads(coerced["content"])
+    assert parsed["title"]
+    assert [field["name"] for field in parsed["fields"]] == [
+        "positioning_statement",
+        "top_creators_analysis",
+    ]
+    assert parsed["fields"][1]["properties"][0]["name"] == "creator_name"
+
+    async def body():
+        chunks = await _drain(rose_cache.replay(stored))
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        replayed = json.loads(content)
+        assert replayed["fields"][0]["name"] == "positioning_statement"
+
+    asyncio.run(body())
+
+
 def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
     """summarize_web_fetch miss returns page text passthrough, not soft stub."""
 

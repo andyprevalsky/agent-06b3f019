@@ -78,6 +78,47 @@ def test_load_archive_maps_benchmark_run_to_agent_detail(tmp_path):
     ]
 
 
+def test_load_archive_copies_response_schema_and_structured_output(tmp_path):
+    run_path = tmp_path / "run.json"
+    schema = {"fields": [{"name": "positioning_statement", "type": "str"}]}
+    structured = {"positioning_statement": "Engineer approach to longevity"}
+    run_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-07T23:00:00+00:00",
+                "tasks": [
+                    {
+                        "name": "chat-mode",
+                        "passed": True,
+                        "agent_id": "agent-1",
+                        "duration_seconds": 12.5,
+                        "logs": {
+                            "messages": [{"role": "USER", "message": "hello", "created_at": "t0"}],
+                            "tree": {
+                                "agent-1": {
+                                    "parent_agent_id": None,
+                                    "goal": "hello",
+                                    "status": "COMPLETED",
+                                    "response_schema": schema,
+                                    "structured_output": structured,
+                                    "tokens_out": 29515,
+                                    "context_size": 185193,
+                                    "messages": [{"role": "USER", "message": "hello", "created_at": "t0"}],
+                                }
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    entry = load_archive(run_path)["agent-1"]
+    assert entry.agent["response_schema"] == schema
+    assert entry.agent["structured_output"] == structured
+    assert entry.agent["tokens_out"] == 29515
+    assert entry.agent["context_size"] == 185193
+
+
 def test_load_archive_safe_tolerates_missing_and_broken(tmp_path):
     assert load_archive_safe(None) == {}
     assert load_archive_safe(tmp_path / "nope.json") == {}

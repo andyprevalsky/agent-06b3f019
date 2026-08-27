@@ -137,6 +137,11 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
     duration = float(task.get("duration_seconds") or 0)
     status = "COMPLETED" if task.get("passed") else "FAILED"
     updated_at = messages[-1]["timestamp"] if messages and messages[-1].get("timestamp") else run_timestamp
+    info = canonicalize_agent_tree((task.get("logs") or {}).get("tree") or {}).get(agent_id, {})
+    tokens_in = int(info.get("tokens_in") or task.get("tokens_in") or 0) or (
+        int(task.get("cache_read_input_tokens") or 0) + int(task.get("cache_creation_input_tokens") or 0)
+    )
+    tokens_out = int(info.get("tokens_out") or task.get("tokens_out") or 0)
     return {
         "agent_id": agent_id,
         "parent_agent_id": None,
@@ -151,15 +156,13 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
         "status": status,
         "status_message": f"Archived benchmark task: {task.get('name')}",
         "temporal_workflow_id": f"benchmark-archive-{agent_id}",
-        "token_count": int(task.get("tokens_in") or 0) + int(task.get("tokens_out") or 0),
-        "tokens_in": int(task.get("tokens_in") or 0)
-        or int(task.get("cache_read_input_tokens") or 0)
-        + int(task.get("cache_creation_input_tokens") or 0),
-        "tokens_out": int(task.get("tokens_out") or 0),
+        "token_count": tokens_in + tokens_out,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
         "tool_tokens_in": 0,
         "tool_tokens_out": 0,
         "tool_cost_cents": 0,
-        "context_size": 0,
+        "context_size": int(info.get("context_size") or 0),
         "message_count": len(messages),
         "price_limit_cents": 0,
         "tree_cost_cents": float(task.get("cost_cents") or 0),
@@ -169,12 +172,12 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
         "created_at": run_timestamp,
         "updated_at": updated_at,
         "write_lock_enabled": True,
-        "structured_output": None,
+        "structured_output": info.get("structured_output") or task.get("structured_output"),
         "failure_context": None,
         "verifier": None,
         "tools": [],
         "tools_in_use": [],
-        "response_schema": None,
+        "response_schema": info.get("response_schema") or task.get("response_schema"),
         "benchmark_task": task.get("name"),
         "benchmark_duration_seconds": duration,
         "benchmark_world_model_mode": task.get("world_model_mode"),
@@ -206,13 +209,13 @@ def _subagent_summary(
         "status": status,
         "status_message": f"Sub-agent of {root_id[:12]}",
         "temporal_workflow_id": f"benchmark-archive-{agent_id}",
-        "token_count": 0,
-        "tokens_in": 0,
-        "tokens_out": 0,
+        "token_count": int(info.get("tokens_in") or 0) + int(info.get("tokens_out") or 0),
+        "tokens_in": int(info.get("tokens_in") or 0),
+        "tokens_out": int(info.get("tokens_out") or 0),
         "tool_tokens_in": 0,
         "tool_tokens_out": 0,
         "tool_cost_cents": 0,
-        "context_size": 0,
+        "context_size": int(info.get("context_size") or 0),
         "message_count": len(messages),
         "price_limit_cents": 0,
         "tree_cost_cents": 0,
@@ -222,12 +225,12 @@ def _subagent_summary(
         "created_at": run_timestamp,
         "updated_at": updated_at,
         "write_lock_enabled": True,
-        "structured_output": None,
+        "structured_output": info.get("structured_output"),
         "failure_context": None,
         "verifier": None,
         "tools": [],
         "tools_in_use": [],
-        "response_schema": None,
+        "response_schema": info.get("response_schema"),
         "benchmark_task": task.get("name"),
         "benchmark_duration_seconds": 0,
         "benchmark_world_model_mode": task.get("world_model_mode"),

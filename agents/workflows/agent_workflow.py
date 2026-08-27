@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import hashlib
 import json as _json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -161,6 +162,65 @@ TOOL_EXECUTORS = {
 APPROVAL_REQUIRED_TOOLS = {
     "call_phone_number": get_call_phone_manager,
 }
+
+
+def structured_response_from_schema_headings(text: str, schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse `# field_name` markdown sections into a structured_response dict."""
+    if not text or not isinstance(schema, dict):
+        return {}
+    fields = schema.get("fields") or []
+    names = [str(field.get("name")) for field in fields if isinstance(field, dict) and field.get("name")]
+    if not names:
+        return {}
+    matches: List[Tuple[int, str, int]] = []
+    for name in names:
+        found = re.search(rf"^#+\s+{re.escape(name)}\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+        if found:
+            matches.append((found.start(), name, found.end()))
+    if not matches:
+        return {}
+    matches.sort()
+    out: Dict[str, Any] = {}
+    for index, (_start, name, end) in enumerate(matches):
+        next_start = matches[index + 1][0] if index + 1 < len(matches) else len(text)
+        body = text[end:next_start].strip()
+        if body:
+            out[name] = body
+    return out
+
+
+def coalesce_structured_response(
+    context: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Merge verifier output with `# field_name` sections from the transcript."""
+    merged: Dict[str, Any] = dict(structured_response) if isinstance(structured_response, dict) else {}
+    names = [
+        str(field.get("name"))
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    ]
+    if not names:
+        return structured_response if structured_response else (merged or None)
+
+    def _missing(current: Dict[str, Any]) -> List[str]:
+        empty = (None, "", [], {})
+        return [name for name in names if name not in current or current[name] in empty]
+
+    if not _missing(merged):
+        return merged
+    for message in reversed(context or []):
+        text = str(message.get("text") or message.get("message") or "")
+        extracted = structured_response_from_schema_headings(text, schema)
+        if not extracted:
+            continue
+        for key, value in extracted.items():
+            if key not in merged or merged[key] in (None, "", [], {}):
+                merged[key] = value
+        if not _missing(merged):
+            break
+    return merged or structured_response
 
 
 @workflow.defn
@@ -4059,6 +4119,18 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
 
+    def _coalesce_structured_response(
+        self, context: List[Dict], structured_response: Optional[Dict]
+    ) -> Optional[Dict]:
+        """Fill missing schema fields from `# field_name` sections in the transcript.
+
+        Fast Mode assemble-final (and other dag_reasoning slots) often persist the
+        deliverable as markdown headings that match the output schema, while the
+        verifier `output` dict stays empty because schema gen missed. Without this
+        merge, Task Complete has a summary but no Output section.
+        """
+        return coalesce_structured_response(context, self.output_schema, structured_response)
+
     def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
         """Convert structured_response → CompletionSummaryCard outputs format."""
         if not structured_response or not self.output_schema:
@@ -4239,6 +4311,7 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
+            structured_response = self._coalesce_structured_response(context, structured_response)
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",

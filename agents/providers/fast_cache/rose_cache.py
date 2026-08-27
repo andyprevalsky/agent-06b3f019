@@ -13,6 +13,7 @@ are written for future Fast Mode runs.
 
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
@@ -64,8 +65,66 @@ def _cache_replay_usage(original: Dict[str, Any]) -> Dict[str, Any]:
     return usage
 
 
+def coerce_cached_llm_payload(stored: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Replay activity-shaped ``response_schema`` rows as LLM stream content.
+
+    ``set_response_schema_activity`` writes ``{schema, title, usage}`` into the
+    same ``kind=llm`` namespace ``RoseClient.complete`` reads. Replaying that
+    blob as a stream yields empty ``content`` → "LLM returned no response
+    schema content", so Agent Settings stays on "Schema generating..." and
+    ``_format_outputs`` emits no Task Complete Output section.
+    """
+    if not isinstance(stored, dict):
+        return stored or {}
+    if stored.get("content") or stored.get("content_chunks") or stored.get("tool_calls"):
+        return stored
+    schema = stored.get("schema")
+    if not isinstance(schema, dict):
+        return stored
+    raw_fields = schema.get("fields")
+    if not isinstance(raw_fields, list) or not raw_fields:
+        return stored
+    fields: list[dict[str, Any]] = []
+    for field in raw_fields:
+        if not isinstance(field, dict) or not field.get("name") or not field.get("type"):
+            continue
+        item: Dict[str, Any] = {"name": field["name"], "type": field["type"]}
+        props = field.get("properties")
+        if isinstance(props, list) and props:
+            item["properties"] = [
+                {"name": prop["name"], "type": prop["type"]}
+                for prop in props
+                if isinstance(prop, dict) and prop.get("name") and prop.get("type")
+            ]
+        fields.append(item)
+    if not fields:
+        return stored
+    title = stored.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = "Task Output"
+    payload = {
+        "reasoning": "Cached response schema.",
+        "fields": fields,
+        "title": title.strip()[:80],
+    }
+    content = json.dumps(payload)
+    out = dict(stored)
+    out["content"] = content
+    out["content_chunks"] = [
+        {
+            "text": content,
+            "item_id": "cache:response_schema:0",
+            "output_index": 0,
+            "content_index": 0,
+            "phase": "final_answer",
+        }
+    ]
+    return out
+
+
 async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     """Reconstruct the StreamChunk sequence from a stored response."""
+    stored = coerce_cached_llm_payload(stored)
     yield SimpleNamespace(
         kind="metadata",
         data={
