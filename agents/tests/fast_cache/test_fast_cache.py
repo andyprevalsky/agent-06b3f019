@@ -2360,9 +2360,9 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert soft_complete_on_miss("context_compression") is not None
     assert soft_complete_on_miss("response_schema") is None
 
-    # July OAi-demo root DAG ends at dag_reasoning p:5. A later node (p:6
-    # assemble-final-deliverable) must traj-end, not call live Rose ($0.63
-    # miss + extra nested GP children on 163ad502).
+    # If the July assemble-final row is absent, dag_reasoning must
+    # traj-end rather than call live Rose ($0.63 miss + extra nested
+    # GP children on 163ad502). When p:6 exists, get-position hits it.
     dag = soft_complete_on_miss("dag_reasoning")
     assert dag is not None
     assert json.loads(dag["content"])["response"]

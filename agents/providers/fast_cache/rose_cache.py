@@ -330,8 +330,10 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
         }
     if site == "dag_reasoning":
         # ReasoningResponse contract: {response}. July OAi-demo root DAG
-        # caches dag_reasoning through p:5; a later assemble-final node
-        # (p:6) must not fall through to live Rose.
+        # caches dag_reasoning through p:5 plus a seeded assemble-final
+        # slot at p:6 (`july_assemble_final`: 50 analyses, positioning,
+        # 90-day calendar, 30 hooks, 20 engagement). Traj-end is only
+        # the fallback when that row is missing — never live Rose.
         soft_json = (
             '{"response":"Fast Mode cache trajectory ended; prior tool '
             'evidence is sufficient to treat the goal as complete."}'
