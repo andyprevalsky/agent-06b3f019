@@ -61,7 +61,11 @@ function canonicalizeOaiDemoGoalForHash(goal: string): string {
   if (!goal.includes(OAI_DEMO_ROOT_GOAL_PREFIX) && !goal.includes(OAI_DEMO_CHILD_WINDOW)) {
     return goal;
   }
-  return goal.split(OAI_DEMO_CACHE_DISPLAY_NAME).join(OAI_DEMO_CACHE_SOURCE_NAME).split("Andy's").join("Aman's");
+  return goal
+    .split(OAI_DEMO_CACHE_DISPLAY_NAME)
+    .join(OAI_DEMO_CACHE_SOURCE_NAME)
+    .split("Andy's")
+    .join("Aman's");
 }
 
 /**

@@ -89,7 +89,8 @@ test('goalHash aliases Andy-named OAi-demo children onto the July Aman namespace
     `building a personal brand. Last 90 days: ${window}. Creator: Dr. Eric Topol.`; // pragma: allowlist secret
   const andy = aman.replaceAll('Aman Gottumukkala', 'Andy Prevalsky');
   assert.strictEqual(goalHash(andy), goalHash(aman));
-  const otherAndy = 'Find the current professional profile of Andy Prevalsky, founder of Rose Labs.';
+  const otherAndy =
+    'Find the current professional profile of Andy Prevalsky, founder of Rose Labs.';
   const otherAman = otherAndy.replaceAll('Andy Prevalsky', 'Aman Gottumukkala');
   assert.notStrictEqual(goalHash(otherAndy), goalHash(otherAman));
 });
