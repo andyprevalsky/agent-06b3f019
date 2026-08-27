@@ -113,16 +113,23 @@ class WaitForManager(ToolManager):
 
         delta_seconds = int((target - now).total_seconds())
         if delta_seconds <= 0:
-            if resume:
-                # Deploy migration re-armed a wait whose target elapsed during
-                # downtime — treat it as satisfied so the agent proceeds without
-                # depending on the LLM to re-issue wait_for.
+            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            if resume or fast_mode:
+                # resume=True: deploy migration re-armed a wait whose target
+                # elapsed during downtime. Fast Mode: July demo timestamps
+                # (e.g. 2026-07-17T07:03Z) are already past on replay — treat
+                # them as satisfied so children continue instead of ERROR.
+                reason = (
+                    "target already elapsed during deploy"
+                    if resume
+                    else "target already elapsed (Fast Mode replay)"
+                )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Wait complete",
-                    message=f"Reached {until_timestamp} (target already elapsed during deploy)",
+                    message=f"Reached {until_timestamp} ({reason})",
                     status=MessageStatus.FINISHED,
-                    metadata={"waitForMode": "timestamp", "resumed": True},
+                    metadata={"waitForMode": "timestamp", "resumed": bool(resume)},
                 )
                 return
             yield ToolEvent(

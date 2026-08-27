@@ -253,13 +253,14 @@ def _patch_handler_workflow(fake):
 
 
 class _WFInstance:
-    def __init__(self, *, paused=False, cost_limit_reached=False):
+    def __init__(self, *, paused=False, cost_limit_reached=False, fast_mode_cache_enabled=False):
         self.user_id = "user-1"
         self.agent_id = "agent-1"
         self.model = "rose-1-lite"
         self.context_gates = {}
         self.is_paused = paused
         self._cost_limit_reached = cost_limit_reached
+        self.fast_mode_cache_enabled = fast_mode_cache_enabled
         self.handled = []
 
     async def _handle_tool_event(self, event, tcid, tname):
@@ -871,6 +872,35 @@ async def test_handler_timestamp_resume_nonbool_still_errors_in_past():
     assert MessageStatus.FINISHED not in statuses
 
 
+async def test_handler_timestamp_fast_mode_past_completes_not_errors():
+    """Fast Mode replay of a July wait_for must FINISH, not ERROR, once the target is past.
+
+    The OAi demo recorded wait_until 2026-07-17…; replaying in August used to
+    emit ``Timestamp … is in the past`` and leave children ACTIVE.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 27, 2, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(fast_mode_cache_enabled=True),
+                tool_call={"until_timestamp": "2026-07-17T07:03:00+00:00"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    assert MessageStatus.ERROR not in statuses
+    assert fake.sleep_records == []
+    assert "past" not in events[0].message.lower()
+
+
 async def run_all_tests():
     print("wait-for blackbox tests:")
     r = BlackboxResult()
@@ -927,6 +957,10 @@ async def run_all_tests():
     r.record("resume_latest_wins", test_resume_latest_wait_wins)
     await r.record_async("handler_ts_resume_past", test_handler_timestamp_resume_past_completes_not_errors)
     await r.record_async("handler_ts_resume_nonbool", test_handler_timestamp_resume_nonbool_still_errors_in_past)
+    await r.record_async(
+        "handler_ts_fast_mode_past",
+        test_handler_timestamp_fast_mode_past_completes_not_errors,
+    )
     teardown_mock()
     return r.all_passed
 
