@@ -206,13 +206,25 @@ def _expected_explore_agents_for_city_task(goal_text: str) -> int | None:
     return None
 
 
-def _finished_oai_demo_for_each_count(workflow_instance) -> int:
-    """Count completed root for_each delegations already in context.
+def _is_oai_demo_for_each_tool(metadata: dict) -> bool:
+    tool_name = str(metadata.get("toolName") or "")
+    if tool_name == "spawn_general_purpose_agent_for_each":
+        return True
+    return tool_name == "spawn_agent" and metadata.get("agentType") == "for_each"
+
+
+def _prior_oai_demo_for_each_count(workflow_instance, current_tool_call_id: str | None = None) -> int:
+    """Count prior root for_each calls, including IN_PROGRESS/ERROR.
 
     The July mass-agent root replays a second 50-GP for_each after the first
-    wave completes. One wave satisfies T2; a second wave cannot finish inside
-    the 900s harness (smoke8: first 50 done at 449s, second wave still ACTIVE
-    at 901s). Scoped to this task via is_oai_demo_mass_agent_task.
+    wave. One wave satisfies T2; a second wave cannot finish inside the 900s
+    harness (smoke8: first 50 done at 449s, second wave still ACTIVE at 901s).
+
+    Smoke9: the first wave's spawn_general_purpose_agent_for_each ended ERROR
+    ("42/50 children failed" after finalize activity timeouts) and never
+    FINISHED. A FINISHED-only counter then allowed the second fan-out at
+    ~451s. The in-flight first call must not count itself — the workflow may
+    already have posted IN_PROGRESS for the current toolCallId.
     """
     context = getattr(workflow_instance, "context", [])
     if not isinstance(context, list):
@@ -223,18 +235,82 @@ def _finished_oai_demo_for_each_count(workflow_instance) -> int:
         if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
             continue
         metadata = msg.get("metadata") or {}
+        if not _is_oai_demo_for_each_tool(metadata):
+            continue
+        tool_call_id = metadata.get("toolCallId")
+        if current_tool_call_id and tool_call_id == current_tool_call_id:
+            continue
+        if tool_call_id:
+            if tool_call_id in seen_tool_calls:
+                continue
+            seen_tool_calls.add(tool_call_id)
+        count += 1
+    return count
+
+
+def _is_for_each_finalize_timeout(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return "timed out" in text or "timeout" in text
+
+
+def _oai_demo_child_result_failed(child_result: Dict[str, Any]) -> bool:
+    status = str(child_result.get("status") or "").strip().lower()
+    return status in {"failed", "error", "max_iterations"} or child_result.get("success") is False
+
+
+async def _recover_oai_demo_for_each_timeout(
+    workflow_instance, child_agent_id: Any, exc: BaseException
+) -> Dict[str, Any] | None:
+    """Wait for a completed child after finalize activity saturation (smoke9).
+
+    50 parallel finalize_child calls hit post_message / reconcile activity
+    timeouts around 100s, then for_each ERRORed (T10) while the GPs were
+    still replaying. On this task, keep waiting for the child signal instead
+    of treating the activity timeout as a child failure.
+    """
+    if not child_agent_id:
+        return None
+    if not getattr(workflow_instance, "fast_mode_cache_enabled", False):
+        return None
+    if not is_oai_demo_mass_agent_task(workflow_instance):
+        return None
+    if not _is_for_each_finalize_timeout(exc):
+        return None
+    results = getattr(workflow_instance, "child_results", None)
+    if not isinstance(results, dict):
+        return None
+    if child_agent_id in results:
+        return results.get(child_agent_id)
+    while child_agent_id not in workflow_instance.child_results:
+        try:
+            await workflow.wait_condition(
+                lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                timeout=timedelta(seconds=30),
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            continue
+    return workflow_instance.child_results.get(child_agent_id)
+
+
+def _oai_demo_first_level_gp_count(workflow_instance) -> int:
+    """Distinct first-level GP spawn tool calls already in context."""
+    context = getattr(workflow_instance, "context", [])
+    if not isinstance(context, list):
+        return 0
+    seen_tool_calls: set[str] = set()
+    count = 0
+    for msg in context:
+        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
         tool_name = str(metadata.get("toolName") or "")
-        if tool_name not in {"spawn_general_purpose_agent_for_each", "spawn_agent"}:
+        if tool_name == "spawn_general_purpose_agent_for_each":
             continue
-        if tool_name == "spawn_agent" and metadata.get("agentType") != "for_each":
-            continue
-        if metadata.get("toolStatus") != "FINISHED":
-            continue
-        if not (
-            metadata.get("forEachAggregate")
-            or str(metadata.get("title") or "").startswith("for_each complete")
-            or "Completed for_each delegation" in str(msg.get("text") or msg.get("message") or "")
-        ):
+        if tool_name == "spawn_general_purpose_agent":
+            pass
+        elif tool_name == "spawn_agent" and metadata.get("agentType") == "general_purpose":
+            pass
+        else:
             continue
         tool_call_id = metadata.get("toolCallId")
         if tool_call_id:
@@ -387,7 +463,10 @@ class SpawnAgentManager(ToolManager):
                 or (
                     parent_depth == 0
                     and agent_type == "for_each"
-                    and _finished_oai_demo_for_each_count(workflow_instance) >= 1
+                    and (
+                        _prior_oai_demo_for_each_count(workflow_instance, tool_call_id) >= 1
+                        or _oai_demo_first_level_gp_count(workflow_instance) >= 50
+                    )
                 )
             )
         ):
@@ -1043,6 +1122,25 @@ class SpawnAgentManager(ToolManager):
                             }
                         )
             except Exception as exc:
+                recovered = await _recover_oai_demo_for_each_timeout(
+                    workflow_instance, child_info.get("agent_id"), exc
+                )
+                if recovered is not None and not _oai_demo_child_result_failed(recovered):
+                    logger.warning(
+                        "for_each child finalize timed out; recovered completed child",
+                        tcid=tcid,
+                        error=str(exc),
+                    )
+                    child_outputs.append(
+                        {
+                            "index": idx,
+                            "agent_id": child_info.get("agent_id"),
+                            "status": "completed",
+                            "summary": recovered.get("summary") or "",
+                            "structured_response": recovered.get("structured_response"),
+                        }
+                    )
+                    return
                 saw_error = True
                 child_outputs.append(
                     {

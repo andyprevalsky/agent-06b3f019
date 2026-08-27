@@ -1207,6 +1207,209 @@ async def test_handler_fast_mode_skips_second_root_for_each_on_oai_demo():
     assert (events[0].metadata or {}).get("skippedNestedSpawn") is True
 
 
+def _oai_demo_root_goal() -> str:
+    return (
+        "I'm building a personal brand for health, longevity, technology, founder journey "  # pragma: allowlist secret
+        "[I'll refine the angle]. Analyze the top 50 creators."
+    )
+
+
+async def test_handler_fast_mode_skips_second_root_for_each_when_first_errored():
+    """Smoke9: first for_each ended ERROR after finalize timeouts; still skip wave 2."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    wf = _FakeWFInstance(
+        depth=0,
+        goal=_oai_demo_root_goal(),
+        context=[
+            {
+                "role": "TOOL",
+                "text": "42/50 children failed. See structured_response.items for per-child results.",
+                "metadata": {
+                    "toolName": "spawn_general_purpose_agent_for_each",
+                    "toolStatus": "ERROR",
+                    "toolCallId": "tc-first-for-each",
+                    "title": "for_each failed",
+                },
+            }
+        ],
+    )
+    wf.fast_mode_cache_enabled = True
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "for_each",
+                    "goal": "Analyze each creator again",
+                    "items": [{"name": "Andrew Huberman", "rank": 1}],
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc-second-for-each",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert fake_mgr.last_call is None, "ERROR first wave must still skip the second for_each"
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.FINISHED
+    assert (events[0].metadata or {}).get("skippedNestedSpawn") is True
+
+
+async def test_handler_fast_mode_skips_second_root_for_each_when_first_in_progress():
+    """Do not wait for FINISHED — the first wave is already IN_PROGRESS in context."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    wf = _FakeWFInstance(
+        depth=0,
+        goal=_oai_demo_root_goal(),
+        context=[
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_general_purpose_agent_for_each",
+                    "toolStatus": "IN_PROGRESS",
+                    "toolCallId": "tc-first-for-each",
+                    "title": "Spawning agent cluster",
+                },
+            }
+        ],
+    )
+    wf.fast_mode_cache_enabled = True
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "for_each",
+                    "goal": "Analyze each creator again",
+                    "items": [{"name": "Andrew Huberman", "rank": 1}],
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc-second-for-each",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert fake_mgr.last_call is None, "IN_PROGRESS first wave must skip the second for_each"
+    assert (events[0].metadata or {}).get("skippedNestedSpawn") is True
+
+
+async def test_handler_fast_mode_does_not_self_skip_root_for_each_in_progress():
+    """The in-flight first for_each must still spawn (same toolCallId IN_PROGRESS)."""
+    from domains.spawn_agent.oai_demo_july import JULY_FOR_EACH_ITEMS
+    import domains.spawn_agent.handler as h
+
+    fake_mgr = _FakeDelegateManager([])
+    fake = _FakeSpawnWF()
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        wf = _FakeWFInstance(
+            goal=_oai_demo_root_goal(),
+            context=[
+                {
+                    "role": "TOOL",
+                    "text": "",
+                    "metadata": {
+                        "toolName": "spawn_general_purpose_agent_for_each",
+                        "toolStatus": "IN_PROGRESS",
+                        "toolCallId": "tc-oai-fe",
+                        "title": "Spawning agent cluster",
+                    },
+                }
+            ],
+        )
+        wf.fast_mode_cache_enabled = True
+        await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "for_each",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+                    "output_schema": {"fields": []},
+                    "items": [{"creator_name": "Kayla Barnes-Lentz", "rank": 39}],
+                },
+                tool_call_id="tc-oai-fe",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+
+    batch_call = next(call for call in fake.activity_calls if call["name"] == "spawn_sub_agents_batch_activity")
+    assert len(batch_call["args"][1]) == 50
+    assert all(item["name"] in cfg["goal"] for item, cfg in zip(JULY_FOR_EACH_ITEMS, batch_call["args"][1]))
+
+
+async def test_handler_oai_demo_for_each_recovers_finalize_timeout():
+    """Activity timeouts during 50-way finalize must not ERROR a completed child."""
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    class _TimeoutFinalize:
+        def finalize_child(self, *args, **kwargs):
+            async def _gen():
+                raise RuntimeError("Activity task timed out")
+                yield
+
+            return _gen()
+
+    fake = _FakeSpawnWF()
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: _TimeoutFinalize()
+    try:
+        wf = _FakeWFInstance(goal=_oai_demo_root_goal())
+        wf.fast_mode_cache_enabled = True
+        for i in range(50):
+            wf.child_results[f"child-{i}"] = {
+                "success": True,
+                "summary": f"creator {i} complete",
+                "structured_response": {"creator_name": f"creator-{i}"},
+            }
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "for_each",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+                    "output_schema": {"fields": []},
+                    "items": [{"creator_name": "Andrew Huberman", "rank": 1}],
+                },
+                tool_call_id="tc-timeout-fe",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+
+    assert not any(e.status == MessageStatus.ERROR for e in events)
+    aggregate = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert aggregate
+    assert aggregate[-1].metadata["forEachAggregate"] is True
+    items = aggregate[-1].metadata["structured_response"]["items"]
+    assert items[0]["status"] == "completed"
+    assert items[0]["summary"] == "creator 0 complete"
+    assert len(items) == 50
+
+
 async def test_handler_fast_mode_spawns_explore_on_oai_demo_child():
     """Explore children on this task must still actually spawn (full replay, not skip)."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -3398,6 +3601,22 @@ async def run_all_tests():
     await r.record_async(
         "handler_fast_mode_skips_second_root_for_each_on_oai_demo",
         test_handler_fast_mode_skips_second_root_for_each_on_oai_demo,
+    )
+    await r.record_async(
+        "handler_fast_mode_skips_second_root_for_each_when_first_errored",
+        test_handler_fast_mode_skips_second_root_for_each_when_first_errored,
+    )
+    await r.record_async(
+        "handler_fast_mode_skips_second_root_for_each_when_first_in_progress",
+        test_handler_fast_mode_skips_second_root_for_each_when_first_in_progress,
+    )
+    await r.record_async(
+        "handler_fast_mode_does_not_self_skip_root_for_each_in_progress",
+        test_handler_fast_mode_does_not_self_skip_root_for_each_in_progress,
+    )
+    await r.record_async(
+        "handler_oai_demo_for_each_recovers_finalize_timeout",
+        test_handler_oai_demo_for_each_recovers_finalize_timeout,
     )
     await r.record_async(
         "handler_fast_mode_spawns_explore_on_oai_demo_child",
