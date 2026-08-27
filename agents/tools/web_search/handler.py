@@ -295,19 +295,28 @@ async def web_search_activity(
                 return stored
         if stored is None:
             # Fast Mode read miss: soft-complete instead of live Parallel AI.
-            # July OAi-demo tool namespaces are incomplete vs replayed LLM tool
-            # calls; falling through burns ~0.5c/query and broke the $0 warm path.
-            logger.info("fast_cache.web_search_soft_complete", key=cache_key, query=query[:120])
-            return {
-                "answer": (
-                    "Fast Mode cache miss for this web search. Returning without a "
-                    "live provider call."
-                ),
-                "sources": [],
-                "query": query,
-                "provider": "fast-mode-soft-complete",
-                FAST_CACHE_HIT_FIELD: True,
-            }
+            # Restricted to exact-match fast_cache:on bench trees (mass-agent OAi).
+            if not await fast_cache_client.soft_complete_allowed_for_agent(
+                agent_id, fast_mode_goal
+            ):
+                logger.info(
+                    "fast_cache.web_search_miss_live",
+                    key=cache_key,
+                    query=query[:120],
+                    reason="soft_complete_not_allowlisted",
+                )
+            else:
+                logger.info("fast_cache.web_search_soft_complete", key=cache_key, query=query[:120])
+                return {
+                    "answer": (
+                        "Fast Mode cache miss for this web search. Returning without a "
+                        "live provider call."
+                    ),
+                    "sources": [],
+                    "query": query,
+                    "provider": "fast-mode-soft-complete",
+                    FAST_CACHE_HIT_FIELD: True,
+                }
     elif cache_key is not None:
         logger.info("fast_cache.web_search_write_only", key=cache_key)
 

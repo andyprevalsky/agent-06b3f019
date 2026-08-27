@@ -645,20 +645,22 @@ class RoseClient:
                 # even when the scrape hit. Pass page text through instead of a
                 # soft stub (reward hack) or a live Haiku call ($).
                 if site == "summarize_web_fetch":
-                    derived = _fc_swf_passthrough(messages)
-                    logger.info(
-                        "llm.cache.replay",
-                        call_site=call_site,
-                        key=key,
-                        hit_key="scrape_passthrough",
-                        reason="swf_scrape_passthrough",
-                    )
-                    async for chunk in _fc_replay(derived):
-                        yield chunk
-                    return
+                    if ctx.soft_complete_allowed:
+                        derived = _fc_swf_passthrough(messages)
+                        logger.info(
+                            "llm.cache.replay",
+                            call_site=call_site,
+                            key=key,
+                            hit_key="scrape_passthrough",
+                            reason="swf_scrape_passthrough",
+                        )
+                        async for chunk in _fc_replay(derived):
+                            yield chunk
+                        return
+                    # Non-demo FM: fall through to live summarize.
                 if site in {"completion_summary", "context_compression"}:
                     terminal = _fc_soft_complete(site)
-                    if terminal is not None:
+                    if terminal is not None and ctx.soft_complete_allowed:
                         logger.info(
                             "llm.cache.replay",
                             call_site=call_site,
@@ -672,8 +674,10 @@ class RoseClient:
                 soft = _fc_soft_complete(call_site)
                 # Warm end-of-trajectory: emit as replay passthrough (not soft_complete)
                 # so honest hit metrics stay replay-only / soft≈0.
-                if soft is not None and await _fc.trajectory_prior_exists(
-                    ctx.goal_hash, call_site, ctx.base_step
+                if (
+                    soft is not None
+                    and ctx.soft_complete_allowed
+                    and await _fc.trajectory_prior_exists(ctx.goal_hash, call_site, ctx.base_step)
                 ):
                     logger.info(
                         "llm.cache.replay",
@@ -686,7 +690,7 @@ class RoseClient:
                         yield chunk
                     return
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
-                if soft is not None:
+                if soft is not None and ctx.soft_complete_allowed:
                     logger.info(
                         "llm.cache.replay",
                         call_site=call_site,

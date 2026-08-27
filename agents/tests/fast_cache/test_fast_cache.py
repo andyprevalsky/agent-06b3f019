@@ -30,6 +30,15 @@ from providers.fast_cache import rose_cache
 from providers.rose.pools import POOL_REGISTRY
 
 
+def _soft_complete_bench_goal() -> str:
+    """Exact prompt for the sole ``fast_cache:on`` task (test-mass-agent-run-0)."""
+    from pathlib import Path
+
+    tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
+    return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
+
+
 # ---------------------------------------------------------------------------
 # Fakes / helpers
 # ---------------------------------------------------------------------------
@@ -2211,7 +2220,7 @@ def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch
 
     async def fake_resolve(agent_id: str):
         assert agent_id == "agent-1"
-        return True, "persisted row goal", True, "agent-1"
+        return True, "persisted row goal", True, "agent-1", "persisted row goal"
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
@@ -2226,7 +2235,7 @@ def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
     from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
 
     async def fake_resolve(agent_id: str):
-        return False, None, False, None
+        return False, None, False, None, None
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
@@ -2330,6 +2339,21 @@ def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():
     assert normalize.goal_hash(py_goal) != normalize.goal_hash(unsorted)
 
 
+def test_soft_complete_allowed_only_for_fast_cache_on_bench_goals():
+    """Soft stubs require exact match with a fast_cache:on catalog prompt (or its root)."""
+    bench = _soft_complete_bench_goal()
+    assert normalize.goal_hash(bench) == normalize.OAI_DEMO_ROOT_GOAL_HASH
+    assert normalize.OAI_DEMO_ROOT_GOAL_HASH in normalize.soft_complete_goal_hashes()
+    assert normalize.soft_complete_allowed(bench) is True
+    assert normalize.soft_complete_allowed("Order Blue Bottle at Ferry Building") is False
+    assert normalize.soft_complete_allowed("child for_each goal", root_goal=bench) is True
+    assert normalize.soft_complete_allowed("child for_each goal", root_goal="other root") is False
+    ctx = FastCacheContext(enabled=True, goal="child", root_goal=bench)
+    assert ctx.soft_complete_allowed is True
+    ctx_other = FastCacheContext(enabled=True, goal="Order coffee")
+    assert ctx_other.soft_complete_allowed is False
+
+
 def test_soft_complete_on_miss_for_explore_sites_only():
     from providers.fast_cache.rose_cache import soft_complete_on_miss, swf_scrape_passthrough
 
@@ -2369,9 +2393,10 @@ def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
         return step is not None and int(step) > 0
 
     monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
+    bench = _soft_complete_bench_goal()
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=5))
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=5, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
@@ -2387,14 +2412,12 @@ def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
     asyncio.run(body())
 
 
-def test_cold_explore_miss_does_not_soft_complete(mem):
-    """Cold explore namespaces must not soft-complete (would fake July hits).
+def test_cold_explore_miss_passthrough_only_for_allowlisted_bench(mem):
+    """Cold allowlisted (mass-agent) namespaces passthrough; other FM goals go live."""
 
-    They emit an explicit cold-namespace passthrough replay instead of live LLM.
-    """
-
-    async def body():
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=1))
+    async def body_allowlisted():
+        bench = _soft_complete_bench_goal()
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=1, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
@@ -2403,6 +2426,31 @@ def test_cold_explore_miss_does_not_soft_complete(mem):
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "attempt_completion_with_result"
         assert mem.set_calls == 0
+
+    async def body_non_bench_goes_live():
+        set_context(FastCacheContext(enabled=True, goal="Order Blue Bottle", base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+
+    asyncio.run(body_allowlisted())
+    asyncio.run(body_non_bench_goes_live())
+
+
+def test_cold_explore_miss_does_not_soft_complete(mem):
+    """Backward-compat alias: non-bench cold FM must not stub (goes live)."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+        # Live path may write-through the fresh response; the critical assertion is
+        # that we did not emit a soft-complete attempt_completion stub.
 
     asyncio.run(body())
 
@@ -2472,7 +2520,8 @@ def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
     """summarize_web_fetch miss returns page text passthrough, not soft stub."""
 
     async def body():
-        set_context(FastCacheContext(enabled=True, goal="g", base_step=2))
+        bench = _soft_complete_bench_goal()
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=2, root_goal=bench))
         rose = FakeRose(_full_stream())
         chunks = await _drain(
             rose_cache.cached_complete(
@@ -2487,5 +2536,24 @@ def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
         parsed = json.loads(content)
         assert "SCRAPED PAGE BODY" in parsed["summary"]
         assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
+def test_swf_miss_non_bench_goes_live(mem):
+    """Non-allowlisted FM goals do not get SWF scrape passthrough stubs."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="Order coffee", base_step=2))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(
+                rose,
+                call_site="summarize_web_fetch",
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "SCRAPED PAGE BODY ABOUT CREATOR"}],
+            )
+        )
+        assert rose.calls == 1
 
     asyncio.run(body())

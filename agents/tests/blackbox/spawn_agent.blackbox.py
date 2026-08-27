@@ -2021,7 +2021,7 @@ async def test_spawn_explore_agent_activity_unavailable_sources_still_completed(
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "g", True, None)),
+            new=AsyncMock(return_value=(False, "g", True, None, None)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
     ):
@@ -2064,7 +2064,7 @@ async def test_spawn_explore_agent_activity_normalizes_scalar_unavailable_source
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "g", True, None)),
+            new=AsyncMock(return_value=(False, "g", True, None, None)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
     ):
@@ -2546,7 +2546,7 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "parent g", True, None)),
+            new=AsyncMock(return_value=(False, "parent g", True, None, None)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
         patch("tools.web_fetch.WebFetchManager", return_value=fake_wf),

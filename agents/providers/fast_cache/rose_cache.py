@@ -417,20 +417,23 @@ async def cached_complete(
         if not lookup_failed:
             site = (call_site or "").strip()
             if site == "summarize_web_fetch":
-                derived = swf_scrape_passthrough(complete_kwargs.get("messages"))
-                logger.info(
-                    "llm.cache.replay",
-                    call_site=call_site,
-                    key=key,
-                    hit_key="scrape_passthrough",
-                    reason="swf_scrape_passthrough",
-                )
-                async for chunk in _replay(derived):
-                    yield chunk
-                return
+                if not ctx.soft_complete_allowed:
+                    pass  # fall through to live Haiku under non-demo FM
+                else:
+                    derived = swf_scrape_passthrough(complete_kwargs.get("messages"))
+                    logger.info(
+                        "llm.cache.replay",
+                        call_site=call_site,
+                        key=key,
+                        hit_key="scrape_passthrough",
+                        reason="swf_scrape_passthrough",
+                    )
+                    async for chunk in _replay(derived):
+                        yield chunk
+                    return
             if site in {"completion_summary", "context_compression"}:
                 terminal = soft_complete_on_miss(site)
-                if terminal is not None:
+                if terminal is not None and ctx.soft_complete_allowed:
                     logger.info(
                         "llm.cache.replay",
                         call_site=call_site,
@@ -442,8 +445,10 @@ async def cached_complete(
                         yield chunk
                     return
             soft = soft_complete_on_miss(call_site)
-            if soft is not None and await cache_client.trajectory_prior_exists(
-                ctx.goal_hash, call_site, ctx.base_step
+            if (
+                soft is not None
+                and ctx.soft_complete_allowed
+                and await cache_client.trajectory_prior_exists(ctx.goal_hash, call_site, ctx.base_step)
             ):
                 # True warm end-of-trajectory: July namespace has no p:N+1.
                 # Log as replay passthrough (same family as fm_terminal_passthrough)
@@ -464,7 +469,7 @@ async def cached_complete(
             # Mode read (verify22 burned cents on cold execute/verifier/explore).
             # Emit the terminal schema payload as an explicit cold passthrough
             # replay — not soft_complete — so soft≈0 on the warm path.
-            if soft is not None:
+            if soft is not None and ctx.soft_complete_allowed:
                 logger.info(
                     "llm.cache.replay",
                     call_site=call_site,
