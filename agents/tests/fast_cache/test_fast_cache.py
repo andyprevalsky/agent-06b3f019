@@ -2360,6 +2360,39 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert soft_complete_on_miss("context_compression") is not None
     assert soft_complete_on_miss("response_schema") is None
 
+    # July OAi-demo root DAG ends at dag_reasoning p:5. A later node (p:6
+    # assemble-final-deliverable) must traj-end, not call live Rose ($0.63
+    # miss + extra nested GP children on 163ad502).
+    dag = soft_complete_on_miss("dag_reasoning")
+    assert dag is not None
+    assert json.loads(dag["content"])["response"]
+    assert dag["usage"]["from_fast_cache"] is True
+    assert dag["tool_calls"] == []
+
+
+def test_soft_complete_dag_reasoning_miss_does_not_call_live(mem, monkeypatch):
+    """Warm end-of-trajectory dag_reasoning miss ends via passthrough, no live Rose."""
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=6))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="dag_reasoning", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        parsed = json.loads(content)
+        assert "trajectory ended" in parsed["response"].lower()
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
+
 
 def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
     """Warm end-of-trajectory explore miss ends via passthrough replay, no live Rose."""

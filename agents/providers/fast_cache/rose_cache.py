@@ -328,6 +328,37 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
                 "from_fast_cache": True,
             },
         }
+    if site == "dag_reasoning":
+        # ReasoningResponse contract: {response}. July OAi-demo root DAG
+        # caches dag_reasoning through p:5; a later assemble-final node
+        # (p:6) must not fall through to live Rose.
+        soft_json = (
+            '{"response":"Fast Mode cache trajectory ended; prior tool '
+            'evidence is sufficient to treat the goal as complete."}'
+        )
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": soft_json,
+            "content_chunks": [
+                {
+                    "text": soft_json,
+                    "item_id": "cache:soft:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                }
+            ],
+            "reasoning": "",
+            "tool_calls": [],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
     if site in {"completion_summary", "context_compression"}:
         text = (
             "Fast Mode cache trajectory ended; the task completed successfully "
