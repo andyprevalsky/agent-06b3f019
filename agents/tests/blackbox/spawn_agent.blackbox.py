@@ -87,6 +87,9 @@ def test_is_oai_demo_mass_agent_task_only_matches_catalog_task():
     assert is_oai_demo_mass_agent_task(
         _Goal("You are analyzing ONE creator. Window 2026-04-04 through 2026-07-03.")  # pragma: allowlist secret
     )
+    assert is_oai_demo_mass_agent_task(
+        _Goal("You are analyzing ONE creator for Andy Prevalsky, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refi")  # pragma: allowlist secret
+    )
     assert not is_oai_demo_mass_agent_task(_Goal("Find the current population of Tokyo."))
     assert not is_oai_demo_mass_agent_task(_Goal("Order me 1 rocky fish sandwich"))
 

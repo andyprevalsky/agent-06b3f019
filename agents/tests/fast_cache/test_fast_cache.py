@@ -2299,6 +2299,41 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
     sahil = andy_goal.replace("Dr. Eric Topol", "Sahil Bloom")
     assert normalize.goal_hash(sahil) == JULY_GP_GOAL_HASHES["Sahil Bloom"] == "3fd2fec61970ac83"
+    # Smoke7 leftovers remapped onto Austin/checkout namespaces (270-step
+    # clones). Those hashes must not be reused for creator-analysis children.
+    austin_or_checkout = {
+        "d5ca1a36cddc02e8",
+        "a40f6dd9ace06b6c",
+        "115e7be730aed584",
+        "1f60137116da569c",
+        "8cac2a39243299c3",
+    }
+    leftover_creators = (
+        "Bryan Johnson",
+        "Tim Ferriss",
+        "Dave Asprey",
+        "Gary Brecka",
+        "Andrew Wilkinson",
+        "Max Lugavere",
+        "Molly Maloof",
+        "Lex Fridman",
+        "Siim Land",
+        "Nick Norwitz",
+        "Steven Bartlett",
+        "Mark Hyman",
+        "David Sinclair",
+        "Casey Means",
+        "Matt Kaeberlein",
+        "Rowan Cheung",
+        "Naval Ravikant",
+        "Sam Parr",
+        "Matt D'Avella",
+    )
+    for name in leftover_creators:
+        child = andy_goal.replace("Dr. Eric Topol", name)
+        hashed = normalize.goal_hash(child)
+        assert hashed == JULY_GP_GOAL_HASHES[name]
+        assert hashed not in austin_or_checkout, name
     kayla = (
         "You are analyzing ONE creator for Andy Prevalsky. "  # pragma: allowlist secret
         f"Last 90 days: {window}. "  # pragma: allowlist secret

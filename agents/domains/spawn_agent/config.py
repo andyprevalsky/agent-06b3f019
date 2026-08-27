@@ -82,6 +82,10 @@ OAI_DEMO_ROOT_GOAL_PREFIX = (
     "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
 )
 OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+# First-level for_each children start with this even when Agent.goal is
+# truncated before the date window. Keep hashing on window/root only so a
+# truncated goal cannot alias all 50 children onto one namespace.
+OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
 
 
 def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
@@ -91,7 +95,11 @@ def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
         getattr(workflow_instance, "goal", None) or "",
     )
     text = "\n".join(str(chunk) for chunk in chunks)
-    return OAI_DEMO_ROOT_GOAL_PREFIX in text or OAI_DEMO_CHILD_WINDOW in text
+    return (
+        OAI_DEMO_ROOT_GOAL_PREFIX in text
+        or OAI_DEMO_CHILD_WINDOW in text
+        or OAI_DEMO_CHILD_GOAL_PREFIX in text
+    )
 
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0
