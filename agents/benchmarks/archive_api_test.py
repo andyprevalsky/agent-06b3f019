@@ -119,6 +119,57 @@ def test_load_archive_copies_response_schema_and_structured_output(tmp_path):
     assert entry.agent["context_size"] == 185193
 
 
+def test_load_archive_derives_response_schema_from_final_outputs(tmp_path):
+    run_path = tmp_path / "run.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-07T23:00:00+00:00",
+                "tasks": [
+                    {
+                        "name": "chat-mode",
+                        "passed": True,
+                        "agent_id": "agent-1",
+                        "logs": {
+                            "messages": [
+                                {
+                                    "role": "TOOL",
+                                    "message": "",
+                                    "created_at": "t1",
+                                    "metadata": {
+                                        "isFinalSummary": True,
+                                        "completionSummary": {
+                                            "summary": "Completed a 50-creator competitive analysis.",
+                                            "outputs": [
+                                                {
+                                                    "key": "positioning_statement",
+                                                    "label": "Positioning Statement",
+                                                    "value": "Engineer approach",
+                                                }
+                                            ],
+                                        },
+                                    },
+                                }
+                            ],
+                            "tree": {
+                                "agent-1": {
+                                    "parent_agent_id": None,
+                                    "goal": "hello",
+                                    "status": "COMPLETED",
+                                    "messages": [],
+                                }
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    entry = load_archive(run_path)["agent-1"]
+    assert entry.agent["response_schema"]["fields"][0]["name"] == "positioning_statement"
+    assert entry.agent["structured_output"]["positioning_statement"] == "Engineer approach"
+
+
 def test_load_archive_safe_tolerates_missing_and_broken(tmp_path):
     assert load_archive_safe(None) == {}
     assert load_archive_safe(tmp_path / "nope.json") == {}

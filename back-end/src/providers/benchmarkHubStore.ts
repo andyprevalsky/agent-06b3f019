@@ -383,6 +383,69 @@ function frontendMessage(
   };
 }
 
+function inferOutputSchemaType(value: unknown): string {
+  if (typeof value === 'boolean') return 'bool';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
+  if (Array.isArray(value)) {
+    if (value.length > 0 && value.every((item) => item !== null && typeof item === 'object')) {
+      return 'list[object]';
+    }
+    if (value.every((item) => typeof item === 'number' && Number.isInteger(item))) {
+      return 'list[int]';
+    }
+    return 'list[str]';
+  }
+  if (value !== null && typeof value === 'object') return 'object';
+  return 'str';
+}
+
+function completionOutputsFromMessages(
+  messages: Array<Record<string, unknown>>
+): Array<Record<string, unknown>> {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const metadata = (messages[index]?.metadata ?? {}) as Record<string, unknown>;
+    const summary = (metadata.completionSummary ?? metadata.completion_summary) as
+      Record<string, unknown> | undefined;
+    const outputs = summary?.outputs;
+    if (Array.isArray(outputs) && outputs.length > 0) {
+      return outputs.filter(
+        (row): row is Record<string, unknown> => !!row && typeof row === 'object'
+      );
+    }
+  }
+  return [];
+}
+
+function schemaFromCompletionOutputs(
+  outputs: Array<Record<string, unknown>>
+): Record<string, unknown> | null {
+  const fields = outputs
+    .map((row) => {
+      const name = String(row.key ?? row.name ?? '');
+      if (!name) return null;
+      const label = String(row.label ?? name.replace(/_/g, ' '));
+      return {
+        name,
+        type: inferOutputSchemaType(row.value),
+        required: true,
+        description: label,
+      };
+    })
+    .filter((field): field is NonNullable<typeof field> => field !== null);
+  return fields.length > 0 ? { fields } : null;
+}
+
+function structuredFromCompletionOutputs(
+  outputs: Array<Record<string, unknown>>
+): Record<string, unknown> | null {
+  const populated: Record<string, unknown> = {};
+  for (const row of outputs) {
+    const name = String(row.key ?? row.name ?? '');
+    if (name) populated[name] = row.value;
+  }
+  return Object.keys(populated).length > 0 ? populated : null;
+}
+
 function agentSummaryFromTask(
   task: Record<string, unknown>,
   agentId: string,
@@ -393,6 +456,7 @@ function agentSummaryFromTask(
 ): Record<string, unknown> {
   const tokensIn = Number(node.tokens_in ?? task.tokens_in ?? 0);
   const tokensOut = Number(node.tokens_out ?? task.tokens_out ?? 0);
+  const outputs = completionOutputsFromMessages(messages);
   return {
     agent_id: agentId,
     parent_agent_id: parent.parentAgentId,
@@ -426,12 +490,17 @@ function agentSummaryFromTask(
         ? (messages[messages.length - 1].timestamp ?? runTimestamp)
         : runTimestamp,
     write_lock_enabled: true,
-    structured_output: node.structured_output ?? task.structured_output ?? null,
+    structured_output:
+      node.structured_output ??
+      task.structured_output ??
+      structuredFromCompletionOutputs(outputs) ??
+      null,
     failure_context: null,
     verifier: null,
     tools: [],
     tools_in_use: [],
-    response_schema: node.response_schema ?? task.response_schema ?? null,
+    response_schema:
+      node.response_schema ?? task.response_schema ?? schemaFromCompletionOutputs(outputs) ?? null,
     benchmark_task: task.name ?? null,
     benchmark_duration_seconds: Number(task.duration_seconds ?? 0),
     benchmark_world_model_mode: task.world_model_mode ?? null,
@@ -557,10 +626,15 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
         tools_in_use: [],
         message_count: info.raw.length,
         tree_cost_cents: id === rootId ? Number(task.cost_cents ?? 0) : 0,
-        output_schema: (tree[id] ?? {}).response_schema ?? task.response_schema ?? null,
+        output_schema:
+          (tree[id] ?? {}).response_schema ??
+          (id === rootId ? task.response_schema : null) ??
+          schemaFromCompletionOutputs(completionOutputsFromMessages(info.raw)) ??
+          null,
         structured_output:
           (tree[id] ?? {}).structured_output ??
           (id === rootId ? task.structured_output : null) ??
+          structuredFromCompletionOutputs(completionOutputsFromMessages(info.raw)) ??
           null,
         tokens_in: Number((tree[id] ?? {}).tokens_in ?? (id === rootId ? task.tokens_in : 0) ?? 0),
         tokens_out: Number(

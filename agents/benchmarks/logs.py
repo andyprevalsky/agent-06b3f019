@@ -785,6 +785,64 @@ def extract_message_transcript(agent_data: dict) -> List[dict]:
     return transcript
 
 
+def _infer_output_schema_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, list):
+        if value and all(isinstance(item, dict) for item in value):
+            return "list[object]"
+        if value and all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+            return "list[int]"
+        return "list[str]"
+    if isinstance(value, dict):
+        return "object"
+    return "str"
+
+
+def completion_outputs_from_messages(messages: Optional[List[dict]]) -> List[dict]:
+    """Last Task Complete `outputs[]` from a transcript (Hub/archive hydrate)."""
+    for message in reversed(messages or []):
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        summary = metadata.get("completionSummary") or metadata.get("completion_summary") or {}
+        if not isinstance(summary, dict):
+            continue
+        outputs = summary.get("outputs")
+        if isinstance(outputs, list) and outputs:
+            return [row for row in outputs if isinstance(row, dict)]
+    return []
+
+
+def schema_from_completion_outputs(outputs: List[dict]) -> Optional[dict]:
+    fields: List[dict] = []
+    for row in outputs:
+        name = str(row.get("key") or row.get("name") or "")
+        if not name:
+            continue
+        label = str(row.get("label") or name.replace("_", " "))
+        fields.append(
+            {
+                "name": name,
+                "type": _infer_output_schema_type(row.get("value")),
+                "required": True,
+                "description": label,
+            }
+        )
+    return {"fields": fields} if fields else None
+
+
+def structured_from_completion_outputs(outputs: List[dict]) -> Optional[dict]:
+    populated: Dict[str, Any] = {}
+    for row in outputs:
+        name = str(row.get("key") or row.get("name") or "")
+        if name:
+            populated[name] = row.get("value")
+    return populated or None
+
+
 # ---------------------------------------------------------------------------
 # Collect all logs for a single agent
 # ---------------------------------------------------------------------------
@@ -890,13 +948,17 @@ async def collect_tree_messages(
             except Exception:
                 agent_data = {}
         agent_obj = agent_data.get("agent", agent_data) if isinstance(agent_data, dict) else {}
+        messages = extract_message_transcript(agent_data)
+        outputs = completion_outputs_from_messages(messages)
         return aid, {
             "parent_agent_id": agent_info.get("parent_agent_id"),
             "goal": (agent_info.get("goal") or "")[:200],
             "status": agent_info.get("status") or agent_obj.get("status") or "UNKNOWN",
-            "messages": extract_message_transcript(agent_data),
-            "response_schema": agent_obj.get("response_schema"),
-            "structured_output": agent_obj.get("structured_output"),
+            "messages": messages,
+            "response_schema": agent_obj.get("response_schema")
+            or schema_from_completion_outputs(outputs),
+            "structured_output": agent_obj.get("structured_output")
+            or structured_from_completion_outputs(outputs),
             "tokens_in": agent_obj.get("tokens_in") or agent_obj.get("tokensIn") or 0,
             "tokens_out": agent_obj.get("tokens_out") or agent_obj.get("tokensOut") or 0,
             "context_size": agent_obj.get("context_size") or agent_obj.get("contextSize") or 0,

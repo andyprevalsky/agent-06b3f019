@@ -663,6 +663,86 @@ async function testRuns_copiesResponseSchemaAndFinalOutputs(): Promise<void> {
   }
 }
 
+async function testRuns_derivesResponseSchemaFromFinalOutputs(): Promise<void> {
+  const runId = `${RUN_ID}-schema-derived`;
+  const bundle = syntheticBundle();
+  bundle.run_id = runId;
+  const tasks = bundle.tasks as Array<Record<string, unknown>>;
+  const logs = tasks[0].logs as Record<string, unknown>;
+  const tree = logs.tree as Record<string, Record<string, unknown>>;
+  const rootNode = tree[ROOT_AGENT];
+  delete rootNode.response_schema;
+  delete rootNode.structured_output;
+  rootNode.messages = [
+    ...((rootNode.messages as Array<Record<string, unknown>>) ?? []),
+    {
+      role: 'TOOL',
+      message: '',
+      created_at: '2026-07-10T00:00:04Z',
+      metadata: {
+        isFinalSummary: true,
+        toolName: 'completion_summary',
+        toolStatus: 'FINISHED',
+        completionSummary: {
+          summary: 'Completed a 50-creator competitive analysis.',
+          outputs: [
+            {
+              key: 'top_creators_analysis',
+              label: 'Top Creators Analysis',
+              value: '1. Andrew Huberman',
+            },
+            {
+              key: 'positioning_statement',
+              label: 'Positioning Statement',
+              value: 'Engineer approach to longevity',
+            },
+          ],
+          totalToolCalls: 127,
+          durationSeconds: 133,
+          costDollars: 0.0885,
+        },
+      },
+    },
+  ];
+
+  try {
+    const upload = await request(`${BASE_URL}/api/benchmarks/runs`, {
+      method: 'POST',
+      headers: internalHeaders,
+      body: JSON.stringify(bundle),
+    });
+    assertStatus(upload.status, 201, upload.data);
+
+    const rootView = await request(
+      `${BASE_URL}/api/benchmarks/runs/${runId}/agents/${ROOT_AGENT}`,
+      {
+        headers: internalHeaders,
+      }
+    );
+    assertStatus(rootView.status, 200, rootView.data);
+    const root = rootView.data as {
+      agent: {
+        response_schema: { fields: Array<{ name: string }> } | null;
+        structured_output: { positioning_statement?: string } | null;
+      };
+    };
+    const names = (root.agent.response_schema?.fields ?? []).map((field) => field.name);
+    assert(
+      names.includes('positioning_statement') && names.includes('top_creators_analysis'),
+      `derived schema fields ${JSON.stringify(root.agent.response_schema)}`
+    );
+    assert(
+      root.agent.structured_output?.positioning_statement === 'Engineer approach to longevity',
+      'derived structured_output missing'
+    );
+  } finally {
+    await request(`${BASE_URL}/api/benchmarks/runs/${runId}`, {
+      method: 'DELETE',
+      headers: internalHeaders,
+    });
+  }
+}
+
 async function testRuns_uploadRequiresRunId(): Promise<void> {
   const res = await request(`${BASE_URL}/api/benchmarks/runs`, {
     method: 'POST',
@@ -841,6 +921,10 @@ async function runAll(): Promise<void> {
     [
       'runs: copies response_schema and final outputs',
       testRuns_copiesResponseSchemaAndFinalOutputs,
+    ],
+    [
+      'runs: derives response_schema from final outputs',
+      testRuns_derivesResponseSchemaFromFinalOutputs,
     ],
     ['runs: upload requires run_id', testRuns_uploadRequiresRunId],
     [

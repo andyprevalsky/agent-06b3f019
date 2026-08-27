@@ -164,12 +164,22 @@ APPROVAL_REQUIRED_TOOLS = {
 }
 
 
+_SNAKE_HEADING = re.compile(r"^#+\s+([a-z][a-z0-9_]{2,})\s*$", flags=re.MULTILINE)
+
+
 def structured_response_from_schema_headings(text: str, schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Parse `# field_name` markdown sections into a structured_response dict."""
-    if not text or not isinstance(schema, dict):
+    if not text:
         return {}
-    fields = schema.get("fields") or []
+    fields = schema.get("fields") or [] if isinstance(schema, dict) else []
     names = [str(field.get("name")) for field in fields if isinstance(field, dict) and field.get("name")]
+    if not names:
+        seen: set[str] = set()
+        names = []
+        for name in _SNAKE_HEADING.findall(text):
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
     if not names:
         return {}
     matches: List[Tuple[int, str, int]] = []
@@ -202,7 +212,15 @@ def coalesce_structured_response(
         if isinstance(field, dict) and field.get("name")
     ]
     if not names:
-        return structured_response if structured_response else (merged or None)
+        for message in reversed(context or []):
+            text = str(message.get("text") or message.get("message") or "")
+            extracted = structured_response_from_schema_headings(text, None)
+            if not extracted:
+                continue
+            for key, value in extracted.items():
+                if key not in merged or merged[key] in (None, "", [], {}):
+                    merged[key] = value
+        return merged or structured_response
 
     def _missing(current: Dict[str, Any]) -> List[str]:
         empty = (None, "", [], {})
@@ -4133,10 +4151,10 @@ class AgentWorkflow:
 
     def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
         """Convert structured_response → CompletionSummaryCard outputs format."""
-        if not structured_response or not self.output_schema:
+        if not structured_response:
             return []
 
-        fields = self.output_schema.get("fields", [])
+        fields = (self.output_schema or {}).get("fields", []) if isinstance(self.output_schema, dict) else []
         outputs = []
 
         for field in fields:
@@ -4145,11 +4163,24 @@ class AgentWorkflow:
                 outputs.append(
                     {
                         "key": field_name,
-                        "label": field.get("description", field_name.replace("_", " ").title()),
+                        "label": field.get("description") or field_name.replace("_", " ").title(),
                         "value": structured_response[field_name],
                     }
                 )
 
+        if outputs:
+            return outputs
+
+        for field_name, value in structured_response.items():
+            if not isinstance(field_name, str) or not field_name or field_name.startswith("_"):
+                continue
+            outputs.append(
+                {
+                    "key": field_name,
+                    "label": field_name.replace("_", " ").title(),
+                    "value": value,
+                }
+            )
         return outputs
 
     async def _mark_complete(self, context: List[Dict], structured_response: Optional[Dict] = None) -> None:

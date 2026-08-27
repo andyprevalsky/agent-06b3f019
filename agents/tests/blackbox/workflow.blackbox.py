@@ -1563,10 +1563,13 @@ def test_workflow_parent_state_query_all_false():
     assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False}
 
 
-def test_workflow_format_outputs_no_schema_returns_empty():
+def test_workflow_format_outputs_no_schema_emits_response_keys():
     wf = _bare_workflow_instance()
     wf.output_schema = None
-    assert wf._format_outputs({"x": 1}) == []
+    outputs = wf._format_outputs({"positioning_statement": "Engineer approach", "_skip": 1})
+    assert [row["key"] for row in outputs] == ["positioning_statement"]
+    assert outputs[0]["label"] == "Positioning Statement"
+    assert outputs[0]["value"] == "Engineer approach"
 
 
 def test_workflow_format_outputs_no_response_returns_empty():
@@ -1597,11 +1600,11 @@ def test_workflow_format_outputs_skips_missing_fields():
     assert outputs[0]["key"] == "present"
 
 
-def test_workflow_format_outputs_field_without_name_skipped():
+def test_workflow_format_outputs_field_without_name_falls_back_to_keys():
     wf = _bare_workflow_instance()
     wf.output_schema = {"fields": [{"description": "no name"}]}
     outputs = wf._format_outputs({"x": "y"})
-    assert outputs == []
+    assert outputs == [{"key": "x", "label": "X", "value": "y"}]
 
 
 def test_structured_response_from_schema_headings_parses_assemble_final():
@@ -1629,6 +1632,17 @@ def test_structured_response_from_schema_headings_parses_assemble_final():
     assert "sleep audit" in parsed["ninety_day_content_calendar"]
 
 
+def test_structured_response_from_schema_headings_without_schema():
+    from workflows.agent_workflow import structured_response_from_schema_headings
+
+    parsed = structured_response_from_schema_headings(
+        "# positioning_statement\n\nEngineer approach.\n\n# weekly_engagement_target_creators\n\nHuberman.",
+        None,
+    )
+    assert parsed["positioning_statement"] == "Engineer approach."
+    assert parsed["weekly_engagement_target_creators"] == "Huberman."
+
+
 def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
     wf = _bare_workflow_instance()
     wf.output_schema = {
@@ -1653,6 +1667,26 @@ def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
         "weekly_engagement_target_creators",
     ]
     assert outputs[0]["value"] == "Aman as the founder-operator."
+
+
+def test_workflow_coalesce_structured_response_without_schema_uses_headings():
+    wf = _bare_workflow_instance()
+    wf.output_schema = None
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": (
+                "# positioning_statement\n\nAman as the founder-operator.\n\n"
+                "# weekly_engagement_target_creators\n\nHuberman, Attia, Johnson."
+            ),
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    assert [row["key"] for row in outputs] == [
+        "positioning_statement",
+        "weekly_engagement_target_creators",
+    ]
 
 
 def test_workflow_extract_failure_context_empty_context():
@@ -5324,11 +5358,11 @@ async def test_workflow_format_outputs_with_schema():
 
 
 async def test_workflow_format_outputs_empty_without_schema():
-    """_format_outputs handles missing schema gracefully."""
+    """_format_outputs still returns outputs when schema gen missed."""
     wf = _bare_workflow_instance()
     wf.output_schema = None
     outputs = wf._format_outputs({"answer": "anything"})
-    assert isinstance(outputs, list)
+    assert outputs == [{"key": "answer", "label": "Answer", "value": "anything"}]
 
 
 async def test_workflow_format_outputs_none_response():
@@ -6236,18 +6270,26 @@ async def run_all_tests():
     r.record("wf_cost_limit_reached_default", test_workflow_is_cost_limit_reached_query_default)
     r.record("wf_parent_state_query", test_workflow_parent_state_query)
     r.record("wf_parent_state_all_false", test_workflow_parent_state_query_all_false)
-    r.record("wf_format_outputs_no_schema", test_workflow_format_outputs_no_schema_returns_empty)
+    r.record("wf_format_outputs_no_schema", test_workflow_format_outputs_no_schema_emits_response_keys)
     r.record("wf_format_outputs_no_response", test_workflow_format_outputs_no_response_returns_empty)
     r.record("wf_format_outputs_maps_fields", test_workflow_format_outputs_maps_fields)
     r.record("wf_format_outputs_skips_missing", test_workflow_format_outputs_skips_missing_fields)
-    r.record("wf_format_outputs_field_no_name", test_workflow_format_outputs_field_without_name_skipped)
+    r.record("wf_format_outputs_field_no_name", test_workflow_format_outputs_field_without_name_falls_back_to_keys)
     r.record(
         "wf_schema_headings_parse_assemble_final",
         test_structured_response_from_schema_headings_parses_assemble_final,
     )
     r.record(
+        "wf_schema_headings_without_schema",
+        test_structured_response_from_schema_headings_without_schema,
+    )
+    r.record(
         "wf_coalesce_structured_response_from_headings",
         test_workflow_coalesce_structured_response_fills_outputs_from_headings,
+    )
+    r.record(
+        "wf_coalesce_structured_response_without_schema",
+        test_workflow_coalesce_structured_response_without_schema_uses_headings,
     )
     r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
     r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)

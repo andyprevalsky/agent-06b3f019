@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from benchmarks.logs import canonicalize_agent_tree
+from benchmarks.logs import (
+    canonicalize_agent_tree,
+    completion_outputs_from_messages,
+    schema_from_completion_outputs,
+    structured_from_completion_outputs,
+)
 
 
 @dataclass(frozen=True)
@@ -142,6 +147,7 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
         int(task.get("cache_read_input_tokens") or 0) + int(task.get("cache_creation_input_tokens") or 0)
     )
     tokens_out = int(info.get("tokens_out") or task.get("tokens_out") or 0)
+    outputs = completion_outputs_from_messages(messages)
     return {
         "agent_id": agent_id,
         "parent_agent_id": None,
@@ -172,12 +178,16 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
         "created_at": run_timestamp,
         "updated_at": updated_at,
         "write_lock_enabled": True,
-        "structured_output": info.get("structured_output") or task.get("structured_output"),
+        "structured_output": info.get("structured_output")
+        or task.get("structured_output")
+        or structured_from_completion_outputs(outputs),
         "failure_context": None,
         "verifier": None,
         "tools": [],
         "tools_in_use": [],
-        "response_schema": info.get("response_schema") or task.get("response_schema"),
+        "response_schema": info.get("response_schema")
+        or task.get("response_schema")
+        or schema_from_completion_outputs(outputs),
         "benchmark_task": task.get("name"),
         "benchmark_duration_seconds": duration,
         "benchmark_world_model_mode": task.get("world_model_mode"),
@@ -193,6 +203,7 @@ def _subagent_summary(
     the frontend can render the full fan-out tree (parent_agent_id + busId)."""
     status = str(info.get("status") or "COMPLETED").upper()
     updated_at = messages[-1]["timestamp"] if messages and messages[-1].get("timestamp") else run_timestamp
+    outputs = completion_outputs_from_messages(messages)
     return {
         "agent_id": agent_id,
         "parent_agent_id": info.get("parent_agent_id"),
@@ -225,12 +236,12 @@ def _subagent_summary(
         "created_at": run_timestamp,
         "updated_at": updated_at,
         "write_lock_enabled": True,
-        "structured_output": info.get("structured_output"),
+        "structured_output": info.get("structured_output") or structured_from_completion_outputs(outputs),
         "failure_context": None,
         "verifier": None,
         "tools": [],
         "tools_in_use": [],
-        "response_schema": info.get("response_schema"),
+        "response_schema": info.get("response_schema") or schema_from_completion_outputs(outputs),
         "benchmark_task": task.get("name"),
         "benchmark_duration_seconds": 0,
         "benchmark_world_model_mode": task.get("world_model_mode"),

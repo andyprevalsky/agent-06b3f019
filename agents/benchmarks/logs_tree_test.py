@@ -117,6 +117,38 @@ def test_collect_tree_messages_copies_response_schema_and_structured_output():
     assert tree["root-1"]["context_size"] == 185193
 
 
+def test_collect_tree_messages_derives_schema_from_completion_outputs():
+    tree_agents = [{"agent_id": "root-1", "parent_agent_id": None, "goal": "g", "status": "COMPLETED"}]
+    store = {
+        "root-1": {
+            "agent": {"status": "COMPLETED"},
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": "",
+                    "timestamp": "t1",
+                    "metadata": {
+                        "isFinalSummary": True,
+                        "completionSummary": {
+                            "summary": "done",
+                            "outputs": [
+                                {
+                                    "key": "positioning_statement",
+                                    "label": "Positioning Statement",
+                                    "value": "Engineer approach",
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        }
+    }
+    tree = _run(collect_tree_messages("root-1", tree_agents, _fake_get_agent(store)))
+    assert tree["root-1"]["response_schema"]["fields"][0]["name"] == "positioning_statement"
+    assert tree["root-1"]["structured_output"]["positioning_statement"] == "Engineer approach"
+
+
 if __name__ == "__main__":
     import pytest
 
