@@ -460,6 +460,17 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
     return None
 
 
+_JULY_GP_RESEARCH_TOOLS = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "grep",
+        "browser_use",
+        "spawn_browser_agent",
+    }
+)
+
+
 def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
     """True for test-mass-agent-run-0 per-creator execute/plan loops.
 
@@ -474,18 +485,57 @@ def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
     return bool(july_gp_goal_hash_for_goal(getattr(ctx, "goal", None) or ""))
 
 
-async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
-    """Retry get-position at step >= 1 for a known July GP execute namespace."""
+def _payload_tool_name(stored: Any) -> str:
+    if not isinstance(stored, dict):
+        return ""
+    tool_calls = stored.get("tool_calls") or []
+    if tool_calls and isinstance(tool_calls[0], dict):
+        return str(tool_calls[0].get("name") or "").strip()
+    return ""
+
+
+def _july_gp_accept_payload(stored: Any, prior_tool: str) -> bool:
+    if stored is None:
+        return False
+    name = _payload_tool_name(stored)
+    if name != "attempt_completion":
+        return True
+    # Sahil/Lenny/Gabrielle July p:1 is attempt_completion (spawn work lived in
+    # nested GPs). Replaying that as the first execute step 9-msg stubs the
+    # child. Only accept completion after a real research tool in-series.
+    return prior_tool in _JULY_GP_RESEARCH_TOOLS
+
+
+async def july_gp_resolve_execute(
+    ctx: Any,
+    call_site: str,
+    stored: Any = None,
+    hit_key: Any = None,
+) -> tuple[Any, Any]:
+    """Walk July GP execute steps, skipping early attempt_completion stubs."""
     if not is_july_gp_execute_site(ctx, call_site):
-        return None, None
+        return stored, hit_key
     step = getattr(ctx, "base_step", None)
-    retry_step = 1 if step is None or int(step) < 1 else int(step)
-    last: tuple[Any, Any] = (None, None)
-    for _ in range(3):
-        last = await cache_client.cache_get_position_fallback(ctx.goal_hash, call_site, retry_step)
-        if last[0] is not None:
-            return last
-    return last
+    start = 1 if step is None or int(step) < 1 else int(step)
+    prior_tool = ""
+    for current in range(start, start + 16):
+        if stored is not None and current == start:
+            cand, key = stored, hit_key
+        else:
+            cand, key = await cache_client.cache_get_position_fallback(
+                ctx.goal_hash, call_site, current
+            )
+        if cand is None:
+            continue
+        if _july_gp_accept_payload(cand, prior_tool):
+            return cand, key
+        prior_tool = _payload_tool_name(cand)
+    return None, None
+
+
+async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
+    """Resolve a July GP execute row, skipping first-step completion stubs."""
+    return await july_gp_resolve_execute(ctx, call_site)
 
 
 async def cached_complete(
@@ -521,8 +571,7 @@ async def cached_complete(
                     call_site,
                     ctx.base_step,
                 )
-            if stored is None:
-                stored, hit_key = await july_gp_position_retry(ctx, call_site)
+            stored, hit_key = await july_gp_resolve_execute(ctx, call_site, stored, hit_key)
         except Exception as exc:  # cache read failures degrade to live
             logger.warning("fast_cache.get_error", key=key, error=str(exc))
             stored, hit_key = None, None
