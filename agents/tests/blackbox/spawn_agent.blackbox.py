@@ -1103,6 +1103,49 @@ async def test_handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child(
     assert "skipping nested spawn" in str(events[0].message or "")
 
 
+async def test_handler_fast_mode_spawns_explore_on_oai_demo_child():
+    """Explore children on this task must still actually spawn (full replay, not skip)."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "You are analyzing ONE creator for Andy Prevalsky. "
+            "Research the creator's public activity in the last 90 days "
+            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
+        ),
+    )
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "net-meta", "fetch_local_data_summary": "local"},
+        start_activity_result=_Activity(
+            result={
+                "result": "Huberman cadence notes.",
+                "tool_call_results": [],
+                "accumulated_usage": [{"llm": [{"x": 1}], "service": []}],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "Research Andrew Huberman last 90 days"},
+                tool_call_id="tc-oai-explore",
+            )
+        )
+    finally:
+        restore()
+
+    assert fake.start_activity_calls, "OAi demo explore must still run so trajectories replay"
+    assert any(e.status == MessageStatus.IN_PROGRESS for e in events)
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any("skipping nested spawn" in str(e.message or "") for e in events)
+
+
 async def test_handler_fast_mode_spawns_root_general_purpose():
     """Root Fast Mode still actually spawns first-level GPs so children can replay."""
     from tools.base import EventType, MessageStatus, ToolEvent
@@ -3099,6 +3142,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child",
         test_handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child,
+    )
+    await r.record_async(
+        "handler_fast_mode_spawns_explore_on_oai_demo_child",
+        test_handler_fast_mode_spawns_explore_on_oai_demo_child,
     )
     await r.record_async(
         "handler_fast_mode_spawns_root_general_purpose",
