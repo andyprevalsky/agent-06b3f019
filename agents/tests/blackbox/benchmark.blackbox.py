@@ -13005,17 +13005,68 @@ def test_unified_catalog_delineates_bench_axes():
     assert mass["fast_cache"] == "on"
     assert mass["enforce_declared_evaluators"] is True
     assert mass["min_agent_count"] == 50
-    static_checks = {
-        check.get("type")
-        for evaluator in mass["evaluators"]
-        if evaluator.get("method") == "static_check"
-        for check in evaluator.get("checks", [])
+    evaluators = {evaluator["id"]: evaluator for evaluator in mass["evaluators"]}
+    assert set(evaluators) == {
+        "t8-root-completed",
+        "t10-no-tool-failures",
+        "t7-completion-summary-length",
+        "t1-andy-only",
+        "t2-fifty-first-level-gps",
+        "t3-full-explore-trajectories",
+        "t4-full-july-gp-trajectories",
+        "t5-zero-live-spend",
+        "t6-no-nested-gps",
+        "t7-real-deliverable",
+        "t7-schema-task-complete",
+        "t9-no-leftover-children",
     }
-    assert static_checks == {"agent_status", "no_tool_failures", "completion_summary_length"}
-    assert all(check_type in RUNTIME_STATIC_CHECK_TYPES for check_type in static_checks)
-    judge = next(evaluator for evaluator in mass["evaluators"] if evaluator["method"] == "single_turn_llm_judge")
-    assert any("0 tokens streamed from non-fast-cache" in criterion for criterion in judge["criteria"])
-    assert any("$0 spent" in criterion for criterion in judge["criteria"])
+    static_by_id = {
+        evaluator_id: [check.get("type") for check in evaluator.get("checks", [])]
+        for evaluator_id, evaluator in evaluators.items()
+        if evaluator.get("method") == "static_check"
+    }
+    assert static_by_id == {
+        "t8-root-completed": ["agent_status"],
+        "t10-no-tool-failures": ["no_tool_failures"],
+        "t7-completion-summary-length": ["completion_summary_length"],
+    }
+    assert all(
+        check_type in RUNTIME_STATIC_CHECK_TYPES
+        for types in static_by_id.values()
+        for check_type in types
+    )
+    judge_ids = [
+        evaluator["id"]
+        for evaluator in mass["evaluators"]
+        if evaluator["method"] == "single_turn_llm_judge"
+    ]
+    assert judge_ids == [
+        "t1-andy-only",
+        "t2-fifty-first-level-gps",
+        "t3-full-explore-trajectories",
+        "t4-full-july-gp-trajectories",
+        "t5-zero-live-spend",
+        "t6-no-nested-gps",
+        "t7-real-deliverable",
+        "t7-schema-task-complete",
+        "t9-no-leftover-children",
+    ]
+    criteria = [criterion for evaluator in mass["evaluators"] for criterion in evaluator["criteria"]]
+    assert any(criterion.startswith("T1:") for criterion in criteria)
+    assert any(criterion.startswith("T2:") for criterion in criteria)
+    assert any(criterion.startswith("T3:") for criterion in criteria)
+    assert any(criterion.startswith("T4:") for criterion in criteria)
+    assert any(criterion.startswith("T5:") for criterion in criteria)
+    assert any(criterion.startswith("T6:") for criterion in criteria)
+    assert any(criterion.startswith("T7:") for criterion in criteria)
+    assert any(criterion.startswith("T8:") for criterion in criteria)
+    assert any(criterion.startswith("T9:") for criterion in criteria)
+    assert any(criterion.startswith("T10:") for criterion in criteria)
+    assert any("0 tokens streamed from non-fast-cache" in criterion for criterion in criteria)
+    assert any("$0 spent" in criterion for criterion in criteria)
+    assert any("assemble-final" in criterion for criterion in criteria)
+    assert any(evaluator.get("method") == "static_check" for evaluator in mass["evaluators"])
+    assert all(evaluator["method"] in {"static_check", "single_turn_llm_judge"} for evaluator in mass["evaluators"])
     # Live capability eval keeps its live environment contract
     live = by_name["browser-agent"]
     assert live["environment"]["mode"] == "live"
