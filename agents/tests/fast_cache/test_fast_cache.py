@@ -2282,6 +2282,8 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     from domains.spawn_agent.oai_demo_july import JULY_GP_GOAL_HASHES
 
     assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
+    sahil = andy_goal.replace("Dr. Eric Topol", "Sahil Bloom")
+    assert normalize.goal_hash(sahil) == JULY_GP_GOAL_HASHES["Sahil Bloom"] == "3fd2fec61970ac83"
     kayla = (
         "You are analyzing ONE creator for Andy Prevalsky. "  # pragma: allowlist secret
         f"Last 90 days: {window}. "  # pragma: allowlist secret
