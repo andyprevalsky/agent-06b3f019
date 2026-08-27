@@ -206,6 +206,45 @@ def _expected_explore_agents_for_city_task(goal_text: str) -> int | None:
     return None
 
 
+def _finished_oai_demo_for_each_count(workflow_instance) -> int:
+    """Count completed root for_each delegations already in context.
+
+    The July mass-agent root replays a second 50-GP for_each after the first
+    wave completes. One wave satisfies T2; a second wave cannot finish inside
+    the 900s harness (smoke8: first 50 done at 449s, second wave still ACTIVE
+    at 901s). Scoped to this task via is_oai_demo_mass_agent_task.
+    """
+    context = getattr(workflow_instance, "context", [])
+    if not isinstance(context, list):
+        return 0
+    count = 0
+    seen_tool_calls: set[str] = set()
+    for msg in context:
+        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
+        tool_name = str(metadata.get("toolName") or "")
+        if tool_name not in {"spawn_general_purpose_agent_for_each", "spawn_agent"}:
+            continue
+        if tool_name == "spawn_agent" and metadata.get("agentType") != "for_each":
+            continue
+        if metadata.get("toolStatus") != "FINISHED":
+            continue
+        if not (
+            metadata.get("forEachAggregate")
+            or str(metadata.get("title") or "").startswith("for_each complete")
+            or "Completed for_each delegation" in str(msg.get("text") or msg.get("message") or "")
+        ):
+            continue
+        tool_call_id = metadata.get("toolCallId")
+        if tool_call_id:
+            if tool_call_id in seen_tool_calls:
+                continue
+            seen_tool_calls.add(tool_call_id)
+        count += 1
+    return count
+
+
 def _prior_explore_agent_count(workflow_instance) -> int:
     context = getattr(workflow_instance, "context", [])
     if not isinstance(context, list):
@@ -337,12 +376,20 @@ class SpawnAgentManager(ToolManager):
         fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
         parent_depth = int(getattr(workflow_instance, "depth", 0) or 0)
         # Scoped to test-mass-agent-run-0 only: first-level for_each GPs spawn,
-        # but those children must not recurse more GPs.
+        # but those children must not recurse more GPs. The root also gets
+        # exactly one for_each wave — a second 50-GP fan-out misses 900s.
         if (
             fm
             and agent_type in {"general_purpose", "for_each"}
-            and parent_depth >= 1
             and is_oai_demo_mass_agent_task(workflow_instance)
+            and (
+                parent_depth >= 1
+                or (
+                    parent_depth == 0
+                    and agent_type == "for_each"
+                    and _finished_oai_demo_for_each_count(workflow_instance) >= 1
+                )
+            )
         ):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,

@@ -1154,6 +1154,59 @@ async def test_handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child(
     assert "skipping nested spawn" in str(events[0].message or "")
 
 
+async def test_handler_fast_mode_skips_second_root_for_each_on_oai_demo():
+    """Root runs one for_each wave; a second 50-GP fan-out misses the 900s harness."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    wf = _FakeWFInstance(
+        depth=0,
+        goal=(
+            "I'm building a personal brand for health, longevity, technology, founder journey "  # pragma: allowlist secret
+            "[I'll refine the angle]. Analyze the top 50 creators."
+        ),
+        context=[
+            {
+                "role": "TOOL",
+                "text": "Completed for_each delegation for 50 items.",
+                "metadata": {
+                    "toolName": "spawn_general_purpose_agent_for_each",
+                    "toolStatus": "FINISHED",
+                    "forEachAggregate": True,
+                    "toolCallId": "tc-first-for-each",
+                    "title": "for_each complete",
+                },
+            }
+        ],
+    )
+    wf.fast_mode_cache_enabled = True
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "for_each",
+                    "goal": "Analyze each creator again",
+                    "items": [{"name": "Andrew Huberman", "rank": 1}],
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc-second-for-each",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert fake_mgr.last_call is None, "second root for_each must FINISH-skip"
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.FINISHED
+    assert (events[0].metadata or {}).get("skippedNestedSpawn") is True
+
+
 async def test_handler_fast_mode_spawns_explore_on_oai_demo_child():
     """Explore children on this task must still actually spawn (full replay, not skip)."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -3341,6 +3394,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child",
         test_handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child,
+    )
+    await r.record_async(
+        "handler_fast_mode_skips_second_root_for_each_on_oai_demo",
+        test_handler_fast_mode_skips_second_root_for_each_on_oai_demo,
     )
     await r.record_async(
         "handler_fast_mode_spawns_explore_on_oai_demo_child",
