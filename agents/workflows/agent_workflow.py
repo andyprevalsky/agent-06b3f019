@@ -389,6 +389,7 @@ class AgentWorkflow:
         self._last_parent_state_query_at: Optional[datetime] = None
         self._last_parent_state: Dict = {}
         self._pending_message_handles: List[Any] = []
+        self._cached_local_data_summary: Optional[str] = None
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
         # Tree token tracking (hierarchical relay: child → parent → root)

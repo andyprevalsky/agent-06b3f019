@@ -2310,6 +2310,88 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
 
 
+def test_position_fallback_memos_and_single_flights_http(monkeypatch):
+    """Sibling Fast Mode agents must share one get-position HTTP per durable slot."""
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    posts: list[int] = []
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"hit": True, "value": {"tool_calls": [{"name": "web_search"}]}, "key": "k-1"}
+
+    class _Client:
+        async def post(self, *args, **kwargs):
+            del args
+            posts.append(int((kwargs.get("json") or {}).get("step") or 0))
+            await asyncio.sleep(0)
+            return _Resp()
+
+    monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "key"))
+    monkeypatch.setattr(cache_client, "_shared_client", lambda: _Client())
+
+    async def body():
+        first, second = await asyncio.gather(
+            cache_client.cache_get_position_fallback("hash-a", "explore_agent", 1),
+            cache_client.cache_get_position_fallback("hash-a", "explore_agent", 1),
+        )
+        third = await cache_client.cache_get_position_fallback("hash-a", "explore_agent", 1)
+        assert first == second == third
+        assert first[1] == "k-1"
+        assert posts.count(1) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
+def test_position_fallback_prefetches_upcoming_steps(monkeypatch):
+    """A hit should prefetch the next few steps so the sequential loop is local."""
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    seen: list[int] = []
+
+    class _Resp:
+        def __init__(self, step: int):
+            self.status_code = 200
+            self._step = step
+
+        def json(self):
+            return {"hit": True, "value": {"step": self._step}, "key": f"k-{self._step}"}
+
+    class _Client:
+        async def post(self, *args, **kwargs):
+            del args
+            step = int((kwargs.get("json") or {}).get("step") or 0)
+            seen.append(step)
+            await asyncio.sleep(0)
+            return _Resp(step)
+
+    monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "key"))
+    monkeypatch.setattr(cache_client, "_shared_client", lambda: _Client())
+
+    async def body():
+        value, key = await cache_client.cache_get_position_fallback("hash-b", "execute_loop", 3)
+        assert key == "k-3"
+        assert value == {"step": 3}
+        for _ in range(40):
+            if {3, 4, 5, 6, 7, 8, 9, 10, 11}.issubset(set(seen)):
+                break
+            await asyncio.sleep(0)
+        assert 3 in seen
+        assert {4, 5, 6, 7, 8, 9, 10, 11}.issubset(set(seen))
+        replay = await cache_client.cache_get_position_fallback("hash-b", "execute_loop", 4)
+        assert replay == ({"step": 4}, "k-4")
+        assert seen.count(4) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
 def test_cache_replay_usage_zeros_live_output_tokens():
     """Replay must not report stored completion tokens as live streamed output."""
     usage = rose_cache._cache_replay_usage(

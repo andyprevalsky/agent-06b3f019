@@ -381,15 +381,24 @@ class SpawnAgentManager(ToolManager):
         try:
             context_gates = tool_call.get("context_gates") or {}
             if local_data_summary is None:
-                if context_gates.get("recent_communications", True):
+                cached_summary = getattr(workflow_instance, "_cached_local_data_summary", None)
+                if isinstance(cached_summary, str):
+                    # Same user + same connected-data snapshot for the life of
+                    # this workflow. Re-fetching on every July explore was one
+                    # extra Temporal hop per spawn (224+ on Huberman-class GPs).
+                    local_data_summary = cached_summary
+                elif context_gates.get("recent_communications", True):
                     local_data_summary = await workflow.execute_activity(
                         fetch_local_data_summary,
                         args=[workflow_instance.user_id],
                         start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
                         retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
                     )
+                    if isinstance(local_data_summary, str):
+                        workflow_instance._cached_local_data_summary = local_data_summary
                 else:
                     local_data_summary = ""
+                    workflow_instance._cached_local_data_summary = ""
 
             # Resolve requested attachments from workflow context
             attachment_texts: List[str] = []

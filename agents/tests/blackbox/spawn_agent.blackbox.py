@@ -601,6 +601,50 @@ async def test_handler_explore_happy_path():
     assert finished.data["usage"]["llm"]
 
 
+async def test_handler_explore_reuses_cached_local_data_summary():
+    """A workflow fetches local_data_summary once and reuses it on later explores."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_local_data_summary": "local-once"},
+        start_activity_result=_Activity(
+            result={
+                "result": "All done.",
+                "tool_call_results": [],
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    wf = _FakeWFInstance()
+    restore = _patch_spawn_workflow(fake)
+    try:
+        first = await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "research one"},
+                tool_call_id="tc-1",
+            )
+        )
+        second = await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "research two"},
+                tool_call_id="tc-2",
+            )
+        )
+    finally:
+        restore()
+    fetches = [call for call in fake.activity_calls if call["name"] == "fetch_local_data_summary"]
+    assert len(fetches) == 1
+    assert wf._cached_local_data_summary == "local-once"
+    assert fake.start_activity_calls[0]["args"][-1] == "local-once"
+    assert fake.start_activity_calls[1]["args"][-1] == "local-once"
+    assert any(event.status == MessageStatus.FINISHED for event in first)
+    assert any(event.status == MessageStatus.FINISHED for event in second)
+
+
 async def test_handler_explore_uses_lite_pool_independent_of_parent_model():
     """Explore research stays on its dedicated Lite pool even when the parent uses Ultra."""
     from domains.spawn_agent.config import EXPLORE_DEFAULT_MODEL
@@ -3107,6 +3151,10 @@ async def run_all_tests():
     await r.record_async("handler_validation_bubbles_for_each", test_handler_validation_bubbles_for_each)
     await r.record_async("handler_validation_emits_error_for_others", test_handler_validation_emits_error_for_others)
     await r.record_async("handler_explore_happy", test_handler_explore_happy_path)
+    await r.record_async(
+        "handler_explore_reuses_local_data_summary",
+        test_handler_explore_reuses_cached_local_data_summary,
+    )
     await r.record_async(
         "handler_explore_uses_lite_pool",
         test_handler_explore_uses_lite_pool_independent_of_parent_model,
