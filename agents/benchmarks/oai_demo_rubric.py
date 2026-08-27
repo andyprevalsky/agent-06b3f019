@@ -11,8 +11,8 @@ System context:
     grade_oai_demo_rubric()  ← this file (fail-closed static_check)
 
 T1 Andy-only   T2 50 real first-level GPs   T3 every explore full traj
-T4 every GP full traj   T5 honest FM replay   T6 no nested GP
-T7 clean tree   T8 real deliverable   T9 schema/Task Complete
+T4 every GP full traj   T5 honest FM replay ($0, 0 live tokens)
+T6 no nested GP   T7 clean tree   T8 real deliverable   T9 schema/Task Complete
 """
 
 from __future__ import annotations
@@ -142,6 +142,101 @@ def _is_short_stub(node: dict, *, spawned_explore: bool = False) -> bool:
 def _from_fast_cache(node: dict) -> bool:
     blob = _text_blob(node)
     return "from_fast_cache" in blob and "true" in blob
+
+
+def _as_nonneg_number(value: Any) -> float:
+    try:
+        return max(float(value or 0), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _usage_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _iter_usage_dicts(node: dict) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for message in _messages(node):
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata.get("usage")]
+        auxiliary = metadata.get("auxiliary")
+        if isinstance(auxiliary, dict):
+            candidates.append(auxiliary.get("usage") or auxiliary)
+        for candidate in candidates:
+            usage = _usage_dict(candidate)
+            if not usage:
+                continue
+            if usage.get("from_fast_cache") is True or any(
+                key in usage
+                for key in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "tokens_in",
+                    "tokens_out",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+            ):
+                found.append(usage)
+    return found
+
+
+def _live_stream_tokens(usage: dict[str, Any]) -> int:
+    """Tokens that came from a live (non-Fast-Mode-cache) stream."""
+    if usage.get("from_fast_cache") is True:
+        return 0
+    live = 0
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "tokens_in",
+        "tokens_out",
+        "cache_creation_input_tokens",
+    ):
+        live += int(_as_nonneg_number(usage.get(key)))
+    return live
+
+
+def _cost_and_live_tokens(data: dict, tree: dict[str, dict]) -> tuple[float, int]:
+    """Return (cost_cents, live_non_cache_tokens) for T5."""
+    benchmark = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    stamped = benchmark.get("usage") if isinstance(benchmark.get("usage"), dict) else {}
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    cost = _as_nonneg_number(
+        stamped.get("cost_cents")
+        if stamped.get("cost_cents") is not None
+        else agent.get("tree_cost_cents")
+        if agent.get("tree_cost_cents") is not None
+        else agent.get("total_cost_cents")
+        if agent.get("total_cost_cents") is not None
+        else data.get("cost_cents")
+    )
+    live = int(_as_nonneg_number(stamped.get("cache_creation_input_tokens")))
+    live += int(_as_nonneg_number(stamped.get("live_input_tokens")))
+    live += int(_as_nonneg_number(stamped.get("live_output_tokens")))
+    for node in tree.values():
+        for usage in _iter_usage_dicts(node):
+            live += _live_stream_tokens(usage)
+    for item in stamped.get("usage_items") if isinstance(stamped.get("usage_items"), list) else []:
+        if isinstance(item, dict):
+            live += _live_stream_tokens(item)
+    return cost, live
 
 
 def _agent_type(agent_id: str, node: dict, raw_by_id: dict[str, dict]) -> str:
@@ -276,15 +371,20 @@ def grade_oai_demo_rubric(data: dict) -> tuple[bool, str]:
     else:
         rows.append(("T4", True, f"{len(first_level_gps)} GPs have full trajectories"))
 
+    cost_cents, live_tokens = _cost_and_live_tokens(data, tree)
     if any(
         _is_short_stub(node, spawned_explore=False) or _is_cold_stub_text(_text_blob(node))
         for _, node in first_level_gps + explores
     ):
         rows.append(("T5", False, "traj-end / cold-passthrough stub present (soft-as-hit)"))
+    elif cost_cents > 0:
+        rows.append(("T5", False, f"${cost_cents / 100:.4f} spent; expected $0 Fast Mode replay"))
+    elif live_tokens > 0:
+        rows.append(("T5", False, f"{live_tokens} tokens streamed from non-fast-cache; expected 0"))
     elif first_level_gps and not any(_from_fast_cache(node) for _, node in first_level_gps):
         rows.append(("T5", False, "no from_fast_cache replay evidence on first-level GPs"))
     else:
-        rows.append(("T5", True, "honest Fast Mode replay"))
+        rows.append(("T5", True, "honest Fast Mode replay ($0, 0 live tokens)"))
 
     nested_gps = []
     for agent_id, node in tree.items():

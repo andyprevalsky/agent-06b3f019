@@ -9693,6 +9693,13 @@ async def run_single_task(
             **data.get("_benchmark", {}),
             "agent_class_step_counts": agent_class_step_counts,
             "min_steps": dict(task.min_steps),
+            "usage": {
+                "cost_cents": float(cost_cents or 0),
+                "cache_read_input_tokens": int(cache_read_input_tokens or 0),
+                "cache_creation_input_tokens": int(cache_creation_input_tokens or 0),
+                "tokens_in": int(tokens_in or 0),
+                "tokens_out": int(tokens_out or 0),
+            },
         }
         expected_gate_terminal = (
             task.expected_gate

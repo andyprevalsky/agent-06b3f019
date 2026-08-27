@@ -132,6 +132,47 @@ def test_oai_demo_rubric_fails_stub_gp():
     assert "T5 FAIL" in reason
 
 
+def test_oai_demo_rubric_fails_live_spend_and_non_cache_tokens():
+    """T5 fails closed on any live dollars or tokens that did not come from Fast Mode."""
+    tree = _passing_tree()
+    paid = {
+        "agent": {
+            "id": "root",
+            "status": "COMPLETED",
+            "response_schema": tree["root"]["response_schema"],
+            "structured_output": tree["root"]["structured_output"],
+        },
+        "_benchmark": {
+            "tree": tree,
+            "all_agents": [],
+            "usage": {"cost_cents": 19, "cache_creation_input_tokens": 0},
+        },
+    }
+    passed, reason = grade_oai_demo_rubric(paid)
+    assert not passed
+    assert "T5 FAIL" in reason
+    assert "$0" in reason
+
+    live = {
+        "agent": {
+            "id": "root",
+            "status": "COMPLETED",
+            "response_schema": tree["root"]["response_schema"],
+            "structured_output": tree["root"]["structured_output"],
+        },
+        "_benchmark": {"tree": tree, "all_agents": []},
+    }
+    live["_benchmark"]["tree"]["gp-1"]["messages"][2]["metadata"]["usage"] = {
+        "from_fast_cache": False,
+        "prompt_tokens": 80,
+        "completion_tokens": 12,
+    }
+    passed, reason = grade_oai_demo_rubric(live)
+    assert not passed
+    assert "T5 FAIL" in reason
+    assert "non-fast-cache" in reason
+
+
 def test_oai_demo_rubric_fails_aman_and_empty_schema():
     tree = _passing_tree()
     tree["root"]["messages"][0]["message"] = "Aman Gottumukkala notes"

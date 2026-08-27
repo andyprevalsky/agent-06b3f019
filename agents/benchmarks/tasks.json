@@ -46,7 +46,7 @@
           "T2 Root actually spawned 50 first-level general-purpose children with transcripts",
           "T3 Every explore child plays a full research trajectory",
           "T4 Every first-level GP plays a full July-class trajectory",
-          "T5 Honest Fast Mode replay only",
+          "T5 Honest Fast Mode replay only: $0 spent and 0 tokens streamed from non-fast-cache",
           "T6 No nested general-purpose children",
           "T7 No ERROR chips and no leftover in-progress children",
           "T8 Real deliverable: positioning, 90-day calendar, hooks, engagement targets",
