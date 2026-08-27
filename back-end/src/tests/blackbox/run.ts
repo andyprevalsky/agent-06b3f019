@@ -155,6 +155,7 @@ const lateExclusiveDomainNames = new Set([
   'admin-health',
   'benchmarks',
   'benchmarks-hub',
+  'benchmarks-hub.part2',
   'benchmarks-test-prompts',
 ]);
 const domainWeights = new Map<string, number>([

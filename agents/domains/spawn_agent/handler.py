@@ -247,14 +247,24 @@ class SpawnAgentManager(ToolManager):
 
         blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
         if blocked_reason:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="spawn_agent failed",
-                message=blocked_reason,
-                status=MessageStatus.ERROR,
-                metadata={"agentType": agent_type},
-            )
-            return
+            fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            # Fast Mode must still spawn general_purpose / for_each so each child
+            # Agent row exists and can replay execute_loop cache. FINISH-without-
+            # spawn leaves empty "spinning up..." chips on the Hub FE.
+            skip_without_spawn = not (fm and agent_type in {"general_purpose", "for_each"})
+            if skip_without_spawn:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="spawn_agent complete" if fm else "spawn_agent failed",
+                    message=(
+                        "Fast Mode cache trajectory already gathered this research; skipping further spawn."
+                        if fm
+                        else blocked_reason
+                    ),
+                    status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
+                    metadata={"agentType": agent_type},
+                )
+                return
 
         reserved_explore_slot = False
         if agent_type == "explore" and _explore_only_research_instruction(workflow_instance, tool_call):
@@ -508,6 +518,17 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
+            # Fast Mode: a truncated/malformed cached explore turn (e.g. the
+            # identify-50 attempt_completion JSON) used to ERROR the spawn after
+            # 3 parse retries of the same row. Finish with gathered evidence.
+            if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+                explore_failed = False
+                if not explore_result or explore_result == "No results found.":
+                    explore_result = (
+                        explore_error_reason
+                        or "Fast Mode cache trajectory ended for this explore goal. "
+                        "Returning with evidence gathered so far."
+                    )
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted

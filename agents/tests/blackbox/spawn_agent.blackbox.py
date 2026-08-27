@@ -446,6 +446,7 @@ class _FakeWFInstance:
         self.is_paused = paused
         self.model = model
         self.context = context if context is not None else {}
+        self.fast_mode_cache_enabled = False
         self.context_gates = {}
         self.child_tool_ids = {}
         self.pending_children = set()
@@ -705,6 +706,40 @@ async def test_handler_explore_failed_result_yields_error():
     assert error_event.message == "Web search was unavailable."
     assert "error_reason" not in (error_event.data or {})
     assert "error_reason" not in (error_event.metadata or {})
+
+
+async def test_handler_explore_failed_result_fast_mode_finishes():
+    """Fast Mode replay of a truncated explore turn must FINISH, not ERROR."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(
+            result={
+                "status": "error",
+                "result": "LLM call failed 3 consecutive times: Unterminated string",
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        wf = _FakeWFInstance()
+        wf.fast_mode_cache_enabled = True
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "g"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    assert any(event.status == MessageStatus.FINISHED for event in events)
+    assert not any(event.status == MessageStatus.ERROR for event in events)
 
 
 async def test_handler_explore_failed_result_forwards_error_reason():
@@ -968,6 +1003,46 @@ async def test_handler_blocks_recursive_general_purpose_for_explore_only_child()
     assert len(events) == 1
     assert events[0].status == MessageStatus.ERROR
     assert "explore-agent web research only" in events[0].message
+
+
+async def test_handler_fast_mode_spawns_cached_general_purpose_from_explore_only_child():
+    """Fast Mode must actually spawn GP so the child can replay cache — never FINISH-skip."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "Find current population of Tokyo. Use explore-agent web research. "
+            "MUST NOT use browser agent, Claude Code, or code sandbox."
+        ),
+    )
+    wf.fast_mode_cache_enabled = True
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "general_purpose",
+                    "goal": "Determine Tokyo population",
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
+
+    assert fake_mgr.last_call is not None, "general_purpose must actually spawn, not FINISH-skip"
+    assert fake_mgr.last_call["tool_call"]["sub_agent"]["goal"] == "Determine Tokyo population"
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.ERROR for e in events)
+    assert not any("skipping further spawn" in str(e.message or "") for e in events)
 
 
 async def test_handler_allows_root_explicit_general_purpose_with_explore_research_children():
@@ -2853,6 +2928,10 @@ async def run_all_tests():
     await r.record_async("handler_explore_capture", test_handler_explore_capture_tool_results)
     await r.record_async("handler_explore_failed_result", test_handler_explore_failed_result_yields_error)
     await r.record_async(
+        "handler_explore_failed_result_fast_mode_finishes",
+        test_handler_explore_failed_result_fast_mode_finishes,
+    )
+    await r.record_async(
         "handler_explore_failed_result_forwards_error_reason",
         test_handler_explore_failed_result_forwards_error_reason,
     )
@@ -2868,6 +2947,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_blocks_recursive_general_purpose_for_explore_only_child",
         test_handler_blocks_recursive_general_purpose_for_explore_only_child,
+    )
+    await r.record_async(
+        "handler_fast_mode_spawns_cached_general_purpose_from_explore_only_child",
+        test_handler_fast_mode_spawns_cached_general_purpose_from_explore_only_child,
     )
     await r.record_async(
         "handler_allows_root_explicit_general_purpose_with_explore_research_children",

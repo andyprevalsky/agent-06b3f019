@@ -699,6 +699,64 @@ async def fetch_supabase_logs(
 
 
 # ---------------------------------------------------------------------------
+# Canonical logs.tree (agent-id → parent/goal/status/messages)
+# ---------------------------------------------------------------------------
+
+# `/api/tool-usage/tree` returns a cost-rollup object. A previous Hub upload
+# stuffed that shape into `logs.tree`, so getRunAgent keyed nodes as
+# `agent_count` / `tool_usage_count` and every for_each child rendered as
+# "spinning up..." with message_count=0.
+TOOL_USAGE_TREE_KEYS = frozenset(
+    {
+        "root_agent_id",
+        "agent_count",
+        "tool_usage_count",
+        "llm_call_count",
+        "tokens_in",
+        "tokens_out",
+        "total_cost_cents",
+        "total_cost_dollars",
+        "total_tokens_from_tools",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    }
+)
+
+
+def canonicalize_agent_tree(raw: Any) -> Dict[str, dict]:
+    """Keep only agent-id-keyed nodes with parent/goal/status/messages.
+
+    Drops tool-usage rollup keys and any non-dict values so archive/Hub
+    adapters never invent empty chips from `/api/tool-usage/tree`.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, dict] = {}
+    for key, value in raw.items():
+        if not key or key in TOOL_USAGE_TREE_KEYS or not isinstance(value, dict):
+            continue
+        if not (
+            isinstance(value.get("messages"), list)
+            or "parent_agent_id" in value
+            or isinstance(value.get("goal"), str)
+            or isinstance(value.get("status"), str)
+        ):
+            continue
+        out[str(key)] = value
+    return out
+
+
+def tree_child_transcript_count(tree: Any, root_id: Optional[str]) -> int:
+    """How many non-root tree nodes carry at least one message."""
+    canonical = canonicalize_agent_tree(tree)
+    return sum(
+        1
+        for agent_id, info in canonical.items()
+        if agent_id != root_id and isinstance(info.get("messages"), list) and info["messages"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # Message transcript (from agent GET response)
 # ---------------------------------------------------------------------------
 
@@ -725,6 +783,64 @@ def extract_message_transcript(agent_data: dict) -> List[dict]:
             entry["file_pointer"] = file_pointer
         transcript.append(entry)
     return transcript
+
+
+def _infer_output_schema_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, list):
+        if value and all(isinstance(item, dict) for item in value):
+            return "list[object]"
+        if value and all(isinstance(item, int) and not isinstance(item, bool) for item in value):
+            return "list[int]"
+        return "list[str]"
+    if isinstance(value, dict):
+        return "object"
+    return "str"
+
+
+def completion_outputs_from_messages(messages: Optional[List[dict]]) -> List[dict]:
+    """Last Task Complete `outputs[]` from a transcript (Hub/archive hydrate)."""
+    for message in reversed(messages or []):
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        summary = metadata.get("completionSummary") or metadata.get("completion_summary") or {}
+        if not isinstance(summary, dict):
+            continue
+        outputs = summary.get("outputs")
+        if isinstance(outputs, list) and outputs:
+            return [row for row in outputs if isinstance(row, dict)]
+    return []
+
+
+def schema_from_completion_outputs(outputs: List[dict]) -> Optional[dict]:
+    fields: List[dict] = []
+    for row in outputs:
+        name = str(row.get("key") or row.get("name") or "")
+        if not name:
+            continue
+        label = str(row.get("label") or name.replace("_", " "))
+        fields.append(
+            {
+                "name": name,
+                "type": _infer_output_schema_type(row.get("value")),
+                "required": True,
+                "description": label,
+            }
+        )
+    return {"fields": fields} if fields else None
+
+
+def structured_from_completion_outputs(outputs: List[dict]) -> Optional[dict]:
+    populated: Dict[str, Any] = {}
+    for row in outputs:
+        name = str(row.get("key") or row.get("name") or "")
+        if name:
+            populated[name] = row.get("value")
+    return populated or None
 
 
 # ---------------------------------------------------------------------------
@@ -832,11 +948,20 @@ async def collect_tree_messages(
             except Exception:
                 agent_data = {}
         agent_obj = agent_data.get("agent", agent_data) if isinstance(agent_data, dict) else {}
+        messages = extract_message_transcript(agent_data)
+        outputs = completion_outputs_from_messages(messages)
         return aid, {
             "parent_agent_id": agent_info.get("parent_agent_id"),
             "goal": (agent_info.get("goal") or "")[:200],
             "status": agent_info.get("status") or agent_obj.get("status") or "UNKNOWN",
-            "messages": extract_message_transcript(agent_data),
+            "messages": messages,
+            "response_schema": agent_obj.get("response_schema")
+            or schema_from_completion_outputs(outputs),
+            "structured_output": agent_obj.get("structured_output")
+            or structured_from_completion_outputs(outputs),
+            "tokens_in": agent_obj.get("tokens_in") or agent_obj.get("tokensIn") or 0,
+            "tokens_out": agent_obj.get("tokens_out") or agent_obj.get("tokensOut") or 0,
+            "context_size": agent_obj.get("context_size") or agent_obj.get("contextSize") or 0,
         }
 
     results = await asyncio.gather(*[_one(a) for a in tree_agents], return_exceptions=True)
