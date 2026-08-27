@@ -29,6 +29,7 @@ from domains.spawn_agent.config import (
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
 )
+from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
@@ -712,6 +713,12 @@ class SpawnAgentManager(ToolManager):
             raise ValueError(f"Cannot spawn for_each: maximum nesting depth ({FOR_EACH_MAX_DEPTH}) reached.")
 
         base_goal = tool_call.get("goal", "")
+        fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+        base_goal, items = apply_oai_demo_july_for_each(
+            base_goal,
+            items,
+            enabled=fm and is_oai_demo_mass_agent_task(workflow_instance),
+        )
         start_phase = resolve_start_phase(tool_call)
         attachments = tool_call.get("attachments")
         output_schema = tool_call.get("output_schema")
