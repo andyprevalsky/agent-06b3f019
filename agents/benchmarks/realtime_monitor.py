@@ -42,6 +42,25 @@ def _record_timestamp(record: dict[str, Any]) -> str:
     return str(timestamp)
 
 
+def _assistant_started_timestamp(record: dict[str, Any]) -> str:
+    """DAG reasoning flushes can INSERT after a later tool started.
+
+    Smoke11: assemble stream firstTimestamp 23:51:25.158, then
+    attempt_completion IN_PROGRESS 23:51:25.531, then the ASSISTANT row
+    INSERTed at 23:51:25.738. Compare the stream start, not the late write.
+    """
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    for key in ("firstTimestamp", "startedAt"):
+        value = metadata.get(key)
+        if value:
+            return str(value)
+    return _record_timestamp(record)
+
+
+def _is_dag_stream_assistant(metadata: dict[str, Any]) -> bool:
+    return bool(metadata.get("streamId") or metadata.get("dagTaskIndex") is not None)
+
+
 def _assistant_tool_call_ids(metadata: dict[str, Any]) -> set[str]:
     tool_calls = metadata.get("tool_calls")
     if not isinstance(tool_calls, list):
@@ -107,9 +126,11 @@ class NoHangingToolCallsInvariant:
 
         if role != "ASSISTANT" or not self._open_tools:
             return
+        if _is_dag_stream_assistant(metadata):
+            return
 
         assistant_tool_ids = _assistant_tool_call_ids(metadata)
-        assistant_timestamp = _record_timestamp(record)
+        assistant_timestamp = _assistant_started_timestamp(record)
         unresolved = [
             (tool_call_id, tool)
             for tool_call_id, tool in self._open_tools.items()

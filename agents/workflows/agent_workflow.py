@@ -1636,6 +1636,7 @@ class AgentWorkflow:
                     # attempt as an LLM-initiated finish.
                     if dag_result["status"] == "completed":
                         workflow.logger.info("[DAG] Tasks completed, attempting completion")
+                        await self._flush_pending_messages()
                         post_dag_result = await self._attempt_post_dag_completion(
                             agent_id=agent_id,
                             user_id=user_id,
