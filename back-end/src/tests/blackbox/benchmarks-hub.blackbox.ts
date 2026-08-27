@@ -516,9 +516,12 @@ async function testRuns_toolUsageShapedTreeDoesNotInventEmptyChips(): Promise<vo
     });
     assertStatus(upload.status, 201, upload.data);
 
-    const rootView = await request(`${BASE_URL}/api/benchmarks/runs/${runId}/agents/${ROOT_AGENT}`, {
-      headers: internalHeaders,
-    });
+    const rootView = await request(
+      `${BASE_URL}/api/benchmarks/runs/${runId}/agents/${ROOT_AGENT}`,
+      {
+        headers: internalHeaders,
+      }
+    );
     assertStatus(rootView.status, 200, rootView.data);
     const tree = (
       rootView.data as {
@@ -528,7 +531,10 @@ async function testRuns_toolUsageShapedTreeDoesNotInventEmptyChips(): Promise<vo
     const ids = tree.map((n) => n.agent_id);
     assert(!ids.includes('agent_count'), `tool-usage keys leaked into tree: ${ids}`);
     assert(!ids.includes('tool_usage_count'), `tool-usage keys leaked into tree: ${ids}`);
-    assert(ids.includes(ROOT_AGENT) && ids.includes(SUB_AGENT), `canonical children missing: ${ids}`);
+    assert(
+      ids.includes(ROOT_AGENT) && ids.includes(SUB_AGENT),
+      `canonical children missing: ${ids}`
+    );
     const sub = tree.find((n) => n.agent_id === SUB_AGENT);
     assert((sub?.message_count ?? 0) > 0, 'child transcript dropped from mixed tool-usage tree');
     assert(sub?.status === 'COMPLETED', 'child must not render as spinning up');

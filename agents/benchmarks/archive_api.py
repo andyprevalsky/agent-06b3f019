@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from benchmarks.logs import canonicalize_agent_tree
+
 
 @dataclass(frozen=True)
 class ArchivedAgent:
@@ -251,8 +253,6 @@ def load_archive(run_path: Path) -> dict[str, ArchivedAgent]:
         # Index every spawned sub-agent in the tree so the archive renders the full
         # fan-out (not just the root). Each carries busId=<root> + parent_agent_id so
         # GET /api/agents/tree?busId=<root> returns the whole tree.
-        from benchmarks.logs import canonicalize_agent_tree
-
         tree = canonicalize_agent_tree((task.get("logs") or {}).get("tree") or {})
         for sub_id, info in tree.items():
             sub_id = str(sub_id)
@@ -312,7 +312,7 @@ class ArchiveHandler(BaseHTTPRequestHandler):
     # When set, the static archive is hot-reloaded whenever run.json changes, so a
     # single long-lived server transparently promotes from live → final snapshot.
     run_path: Optional[Path] = None
-    _run_mtime: float = -1.0
+    _run_stamp: tuple[int, int] = (-1, -1)
 
     # Endpoints served from local stubs regardless of upstream (the archive
     # frontend needs them to render, and they carry no per-agent state).
@@ -329,12 +329,13 @@ class ArchiveHandler(BaseHTTPRequestHandler):
         if path is None:
             return
         try:
-            mtime = path.stat().st_mtime
+            stat = path.stat()
         except OSError:
             return
-        if mtime == cls._run_mtime:
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        if stamp == cls._run_stamp:
             return
-        cls._run_mtime = mtime
+        cls._run_stamp = stamp
         cls.agents = load_archive_safe(path)
 
     # A direct opener with proxies disabled: the upstream is always a localhost
@@ -533,7 +534,7 @@ def configure_archive_handler(
 ) -> None:
     """Point ArchiveHandler at a run.json and/or a live box backend upstream."""
     ArchiveHandler.run_path = run_path
-    ArchiveHandler._run_mtime = -1.0
+    ArchiveHandler._run_stamp = (-1, -1)
     ArchiveHandler.agents = load_archive_safe(run_path)
     ArchiveHandler.upstream_url = (upstream_url or "").rstrip("/")
     headers: dict[str, str] = {}
