@@ -122,12 +122,12 @@ class PeopleSearchManager(ToolManager):
                 provider,
                 limit,
                 fields,
+                agent_id,
+                world_model_mode,
                 fast_mode_cache_enabled,
                 fast_mode_goal,
                 fast_mode_cache_write_enabled,
             ]
-            if world_model_mode != "real":
-                activity_args.extend([agent_id, world_model_mode])
             result = await execute_activity(
                 people_search_activity,
                 args=activity_args,
@@ -272,11 +272,11 @@ async def people_search_activity(
     provider: str,
     limit: Optional[int] = None,
     fields: Optional[List[str]] = None,
+    agent_id: Optional[str] = None,
+    world_model_mode: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
-    agent_id: Optional[str] = None,
-    world_model_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """Activity: Find or enrich people via Exa or Parallel (sync, sub-minute).
 
@@ -294,6 +294,8 @@ async def people_search_activity(
         provider: 'exa' or 'parallel'.
         limit: discover only; clamped to the public 1..25 range.
         fields: enrich only; the attributes to return for the person.
+        agent_id / world_model_mode: World-model harness routing (precedes Fast
+            Mode flags so older seven-arg payloads stay compatible).
         fast_mode_cache_enabled / fast_mode_goal: Fast Mode read switch.
         fast_mode_cache_write_enabled: Reserved; write-through still live until
             a people_search cache key exists.
@@ -330,16 +332,18 @@ async def people_search_activity(
             fields=fields,
         )
 
+    # Preserve the pre-FM contract: omitted / "real" mode allows live fallback.
+    effective_wm = None if world_model_mode in (None, "real") else world_model_mode
     try:
         return await WorldModelToolExecutionAdapter.from_env(
             agent_id=agent_id,
-            mode=world_model_mode,
+            mode=effective_wm,
         ).execute(
             "people_search",
             {"query": query, "mode": mode, "provider": provider, "limit": limit, "fields": fields},
             "people_search_activity",
             real_executor,
-            allow_real_fallback=world_model_mode is None,
+            allow_real_fallback=effective_wm is None,
         )
     except Exception:
         logger.error("People search failed", query=query, mode=mode, provider=provider)

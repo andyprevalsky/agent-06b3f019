@@ -36,17 +36,30 @@ type CreatorItem = {
  * (`, ` / `: `) — required because Fast Mode JSONB round-trips reorder keys
  * and `build_for_each_goal` now dumps with sort_keys=True.
  */
+function pyAsciiEscape(jsonQuoted: string): string {
+  // JSON.stringify keeps non-ASCII; Python ensure_ascii=True emits \\uXXXX.
+  return jsonQuoted.replace(/[\u007f-\uffff]/g, (ch) => {
+    return '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0');
+  });
+}
+
 function pyJsonDumps(value: unknown): string {
   if (value === null) return 'null';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'null';
-  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return 'null';
+    // Python json.dumps emits a trailing `.0` for whole-number floats. JS cannot
+    // distinguish 1 from 1.0, so keep String(value) (matches Python ints — the
+    // common case for rank / counts in creator payloads).
+    return String(value);
+  }
+  if (typeof value === 'string') return pyAsciiEscape(JSON.stringify(value));
   if (Array.isArray(value)) return `[${value.map(pyJsonDumps).join(', ')}]`;
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([k, v]) => `${JSON.stringify(k)}: ${pyJsonDumps(v)}`);
+      .map(([k, v]) => `${pyAsciiEscape(JSON.stringify(k))}: ${pyJsonDumps(v)}`);
     return `{${entries.join(', ')}}`;
   }
   throw new Error(`unsupported json value: ${typeof value}`);
@@ -175,7 +188,9 @@ async function gpChildNamespaces(
 }
 
 async function main() {
-  const prisma = new PrismaClient();
+  const url = process.env.FAST_MODE_CACHE_DATABASE_URL || process.env.DATABASE_URL;
+  if (!url) throw new Error('FAST_MODE_CACHE_DATABASE_URL or DATABASE_URL required');
+  const prisma = new PrismaClient({ datasources: { db: { url } } });
   try {
     const { baseGoal, items } = await loadWarmPayload(prisma);
     const names = items.map((i) => i.name);

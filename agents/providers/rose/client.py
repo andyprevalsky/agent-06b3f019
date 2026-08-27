@@ -593,14 +593,22 @@ class RoseClient:
 
         key = ctx.llm_key(call_site, _fc_request_key_material(kwargs))
         if ctx.read_enabled:
-            lookup_keys = ctx.llm_lookup_keys(call_site, _fc_request_key_material(kwargs))
-            stored, hit_key = await _fc.cache_get_first(lookup_keys)
-            if stored is None:
-                stored, hit_key = await _fc.cache_get_position_fallback(
-                    ctx.goal_hash,
-                    call_site,
-                    ctx.base_step,
-                )
+            lookup_failed = False
+            stored: Any = None
+            hit_key: Any = None
+            try:
+                lookup_keys = ctx.llm_lookup_keys(call_site, _fc_request_key_material(kwargs))
+                stored, hit_key = await _fc.cache_get_first(lookup_keys)
+                if stored is None:
+                    stored, hit_key = await _fc.cache_get_position_fallback(
+                        ctx.goal_hash,
+                        call_site,
+                        ctx.base_step,
+                    )
+            except Exception as exc:
+                logger.warning("fast_cache.get_error", key=key, error=str(exc)[:200])
+                stored, hit_key = None, None
+                lookup_failed = True
             if stored is not None:
                 if hit_key and hit_key != key and ctx.should_write:
                     # Migrate demo-era / drifted keys onto the current fingerprint
@@ -629,64 +637,67 @@ class RoseClient:
                 async for chunk in _fc_replay(stored):
                     yield chunk
                 return
-            site = str(call_site or "").strip()
-            # SWF: July explore namespaces often lack summarize_web_fetch rows
-            # even when the scrape hit. Pass page text through instead of a
-            # soft stub (reward hack) or a live Haiku call ($).
-            if site == "summarize_web_fetch":
-                derived = _fc_swf_passthrough(messages)
-                logger.info(
-                    "llm.cache.replay",
-                    call_site=call_site,
-                    key=key,
-                    hit_key="scrape_passthrough",
-                    reason="swf_scrape_passthrough",
-                )
-                async for chunk in _fc_replay(derived):
-                    yield chunk
-                return
-            if site in {"completion_summary", "context_compression"}:
-                terminal = _fc_soft_complete(site)
-                if terminal is not None:
+            # Mirror cached_complete: cache-read failures must not look like a
+            # clean miss and must not emit synthetic passthrough completions.
+            if not lookup_failed:
+                site = str(call_site or "").strip()
+                # SWF: July explore namespaces often lack summarize_web_fetch rows
+                # even when the scrape hit. Pass page text through instead of a
+                # soft stub (reward hack) or a live Haiku call ($).
+                if site == "summarize_web_fetch":
+                    derived = _fc_swf_passthrough(messages)
                     logger.info(
                         "llm.cache.replay",
                         call_site=call_site,
                         key=key,
-                        hit_key="terminal_passthrough",
-                        reason="fm_terminal_passthrough",
+                        hit_key="scrape_passthrough",
+                        reason="swf_scrape_passthrough",
                     )
-                    async for chunk in _fc_replay(terminal):
+                    async for chunk in _fc_replay(derived):
                         yield chunk
                     return
-            soft = _fc_soft_complete(call_site)
-            # Warm end-of-trajectory: emit as replay passthrough (not soft_complete)
-            # so honest hit metrics stay replay-only / soft≈0.
-            if soft is not None and await _fc.trajectory_prior_exists(
-                ctx.goal_hash, call_site, ctx.base_step
-            ):
-                logger.info(
-                    "llm.cache.replay",
-                    call_site=call_site,
-                    key=key,
-                    hit_key="trajectory_end_passthrough",
-                    reason="fm_trajectory_end_passthrough",
-                )
-                async for chunk in _fc_replay(soft):
-                    yield chunk
-                return
-            # Cold allowlisted sites must not burn live LLM under Fast Mode read.
-            if soft is not None:
-                logger.info(
-                    "llm.cache.replay",
-                    call_site=call_site,
-                    key=key,
-                    hit_key="cold_namespace_passthrough",
-                    reason="fm_cold_namespace_passthrough",
-                )
-                async for chunk in _fc_replay(soft):
-                    yield chunk
-                return
-            logger.info("llm.cache.miss", call_site=call_site, key=key)
+                if site in {"completion_summary", "context_compression"}:
+                    terminal = _fc_soft_complete(site)
+                    if terminal is not None:
+                        logger.info(
+                            "llm.cache.replay",
+                            call_site=call_site,
+                            key=key,
+                            hit_key="terminal_passthrough",
+                            reason="fm_terminal_passthrough",
+                        )
+                        async for chunk in _fc_replay(terminal):
+                            yield chunk
+                        return
+                soft = _fc_soft_complete(call_site)
+                # Warm end-of-trajectory: emit as replay passthrough (not soft_complete)
+                # so honest hit metrics stay replay-only / soft≈0.
+                if soft is not None and await _fc.trajectory_prior_exists(
+                    ctx.goal_hash, call_site, ctx.base_step
+                ):
+                    logger.info(
+                        "llm.cache.replay",
+                        call_site=call_site,
+                        key=key,
+                        hit_key="trajectory_end_passthrough",
+                        reason="fm_trajectory_end_passthrough",
+                    )
+                    async for chunk in _fc_replay(soft):
+                        yield chunk
+                    return
+                # Cold allowlisted sites must not burn live LLM under Fast Mode read.
+                if soft is not None:
+                    logger.info(
+                        "llm.cache.replay",
+                        call_site=call_site,
+                        key=key,
+                        hit_key="cold_namespace_passthrough",
+                        reason="fm_cold_namespace_passthrough",
+                    )
+                    async for chunk in _fc_replay(soft):
+                        yield chunk
+                    return
+            logger.info("llm.cache.miss", call_site=call_site, key=key, lookup_failed=lookup_failed)
         else:
             # Write-through must always call live LLM. Soft/passthrough end-notches
             # belong only on the Fast Mode *read* path. Applying them here aborts

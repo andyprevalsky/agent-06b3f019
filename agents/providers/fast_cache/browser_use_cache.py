@@ -81,19 +81,21 @@ async def cached_browser_decision(
             return stored
         logger.info("fast_cache.browser_use_miss", key=key)
         # Soft-complete only on a clean miss (warm trajectory exhausted / drift).
-        if not lookup_failed:
-            soft = soft_complete_browser_decision()
-            logger.info(
-                "fast_cache.browser_use_soft_complete",
-                key=key,
-                reason="browser_trajectory_exhausted",
-            )
-            return soft
+        # A cache-read *error* must not fall through to live LLM under Fast Mode
+        # read — that would execute a non-replayed browser action. Soft-complete
+        # (same terminal as clean miss) keeps the warm path deterministic.
+        soft = soft_complete_browser_decision()
+        logger.info(
+            "fast_cache.browser_use_soft_complete",
+            key=key,
+            reason=("browser_cache_lookup_error" if lookup_failed else "browser_trajectory_exhausted"),
+        )
+        return soft
     else:
         logger.info("fast_cache.browser_use_write_only", key=key)
 
     result = await call_llm()
-    if enabled or write_enabled:
+    if write_enabled:
         try:
             await cache_client.cache_set(key, "browser_use", normalize.goal_hash(goal), result)
             logger.info("fast_cache.browser_use_stored", key=key)

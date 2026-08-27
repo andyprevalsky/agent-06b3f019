@@ -354,12 +354,17 @@ export async function cachePurge(goalHash: string): Promise<number> {
  * When `step` is omitted, matches content-addressed keys (`:c:`) for that site
  * (e.g. response_schema).
  */
+function escapeLikePattern(value: string): string {
+  // LIKE metacharacters must not widen the callSite match.
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
 export async function cacheGetPosition(args: {
   goalHash: string;
   callSite: string;
   step?: number | null;
 }): Promise<CacheGetResult & { key: string | null }> {
-  const site = args.callSite.trim();
+  const site = escapeLikePattern(args.callSite.trim());
   const step = args.step === null || args.step === undefined ? null : Math.trunc(args.step);
   if (!args.goalHash || !site || (step !== null && (!Number.isFinite(step) || step < 0))) {
     return { hit: false, value: null, blobPath: null, key: null };
@@ -377,13 +382,26 @@ export async function cacheGetPosition(args: {
   // start at p:2 while today's explore ambient step is p:1 — exact-step miss
   // would otherwise force a live LLM call. Never fall BACK to a lower step:
   // that re-replays early web_search turns and loops explore to max iterations.
+  // Prefer explicit CACHE_KEY_VERSION values (v42/v43) over `fastmode:%:llm:` —
+  // a middle `%` also matches `fastmode:vN:sim.<model>:llm:...` and would
+  // cross-replay world-model-scoped entries into real runs (and vice versa).
+  const VERSION_PREFIXES = ["v42", "v43"] as const;
   const patterns: Array<{ like: string; minStep: number | null }> =
     step === null
-      ? [{ like: `fastmode:%:llm:${args.goalHash}:${site}:c:%`, minStep: null }]
-      : [
-          { like: `fastmode:%:llm:${args.goalHash}:${site}:p:${step}:c:%`, minStep: null },
-          { like: `fastmode:%:llm:${args.goalHash}:${site}:p:%:c:%`, minStep: step },
-        ];
+      ? VERSION_PREFIXES.map((v) => ({
+          like: `fastmode:${v}:llm:${args.goalHash}:${site}:c:%`,
+          minStep: null,
+        }))
+      : VERSION_PREFIXES.flatMap((v) => [
+          {
+            like: `fastmode:${v}:llm:${args.goalHash}:${site}:p:${step}:c:%`,
+            minStep: null,
+          },
+          {
+            like: `fastmode:${v}:llm:${args.goalHash}:${site}:p:%:c:%`,
+            minStep: step,
+          },
+        ]);
 
   for (const { like: pattern, minStep } of patterns) {
     for (const warmOnly of [true, false]) {
@@ -397,7 +415,7 @@ export async function cacheGetPosition(args: {
             FROM "FastModeCacheEntry"
             WHERE "goalHash" = $1
               AND kind = 'llm'
-              AND key LIKE $2
+              AND key LIKE $2 ESCAPE '\\'
               AND "createdAt" < TIMESTAMPTZ '2026-08-25'
             ORDER BY "createdAt" ASC
             LIMIT 1
@@ -407,7 +425,7 @@ export async function cacheGetPosition(args: {
             FROM "FastModeCacheEntry"
             WHERE "goalHash" = $1
               AND kind = 'llm'
-              AND key LIKE $2
+              AND key LIKE $2 ESCAPE '\\'
               AND "createdAt" < TIMESTAMPTZ '2026-08-25'
               AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
             ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
@@ -419,7 +437,7 @@ export async function cacheGetPosition(args: {
             FROM "FastModeCacheEntry"
             WHERE "goalHash" = $1
               AND kind = 'llm'
-              AND key LIKE $2
+              AND key LIKE $2 ESCAPE '\\'
             ORDER BY "createdAt" ASC
             LIMIT 1
           `
@@ -428,7 +446,7 @@ export async function cacheGetPosition(args: {
             FROM "FastModeCacheEntry"
             WHERE "goalHash" = $1
               AND kind = 'llm'
-              AND key LIKE $2
+              AND key LIKE $2 ESCAPE '\\'
               AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
             ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
             LIMIT 1

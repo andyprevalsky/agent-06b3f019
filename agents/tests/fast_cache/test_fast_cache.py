@@ -2290,7 +2290,8 @@ def test_position_lookup_keys_include_july_demo_aliases():
 def test_position_prefix_pattern_matches_durable_slot():
     pattern = normalize.position_prefix_pattern("goal", "plan_loop", 2)
     gh = normalize.goal_hash("goal")
-    assert pattern == f"fastmode:%:llm:{gh}:plan_loop:p:2:c:%"
+    scope = normalize.world_model_cache_scope()
+    assert pattern == f"fastmode:%:{scope}llm:{gh}:plan_loop:p:2:c:%"
 
 
 def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():

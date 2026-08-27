@@ -42,7 +42,15 @@ function parseArgs(raw: string | Record<string, unknown> | undefined): Record<st
 }
 
 function rewriteKey(key: string, fromGh: string, toGh: string): string {
-  return key.split(fromGh).join(toGh);
+  const fromSeg = `:${fromGh}:`;
+  const toSeg = `:${toGh}:`;
+  const count = key.split(fromSeg).length - 1;
+  if (count !== 1) {
+    throw new Error(
+      `rewriteKey expected exactly one '${fromSeg}' segment in key (found ${count}): ${key}`
+    );
+  }
+  return key.replace(fromSeg, toSeg);
 }
 
 async function main() {
@@ -202,7 +210,8 @@ async function main() {
           value = EXCLUDED.value,
           "blobPath" = EXCLUDED."blobPath",
           kind = EXCLUDED.kind,
-          "goalHash" = EXCLUDED."goalHash"
+          "goalHash" = EXCLUDED."goalHash",
+          "createdAt" = EXCLUDED."createdAt"
       `,
         newKey,
         src.kind,

@@ -407,12 +407,23 @@ async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]
             if record.get("hit") and record.get("value") is not None:
                 return record.get("value"), key
         return None, None
-    except Exception:
+    except _BatchUnsupported:
         for key in ordered:
             value = await cache_get(key)
             if value is not None:
                 return value, key
         return None, None
+    except Exception as exc:
+        # Transport / 5xx after get-many: try serial, but if every key still
+        # misses, re-raise so callers set lookup_failed and skip passthroughs.
+        for key in ordered:
+            try:
+                value = await cache_get(key)
+            except Exception:
+                continue
+            if value is not None:
+                return value, key
+        raise RuntimeError(f"fast-cache get-first failed: {exc}") from exc
 
 
 async def cache_get_position_fallback(
@@ -420,17 +431,21 @@ async def cache_get_position_fallback(
     call_site: str,
     step: Optional[int] = None,
 ) -> tuple[Optional[Any], Optional[str]]:
-    """Oldest matching entry for goal/site[/step] when exact keys miss.
+    """Oldest matching entry for goal/site/step when exact keys miss.
 
     Restores the Jul 2026 OAi demo warm cache after fingerprint drift: prefer the
     earliest row under that durable trajectory slot (the original warm write).
-    When `step` is None, matches content-addressed keys (`:c:`) for the site
-    (e.g. response_schema).
+
+    When ``step is None`` (content-addressed contexts), return a miss — the
+    backend position query does not compare the request fingerprint, so a
+    fallback would replay another request's value for the same call site.
+    Transport / non-404 errors raise so callers can set ``lookup_failed`` and
+    skip synthetic passthroughs.
     """
+    if step is None:
+        return None, None
     api_url, api_key = _backend()
-    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site}
-    if step is not None:
-        body["step"] = step
+    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
     try:
         resp = await _shared_client().post(
             f"{api_url}/api/fast-cache/get-position",
@@ -440,11 +455,12 @@ async def cache_get_position_fallback(
         )
     except Exception as exc:
         logger.warning("fast_cache.get_position_error", error=str(exc)[:300])
-        return None, None
+        raise
     if resp.status_code != 200:
-        if resp.status_code not in {404, 405}:
-            logger.warning("fast_cache.get_position_failed", status=resp.status_code)
-        return None, None
+        if resp.status_code in {404, 405}:
+            return None, None
+        logger.warning("fast_cache.get_position_failed", status=resp.status_code)
+        raise RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
     data = resp.json()
     if not data.get("hit"):
         return None, None
@@ -464,7 +480,10 @@ async def trajectory_prior_exists(
     """
     if not goal_hash or step is None or int(step) <= 0:
         return False
-    prior, _ = await cache_get_position_fallback(goal_hash, call_site, int(step) - 1)
+    try:
+        prior, _ = await cache_get_position_fallback(goal_hash, call_site, int(step) - 1)
+    except Exception:
+        return False
     return prior is not None
 
 

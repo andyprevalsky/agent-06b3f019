@@ -338,12 +338,11 @@ async def spawn_explore_agent_activity(
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
 
-    # Belt-and-suspenders: even if the workflow passed depth=quick (DAG clamp /
-    # schema default), Fast Mode must allow July trajectories to finish.
-    depth = resolve_explore_depth(
-        depth,
-        fast_mode_cache_enabled=_explore_fast_mode_enabled,
-    )
+    # Do NOT re-promote depth from an independently resolved Fast Mode flag.
+    # `_spawn_explore` already paired depth + max_iterations with the activity
+    # timeout using workflow_instance.fast_mode_cache_enabled. Re-resolving here
+    # from resolve_agent_fast_mode can bump iterations to deep while the caller
+    # still holds the quick timeout.
 
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
 
@@ -673,17 +672,18 @@ async def spawn_explore_agent_activity(
     # the timestamp into the cacheable system prompt.
     current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Resolve the caller's thoroughness. The depth tag rides in the per-call goal
-    # (NOT the cacheable system prompt); the turn cap comes from the same depth.
-    # Fast Mode may have already promoted depth above; re-resolve so a stale
-    # max_iterations=5 from an older caller cannot clip July replay mid-trajectory.
-    effective_depth = resolve_explore_depth(
-        depth,
-        fast_mode_cache_enabled=_explore_fast_mode_enabled,
-    )
+    # (NOT the cacheable system prompt); the turn cap must match the activity
+    # timeout sized by the handler. When max_iterations is provided, trust that
+    # contract — never bump iterations from a separately resolved Fast Mode flag.
+    if depth in ("quick", "medium", "deep"):
+        effective_depth = depth
+    else:
+        effective_depth = resolve_explore_depth(
+            depth,
+            fast_mode_cache_enabled=_explore_fast_mode_enabled,
+        )
     depth_cap = explore_limits_for_depth(effective_depth)[0]
     if max_iterations is None:
-        resolved_max_iterations = depth_cap
-    elif _explore_fast_mode_enabled and max_iterations < depth_cap:
         resolved_max_iterations = depth_cap
     else:
         resolved_max_iterations = max_iterations

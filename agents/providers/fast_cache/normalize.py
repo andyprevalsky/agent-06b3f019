@@ -999,9 +999,15 @@ def position_lookup_keys(goal: str, call_site: str, step: int, request: Any) -> 
 
 
 def position_prefix_pattern(goal: str, call_site: str, step: int) -> str:
-    """SQL LIKE pattern for oldest-entry fallback under a goal/site/step."""
+    """SQL LIKE pattern for oldest-entry fallback under a goal/site/step.
+
+    Includes ``world_model_cache_scope()`` so simulated keys cannot match real
+    runs (and vice versa). Backend ``cacheGetPosition`` uses explicit v42/v43
+    prefixes for the same reason.
+    """
     site = normalize_call_site(call_site)
-    return f"fastmode:%:llm:{goal_hash(goal)}:{site}:p:{step}:c:%"
+    scope = world_model_cache_scope()
+    return f"fastmode:%:{scope}llm:{goal_hash(goal)}:{site}:p:{step}:c:%"
 
 
 def llm_key(goal: str, call_site: str, request: Any) -> str:

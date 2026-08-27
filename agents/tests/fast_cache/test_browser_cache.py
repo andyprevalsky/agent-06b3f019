@@ -320,6 +320,35 @@ def test_browser_use_soft_completes_on_miss(mem):
     asyncio.run(body())
 
 
+def test_browser_use_soft_completes_on_lookup_error(monkeypatch, mem):
+    """Cache-read errors must not fall through to live browser LLM under FM read."""
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("backend down")
+
+    monkeypatch.setattr(browser_use_cache.cache_client, "cache_get", boom)
+
+    async def body():
+        calls = {"n": 0}
+
+        async def live():
+            calls["n"] += 1
+            return {"action": "click", "index": 1}
+
+        out = await browser_use_cache.cached_browser_decision(
+            enabled=True,
+            goal="g",
+            request={"task": "x", "browser_state": {"url": "https://x.com"}},
+            call_llm=live,
+        )
+        assert calls["n"] == 0
+        assert mem.set_calls == 0
+        assert out["action"]["action"] == "done"
+        assert out.get("from_fast_cache") is True
+
+    asyncio.run(body())
+
+
 def test_browser_use_cached_action_remaps_shifted_dom_index():
     old_dom = FakeDom({
         105: FakeElement(

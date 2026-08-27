@@ -24,13 +24,25 @@ const canon = (g: string) => sha16(g.replace(REF_RE, '@ref:message:<uuid>'));
 
 const APPLY = process.argv.includes('--apply');
 const missFileIdx = process.argv.indexOf('--miss-file');
-const missFile = missFileIdx >= 0 ? process.argv[missFileIdx + 1] : '';
+const missFileArg = missFileIdx >= 0 ? process.argv[missFileIdx + 1] : '';
+if (missFileIdx >= 0 && (!missFileArg || missFileArg.startsWith('--'))) {
+  throw new Error('--miss-file requires a file path');
+}
+const missFile = missFileArg || '';
 
 const MIN_JULY_EX = 10;
 const MIN_JULY_SWF = 3;
 
 function rewriteKey(key: string, fromGh: string, toGh: string): string {
-  return key.split(fromGh).join(toGh);
+  const fromSeg = `:${fromGh}:`;
+  const toSeg = `:${toGh}:`;
+  const count = key.split(fromSeg).length - 1;
+  if (count !== 1) {
+    throw new Error(
+      `rewriteKey expected exactly one '${fromSeg}' segment in key (found ${count}): ${key}`
+    );
+  }
+  return key.replace(fromSeg, toSeg);
 }
 
 function creatorHintFromGoal(goal: string): string {
@@ -52,7 +64,11 @@ async function main() {
   const seen = new Set<string>();
 
   if (missFile) {
-    const miss = JSON.parse(readFileSync(missFile, 'utf8')) as Array<{
+    const parsed: unknown = JSON.parse(readFileSync(missFile, 'utf8'));
+    if (!Array.isArray(parsed)) {
+      throw new Error(`--miss-file ${missFile} must contain a JSON array`);
+    }
+    const miss = parsed as Array<{
       gh: string;
       july_ex?: number;
       july_swf?: number;
@@ -174,29 +190,7 @@ async function main() {
       MIN_JULY_SWF
     );
 
-    let sourceGh = sources.find((s) => s.goalHash !== d.destHash)?.goalHash;
-    // Fallback: any rich July explore+swf namespace (still better than sparse)
-    if (!sourceGh) {
-      const fallback = await prisma.$queryRawUnsafe<Array<{ goalHash: string; ex: number; swf: number }>>(
-        `
-        SELECT "goalHash",
-          count(*) FILTER (WHERE key LIKE '%:explore_agent:%')::int AS ex,
-          count(*) FILTER (WHERE key LIKE '%:summarize_web_fetch:%')::int AS swf
-        FROM "FastModeCacheEntry"
-        WHERE kind = 'llm'
-          AND "createdAt" >= '2026-07-01' AND "createdAt" < '2026-07-15'
-          AND (key LIKE '%:explore_agent:%' OR key LIKE '%:summarize_web_fetch:%')
-        GROUP BY 1
-        HAVING count(*) FILTER (WHERE key LIKE '%:explore_agent:%') >= $1
-           AND count(*) FILTER (WHERE key LIKE '%:summarize_web_fetch:%') >= $2
-        ORDER BY swf DESC, ex DESC
-        LIMIT 1
-      `,
-        MIN_JULY_EX,
-        MIN_JULY_SWF
-      );
-      sourceGh = fallback[0]?.goalHash;
-    }
+    const sourceGh = sources.find((s) => s.goalHash !== d.destHash)?.goalHash;
 
     if (!sourceGh || sourceGh === d.destHash) {
       report.push({ ...d, status: 'no_rich_source', like, sources });
@@ -238,53 +232,59 @@ async function main() {
 
     if (!APPLY) continue;
 
-    if (swfOnly) {
-      const del = await prisma.$executeRawUnsafe(
-        `DELETE FROM "FastModeCacheEntry" WHERE "goalHash" = $1 AND (
-          key LIKE '%:summarize_web_fetch:%'
-          OR (key LIKE '%:explore_agent:%' AND "createdAt" >= '2026-08-25')
-        )`,
-        d.destHash
-      );
-      purged += Number(del) || 0;
-    } else {
-      const del = await prisma.$executeRawUnsafe(
-        `DELETE FROM "FastModeCacheEntry" WHERE "goalHash" = $1 AND (
-          key LIKE '%:explore_agent:%' OR key LIKE '%:summarize_web_fetch:%'
-        )`,
-        d.destHash
-      );
-      purged += Number(del) || 0;
-    }
+    await prisma.$transaction(async (tx) => {
+      if (swfOnly) {
+        const del = await tx.$executeRawUnsafe(
+          `DELETE FROM "FastModeCacheEntry" WHERE "goalHash" = $1 AND (
+            key LIKE '%:summarize_web_fetch:%'
+            OR (key LIKE '%:explore_agent:%' AND "createdAt" >= '2026-08-25')
+          )`,
+          d.destHash
+        );
+        purged += Number(del) || 0;
+      } else {
+        const del = await tx.$executeRawUnsafe(
+          `DELETE FROM "FastModeCacheEntry" WHERE "goalHash" = $1 AND (
+            key LIKE '%:explore_agent:%' OR key LIKE '%:summarize_web_fetch:%'
+          )`,
+          d.destHash
+        );
+        purged += Number(del) || 0;
+      }
 
-    for (const src of srcRows) {
-      const newKey = rewriteKey(src.key, sourceGh, d.destHash);
-      await prisma.$executeRawUnsafe(
-        `
-        INSERT INTO "FastModeCacheEntry" (key, kind, "goalHash", value, "blobPath", "createdAt")
-        VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-        ON CONFLICT (key) DO UPDATE SET
-          value = EXCLUDED.value,
-          "blobPath" = EXCLUDED."blobPath",
-          kind = EXCLUDED.kind,
-          "goalHash" = EXCLUDED."goalHash",
-          "createdAt" = EXCLUDED."createdAt"
-      `,
-        newKey,
-        src.kind,
-        d.destHash,
-        JSON.stringify(src.value),
-        src.blobPath,
-        src.createdAt
-      );
-      copied++;
-    }
+      for (const src of srcRows) {
+        const newKey = rewriteKey(src.key, sourceGh, d.destHash);
+        await tx.$executeRawUnsafe(
+          `
+          INSERT INTO "FastModeCacheEntry" (key, kind, "goalHash", value, "blobPath", "createdAt")
+          VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+          ON CONFLICT (key) DO UPDATE SET
+            value = EXCLUDED.value,
+            "blobPath" = EXCLUDED."blobPath",
+            kind = EXCLUDED.kind,
+            "goalHash" = EXCLUDED."goalHash",
+            "createdAt" = EXCLUDED."createdAt"
+        `,
+          newKey,
+          src.kind,
+          d.destHash,
+          JSON.stringify(src.value),
+          src.blobPath,
+          src.createdAt
+        );
+        copied++;
+      }
+    });
   }
 
   // Always purge today's poison under ALL miss hashes (even rich ones)
   let poisonPurged = 0;
   if (APPLY && missFile) {
-    const miss = JSON.parse(readFileSync(missFile, 'utf8')) as Array<{ gh: string }>;
+    const parsed: unknown = JSON.parse(readFileSync(missFile, 'utf8'));
+    if (!Array.isArray(parsed)) {
+      throw new Error(`--miss-file ${missFile} must contain a JSON array`);
+    }
+    const miss = parsed as Array<{ gh: string }>;
     for (const row of miss) {
       const del = await prisma.$executeRawUnsafe(
         `DELETE FROM "FastModeCacheEntry"
