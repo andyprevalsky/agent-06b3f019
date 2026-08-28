@@ -598,7 +598,9 @@ async def test_execute_tool_max_depth_fast_mode_finishes():
 
     assert len(events) == 1
     assert events[0].status == MessageStatus.FINISHED
-    assert "maximum nesting depth" not in events[0].message.lower() or "Fast Mode" in events[0].message
+    assert "skipping further spawn" in events[0].message.lower()
+    assert "Fast Mode" not in events[0].message
+    assert "fast cache" not in events[0].message.lower()
 
 
 async def test_execute_tool_empty_agents_list_yields_error():

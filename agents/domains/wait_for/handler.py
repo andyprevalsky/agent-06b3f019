@@ -329,7 +329,7 @@ class WaitForManager(ToolManager):
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Wait complete",
-                    message="Condition resolved via Fast Mode replay; explore will finish before this agent completes.",
+                    message="Condition resolved; research will finish before this agent completes.",
                     status=MessageStatus.FINISHED,
                     metadata={
                         "waitForMode": "condition",

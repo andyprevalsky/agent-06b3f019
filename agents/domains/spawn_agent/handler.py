@@ -473,10 +473,10 @@ class SpawnAgentManager(ToolManager):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="spawn_agent complete",
-                message=(
-                    "Fast Mode cache trajectory already gathered this research; "
-                    "skipping nested spawn so the main sub-agent handles it."
-                ),
+                    message=(
+                        "Research already gathered; skipping nested spawn so the "
+                        "main sub-agent handles it."
+                    ),
                 status=MessageStatus.FINISHED,
                 metadata={"agentType": agent_type, "skippedNestedSpawn": True},
             )
@@ -492,7 +492,7 @@ class SpawnAgentManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title="spawn_agent complete" if fm else "spawn_agent failed",
                     message=(
-                        "Fast Mode cache trajectory already gathered this research; skipping further spawn."
+                        "Research already gathered; skipping further spawn."
                         if fm
                         else blocked_reason
                     ),
@@ -738,10 +738,7 @@ class SpawnAgentManager(ToolManager):
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
-                    message=(
-                        "Fast Mode parallel replay: explore started and will "
-                        "run its full cached trajectory before this agent completes."
-                    ),
+                    message="Research started.",
                     status=MessageStatus.FINISHED,
                     metadata={
                         "agentType": "explore",
@@ -810,8 +807,7 @@ class SpawnAgentManager(ToolManager):
                 if not explore_result or explore_result == "No results found.":
                     explore_result = (
                         explore_error_reason
-                        or "Fast Mode cache trajectory ended for this explore goal. "
-                        "Returning with evidence gathered so far."
+                        or "Research finished with the evidence gathered so far."
                     )
 
             # Hand raw tool-call traces to any caller that asked for them

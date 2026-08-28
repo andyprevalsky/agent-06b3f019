@@ -15,6 +15,7 @@
  *
  * Returns null when the message is not a general-purpose agent tool event.
  */
+import { userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../../hooks';
 import SubAgentTree from '../SubAgentTree';
 import SubAgentToolBubble from '../SubAgentToolBubble';
@@ -39,7 +40,7 @@ export function SubAgentBubble({
   // Pre-spawn error
   if (rawToolStatus === 'ERROR' && !subAgentIds && !metadata.subAgentId) {
     const errorTitle = (metadata.title as string) || 'General-purpose agent';
-    const errorMsg = message.text || 'Failed to spawn general-purpose agent';
+    const errorMsg = userFacingMessageText(message.text) || 'Failed to spawn general-purpose agent';
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         <div className="flex items-center gap-1 font-mono text-sm text-red-500">
@@ -90,7 +91,7 @@ export function SubAgentBubble({
         <SubAgentToolBubble
           toolCallId={(metadata.toolCallId as string | undefined) || ''}
           title={(metadata.title as string | undefined) || 'General-purpose agent'}
-          message={message.text}
+          message={userFacingMessageText(message.text)}
           status={toolStatus}
           progress={(metadata.progress as number | undefined) || 0}
           agentId={metadata.subAgentId as string | undefined}

@@ -1497,6 +1497,8 @@ async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
         assert any(e.status == MessageStatus.FINISHED for e in events)
         finished = [e for e in events if e.status == MessageStatus.FINISHED][-1]
         assert (finished.metadata or {}).get("fastModeParallel") is True
+        assert "Fast Mode" not in (finished.message or "")
+        assert "cached trajectory" not in (finished.message or "").lower()
         assert getattr(wf, "_fm_explore_handles", None), "handle must be tracked for drain"
 
         await drain_fast_mode_explores(wf)
