@@ -3006,6 +3006,69 @@ def test_first_level_gp_count_static_uses_collected_transcripts():
     assert "T2:" in reason
 
 
+def test_root_deliverable_markers_use_dag_assemble_not_stub_card():
+    """T7 is a named static row: DAG assemble counts when Task Complete is a stub."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {
+                "type": "root_deliverable_markers",
+                "min_chars": 4000,
+                "required_strings": ["positioning", "90-day", "hook", "Huberman", "Attia"],
+            }
+        ]
+    }
+    assemble = (
+        "POSITIONING STATEMENT for Andy Prevalsky. "
+        "90-day content calendar across YouTube, IG, TikTok, and Substack. "
+        "30 hook-tested video script openings. "
+        "Weekly engagement targets include Huberman and Attia. "
+    ) * 40
+    good = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "Completed a 50-creator analysis into Andy’s positioning.",
+                        "outputs": [],
+                    },
+                },
+            },
+            {
+                "role": "ASSISTANT",
+                "message": assemble,
+                "metadata": {"plannedToolName": "reasoning", "dagTaskIndex": 2},
+            },
+        ]
+    }
+    assert _run_declared_static_check(evaluator, good) == (True, "All declared static checks passed")
+
+    stub = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "Fast Mode cache trajectory ended; the task completed successfully.",
+                        "outputs": [],
+                    },
+                },
+            }
+        ]
+    }
+    passed, reason = _run_declared_static_check(evaluator, stub)
+    assert passed is False
+    assert "T7:" in reason
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -13196,6 +13259,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t10-no-tool-failures": ["no_tool_failures"],
         "t7-completion-summary-length": ["completion_summary_length"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
+        "t7-real-deliverable": ["root_deliverable_markers"],
     }
     assert all(
         check_type in RUNTIME_STATIC_CHECK_TYPES
@@ -13213,7 +13277,6 @@ def test_unified_catalog_delineates_bench_axes():
         "t4-full-july-gp-trajectories",
         "t5-zero-live-spend",
         "t6-no-nested-gps",
-        "t7-real-deliverable",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
     ]
@@ -15920,6 +15983,10 @@ async def run_all_tests():
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",
         test_first_level_gp_count_static_uses_collected_transcripts,
+    )
+    r.record(
+        "root_deliverable_markers_use_dag_assemble_not_stub_card",
+        test_root_deliverable_markers_use_dag_assemble_not_stub_card,
     )
     r.record(
         "opentable_static_runtime_contract",

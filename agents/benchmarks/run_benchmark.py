@@ -8510,6 +8510,14 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
                 "metadata": {"evidence_type": "final_completion"},
             }
         )
+    for item in _root_assemble_deliverables(data):
+        evidence.append(
+            {
+                "role": "ASSISTANT",
+                "text": item["text"][:8000],
+                "metadata": {"evidence_type": "assemble_deliverable", "chars": item["chars"]},
+            }
+        )
     evidence.append({"benchmark_state": _compact_benchmark_state_for_judge(data)})
     return evidence
 
@@ -9129,6 +9137,36 @@ def _tool_runtime_failures(data: dict) -> list[str]:
     return failures
 
 
+def _root_assemble_deliverables(data: dict) -> list[dict]:
+    """July Fast Mode lands the real deliverable in DAG reasoning ASSISTANT chips."""
+    deliverables: list[dict] = []
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").upper() != "ASSISTANT":
+            continue
+        text = _message_text_for_judge(message)
+        if len(text) < 1000:
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        is_assemble = (
+            metadata.get("plannedToolName") == "reasoning"
+            or metadata.get("dagTaskIndex") is not None
+            or str(metadata.get("streamId") or "").startswith("dag-")
+        )
+        if not is_assemble:
+            continue
+        deliverables.append({"text": text, "chars": len(text)})
+    deliverables.sort(key=lambda item: item["chars"], reverse=True)
+    return deliverables[:4]
+
+
+def _root_deliverable_blob(data: dict) -> str:
+    parts = [str(summary.get("summary") or "") for summary in _final_completion_summaries(data)]
+    parts.extend(item["text"] for item in _root_assemble_deliverables(data))
+    return "\n".join(part for part in parts if part)
+
+
 def _final_completion_summaries(data: dict) -> list[dict]:
     """Return durable root completion cards in transcript order."""
     summaries: list[dict] = []
@@ -9421,6 +9459,32 @@ def _run_declared_static_check(
                     for request in matching
                 ):
                     return False, f"{kind}: {_approval_request_detail_failure(kind_check)}"
+            continue
+        if check_type == "root_deliverable_markers":
+            blob = _root_deliverable_blob(data)
+            minimum = int(check.get("min_chars", 4000))
+            if len(blob) < minimum:
+                return (
+                    False,
+                    f"T7: deliverable blob was {len(blob)} characters; expected at least {minimum}",
+                )
+            lowered = blob.lower()
+            missing = [
+                marker
+                for marker in (check.get("required_strings") or [])
+                if str(marker).lower() not in lowered
+            ]
+            if missing:
+                return False, f"T7: deliverable missing required marker {missing[0]!r}"
+            creator_names = [str(name) for name in (check.get("creator_names") or []) if str(name).strip()]
+            min_creators = int(check.get("min_creator_names") or 0)
+            if creator_names and min_creators:
+                found = [name for name in creator_names if name.lower() in lowered]
+                if len(found) < min_creators:
+                    return (
+                        False,
+                        f"T7: deliverable named {len(found)} July creators; expected >= {min_creators}",
+                    )
             continue
         if check_type == "first_level_gp_count":
             gps = _first_level_gps_from_data(data)

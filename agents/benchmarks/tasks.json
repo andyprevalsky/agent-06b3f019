@@ -44,7 +44,7 @@
         "FAST_MODE_CACHE_DATABASE_URL"
       ],
       "live_targets": [],
-      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2 are static_check (agent_status, no_tool_failures, completion_summary_length, first_level_gp_count). T1/T3–T6, T7-content, T7-schema/assemble-final, T9 are single_turn_llm_judge. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content are static_check (agent_status, no_tool_failures, completion_summary_length, first_level_gp_count, root_deliverable_markers). T1/T3–T6, T7-schema/assemble-final, T9 are single_turn_llm_judge. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
     },
     "evaluators": [
       {
@@ -140,11 +140,39 @@
       },
       {
         "id": "t7-real-deliverable",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
           "T7: Real deliverable: positioning, 90-day calendar, 30 hooks, 20 engagement targets"
         ],
-        "judge_prompt": "Score 1.0 only if the completion card / Task Complete is a real deliverable: a positioning statement, a 90-day calendar, about 30 hook-tested openings, about 20 engagement targets, and at least 10 July creator names from the tree. FAIL a root traj-end stub or a generic 'done' summary. Unsupported assistant claims are not proof."
+        "checks": [
+          {
+            "type": "root_deliverable_markers",
+            "min_chars": 4000,
+            "required_strings": [
+              "positioning",
+              "90-day",
+              "hook"
+            ],
+            "creator_names": [
+              "Huberman",
+              "Attia",
+              "Rhonda",
+              "DeLauer",
+              "Sinclair",
+              "Bryan Johnson",
+              "Lex Fridman",
+              "Sahil",
+              "Brecka",
+              "Hyman",
+              "Asprey",
+              "Galpin",
+              "Norton",
+              "Topol",
+              "Isenberg"
+            ],
+            "min_creator_names": 10
+          }
+        ]
       },
       {
         "id": "t7-schema-task-complete",
@@ -152,7 +180,7 @@
         "criteria": [
           "T7: Schema / Task Complete / assemble-final outputs are populated"
         ],
-        "judge_prompt": "Score 1.0 only if the root has a populated response_schema (fields list) and/or structured_output / Task Complete outputs. This is assemble-final landing. FAIL when schema and structured outputs are both empty. Use the completion card and typed agent/tree fields, not assistant claims."
+        "judge_prompt": "Score 1.0 only if the root has a populated response_schema (fields list) and/or structured_output / Task Complete outputs / DAG assemble deliverable. Fast Mode may land the July assemble in DAG reasoning ASSISTANT chips while completionSummary.outputs is empty — that still counts when response_schema.fields or assemble_deliverable evidence is populated. FAIL when schema, structured outputs, and assemble deliverable are all empty. Use typed agent/tree fields and assemble_deliverable, not assistant claims."
       },
       {
         "id": "t9-no-leftover-children",
