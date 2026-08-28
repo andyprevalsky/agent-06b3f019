@@ -49,6 +49,25 @@ from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
 from utils.source_connect_gates import raise_source_connect_gates
 from utils.tool_call_ids import spawn_group_id
 
+_FAST_MODE_USER_COPY = (
+    "fast mode",
+    "fast cache",
+    "fast-cache",
+    "cached trajectory",
+    "from_fast_cache",
+)
+
+
+def user_facing_explore_result(text: Any) -> str:
+    """Return explore chip copy that would show in prod — never Fast Mode plumbing."""
+    raw = str(text or "").strip()
+    if not raw or raw.lower() in {"research started.", "research started"}:
+        return ""
+    lowered = raw.lower()
+    if any(marker in lowered for marker in _FAST_MODE_USER_COPY) and len(raw) < 400:
+        return ""
+    return raw
+
 logger = structlog.get_logger()
 
 _FM_EXPLORE_HANDLES_ATTR = "_fm_explore_handles"
@@ -115,12 +134,16 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
     """
     items = list(_fm_explore_handles(workflow_instance))
     _fm_explore_handles(workflow_instance).clear()
+    post_event = getattr(workflow_instance, "_handle_tool_event", None)
     for item in items:
         handle = item.get("handle")
         if handle is None:
             continue
+        result: Dict[str, Any] = {}
         try:
-            await handle
+            raw_result = await handle
+            if isinstance(raw_result, dict):
+                result = raw_result
         except (asyncio.CancelledError, ActivityError) as exc:
             if isinstance(exc, ActivityError) and not isinstance(
                 exc.cause, (asyncio.CancelledError, TemporalCancelledError)
@@ -136,6 +159,30 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
                 task_id=item.get("task_id"),
                 error=str(exc)[:200],
             )
+        if not callable(post_event):
+            continue
+        explore_result = user_facing_explore_result(
+            result.get("result") or result.get("final_response") or result.get("summary")
+        )
+        if not explore_result:
+            continue
+        ui_goal = str(item.get("ui_goal") or "")
+        await post_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+                message=explore_result,
+                status=MessageStatus.FINISHED,
+                metadata={
+                    "agentType": "explore",
+                    "taskId": item.get("task_id"),
+                    "fullGoal": ui_goal,
+                },
+                data={"result": explore_result},
+            ),
+            item.get("tool_call_id"),
+            "spawn_agent",
+        )
 
 
 def _combined_goal_text(workflow_instance, tool_call: Dict[str, Any]) -> str:

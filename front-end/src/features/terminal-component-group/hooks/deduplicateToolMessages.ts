@@ -1,5 +1,6 @@
 /** Deduplicates TOOL messages while preserving explore-agent and wait_for step history. */
 
+import { isExplorePlumbingCopy, userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../api';
 import type { ExploreStep, WaitForCheck } from '../types';
 import { isInternalLivenessTool, removeCancelledThoughtErrors } from './messageCleanup';
@@ -158,10 +159,33 @@ interface ExploreGrouping {
   hidden: Set<string>;
   stepMap: Map<string, ExploreStep[]>;
   dataByTaskId: Map<string, ExploreData>;
+  patched: Map<string, Message>;
 }
 
 function isThinkingSpawnMessage(m: Message): boolean {
   return m.metadata?.toolName === 'spawn_agent' && m.metadata?.title === 'Explore agent thinking';
+}
+
+function isExploreSpawnFinal(message: Message, ownerCallId?: string): boolean {
+  if (message.metadata?.toolName !== 'spawn_agent' || isThinkingSpawnMessage(message)) return false;
+  if (message.metadata?.toolStatus !== 'FINISHED' && message.metadata?.toolStatus !== 'ERROR') {
+    return false;
+  }
+  if (ownerCallId && message.metadata?.toolCallId !== ownerCallId) return false;
+  return true;
+}
+
+function resolveExploreChipResult(
+  msgs: Message[],
+  ownerCallId: string | undefined,
+  fallback: string,
+): string {
+  const spawnFinals = msgs.filter((message) => isExploreSpawnFinal(message, ownerCallId));
+  for (const message of [...spawnFinals].reverse()) {
+    const visible = userFacingMessageText(message.text);
+    if (visible && !isExplorePlumbingCopy(message.text)) return visible;
+  }
+  return userFacingMessageText(fallback);
 }
 
 function groupExploreMessages(messages: Message[]): ExploreGrouping {
@@ -179,44 +203,55 @@ function groupExploreMessages(messages: Message[]): ExploreGrouping {
   const hidden = new Set<string>();
   const stepMap = new Map<string, ExploreStep[]>();
   const dataByTaskId = new Map<string, ExploreData>();
+  const patched = new Map<string, Message>();
 
   for (const [taskId, msgs] of byTask) {
     msgs.sort(sortByTimestampAsc);
     const isSpawnInitOrFinal = (m: Message) =>
       m.metadata?.toolName === 'spawn_agent' && !isThinkingSpawnMessage(m);
-    const terminalSpawn = msgs.find(
-      (m) =>
-        isSpawnInitOrFinal(m) &&
-        (m.metadata?.toolStatus === 'FINISHED' || m.metadata?.toolStatus === 'ERROR'),
-    );
     const firstSpawn = msgs.find(isSpawnInitOrFinal);
+    const ownerSpawn =
+      msgs.find(
+        (m) =>
+          isSpawnInitOrFinal(m) && typeof m.metadata?.fullGoal === 'string' && m.metadata.fullGoal,
+      ) ||
+      msgs.find((m) => isSpawnInitOrFinal(m) && m.metadata?.title === 'Exploring') ||
+      firstSpawn;
+    const ownerCallId =
+      typeof ownerSpawn?.metadata?.toolCallId === 'string'
+        ? ownerSpawn.metadata.toolCallId
+        : undefined;
+    const terminalSpawn = [...msgs].reverse().find((m) => isExploreSpawnFinal(m, ownerCallId));
     const representative = terminalSpawn || firstSpawn || msgs[0];
+    const resolvedText = resolveExploreChipResult(msgs, ownerCallId, representative.text || '');
+    const viewRep =
+      resolvedText === (representative.text || '')
+        ? representative
+        : { ...representative, text: resolvedText };
 
-    const steps = msgs
-      .filter((m) => m.message_id !== representative.message_id)
-      .map(buildExploreStep);
+    const steps = msgs.filter((m) => m.message_id !== viewRep.message_id).map(buildExploreStep);
 
-    stepMap.set(representative.message_id, steps);
-    representatives.add(representative.message_id);
+    stepMap.set(viewRep.message_id, steps);
+    representatives.add(viewRep.message_id);
+    patched.set(viewRep.message_id, viewRep);
 
     dataByTaskId.set(taskId, {
-      repMessageId: representative.message_id,
-      title: (representative.metadata?.title as string) || '',
-      fullGoal: (representative.metadata?.fullGoal as string) || undefined,
-      message: representative.text || '',
-      status: ((representative.metadata?.toolStatus as string) ||
-        'IN_PROGRESS') as ExploreData['status'],
+      repMessageId: viewRep.message_id,
+      title: (viewRep.metadata?.title as string) || '',
+      fullGoal: (viewRep.metadata?.fullGoal as string) || undefined,
+      message: resolvedText,
+      status: ((viewRep.metadata?.toolStatus as string) || 'IN_PROGRESS') as ExploreData['status'],
       steps,
     });
 
     for (const m of msgs) {
-      if (m.message_id !== representative.message_id) {
+      if (m.message_id !== viewRep.message_id) {
         hidden.add(m.message_id);
       }
     }
   }
 
-  return { representatives, hidden, stepMap, dataByTaskId };
+  return { representatives, hidden, stepMap, dataByTaskId, patched };
 }
 
 function buildWaitForChecks(
@@ -282,11 +317,13 @@ export function deduplicateToolMessages(
 
   const explore = groupExploreMessages(withCompressedPlans);
 
-  const withExploreGrouped = withCompressedPlans.filter((m) => {
-    if (explore.representatives.has(m.message_id)) return true;
-    if (explore.hidden.has(m.message_id)) return false;
-    return true;
-  });
+  const withExploreGrouped = withCompressedPlans
+    .filter((m) => {
+      if (explore.representatives.has(m.message_id)) return true;
+      if (explore.hidden.has(m.message_id)) return false;
+      return true;
+    })
+    .map((m) => explore.patched.get(m.message_id) ?? m);
 
   const waitForCheckMap = new Map<string, WaitForCheck[]>();
   const waitForChildIds = new Set<string>();

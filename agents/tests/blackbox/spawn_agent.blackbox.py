@@ -1455,6 +1455,26 @@ async def test_handler_fast_mode_spawns_explore_on_oai_demo_child():
     assert finished and (finished[-1].metadata or {}).get("fastModeParallel") is True
 
 
+def test_user_facing_explore_result_keeps_prod_summaries():
+    """Explore chips must show the real research summary, never Fast Mode plumbing."""
+    from domains.spawn_agent.handler import user_facing_explore_result
+
+    assert user_facing_explore_result("Huberman cadence notes.") == "Huberman cadence notes."
+    assert user_facing_explore_result("## (1) Andy Prevalsky — Background Findings") == (
+        "## (1) Andy Prevalsky — Background Findings"
+    )
+    assert user_facing_explore_result("Research started.") == ""
+    assert user_facing_explore_result("Research started") == ""
+    assert (
+        user_facing_explore_result(
+            "Fast Mode parallel replay: explore started and will run its full cached trajectory before this agent completes."
+        )
+        == ""
+    )
+    assert user_facing_explore_result("") == ""
+    assert user_facing_explore_result(None) == ""
+
+
 async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
     """Parent execute_loop must FINISH without awaiting the explore activity."""
     from domains.spawn_agent.handler import SpawnAgentManager, drain_fast_mode_explores
@@ -1505,6 +1525,14 @@ async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
         assert handle._awaited is True
         assert handle.done() is True
         assert not getattr(wf, "_fm_explore_handles", None)
+        posted = [
+            (event.message, tcid)
+            for event, tcid, name in wf.handled_events
+            if name == "spawn_agent"
+        ]
+        assert any(
+            message == "Huberman cadence notes." and tcid == "tc-oai-parallel" for message, tcid in posted
+        ), "drain must post the explore summary onto the chip like prod"
     finally:
         restore()
 

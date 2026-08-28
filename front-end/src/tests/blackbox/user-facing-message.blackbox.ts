@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { userFacingMessageText } from '@/lib/userFacingMessage';
+import { isExplorePlumbingCopy, userFacingMessageText } from '@/lib/userFacingMessage';
 
 describe('userFacingMessageText', () => {
   it('keeps ordinary research copy', () => {
@@ -27,5 +27,12 @@ describe('userFacingMessageText', () => {
   it('leaves user-typed empty strings empty', () => {
     expect(userFacingMessageText('')).toBe('');
     expect(userFacingMessageText(undefined)).toBe('');
+  });
+
+  it('treats fire-and-track placeholders as plumbing, not a summary', () => {
+    expect(isExplorePlumbingCopy('Research started.')).toBe(true);
+    expect(isExplorePlumbingCopy('Research started')).toBe(true);
+    expect(isExplorePlumbingCopy('Huberman posts 3x/week on YouTube.')).toBe(false);
+    expect(isExplorePlumbingCopy('## (1) Andy Prevalsky — Background Findings')).toBe(false);
   });
 });

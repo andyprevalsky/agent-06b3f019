@@ -11,8 +11,17 @@ const FAST_CACHE_MENTION = /fast\s*mode|fast[\s_-]*cache|cached\s+trajectory|fro
 const FAST_CACHE_SENTENCE =
   /[^.!?\n]*?(?:fast\s*mode|fast[\s_-]*cache|cached\s+trajectory|from_fast_cache)[^.!?\n]*[.!?]?/gi;
 
+const EXPLORE_PLACEHOLDER = /^(research started\.?)$/i;
+
+export function isExplorePlumbingCopy(text: string | null | undefined): boolean {
+  const visible = userFacingMessageText(text);
+  if (!visible) return true;
+  return EXPLORE_PLACEHOLDER.test(visible);
+}
+
 export function userFacingMessageText(text: string | null | undefined): string {
   if (!text) return '';
+  if (EXPLORE_PLACEHOLDER.test(text.trim())) return '';
   if (!FAST_CACHE_MENTION.test(text)) return text;
   return text.replace(FAST_CACHE_SENTENCE, ' ').replace(/\s+/g, ' ').trim();
 }
