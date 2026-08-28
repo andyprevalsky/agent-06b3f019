@@ -8241,13 +8241,12 @@ def _compact_messages_for_judge(messages: list, *, limit: int = 80, text_chars: 
 
 def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
     messages = node.get("messages") if isinstance(node.get("messages"), list) else []
+    collected_count = len(messages)
     tool_counts: dict[str, int] = {}
     error_tool_count = 0
     research_tool_count = 0
     explore_spawn_count = 0
-    has_traj_end_stub = False
-    mentions_andy = False
-    mentions_aman = False
+    has_traj_end_marker = False
     blob_parts = [str(node.get("goal") or ""), str(node.get("title") or "")]
     for message in messages:
         if not isinstance(message, dict):
@@ -8255,7 +8254,7 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
         text_value = _message_text_for_judge(message)
         blob_parts.append(text_value[:400])
         if any(marker in text_value for marker in _JUDGE_STUB_MARKERS):
-            has_traj_end_stub = True
+            has_traj_end_marker = True
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         tool_name = str(metadata.get("toolName") or "")
         tool_status = str(metadata.get("toolStatus") or "").upper()
@@ -8272,6 +8271,12 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
     mentions_aman = "aman gottumukkala" in blob or "aman's" in blob
     goal = str(node.get("goal") or "")
     agent_type = "general_purpose" if goal.startswith("You are analyzing ONE creator") else node.get("agent_type")
+    has_real_work = (
+        collected_count >= 2
+        or research_tool_count >= 1
+        or explore_spawn_count >= 1
+        or sum(tool_counts.values()) >= 1
+    )
     return {
         "agent_id": agent_id,
         "parent_agent_id": node.get("parent_agent_id"),
@@ -8279,17 +8284,159 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
         "agent_type": agent_type,
         "goal": goal[:240],
         "title": str(node.get("title") or "")[:120],
-        "message_count": len(messages) or node.get("message_count") or 0,
+        "message_count": collected_count if collected_count else int(node.get("message_count") or 0),
         "tool_counts": tool_counts,
         "error_tool_count": error_tool_count,
         "research_tool_count": research_tool_count,
         "explore_spawn_count": explore_spawn_count,
-        "has_traj_end_stub": has_traj_end_stub,
+        "has_real_transcript": has_real_work,
+        "has_traj_end_stub": has_traj_end_marker and not has_real_work,
         "mentions_andy": mentions_andy,
         "mentions_aman": mentions_aman,
         "response_schema": node.get("response_schema") or node.get("output_schema"),
         "structured_output_present": bool(node.get("structured_output") or node.get("structured_response")),
     }
+
+
+def _child_tool_counts_from_root_messages(messages: list) -> dict[str, dict[str, int]]:
+    """Parent spawn chips carry childToolCounts when Agent.messageCount is stale."""
+    out: dict[str, dict[str, int]] = {}
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        sub_id = metadata.get("subAgentId") or metadata.get("sub_agent_id")
+        counts = metadata.get("childToolCounts") or metadata.get("child_tool_counts")
+        if not sub_id or not isinstance(counts, dict):
+            continue
+        normalized = {
+            str(name): int(count or 0)
+            for name, count in counts.items()
+            if int(count or 0) > 0
+        }
+        if normalized:
+            out[str(sub_id)] = normalized
+    return out
+
+
+def _is_explore_tree_node(node: dict) -> bool:
+    if node.get("agent_type") == "explore":
+        return True
+    goal = str(node.get("goal") or "")
+    title = str(node.get("title") or "")
+    return goal.startswith("Explore ") or "explore agent" in title.lower()
+
+
+def _tree_root_id(tree: dict, data: dict) -> Optional[str]:
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    hinted = agent.get("agent_id") or agent.get("id")
+    if hinted and str(hinted) in tree:
+        return str(hinted)
+    for agent_id, node in tree.items():
+        if isinstance(node, dict) and not node.get("parent_agent_id"):
+            return str(agent_id)
+    return None
+
+
+def _has_real_gp_transcript(node: dict) -> bool:
+    if node.get("has_real_transcript"):
+        return True
+    if int(node.get("message_count") or 0) >= 2:
+        return True
+    if int(node.get("research_tool_count") or 0) >= 1:
+        return True
+    if int(node.get("explore_spawn_count") or 0) >= 1:
+        return True
+    tools = node.get("tool_counts") if isinstance(node.get("tool_counts"), dict) else {}
+    return sum(int(count or 0) for count in tools.values()) >= 1
+
+
+def _apply_parent_child_tool_counts(compact_tree: dict, data: dict) -> None:
+    """Fill empty GP nodes from parent spawn childToolCounts (smoke13 stale count=1)."""
+    raw_tree = (data.get("_benchmark") or {}).get("tree") if isinstance(data.get("_benchmark"), dict) else {}
+    raw_tree = raw_tree if isinstance(raw_tree, dict) else {}
+    logs_tree = (data.get("logs") or {}).get("tree") if isinstance(data.get("logs"), dict) else {}
+    logs_tree = logs_tree if isinstance(logs_tree, dict) else {}
+    root_id = _tree_root_id(compact_tree, data)
+    root_messages: list = []
+    if root_id:
+        for source in (raw_tree.get(root_id), logs_tree.get(root_id)):
+            if isinstance(source, dict) and isinstance(source.get("messages"), list):
+                root_messages = source["messages"]
+                break
+    if not root_messages:
+        root_messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    child_tools = _child_tool_counts_from_root_messages(root_messages)
+    for agent_id, node in compact_tree.items():
+        counts = child_tools.get(str(agent_id))
+        if not counts or _has_real_gp_transcript(node):
+            continue
+        merged = {**counts, **(node.get("tool_counts") or {})}
+        node["tool_counts"] = merged
+        node["research_tool_count"] = int(node.get("research_tool_count") or 0) + sum(
+            int(counts.get(name) or 0) for name in _JUDGE_RESEARCH_TOOLS
+        )
+        node["explore_spawn_count"] = int(node.get("explore_spawn_count") or 0) + int(counts.get("spawn_agent") or 0)
+        node["has_real_transcript"] = True
+        if int(node.get("message_count") or 0) < 2:
+            node["message_count"] = max(int(node.get("message_count") or 0), sum(counts.values()))
+
+
+def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[dict]:
+    root_id = _tree_root_id(compact_tree, data)
+    if not root_id:
+        return []
+    gps: list[dict] = []
+    for agent_id, node in compact_tree.items():
+        if str(node.get("parent_agent_id") or "") != str(root_id):
+            continue
+        if _is_explore_tree_node(node):
+            continue
+        gps.append(
+            {
+                "agent_id": agent_id,
+                "status": node.get("status"),
+                "agent_type": node.get("agent_type"),
+                "message_count": int(node.get("message_count") or 0),
+                "research_tool_count": int(node.get("research_tool_count") or 0),
+                "explore_spawn_count": int(node.get("explore_spawn_count") or 0),
+                "has_real_transcript": _has_real_gp_transcript(node),
+                "has_traj_end_stub": bool(node.get("has_traj_end_stub")),
+            }
+        )
+    return gps
+
+
+def _first_level_gps_from_data(data: dict) -> list[dict]:
+    return list(_compact_benchmark_state_for_judge(data).get("first_level_gps") or [])
+
+
+def _judge_source_tree(data: dict) -> dict:
+    """Prefer collected transcripts; fall back to logs.tree when `_benchmark.tree` is metadata-only."""
+    raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    trees: list[dict] = []
+    for candidate in (raw.get("tree"), (data.get("logs") or {}).get("tree") if isinstance(data.get("logs"), dict) else None):
+        if isinstance(candidate, dict) and candidate:
+            trees.append(candidate)
+    if not trees:
+        return {}
+    if len(trees) == 1:
+        return trees[0]
+    merged: dict[str, dict] = {}
+    for tree in trees:
+        for agent_id, node in tree.items():
+            if not isinstance(node, dict):
+                continue
+            key = str(agent_id)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = node
+                continue
+            existing_msgs = existing.get("messages") if isinstance(existing.get("messages"), list) else []
+            node_msgs = node.get("messages") if isinstance(node.get("messages"), list) else []
+            if len(node_msgs) > len(existing_msgs):
+                merged[key] = node
+    return merged
 
 
 def _compact_benchmark_state_for_judge(data: dict) -> dict:
@@ -8298,15 +8445,19 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
     compact = {
         key: value
         for key, value in raw.items()
-        if key not in {"tree", "all_agents"}
+        if key not in {"tree", "all_agents", "first_level_gps"}
     }
-    tree = raw.get("tree")
-    if isinstance(tree, dict):
-        compact["tree"] = {
+    tree = _judge_source_tree(data)
+    compact_tree: dict[str, dict] = {}
+    if tree:
+        compact_tree = {
             str(agent_id): _compact_tree_node_for_judge(str(agent_id), node)
             for agent_id, node in tree.items()
             if isinstance(node, dict)
         }
+        _apply_parent_child_tool_counts(compact_tree, data)
+        compact["tree"] = compact_tree
+    collected_counts = {agent_id: int(node.get("message_count") or 0) for agent_id, node in compact_tree.items()}
     agents = raw.get("all_agents")
     if isinstance(agents, list):
         compact["all_agents"] = [
@@ -8315,12 +8466,15 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
                 "parent_agent_id": agent.get("parent_agent_id"),
                 "status": agent.get("status"),
                 "goal": str(agent.get("goal") or "")[:240],
-                "message_count": agent.get("message_count") or 0,
+                "message_count": collected_counts.get(str(agent.get("agent_id") or agent.get("id") or ""))
+                or agent.get("message_count")
+                or 0,
                 "depth": agent.get("depth"),
             }
             for agent in agents
             if isinstance(agent, dict)
         ]
+    compact["first_level_gps"] = _first_level_gps_from_compact_tree(compact_tree, data)
     compact["usage"] = {
         "cost_cents": data.get("cost_cents") or raw.get("cost_cents") or 0,
         "tokens_out": data.get("tokens_out") or raw.get("tree_tokens_out") or 0,
@@ -9267,6 +9421,17 @@ def _run_declared_static_check(
                     for request in matching
                 ):
                     return False, f"{kind}: {_approval_request_detail_failure(kind_check)}"
+            continue
+        if check_type == "first_level_gp_count":
+            gps = _first_level_gps_from_data(data)
+            minimum = int(check.get("min", 50))
+            real = [gp for gp in gps if gp.get("has_real_transcript")]
+            if len(real) < minimum:
+                return (
+                    False,
+                    f"T2: {len(real)} first-level GPs with real transcripts "
+                    f"(of {len(gps)} first-level GPs); expected >= {minimum}",
+                )
             continue
         if check_type == "approval_request_details_for_seen_kind":
             observed_kind = benchmark_state.get("attention_request_kind_seen")

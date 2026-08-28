@@ -2898,7 +2898,7 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
                 "tree": tree,
                 "all_agents": [
                     {"agent_id": "root", "status": "COMPLETED", "goal": "Analyze", "message_count": 1},
-                    {"agent_id": "gp-1", "parent_agent_id": "root", "status": "COMPLETED", "goal": "ONE creator", "message_count": 2},
+                    {"agent_id": "gp-1", "parent_agent_id": "root", "status": "COMPLETED", "goal": "ONE creator", "message_count": 1},
                 ],
             },
         }
@@ -2909,11 +2909,101 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     state = next(item["benchmark_state"] for item in evidence if "benchmark_state" in item)
     assert state["tree"]["gp-1"]["research_tool_count"] >= 1
     assert state["tree"]["gp-1"]["explore_spawn_count"] >= 1
+    assert state["tree"]["gp-1"]["message_count"] == 2
+    assert state["tree"]["gp-1"]["has_real_transcript"] is True
     assert state["tree"]["gp-1"]["mentions_andy"] is True
     assert state["tree"]["gp-1"]["mentions_aman"] is False
     assert state["tree"]["gp-1"]["has_traj_end_stub"] is False
+    assert state["all_agents"][1]["message_count"] == 2
+    assert state["first_level_gps"][0]["agent_id"] == "gp-1"
+    assert state["first_level_gps"][0]["has_real_transcript"] is True
     assert state["usage"]["live_output_tokens"] == 0
     assert state["usage"]["cost_cents"] == 0
+
+
+def test_first_level_gp_count_static_uses_collected_transcripts():
+    """T2 is a named static row: collected transcripts win over stale Agent.messageCount=1."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "first_level_gp_count", "min": 50}]}
+    root = "root-mass"
+    tree = {
+        root: {
+            "parent_agent_id": None,
+            "status": "COMPLETED",
+            "goal": "Analyze the top 50 creators for Andy Prevalsky",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": "spawned",
+                    "metadata": {
+                        "toolName": "spawn_general_purpose_agent",
+                        "toolStatus": "FINISHED",
+                        "subAgentId": "gp-49",
+                        "childToolCounts": {"web_search": 12, "spawn_agent": 3},
+                    },
+                }
+            ],
+        }
+    }
+    all_agents = [{"agent_id": root, "status": "COMPLETED", "goal": "Analyze", "message_count": 1}]
+    for index in range(50):
+        agent_id = f"gp-{index}"
+        messages = [
+            {"role": "USER", "message": "You are analyzing ONE creator for Andy Prevalsky"},
+            {
+                "role": "TOOL",
+                "message": "search",
+                "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+            },
+        ]
+        # smoke13 shape: one child has collected messages omitted, stale count=1
+        if index == 49:
+            messages = []
+        tree[agent_id] = {
+            "parent_agent_id": root,
+            "status": "COMPLETED",
+            "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+            "messages": messages,
+            "message_count": 1,
+        }
+        all_agents.append(
+            {
+                "agent_id": agent_id,
+                "parent_agent_id": root,
+                "status": "COMPLETED",
+                "goal": "You are analyzing ONE creator",
+                "message_count": 1,
+            }
+        )
+    data = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "messages": tree[root]["messages"],
+        "_benchmark": {"tree": tree, "all_agents": all_agents},
+    }
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    stub_only = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {"parent_agent_id": None, "status": "COMPLETED", "goal": "Analyze", "messages": []},
+                **{
+                    f"gp-{index}": {
+                        "parent_agent_id": root,
+                        "status": "STARTING",
+                        "goal": "You are analyzing ONE creator",
+                        "messages": [],
+                        "message_count": 1,
+                    }
+                    for index in range(50)
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, stub_only)
+    assert passed is False
+    assert "T2:" in reason
 
 
 def _opentable_static_evaluator():
@@ -13105,6 +13195,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t8-root-completed": ["agent_status"],
         "t10-no-tool-failures": ["no_tool_failures"],
         "t7-completion-summary-length": ["completion_summary_length"],
+        "t2-fifty-first-level-gps": ["first_level_gp_count"],
     }
     assert all(
         check_type in RUNTIME_STATIC_CHECK_TYPES
@@ -13118,7 +13209,6 @@ def test_unified_catalog_delineates_bench_axes():
     ]
     assert judge_ids == [
         "t1-andy-only",
-        "t2-fifty-first-level-gps",
         "t3-full-explore-trajectories",
         "t4-full-july-gp-trajectories",
         "t5-zero-live-spend",
@@ -15826,6 +15916,10 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
         test_declared_evaluator_evidence_compacts_mass_agent_tree,
+    )
+    r.record(
+        "first_level_gp_count_static_uses_collected_transcripts",
+        test_first_level_gp_count_static_uses_collected_transcripts,
     )
     r.record(
         "opentable_static_runtime_contract",

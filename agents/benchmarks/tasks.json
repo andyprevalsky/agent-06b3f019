@@ -44,7 +44,7 @@
         "FAST_MODE_CACHE_DATABASE_URL"
       ],
       "live_targets": [],
-      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length are static_check (agent_status, no_tool_failures, completion_summary_length). T1–T6, T7-content, T7-schema/assemble-final, T9 are single_turn_llm_judge. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2 are static_check (agent_status, no_tool_failures, completion_summary_length, first_level_gp_count). T1/T3–T6, T7-content, T7-schema/assemble-final, T9 are single_turn_llm_judge. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
     },
     "evaluators": [
       {
@@ -95,11 +95,16 @@
       },
       {
         "id": "t2-fifty-first-level-gps",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
           "T2: Root spawned 50 first-level general-purpose children with real transcripts"
         ],
-        "judge_prompt": "Score 1.0 only if benchmark_state.tree has at least 50 first-level general-purpose children (parent is the root, agent type is not explore) and every one of those children has a non-empty multi-message transcript. FAIL empty transcripts, mocked/spinning-up nodes, or fewer than 50 first-level GPs. Use the typed tree, not assistant claims."
+        "checks": [
+          {
+            "type": "first_level_gp_count",
+            "min": 50
+          }
+        ]
       },
       {
         "id": "t3-full-explore-trajectories",
@@ -107,7 +112,7 @@
         "criteria": [
           "T3: Every explore child plays a full multi-turn research trajectory"
         ],
-        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. FAIL if first-level GPs have no explore spawns and no research tools. FAIL traj-end/cold stubs. Use benchmark_state.tree tool_counts / explore_spawn_count / research_tool_count. Unsupported assistant claims are not proof."
+        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. Compact evidence omits messages[] arrays — use typed tool_counts / explore_spawn_count / research_tool_count / first_level_gps. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL if first-level GPs have no explore spawns and no research tools. FAIL stub-only traj-end/cold nodes (has_traj_end_stub true). Unsupported assistant claims are not proof."
       },
       {
         "id": "t4-full-july-gp-trajectories",
@@ -115,7 +120,7 @@
         "criteria": [
           "T4: Every first-level GP plays a full July-class trajectory"
         ],
-        "judge_prompt": "Score 1.0 only if every first-level general-purpose child replays a full July-class creator-analysis trajectory: many tool turns, and either research tools or a spawned explore. FAIL a GP with <=12 messages and no research tools and no explore child. FAIL traj-end/cold stubs (fm_cold_namespace_passthrough, fm_trajectory_end_passthrough, or 'Fast Mode cache trajectory ended' as the only work). Unsupported assistant claims are not proof."
+        "judge_prompt": "Score 1.0 only if every first-level general-purpose child replays a full July-class creator-analysis trajectory. Compact evidence omits messages[] arrays — use typed first_level_gps / message_count / tool_counts / research_tool_count / explore_spawn_count. PASS a GP when message_count >= 12 or research_tool_count >= 3 or explore_spawn_count >= 1. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL a GP with no research tools, no explore spawn, and message_count <= 12. FAIL traj-end/cold stubs as the only work (has_traj_end_stub true). Unsupported assistant claims are not proof."
       },
       {
         "id": "t5-zero-live-spend",
@@ -123,7 +128,7 @@
         "criteria": [
           "T5: $0 spent and 0 tokens streamed from non-fast-cache"
         ],
-        "judge_prompt": "Score 1.0 only when typed benchmark_state.usage proves honest Fast Mode replay. FAIL if cost_cents is greater than 0, or cache_creation_input_tokens is greater than 0, or live_output_tokens is greater than 0 (those are tokens streamed from non-fast-cache). FAIL if any first-level GP or explore is a traj-end/cold stub. FAIL if first-level GPs exist but none show from_fast_cache replay evidence. Do not trust assistant claims of $0."
+        "judge_prompt": "Score 1.0 only when typed benchmark_state.usage proves honest Fast Mode replay: cost_cents is 0, cache_creation_input_tokens is 0, and live_output_tokens is 0 (tokens streamed from non-fast-cache). cache_read_input_tokens > 0 with those zeros is Fast Mode replay evidence — do not require a from_fast_cache field on each GP. FAIL if any first-level GP is stub-only (has_traj_end_stub true). Do not trust assistant claims of $0."
       },
       {
         "id": "t6-no-nested-gps",
