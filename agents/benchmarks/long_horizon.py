@@ -46,6 +46,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "completion_summary_length",
     "first_level_gp_count",
     "root_deliverable_markers",
+    "tree_agent_status",
     "expected_gate",
     "expected_payment_receipt",
     "no_browser_agent_failures",

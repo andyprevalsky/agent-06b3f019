@@ -3069,6 +3069,55 @@ def test_root_deliverable_markers_use_dag_assemble_not_stub_card():
     assert "T7:" in reason
 
 
+def test_tree_agent_status_ignores_recovered_error_tool_chips():
+    """T9 is a named static row: COMPLETED children pass even with recovered ERROR chips."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "tree_agent_status", "value": "COMPLETED"}]}
+    data = {
+        "agent": {"agent_id": "root", "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                "root": {"parent_agent_id": None, "status": "COMPLETED", "goal": "Analyze", "messages": []},
+                "gp-1": {
+                    "parent_agent_id": "root",
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "retry",
+                            "metadata": {
+                                "toolName": "attempt_completion_with_result",
+                                "toolStatus": "ERROR",
+                            },
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    leftover = {
+        "agent": {"agent_id": "root", "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                "root": {"parent_agent_id": None, "status": "COMPLETED", "goal": "Analyze", "messages": []},
+                "gp-1": {
+                    "parent_agent_id": "root",
+                    "status": "ACTIVE",
+                    "goal": "You are analyzing ONE creator",
+                    "messages": [],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, leftover)
+    assert passed is False
+    assert "T9:" in reason
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -13260,6 +13309,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-completion-summary-length": ["completion_summary_length"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t7-real-deliverable": ["root_deliverable_markers"],
+        "t9-no-leftover-children": ["tree_agent_status"],
     }
     assert all(
         check_type in RUNTIME_STATIC_CHECK_TYPES
@@ -13278,7 +13328,6 @@ def test_unified_catalog_delineates_bench_axes():
         "t5-zero-live-spend",
         "t6-no-nested-gps",
         "t7-schema-task-complete",
-        "t9-no-leftover-children",
     ]
     criteria = [criterion for evaluator in mass["evaluators"] for criterion in evaluator["criteria"]]
     assert any(criterion.startswith("T1:") for criterion in criteria)
@@ -15987,6 +16036,10 @@ async def run_all_tests():
     r.record(
         "root_deliverable_markers_use_dag_assemble_not_stub_card",
         test_root_deliverable_markers_use_dag_assemble_not_stub_card,
+    )
+    r.record(
+        "tree_agent_status_ignores_recovered_error_tool_chips",
+        test_tree_agent_status_ignores_recovered_error_tool_chips,
     )
     r.record(
         "opentable_static_runtime_contract",

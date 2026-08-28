@@ -44,7 +44,7 @@
         "FAST_MODE_CACHE_DATABASE_URL"
       ],
       "live_targets": [],
-      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content are static_check (agent_status, no_tool_failures, completion_summary_length, first_level_gp_count, root_deliverable_markers). T1/T3–T6, T7-schema/assemble-final, T9 are single_turn_llm_judge. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content/T9 are static_check. T1/T3–T6 and T7-schema are single_turn_llm_judge. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
     },
     "evaluators": [
       {
@@ -184,11 +184,16 @@
       },
       {
         "id": "t9-no-leftover-children",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
           "T9: No leftover ACTIVE or ERROR children"
         ],
-        "judge_prompt": "Score 1.0 only if the tree is clean: every child is COMPLETED (or an equivalent terminal success), with no ACTIVE/STARTING/QUEUED leftovers, no FAILED/ERROR/OUT_OF_CREDITS agents, and no ERROR tool chips. FAIL leftover ACTIVE, ERROR, or PAUSED children. Use typed tree status, not assistant claims."
+        "checks": [
+          {
+            "type": "tree_agent_status",
+            "value": "COMPLETED"
+          }
+        ]
       }
     ],
     "source": [

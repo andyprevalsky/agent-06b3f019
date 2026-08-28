@@ -9460,6 +9460,19 @@ def _run_declared_static_check(
                 ):
                     return False, f"{kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type == "tree_agent_status":
+            expected = str(check.get("value") or "COMPLETED").upper()
+            compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
+            leftovers = []
+            for agent_id, node in compact_tree.items():
+                status = str(node.get("status") or "UNKNOWN").upper()
+                if status != expected:
+                    leftovers.append(f"{agent_id[:8]}={status}")
+            if leftovers:
+                return False, f"T9: leftover children {', '.join(leftovers[:8])}"
+            if not compact_tree:
+                return False, "T9: typed tree was empty"
+            continue
         if check_type == "root_deliverable_markers":
             blob = _root_deliverable_blob(data)
             minimum = int(check.get("min_chars", 4000))
