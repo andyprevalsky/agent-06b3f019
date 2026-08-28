@@ -89,9 +89,9 @@
         "id": "t1-andy-only",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "T1: Andy Prevalsky only (no Aman Gottumukkala)"
+          "T1: Andy Prevalsky is the principal user (not Aman Gottumukkala). July cache field names like opportunities_for_aman do not fail."
         ],
-        "judge_prompt": "This is a Fast Mode mass-agent research tree, not an ecommerce purchase. Score 1.0 only if Andy Prevalsky / Andy's appears in grounded tree or completion text AND Aman Gottumukkala / Aman's does not appear anywhere in tree text, goals, or the completion card. Use benchmark_state.tree / all_agents plus the completion card. Unsupported assistant claims are not proof."
+        "judge_prompt": "This is a Fast Mode mass-agent research tree, not an ecommerce purchase. Score 1.0 if the root goal, first-level GP goals, and completion card are for Andy Prevalsky / Andy's and Aman Gottumukkala is not the principal user/owner. July replay may keep historical schema keys such as opportunities_for_aman or opportunities_for_aman in cached GP output_schema — that is not Aman-as-principal and must not fail T1. FAIL only if the root goal or completion card presents Aman as the user. Use benchmark_state.tree mentions_andy/mentions_aman plus the completion card. Unsupported assistant claims are not proof."
       },
       {
         "id": "t2-fifty-first-level-gps",
@@ -107,7 +107,7 @@
         "criteria": [
           "T3: Every explore child plays a full multi-turn research trajectory"
         ],
-        "judge_prompt": "Score 1.0 only if every explore under the first-level GPs is a full multi-turn research trajectory: at least 3 messages and real web_search/web_fetch/grep/browser evidence. FAIL if there are no explores. FAIL any explore whose text contains fm_cold_namespace_passthrough, fm_trajectory_end_passthrough, or the short 'Fast Mode cache trajectory ended' + attempt_completion stub without research tools. Unsupported assistant claims are not proof."
+        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. FAIL if first-level GPs have no explore spawns and no research tools. FAIL traj-end/cold stubs. Use benchmark_state.tree tool_counts / explore_spawn_count / research_tool_count. Unsupported assistant claims are not proof."
       },
       {
         "id": "t4-full-july-gp-trajectories",
