@@ -25,7 +25,7 @@ sources:
   - agent f989235e-b72b-4615-9e02-0791dec649af
   - PR #1069
 repro: agents/benchmarks/spawn_contract_guest_auth_test.py
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -65,6 +65,11 @@ remain open.
 - Cemented by `agents/benchmarks/spawn_contract_guest_auth_test.py`.
 
 10k-agent behavior: one boolean env on the stack; no per-agent fan-in.
+
+**Post-fix outcome (2026-08-29):** Hub run `670cb9b0` k=5 → **1/5**. All five
+`session_init` rows show `auth_source=none` / `cookies_injected=false`. Kill-switch
+boundary is fixed. Remaining failures are separate open cases:
+guest-form skipped, Ferry abandon, payment without pickup grounding, menu-stall timeout.
 
 ## Human feedback
 
