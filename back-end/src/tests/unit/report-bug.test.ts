@@ -136,6 +136,12 @@ async function testGithubLaunchPollsForBotComment(): Promise<void> {
         { status: 201, headers: { 'Content-Type': 'application/json' } }
       );
     }
+    if (method === 'POST' && url.includes('/issues/42/comments')) {
+      return new Response(JSON.stringify({ id: 1 }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (method === 'GET' && url.includes('/issues/42/comments')) {
       return new Response(
         JSON.stringify([

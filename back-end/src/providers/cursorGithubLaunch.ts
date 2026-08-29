@@ -42,11 +42,15 @@ export interface LaunchedCursorViaGithub {
 }
 
 function githubTokens(): string[] {
-  return [...new Set(
-    [process.env.GITHUB_TOKEN ?? '', process.env.GITHUB_DISPATCH_TOKEN ?? '']
-      .map((t) => t.trim())
-      .filter((t) => t !== '')
-  )];
+  // Prefer GITHUB_DISPATCH_TOKEN — GITHUB_TOKEN is often a stale/expired PAT in
+  // this stack (same prod failure mode as admin-health velocity / create-repo).
+  return [
+    ...new Set(
+      [process.env.GITHUB_DISPATCH_TOKEN ?? '', process.env.GITHUB_TOKEN ?? '']
+        .map((t) => t.trim())
+        .filter((t) => t !== '')
+    ),
+  ];
 }
 
 async function githubFetch(
@@ -136,10 +140,14 @@ export async function launchCursorCloudAgentViaGithub(
     `/repos/${owner}/${repo}/issues`,
     {
       method: 'POST',
-        body: JSON.stringify({
-          title: input.name,
-          body: buildGithubCursorIssueBody(input.promptText),
-        }),
+      body: JSON.stringify({
+        title: input.name,
+        body: [
+          'Rose Report Bug — launching a Cursor cloud agent via `@cursor` so the chat is `source:scm` (visible in the mobile inbox).',
+          '',
+          'Agent prompt follows in the next comment.',
+        ].join('\n'),
+      }),
     },
     fetchImpl
   );
@@ -155,6 +163,17 @@ export async function launchCursorCloudAgentViaGithub(
     issue_number: issue.number,
     issue_url: issue.html_url,
   });
+
+  // Cursor watches issue/PR *comments* for @cursor — body-only mentions on create
+  // do not reliably start an agent (proved 2026-08-29 on issue #1108).
+  await githubFetch(
+    `/repos/${owner}/${repo}/issues/${issue.number}/comments`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ body: buildGithubCursorIssueBody(input.promptText) }),
+    },
+    fetchImpl
+  );
 
   const deadline = Date.now() + timeoutMs;
   let launched: { id: string; url: string } | null = null;
