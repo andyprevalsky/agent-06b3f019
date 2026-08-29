@@ -370,6 +370,13 @@ def load_services_manifest(path: Path = SERVICES_MANIFEST) -> dict:
     return data
 
 
+def services_manifest_saved_browser_auth_disabled(manifest: dict) -> bool:
+    env = manifest.get("env") if isinstance(manifest, dict) else None
+    if not isinstance(env, dict):
+        return False
+    return env.get("benchmark_disable_saved_browser_auth") is True
+
+
 def services_manifest_anon_enabled(manifest: dict) -> bool:
     env = manifest.get("env") if isinstance(manifest, dict) else None
     if not isinstance(env, dict):
@@ -1217,9 +1224,16 @@ def start_services(
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
     skip_public_tunnel = apply_public_tunnel_env(env, tasks)
+    # Guest-checkout benches (e.g. Blue Bottle) need the kill-switch on the
+    # backend/worker process, not just in run_benchmark's harness os.environ —
+    # otherwise cookie_bundle auth is still injected and the semantic judge
+    # correctly fails "guest checkout not demonstrated".
+    from benchmarks.spawn_contract import tasks_require_disabled_saved_browser_auth
+
+    if anon_steel_profile or tasks_require_disabled_saved_browser_auth(tasks):
+        env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
     if anon_steel_profile:
         env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
-        env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
     if stack.isolated:
         assert stack.workspace_name
         assert stack.base_port
@@ -2210,6 +2224,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise RuntimeError(
                     "Existing local stack was not started with anon browser auth disabled. "
                     "Run without --use-existing so local.py can restart the stack with --anon."
+                )
+            from benchmarks.spawn_contract import tasks_require_disabled_saved_browser_auth
+
+            if tasks_require_disabled_saved_browser_auth(selected_tasks) and not (
+                services_manifest_saved_browser_auth_disabled(manifest)
+            ):
+                raise RuntimeError(
+                    "Existing local stack was not started with saved browser auth disabled, "
+                    "but a guest-checkout task was selected. Run without --use-existing so "
+                    "local.py can restart the stack with BENCHMARK_DISABLE_SAVED_BROWSER_AUTH."
                 )
         else:
             process, manifest = start_services(

@@ -138,6 +138,29 @@ def should_disable_saved_browser_auth(task: "BenchmarkTask") -> bool:
     return guest_checkout_without_live_fixture(task)
 
 
+def tasks_require_disabled_saved_browser_auth(task_names: list[str] | tuple[str, ...] | set[str]) -> bool:
+    """True when any selected task needs the stack-level saved-auth kill-switch.
+
+    ``run_benchmark`` sets ``BENCHMARK_DISABLE_SAVED_BROWSER_AUTH`` in the harness
+    process only; cookie injection runs in the backend/worker. Callers that start
+    those services (``local.py``, cloudbench) must export the same flag into the
+    stack env before browser sessions are created — otherwise guest-checkout
+    benches still get ``auth_source=cookie_bundle`` / ``cookies_injected=true``.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    for name in task_names:
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            task = get_task_by_name(name.strip())
+        except Exception:
+            continue
+        if should_disable_saved_browser_auth(task):
+            return True
+    return False
+
+
 def evaluate_dom_patch_blocked(code: str) -> Optional[str]:
     """Return a rejection reason when evaluate would fabricate menu state."""
     text = code if isinstance(code, str) else str(code or "")
