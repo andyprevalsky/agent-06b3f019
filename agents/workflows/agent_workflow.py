@@ -211,12 +211,64 @@ def structured_response_from_schema_headings(text: str, schema: Optional[Dict[st
 
 
 _FAST_MODE_SUMMARY_MARKERS = (
-    "fast mode cache trajectory ended",
-    "fast mode soft-complet",
+    "fast mode",
     "cached trajectory",
     "from_fast_cache",
     "based on prior tool evidence",
+    "the task completed successfully; verified results are included below",
 )
+_PLUMBING_TOOL_MARKERS = (
+    "research started.",
+    "agent initializing",
+    "agent initialization complete",
+    "running verifier to check completion",
+    "explore agent thinking",
+    "**params passed:**",
+)
+_ROW_ITEM_TO_SCHEMA = {
+    "name": "creator_name",
+    "creator_name": "creator_name",
+    "rank": "rank_from_initial_list",
+    "rank_from_initial_list": "rank_from_initial_list",
+}
+_SCHEMA_FIELD_SECTION_ALIASES = {
+    "creator_name": ("creator name", "assigned creator"),
+    "platform_handles_and_urls": (
+        "handles",
+        "platform",
+        "youtube",
+        "instagram",
+        "tiktok",
+        "substack",
+        "account stats",
+    ),
+    "posting_cadence_by_platform": ("cadence", "posting frequency", "updated weekly"),
+    "hook_formulas": ("hook", "title pattern", "headline formula"),
+    "top_5_performing_pieces_last_90_days": (
+        "top 5",
+        "performing",
+        "last ~90",
+        "last 90",
+        "recent long-form",
+        "recent newsletter",
+    ),
+    "core_content_pillars": ("pillar", "formats across"),
+    "audience_persona": ("audience", "persona", "promise"),
+    "monetization_funnels": ("monetiz", "sponsorship", "paid/free", "pricing"),
+    "content_gaps": ("gap", "underserved"),
+    "opportunities_for_aman": ("takeaway", "opportunit", "whitespace", "competitive"),
+    "engagement_approach": ("engagement", "collab"),
+    "citations_sources": ("citation", "source note"),
+    "confidence_level": ("confidence",),
+}
+_EVIDENCE_TOOLS = {
+    "attempt_completion",
+    "attempt_completion_with_result",
+    "spawn_agent",
+    "send_message_to_user",
+    "web_fetch",
+}
+_FLEX_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", flags=re.MULTILINE)
 
 
 def is_ablated_completion_summary(text: Any) -> bool:
@@ -225,6 +277,25 @@ def is_ablated_completion_summary(text: Any) -> bool:
         return True
     lowered = raw.lower()
     return any(marker in lowered for marker in _FAST_MODE_SUMMARY_MARKERS)
+
+
+def _message_body(message: Dict[str, Any]) -> str:
+    if not isinstance(message, dict):
+        return ""
+    text = str(message.get("text") or message.get("message") or "").strip()
+    if text:
+        return text
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    return str(
+        metadata.get("result") or metadata.get("content") or metadata.get("message") or ""
+    ).strip()
+
+
+def _is_plumbing_tool_text(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    return any(marker in lowered for marker in _PLUMBING_TOOL_MARKERS)
 
 
 def last_real_completion_text(
@@ -238,15 +309,15 @@ def last_real_completion_text(
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         tool_name = str(metadata.get("toolName") or "")
         status = str(metadata.get("toolStatus") or "").upper()
-        text = str(message.get("text") or message.get("message") or "").strip()
-        if not text:
-            text = str(metadata.get("result") or metadata.get("content") or "").strip()
-        if is_ablated_completion_summary(text):
+        text = _message_body(message)
+        if is_ablated_completion_summary(text) or _is_plumbing_tool_text(text):
             continue
         if tool_name in {"attempt_completion", "attempt_completion_with_result"} and status in {
             "FINISHED",
             "",
         }:
+            return text
+        if tool_name in _EVIDENCE_TOOLS and status in {"FINISHED", ""} and len(text) >= 200:
             return text
         if (
             str(message.get("role") or "").upper() == "ASSISTANT"
@@ -264,6 +335,149 @@ def last_real_completion_text(
     return ""
 
 
+def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800) -> str:
+    """Collapse a long replayed report into a Task Complete card body."""
+    kept: List[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if is_ablated_completion_summary(line) or _is_plumbing_tool_text(line):
+            continue
+        kept.append(line)
+    blob = " ".join(kept).strip()
+    if not blob:
+        return ""
+    if len(blob) <= max_chars:
+        return blob
+    clipped = blob[:max_chars]
+    for separator in (". ", "! ", "? "):
+        idx = clipped.rfind(separator)
+        if idx >= min_chars:
+            return clipped[: idx + 1].strip()
+    return clipped.strip()
+
+
+def card_summary_from_evidence(
+    context: List[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]] = None,
+    *,
+    min_chars: int = 200,
+) -> str:
+    """1-2 sentence Task Complete summary from replayed evidence, never Fast Mode copy."""
+    candidate = last_real_completion_text(context, structured_response)
+    brief = brief_card_summary(candidate, min_chars=min_chars)
+    if brief and not is_ablated_completion_summary(brief) and len(brief) >= min_chars:
+        return brief
+    if isinstance(structured_response, dict):
+        parts = [
+            str(value).strip()
+            for value in structured_response.values()
+            if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value)
+        ]
+        brief = brief_card_summary(" ".join(parts), min_chars=min_chars)
+        if brief and len(brief) >= min_chars:
+            return brief
+    return brief if brief and not is_ablated_completion_summary(brief) else ""
+
+
+def _json_objects_in_text(text: str) -> List[Dict[str, Any]]:
+    raw = str(text or "")
+    if "{" not in raw:
+        return []
+    decoder = _json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    index = 0
+    while True:
+        start = raw.find("{", index)
+        if start < 0:
+            break
+        try:
+            obj, consumed = decoder.raw_decode(raw[start:])
+        except _json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        index = start + max(int(consumed), 1)
+    return found
+
+
+def _markdown_sections(text: str) -> List[Tuple[str, str]]:
+    matches = list(_FLEX_HEADING.finditer(text or ""))
+    if not matches:
+        return []
+    sections: List[Tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end() : end].strip()
+        if body:
+            sections.append((match.group(1).strip(), body))
+    return sections
+
+
+def _section_matches_field(title: str, field_name: str) -> bool:
+    lowered = title.lower()
+    human = field_name.replace("_", " ")
+    if human in lowered or field_name.lower() in lowered:
+        return True
+    for alias in _SCHEMA_FIELD_SECTION_ALIASES.get(field_name, ()):
+        if alias in lowered:
+            return True
+    return False
+
+
+def _fill_from_row_and_sections(
+    merged: Dict[str, Any],
+    names: List[str],
+    context: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    empty = (None, "", [], {})
+
+    def missing() -> List[str]:
+        return [name for name in names if name not in merged or merged[name] in empty]
+
+    for message in context or []:
+        if not isinstance(message, dict):
+            continue
+        for obj in _json_objects_in_text(_message_body(message)):
+            for raw_key, value in obj.items():
+                target = _ROW_ITEM_TO_SCHEMA.get(str(raw_key))
+                if target and target in names and merged.get(target) in empty + (None,):
+                    if value not in empty:
+                        merged[target] = value
+            for name in names:
+                if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
+                    merged[name] = obj[name]
+        if not missing():
+            return merged
+
+    used_titles: Set[str] = set()
+    for message in reversed(context or []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        role = str(message.get("role") or "").upper()
+        if role == "USER" and tool_name not in _EVIDENCE_TOOLS:
+            continue
+        text = _message_body(message)
+        if len(text) < 200 or _is_plumbing_tool_text(text):
+            continue
+        for title, body in _markdown_sections(text):
+            if title in used_titles:
+                continue
+            for name in missing():
+                if not _section_matches_field(title, name):
+                    continue
+                merged[name] = body
+                used_titles.add(title)
+                break
+        if not missing():
+            break
+    return merged
+
+
 def coalesce_structured_response(
     context: List[Dict[str, Any]],
     schema: Optional[Dict[str, Any]],
@@ -278,7 +492,7 @@ def coalesce_structured_response(
     ]
     if not names:
         for message in reversed(context or []):
-            text = str(message.get("text") or message.get("message") or "")
+            text = _message_body(message)
             extracted = structured_response_from_schema_headings(text, None)
             if not extracted:
                 continue
@@ -294,15 +508,8 @@ def coalesce_structured_response(
     if not _missing(merged):
         return merged
     for message in reversed(context or []):
-        text = str(message.get("text") or message.get("message") or "")
+        text = _message_body(message)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        if not text:
-            text = str(
-                metadata.get("result")
-                or metadata.get("content")
-                or metadata.get("message")
-                or ""
-            )
         extracted = structured_response_from_schema_headings(text, schema)
         if not extracted:
             extracted = _structured_from_payload(message, names)
@@ -315,6 +522,24 @@ def coalesce_structured_response(
                 merged[key] = value
         if not _missing(merged):
             break
+    return merged or structured_response
+
+
+def structured_response_from_evidence(
+    context: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Fill schema outputs from replayed assemble / explore / row-item evidence."""
+    merged = coalesce_structured_response(context, schema, structured_response)
+    merged = dict(merged) if isinstance(merged, dict) else {}
+    names = [
+        str(field.get("name"))
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    ]
+    if names:
+        merged = _fill_from_row_and_sections(merged, names, context)
     return merged or structured_response
 
 
@@ -4322,6 +4547,22 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
 
+    async def _completion_transcript(self, context: List[Dict]) -> List[Dict]:
+        """Durable posted transcript, including assemble/explore rows posted after context snapshot."""
+        try:
+            polled = await workflow.execute_activity(
+                poll_new_messages,
+                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception as exc:
+            workflow.logger.warning(f"completion transcript poll failed: {exc}")
+            polled = None
+        if isinstance(polled, list) and polled:
+            return polled
+        return list(context or [])
+
     def _coalesce_structured_response(
         self, context: List[Dict], structured_response: Optional[Dict]
     ) -> Optional[Dict]:
@@ -4332,7 +4573,7 @@ class AgentWorkflow:
         verifier `output` dict stays empty because schema gen missed. Without this
         merge, Task Complete has a summary but no Output section.
         """
-        return coalesce_structured_response(context, self.output_schema, structured_response)
+        return structured_response_from_evidence(context, self.output_schema, structured_response)
 
     def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
         """Convert structured_response → CompletionSummaryCard outputs format."""
@@ -4489,10 +4730,11 @@ class AgentWorkflow:
                 workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
 
             summary = summary_result.get("summary", "")
-            structured_response = self._coalesce_structured_response(context, structured_response)
-            if is_ablated_completion_summary(summary):
-                recovered = last_real_completion_text(context, structured_response)
-                if recovered:
+            transcript = await self._completion_transcript(context)
+            structured_response = self._coalesce_structured_response(transcript, structured_response)
+            if is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200:
+                recovered = card_summary_from_evidence(transcript, structured_response)
+                if recovered and not is_ablated_completion_summary(recovered):
                     summary = recovered
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":

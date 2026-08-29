@@ -1719,6 +1719,57 @@ def test_workflow_coalesce_structured_response_without_schema_uses_headings():
     ]
 
 
+def test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore():
+    """Fast Mode GPs often lack verifier JSON; row item + explore report still fill the card."""
+    from workflows.agent_workflow import card_summary_from_evidence, is_ablated_completion_summary
+
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name"},
+            {"name": "rank_from_initial_list"},
+            {"name": "hook_formulas"},
+            {"name": "core_content_pillars"},
+        ]
+    }
+    explore = (
+        "# Casey Winters creator-brand competitive analysis\n\n"
+        "Deeply researched product and growth advice for founders, with a large newsletter "
+        "and a weekly interview show that stays tactical rather than motivational.\n\n"
+        "## Hook formulas / title patterns\n\n"
+        "Credential plus concrete playbook: 'How X grew from 0 to Y'.\n\n"
+        "## Content pillars and formats across platforms\n\n"
+        "Product leadership, growth loops, and career advice for builders."
+    )
+    context = [
+        {
+            "role": "USER",
+            "text": (
+                "You are analyzing ONE creator for Andy Prevalsky.\n"
+                "Row item:\n"
+                '{"name": "Casey Winters", "rank": 22}'
+            ),
+        },
+        {
+            "role": "TOOL",
+            "text": explore,
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    by_key = {row["key"]: row["value"] for row in outputs}
+    assert by_key["creator_name"] == "Casey Winters"
+    assert by_key["rank_from_initial_list"] == 22
+    assert "playbook" in str(by_key["hook_formulas"])
+    assert "Product leadership" in str(by_key["core_content_pillars"])
+    summary = card_summary_from_evidence(context, merged)
+    assert not is_ablated_completion_summary(summary)
+    assert "Casey" in summary or "founders" in summary
+    assert "Fast Mode" not in summary
+    assert len(summary) >= 200
+
+
 def test_workflow_extract_failure_context_empty_context():
     wf = _bare_workflow_instance()
     result = wf._extract_failure_context(context=[])
@@ -5216,6 +5267,86 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_polls_assemble_for_schema_outputs():
+    """Root DAG assemble is posted after execute_context snapshot; poll it onto the card."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-oai-assemble"
+    wf.user_id = "u-mc"
+    wf.goal = "Analyze the top 50 creators for Andy Prevalsky."
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "top_creators_analysis", "type": "str"},
+            {"name": "positioning_statement", "type": "str"},
+            {"name": "ninety_day_content_calendar", "type": "str"},
+        ]
+    }
+    assemble = (
+        "July cache assemble of Andy Prevalsky's creator brief.\n\n"
+        "# top_creators_analysis\n\n"
+        "1. Andrew Huberman — Huberman Lab cadence, hooks, and coverage gaps.\n\n"
+        "# positioning_statement\n\n"
+        "Andy as the founder-operator who translates longevity science into operating systems.\n\n"
+        "# ninety_day_content_calendar\n\n"
+        "Week 1: sleep audit. Week 2: training block. Week 3: founder recovery."
+    )
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "ASSISTANT",
+            "message": assemble,
+            "metadata": {"plannedToolName": "reasoning", "dagTaskIndex": 6},
+        }
+    ]
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": (
+            "Completed a 50-creator competitive analysis across health, longevity, "
+            "technology, and founder-journey niches, then synthesized Andy's "
+            "differentiated positioning, a 90-day multi-platform content calendar, "
+            "and a weekly engagement list of creators to get on his radar."
+        ),
+        "tool_counts": {"spawn_agent": 50},
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "from_fast_cache": True,
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response=None)
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        card = (finished or {}).get("completionSummary") or {}
+        summary = str(card.get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "50-creator" in summary
+        outputs = card.get("outputs") or []
+        keys = {item.get("key") for item in outputs}
+        assert keys == {
+            "top_creators_analysis",
+            "positioning_statement",
+            "ninety_day_content_calendar",
+        }
+        values = " ".join(str(item.get("value") or "") for item in outputs)
+        assert "Huberman" in values
+        assert "90-day" in values or "Week 1" in values
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_check_cost_limit_skipped_after_finished():
     """The cost limit authorizes future spend; it must not re-open a finished agent.
 
@@ -6555,6 +6686,10 @@ async def run_all_tests():
         "wf_coalesce_structured_response_without_schema",
         test_workflow_coalesce_structured_response_without_schema_uses_headings,
     )
+    r.record(
+        "wf_coalesce_gp_outputs_from_explore_evidence",
+        test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore,
+    )
     r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
     r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)
     r.record("wf_efc_skips_reasoning_meta", test_workflow_extract_failure_context_skips_reasoning_metadata)
@@ -6786,6 +6921,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_mark_complete_replaces_fast_mode_ablation",
         test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary,
+    )
+    await r.record_async(
+        "wf_mark_complete_polls_assemble_for_schema_outputs",
+        test_workflow_mark_complete_polls_assemble_for_schema_outputs,
     )
     await r.record_async(
         "wf_mark_complete_summary_cost_no_cost_limit",

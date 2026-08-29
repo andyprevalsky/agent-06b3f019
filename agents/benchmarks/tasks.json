@@ -83,10 +83,10 @@
             "type": "completion_summary_length",
             "min_chars": 200,
             "forbidden_substrings": [
-              "Fast Mode cache trajectory ended",
-              "Fast Mode soft-complet",
+              "Fast Mode",
               "cached trajectory",
-              "based on prior tool evidence"
+              "based on prior tool evidence",
+              "verified results are included below"
             ],
             "require_outputs": true,
             "include_first_level_gps": true
