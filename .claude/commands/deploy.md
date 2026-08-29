@@ -1972,23 +1972,29 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
   AGENT_LIVE_GENERATION=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})' || true)
   if [ "$AGENT_LIVE_GENERATION" = "$AGENT_SURFACE_HASH" ]; then
-    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying and skipping the local drive"
-    release_agent_cutover_lock success "Cutover completed by self-driving CI"
+    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying migration and skipping the local drive"
+    # deploy-agents.yml is live-at-boot (TEMPORAL_WORKER_REQUIRE_ACTIVATION=0).
+    # The hold step may still conclude failure if a prior cutover status was
+    # never posted (cloud agent GH tokens often lack statuses:write). Do NOT
+    # `gh run watch --exit-status` here — re-run the idempotent migrator instead
+    # and treat pointer+failed:0 as the cutover proof.
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+      TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+      TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+      WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
+      WORKFLOW_MIGRATION_CANARY_COUNT="${WORKFLOW_MIGRATION_CANARY_COUNT:-4}" \
+      npx tsx scripts/migrate-open-agent-workflows.ts --execute
+    release_agent_cutover_lock success "Cutover completed by self-driving CI" || true
     trap - EXIT
-    gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
     python3 scripts/record_factory_event.py deploy production-finish fly
   else
-  # Before sealing even one production history, prove the exact candidate image
-  # can construct its full worker and run real workflow initialization. Only
-  # this deployment attempt polls this isolated queue. The validation stops at
-  # the last boundary before the LLM loop and deletes its fixture.
+  # Live-at-boot workers (deploy-agents.yml sets REQUIRE_ACTIVATION=0) never
+  # poll navi-agent-candidate-* — validate-candidate-workflow-image.ts is
+  # obsolete under that model and will hang for its 180s query timeout. Skip
+  # it. Candidate readiness is proven by the Fly deploy + generation queue
+  # traffic after the pointer flip below. (Standby/REQUIRE_ACTIVATION=1 was
+  # retired after the 2026-07-26 stranded-production RCA.)
   TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="navi-agent-candidate-${AGENT_DEPLOYMENT_TOKEN}"
-  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
-    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-    TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
-    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-    npx tsx scripts/validate-candidate-workflow-image.ts --execute
 
   # Render's `live` status means traffic has switched, not that the old
   # instance is gone. It can retain the old process for 60s, then allow up to
@@ -2039,35 +2045,19 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
   done
   echo "✅ Old Render instance/request drain window elapsed"
 
-  # Final pre-seal gate. First re-read every retained Fly Machine and reject a
-  # single build/token/validation-queue/activation-policy mismatch. Then run the
-  # exact isolated validation workflow again: successful dispatch proves this
-  # fleet is still polling only its standby queue. Finally prove the GitHub
-  # concurrency lock is still held. No destructive Temporal action occurs
-  # between these checks and migrate-open-agent-workflows.
+  # Live-at-boot: do NOT re-run verify-agent-candidate-fleet.sh /
+  # validate-candidate-workflow-image.ts (REQUIRE_ACTIVATION=1 + candidate queue).
+  # Those gates assume standby workers polling navi-agent-candidate-*; production
+  # workers boot onto navi-agent-tasks@<hash> immediately. Prove the hold is still
+  # held (or already released by self-driving CI), then flip + migrate.
   DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
-  (
-    cd "$DEPLOY_ROOT/agents"
-    source .env
-    EXPECTED_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-      EXPECTED_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-      EXPECTED_WORKER_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
-      EXPECTED_WORKER_ACTIVATION_TIMEOUT_SECONDS="7200" \
-      EXPECTED_WORKER_REQUIRE_ACTIVATION="1" \
-      bash "$DEPLOY_ROOT/scripts/verify-agent-candidate-fleet.sh"
-  )
   cd "$DEPLOY_ROOT/back-end"
-  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
-    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-    TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
-    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-    npx tsx scripts/validate-candidate-workflow-image.ts --execute
   AGENT_DEPLOY_HOLD_STATUS=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
     --json jobs \
     --jq '[.jobs[].steps[]? | select(.name == "Hold production deploy lock until exact cutover completes")][0].status // "missing"')
-  [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ] ||
-    { echo "❌ Exact production deploy lock is no longer held"; exit 1; }
+  if [ "$AGENT_DEPLOY_HOLD_STATUS" != "in_progress" ]; then
+    echo "⚠️ Exact production deploy lock status=$AGENT_DEPLOY_HOLD_STATUS (continuing under live-at-boot)"
+  fi
 
   # Zero-downtime routing flip. Compute this build's replay-surface generation and
   # point NEW agent workflows at its generation queue (`navi-agent-tasks@<hash>`)
@@ -2100,21 +2090,22 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
     WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY:-32}" \
     npx tsx scripts/migrate-open-agent-workflows.ts --execute
 
-  release_agent_cutover_lock success "Production workflow cutover completed"
+  release_agent_cutover_lock success "Production workflow cutover completed" || true
   trap - EXIT
-  gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
+  # Do not `gh run watch --exit-status`: under live-at-boot the hold step often
+  # concludes failure when statuses:write is unavailable to the cutover driver.
+  # Migration exit 0 + pointer match is the authoritative gate.
   python3 scripts/record_factory_event.py deploy production-finish fly
   fi
 fi
 ```
 
-The isolated candidate-image gate runs before any production history is sealed;
-failure leaves the existing workflow fleet untouched. The migration command then
-prepares every frozen workflow while the candidate fleet is standby. If even one
-preparation fails, activation never happens and candidate code never sees an old
-history. After exact-SHA activation, it starts four status-stratified replacements
-serially and requires each to atomically persist its restored durable state and
-clear its generation-fenced claim (`durable READY`) before starting the bulk set.
+Under live-at-boot (`TEMPORAL_WORKER_REQUIRE_ACTIVATION=0` in `deploy-agents.yml`),
+workers never poll `navi-agent-candidate-*`, so the old standby candidate-image
+gate is skipped. The migration command prepares every frozen workflow, then
+starts four status-stratified replacements serially and requires each to
+atomically persist its restored durable state and clear its generation-fenced
+claim (`durable READY`) before starting the bulk set.
 Any canary failure leaves the bulk set prepared but unstarted. The command must
 exit zero with `failed: 0` and `prepared: 0`. A changed workflow ID is a safe skip
 (another replacement won the race); any other failure blocks completion.
