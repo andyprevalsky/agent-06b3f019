@@ -3,7 +3,7 @@
  *
  * Proves checklist items:
  *  - #2  the toggle is hidden unless the user is in FAST_MODE_USER_IDS
- *  - #4  default off (controlled value starts false; toggling flips it)
+ *  - #4  default on for allowlisted accounts (controlled value; toggling flips it)
  *  - #3  the toggle drives the boolean threaded into the create-agent payload
  */
 import React from 'react';
@@ -190,6 +190,13 @@ describe('Fast Mode account gating', () => {
     expect(FAST_MODE_USER_IDS).toContain('1f85ff25-6e29-4c1b-8739-f917bd101a30'); // Andy
     expect(FAST_MODE_USER_IDS).toContain('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'); // Tamy
     expect(FAST_MODE_USER_IDS.length).toBe(2);
+  });
+
+  it('defaults Fast Mode on for Andy and Tamy', async () => {
+    const { DEFAULT_FAST_MODE_USER_IDS } = await import('@/lib/fastModeAccounts');
+    expect(DEFAULT_FAST_MODE_USER_IDS).toContain('1f85ff25-6e29-4c1b-8739-f917bd101a30');
+    expect(DEFAULT_FAST_MODE_USER_IDS).toContain('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9');
+    expect(DEFAULT_FAST_MODE_USER_IDS.length).toBe(2);
   });
 });
 

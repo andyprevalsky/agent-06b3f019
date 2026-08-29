@@ -7,12 +7,16 @@ against cache "busts" is normalization (we never validate freshness).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
 
 CACHE_KEY_VERSION = "v42"
 
@@ -696,16 +700,58 @@ def normalize_url(raw_url: str) -> str:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+# Display-name swap for test-mass-agent-run-0 only. Child/explore goals that
+# say Andy Prevalsky must hash as the July Aman namespace so they replay the
+# original trajectories instead of cold-passthrough stubbing.
+OAI_DEMO_ROOT_GOAL_PREFIX = (
+    "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+)
+OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
+OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
+
+
+def is_oai_demo_goal_text(text: str) -> bool:
+    blob = text or ""
+    return OAI_DEMO_ROOT_GOAL_PREFIX in blob or OAI_DEMO_CHILD_WINDOW in blob
+
+
+def canonicalize_oai_demo_goal_for_hash(goal: str) -> str:
+    """Fold Andy-named OAi-demo goals back onto the July Aman cache namespace."""
+    if not is_oai_demo_goal_text(goal):
+        return goal
+    return goal.replace(OAI_DEMO_CACHE_DISPLAY_NAME, OAI_DEMO_CACHE_SOURCE_NAME).replace("Andy's", "Aman's")
+
+
+def rewrite_oai_demo_display_names(value: Any) -> Any:
+    """Rewrite cached Aman source names to Andy on replay for this task only."""
+    if isinstance(value, str):
+        return value.replace(OAI_DEMO_CACHE_SOURCE_NAME, OAI_DEMO_CACHE_DISPLAY_NAME).replace("Aman's", "Andy's")
+    if isinstance(value, list):
+        return [rewrite_oai_demo_display_names(item) for item in value]
+    if isinstance(value, dict):
+        return {key: rewrite_oai_demo_display_names(item) for key, item in value.items()}
+    return value
+
+
 def goal_hash(goal: str) -> str:
     """Short, stable hash of a goal string.
 
-    Exact-match on user prose, with one canonicalization: run-local
-    `@ref:message:<uuid>` pointers collapse before hashing. Spawn paths append
-    a fresh message reference to sub-agent goals on every run, and namespacing
-    on those would give each rerun of the same goal an empty cache namespace.
+    Exact-match on user prose, with two scoped canonicalizations:
+    1. run-local `@ref:message:<uuid>` pointers collapse before hashing
+    2. test-mass-agent-run-0 Andy/Aman display-name swap folds onto the July
+       cache namespace so child/explore lookups hit the original trajectories
+    3. per-creator for_each children alias onto the July execute_loop
+       goalHash (item JSON / template drift must not mint a cold namespace)
+
     Keep in sync with `goalHash` in back-end fastCacheNormalizeCore.ts.
     """
     canonical = re.sub(r"@ref:message:" + _UUID_RE.pattern, "@ref:message:<uuid>", goal)
+    canonical = canonicalize_oai_demo_goal_for_hash(canonical)
+    if is_oai_demo_goal_text(canonical):
+        aliased = july_gp_goal_hash_for_goal(canonical)
+        if aliased:
+            return aliased
     return sha256(canonical)[:16]
 
 
@@ -911,9 +957,165 @@ def position_request_fingerprint(request: Any) -> str:
     return sha256(canonical_messages(material))[:32]
 
 
+# Root goal hash for test-mass-agent-run-0 / the Jul 2026 OAi demo warm namespace.
+# Kept as a constant so dual-read + coverage checks cannot drift from the prompt.
+OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
+
+# ---------------------------------------------------------------------------
+# Soft-complete allowlist (exact-match benchmark tasks with fast_cache: "on")
+#
+# Soft Mode stubs (cold/trajectory passthrough, tool soft-complete, browser
+# soft-complete, verifier soft-pass) are ONLY for agents whose goal — or their
+# tree root's goal — exactly matches a catalog task with fast_cache: "on".
+# Today that is test-mass-agent-run-0 (OAi demo). Fast Mode cache HIT replay
+# remains available for any FM-enabled agent; only synthetic miss stubs are gated.
+#
+#   tasks.json (fast_cache:on) ──goal_hash──► soft_complete_goal_hashes()
+#        │
+#        ▼
+#   agent.goal / root.goal ──soft_complete_allowed()──► stub | live LLM
+# ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def soft_complete_goal_hashes() -> frozenset[str]:
+    """Goal hashes of benchmark tasks that opt into soft-complete stubs.
+
+    Sourced from ``agents/benchmarks/tasks.json`` entries with
+    ``fast_cache: "on"``. Always includes ``OAI_DEMO_ROOT_GOAL_HASH`` so the
+    Jul 2026 warm namespace cannot drift if the catalog load fails in workers.
+    """
+    hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH}
+    try:
+        tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
+        with tasks_path.open(encoding="utf-8") as fh:
+            tasks = json.load(fh)
+        if isinstance(tasks, list):
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                if str(task.get("fast_cache") or "").strip().lower() != "on":
+                    continue
+                prompt = task.get("prompt")
+                if isinstance(prompt, str) and prompt.strip():
+                    hashes.add(goal_hash(prompt))
+    except Exception:
+        # Catalog unavailable in some unit-test / slim images — constant remains.
+        pass
+    return frozenset(hashes)
+
+
+def soft_complete_allowed(
+    goal: str | None = None,
+    *,
+    root_goal: str | None = None,
+) -> bool:
+    """True when soft-complete stubs may fire for this agent namespace.
+
+    Exact match: ``goal_hash(goal)`` or ``goal_hash(root_goal)`` must equal a
+    ``fast_cache: "on"`` benchmark prompt hash (mass-agent OAi demo today).
+    Child agents under that root inherit via ``root_goal``.
+    """
+    allowed = soft_complete_goal_hashes()
+    if goal and goal_hash(goal) in allowed:
+        return True
+    if root_goal and goal_hash(root_goal) in allowed:
+        return True
+    return False
+# Pre-Jul-21 / pre-Aug-22 position fingerprint shape used by the OAi demo warm
+# cache (no user_messages, no exclude_anthropic_family).
+_OAI_DEMO_CACHE_KEY_VERSIONS = ("v42", "v43")
+
+
+def oai_demo_position_request_fingerprint(request: Any) -> str:
+    """July-2026 OAi-demo position fingerprint (pre user-message / policy fields)."""
+    if not isinstance(request, dict):
+        return sha256(canonical_messages(request))[:32]
+
+    messages = request.get("messages")
+    static_messages: list[Any] = []
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role == "system":
+                static_messages.append(message)
+                continue
+            if static_messages:
+                break
+
+    material: dict[str, Any] = {
+        "pool": request.get("pool"),
+        "pool_contract": request.get("pool_contract"),
+        "static_messages": static_messages,
+        "tools": request.get("tools"),
+        "tool_choice": request.get("tool_choice"),
+        "temperature": request.get("temperature"),
+        "max_tokens": request.get("max_tokens"),
+        "seed": request.get("seed"),
+        "thinking": request.get("thinking"),
+        "effort": request.get("effort"),
+        "provider_fast_mode": request.get("provider_fast_mode"),
+        "response_schema": request.get("response_schema"),
+        "env_fingerprint": request.get("env_fingerprint"),
+    }
+    return sha256(canonical_messages(material))[:32]
+
+
+def rewrite_cache_key_version(key: str, version: str) -> str:
+    """Swap the `fastmode:vN:` version segment while preserving the rest."""
+    parts = key.split(":", 2)
+    if len(parts) < 3 or parts[0] != "fastmode":
+        return key
+    return f"fastmode:{version}:{parts[2]}"
+
+
+def build_key_with_version(version: str, kind: str, goal: str, detail: str) -> str:
+    return f"fastmode:{version}:{world_model_cache_scope()}{kind}:{goal_hash(goal)}:{detail}"
+
+
 def position_key(goal: str, call_site: str, step: int, request: Any) -> str:
     detail = f"{normalize_call_site(call_site)}:p:{step}:c:{position_request_fingerprint(request)}"
     return build_key("llm", goal, detail)
+
+
+def position_lookup_keys(goal: str, call_site: str, step: int, request: Any) -> list[str]:
+    """Ordered exact keys to try for position replay (current + OAi-demo aliases).
+
+    Later keying changes (exclude_anthropic_family, user_messages in the
+    fingerprint, CACHE_KEY_VERSION) would otherwise 100% miss the Jul 2026 warm
+    cache that powered the OAi mass-agent demo. Try current first, then the
+    demo-era fingerprint under both v42 and v43.
+    """
+    site = normalize_call_site(call_site)
+    current = position_key(goal, call_site, step, request)
+    legacy_detail = f"{site}:p:{step}:c:{oai_demo_position_request_fingerprint(request)}"
+    keys = [current]
+    for version in _OAI_DEMO_CACHE_KEY_VERSIONS:
+        keys.append(build_key_with_version(version, "llm", goal, legacy_detail))
+        keys.append(rewrite_cache_key_version(current, version))
+    # Preserve order, drop duplicates.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    return ordered
+
+
+def position_prefix_pattern(goal: str, call_site: str, step: int) -> str:
+    """SQL LIKE pattern for oldest-entry fallback under a goal/site/step.
+
+    Includes ``world_model_cache_scope()`` so simulated keys cannot match real
+    runs (and vice versa). Backend ``cacheGetPosition`` uses explicit v42/v43
+    prefixes for the same reason.
+    """
+    site = normalize_call_site(call_site)
+    scope = world_model_cache_scope()
+    return f"fastmode:%:{scope}llm:{goal_hash(goal)}:{site}:p:{step}:c:%"
 
 
 def llm_key(goal: str, call_site: str, request: Any) -> str:

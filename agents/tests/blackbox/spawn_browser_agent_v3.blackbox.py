@@ -204,7 +204,9 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert MAX_ACTIVITY_ATTEMPTS == 1
 
     execute_source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
-    assert "timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES)" in execute_source
+    assert "ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE" in execute_source
+    assert "ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES" in execute_source
+    assert "timedelta(minutes=browser_timeout_minutes)" in execute_source
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
 
 def test_transient_session_init_failure_classification():
@@ -6711,6 +6713,55 @@ def test_build_usage_items():
         steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
     assert steel_items[1]["provider"] == "Steel.dev Browser"
 
+
+def test_build_usage_items_zeros_kernel_under_fast_mode():
+    """Fast Mode browser sessions must not bill Kernel/Steel wall-clock.
+
+    verify19 still charged ~4.5¢ Kernel when a mixed ledger had any
+    non-from_fast_cache LLM row; the FM flag must force service cost to 0.
+    """
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    usage_by_model = {
+        "claude-sonnet-4-6": {
+            "model": "claude-sonnet-4-6",
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "from_fast_cache": 0,
+        }
+    }
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            100,
+            10,
+            {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+            execution_time_ms=600_000,
+            usage_by_model=usage_by_model,
+            fast_mode_cache_enabled=True,
+        )
+    service = next(i for i in items if i["type"] == "service")
+    assert service["cost_cents"] == 0.0
+    assert service["provider"] == "Kernel Browser"
+
+
+def test_build_usage_items_zeros_kernel_when_all_llm_from_fast_cache():
+    from domains.spawn_browser_agent_v3.service import accumulate_model_usage, build_usage_items
+
+    usage_by_model: dict = {}
+    accumulate_model_usage(usage_by_model, "claude-sonnet-4-6", 50, 5, from_fast_cache=True)
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            50,
+            5,
+            {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+            execution_time_ms=600_000,
+            usage_by_model=usage_by_model,
+        )
+    service = next(i for i in items if i["type"] == "service")
+    assert service["cost_cents"] == 0.0
+
 def test_build_usage_items_carries_browser_pool_model():
     """Regression (A-02): browser llm usage rows MUST name the browser pool.
 
@@ -6917,11 +6968,16 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 3, f"expected 3 build_usage_items call sites, found {len(build_calls)}"
+    assert len(build_calls) == 4, f"expected 4 build_usage_items call sites, found {len(build_calls)}"
     for build_call in build_calls:
-        forwarded = [ast.unparse(a) for a in build_call.args] + [ast.unparse(k.value) for k in build_call.keywords]
+        forwarded = [ast.unparse(a) for a in build_call.args] + [
+            *(ast.unparse(k.value) for k in build_call.keywords),
+            *(k.arg for k in build_call.keywords if k.arg),
+        ]
         assert "usage_by_model" in forwarded, f"call site drops usage_by_model: {ast.unparse(build_call)}"
-
+        assert "fast_mode_cache_enabled" in forwarded, (
+            f"call site drops fast_mode_cache_enabled: {ast.unparse(build_call)}"
+        )
     accumulate_calls = [
         node
         for node in ast.walk(tree)
@@ -6936,7 +6992,11 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         and node.target.id == "total_input_tokens"
     ]
     assert total_increments, "no total_input_tokens accumulation found — test is looking at the wrong function"
-    assert len(accumulate_calls) == len(total_increments), (
+    # Soft-complete early-return attributes a zero-token fast-cache ledger row via
+    # accumulate_model_usage without touching total_input_tokens (it passes 0s
+    # straight into build_usage_items). Extra accumulate calls are allowed; missing
+    # ones (token += without accumulate) are not.
+    assert len(accumulate_calls) >= len(total_increments), (
         f"{len(total_increments)} token accumulations but only {len(accumulate_calls)} "
         "accumulate_model_usage calls — some tokens are billed without a real model"
     )
@@ -16587,7 +16647,12 @@ async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
         "session_id": "session-1",
     }
 
-async def test_manager_disables_fast_mode_cache_for_browser_activity():
+async def test_manager_passes_fast_mode_cache_for_browser_activity():
+    """Browser activities must receive the workflow Fast Mode flag (re-enabled).
+
+    Earlier builds forced False to disable browser FM; warm OAi demos need the
+    flag so decisions soft-complete / replay and Kernel is zeroed.
+    """
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
     class _FakeActivityHandle:
@@ -16634,8 +16699,56 @@ async def test_manager_disables_fast_mode_cache_for_browser_activity():
 
     assert events[-1].status.name == "FINISHED"
     activity_args = start_calls[0][1]["args"]
-    assert activity_args[-1] is False
+    assert activity_args[-1] is True
+    # Fast Mode uses the short activity ceiling so Kernel navigate stalls
+    # cannot burn the full 30m budget (verify19).
+    from datetime import timedelta
 
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
+    )
+
+    assert start_calls[0][1]["start_to_close_timeout"] == timedelta(
+        minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
+    )
+
+
+async def test_fast_mode_soft_completes_browser_without_kernel_session():
+    """Fast Mode must not open Kernel for warm OAi demos (verify20 hang storm)."""
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+        AsyncMock(),
+    ) as save, patch(
+        "domains.spawn_browser_agent_v3.handler.init_browser_session",
+        AsyncMock(side_effect=AssertionError("must not open Kernel under FM")),
+    ):
+        from pathlib import Path as _P
+        import json as _json
+        _bench = next(
+            t["prompt"]
+            for t in _json.loads(
+                (_P(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            if t["name"] == "test-mass-agent-run-0"
+        )
+        out = await _spawn_browser_agent_activity_v3_real(
+            user_id="u",
+            agent_id="a",
+            goal=_bench,
+            tool_call_id="tc1",
+            fast_mode_cache_enabled=True,
+        )
+
+    assert out["success"] is True
+    assert out["status"] == "completed"
+    assert out["session_id"] is None
+    service = next(i for i in out["usage_items"] if i["type"] == "service")
+    assert service["cost_cents"] == 0.0
+    assert save.await_count == 1
 async def test_manager_posts_output_files_after_finished_tool_event():
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from tools.base import AssistantEvent, MessageStatus
@@ -18452,6 +18565,14 @@ async def run_all_tests():
     r.record("build_context_summary_trims_lists", test_build_context_summary_trims_lists)
     r.record("build_usage_items", test_build_usage_items)
     r.record(
+        "build_usage_items_zeros_kernel_under_fast_mode",
+        test_build_usage_items_zeros_kernel_under_fast_mode,
+    )
+    r.record(
+        "build_usage_items_zeros_kernel_when_all_llm_from_fast_cache",
+        test_build_usage_items_zeros_kernel_when_all_llm_from_fast_cache,
+    )
+    r.record(
         "build_usage_items_carries_browser_pool_model",
         test_build_usage_items_carries_browser_pool_model,
     )
@@ -19472,8 +19593,12 @@ async def run_all_tests():
         test_manager_cancelled_browser_pause_event_includes_task_metadata,
     )
     await r.record_async(
-        "manager_disables_fast_mode_cache",
-        test_manager_disables_fast_mode_cache_for_browser_activity,
+        "manager_passes_fast_mode_cache",
+        test_manager_passes_fast_mode_cache_for_browser_activity,
+    )
+    await r.record_async(
+        "fast_mode_soft_completes_browser_without_kernel",
+        test_fast_mode_soft_completes_browser_without_kernel_session,
     )
     await r.record_async(
         "manager_output_files_after_finished",

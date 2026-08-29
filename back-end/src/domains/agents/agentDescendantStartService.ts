@@ -42,7 +42,7 @@ export function assertExistingDescendantRequestMatches(
     ['response_schema', body.response_schema ?? null, existing.responseSchema],
     [
       'fast_mode_cache_enabled',
-      body.fast_mode_cache_enabled ?? false,
+      body.fast_mode_cache_enabled ?? existing.fastModeCacheEnabled,
       existing.fastModeCacheEnabled,
     ],
     ['world_model_mode', body.world_model_mode ?? 'real', existing.worldModelMode],
@@ -113,6 +113,9 @@ export async function resumeExistingSubAgent(
   if (body.agent_id === undefined || body.parent_agent_id === undefined) return null;
   const existing = (await repo.findExistingAgentsByIds([body.agent_id], userId))[0];
   if (existing === undefined) return null;
+  if (body.fast_mode_cache_enabled === undefined) {
+    body.fast_mode_cache_enabled = existing.fastModeCacheEnabled;
+  }
   assertExistingDescendantRequestMatches(body, existing);
   const workflowId = existing.temporalWorkflowStartPending
     ? await startSubAgentWorkflow(body, existing.id, userId, verifier, existing.priceLimitCents)

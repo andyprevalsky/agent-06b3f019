@@ -126,6 +126,8 @@ export interface CatalogTestPrompt {
   attachmentUrls: string[];
   /** Catalog tags — optional so an older backend payload without tags still parses. */
   tags?: string[];
+  /** Optional so an older backend without the last-5 signal still parses. */
+  lastFivePassed?: boolean;
 }
 
 /**

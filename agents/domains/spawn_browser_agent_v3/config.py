@@ -33,6 +33,10 @@ def get_max_iterations() -> int:
 MAX_ITERATIONS = get_max_iterations()
 MAX_CONSECUTIVE_API_FAILURES = 5
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 30
+# Fast Mode warm demos must not sit on a live Kernel navigate/network flood for
+# the full 30m activity budget (verify19 Huberman YouTube hang). Soft-complete
+# + cache hits should finish in seconds; 3m is a hard ceiling for FM stalls.
+ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE = 3
 HEARTBEAT_TIMEOUT_SECONDS = 120
 # A background task heartbeats at this cadence independent of the main loop, so a
 # CPU-bound bot-challenge that freezes the page renderer (and every CDP call) for

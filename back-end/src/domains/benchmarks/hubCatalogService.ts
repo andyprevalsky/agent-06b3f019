@@ -19,6 +19,30 @@ export interface TaskStats {
   last_attempt_at: string | null;
   last_status: string | null;
   last_fast_mode: boolean;
+  /** True iff history has ≥5 attempts and the most recent 5 all passed. */
+  last_five_passed: boolean;
+}
+
+/** How many consecutive recent passes qualify a task for the query-box green check. */
+export const LAST_FIVE_PASS_WINDOW = 5;
+
+/**
+ * Pure helper: given attempts ordered oldest→newest, return whether the most
+ * recent LAST_FIVE_PASS_WINDOW all passed. Fewer than WINDOW attempts → false.
+ */
+export function lastFiveAttemptsPassed(passedFlagsOldestFirst: boolean[]): boolean {
+  if (passedFlagsOldestFirst.length < LAST_FIVE_PASS_WINDOW) return false;
+  const recent = passedFlagsOldestFirst.slice(-LAST_FIVE_PASS_WINDOW);
+  return recent.every((passed) => passed);
+}
+
+/**
+ * Chronological comparator for attempt timestamps (ISO strings).
+ * Equal timestamps return 0 so Array.sort stays stable / deterministic.
+ */
+export function compareAttemptTimestamps(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
 }
 
 function percentile(sorted: number[], p: number): number | null {
@@ -68,7 +92,7 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
   }
   const stats = new Map<string, TaskStats>();
   for (const [task, list] of samples) {
-    list.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+    list.sort((a, b) => compareAttemptTimestamps(a.timestamp, b.timestamp));
     const passes = list.filter((s) => s.passed);
     const passDurations = passes
       .map((s) => s.duration)
@@ -84,6 +108,7 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
       last_attempt_at: last?.timestamp || null,
       last_status: last?.status ?? null,
       last_fast_mode: last?.fastMode === true,
+      last_five_passed: lastFiveAttemptsPassed(list.map((s) => s.passed)),
     });
   }
   return stats;
