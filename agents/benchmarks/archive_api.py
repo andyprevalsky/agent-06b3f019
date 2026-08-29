@@ -21,6 +21,13 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from benchmarks.logs import (
+    canonicalize_agent_tree,
+    completion_outputs_from_messages,
+    schema_from_completion_outputs,
+    structured_from_completion_outputs,
+)
+
 
 @dataclass(frozen=True)
 class ArchivedAgent:
@@ -135,6 +142,12 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
     duration = float(task.get("duration_seconds") or 0)
     status = "COMPLETED" if task.get("passed") else "FAILED"
     updated_at = messages[-1]["timestamp"] if messages and messages[-1].get("timestamp") else run_timestamp
+    info = canonicalize_agent_tree((task.get("logs") or {}).get("tree") or {}).get(agent_id, {})
+    tokens_in = int(info.get("tokens_in") or task.get("tokens_in") or 0) or (
+        int(task.get("cache_read_input_tokens") or 0) + int(task.get("cache_creation_input_tokens") or 0)
+    )
+    tokens_out = int(info.get("tokens_out") or task.get("tokens_out") or 0)
+    outputs = completion_outputs_from_messages(messages)
     return {
         "agent_id": agent_id,
         "parent_agent_id": None,
@@ -149,15 +162,13 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
         "status": status,
         "status_message": f"Archived benchmark task: {task.get('name')}",
         "temporal_workflow_id": f"benchmark-archive-{agent_id}",
-        "token_count": int(task.get("tokens_in") or 0) + int(task.get("tokens_out") or 0),
-        "tokens_in": int(task.get("tokens_in") or 0)
-        or int(task.get("cache_read_input_tokens") or 0)
-        + int(task.get("cache_creation_input_tokens") or 0),
-        "tokens_out": int(task.get("tokens_out") or 0),
+        "token_count": tokens_in + tokens_out,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
         "tool_tokens_in": 0,
         "tool_tokens_out": 0,
         "tool_cost_cents": 0,
-        "context_size": 0,
+        "context_size": int(info.get("context_size") or 0),
         "message_count": len(messages),
         "price_limit_cents": 0,
         "tree_cost_cents": float(task.get("cost_cents") or 0),
@@ -167,12 +178,16 @@ def _agent_summary(task: dict[str, Any], messages: list[dict[str, Any]], run_tim
         "created_at": run_timestamp,
         "updated_at": updated_at,
         "write_lock_enabled": True,
-        "structured_output": None,
+        "structured_output": info.get("structured_output")
+        or task.get("structured_output")
+        or structured_from_completion_outputs(outputs),
         "failure_context": None,
         "verifier": None,
         "tools": [],
         "tools_in_use": [],
-        "response_schema": None,
+        "response_schema": info.get("response_schema")
+        or task.get("response_schema")
+        or schema_from_completion_outputs(outputs),
         "benchmark_task": task.get("name"),
         "benchmark_duration_seconds": duration,
         "benchmark_world_model_mode": task.get("world_model_mode"),
@@ -188,6 +203,7 @@ def _subagent_summary(
     the frontend can render the full fan-out tree (parent_agent_id + busId)."""
     status = str(info.get("status") or "COMPLETED").upper()
     updated_at = messages[-1]["timestamp"] if messages and messages[-1].get("timestamp") else run_timestamp
+    outputs = completion_outputs_from_messages(messages)
     return {
         "agent_id": agent_id,
         "parent_agent_id": info.get("parent_agent_id"),
@@ -204,13 +220,13 @@ def _subagent_summary(
         "status": status,
         "status_message": f"Sub-agent of {root_id[:12]}",
         "temporal_workflow_id": f"benchmark-archive-{agent_id}",
-        "token_count": 0,
-        "tokens_in": 0,
-        "tokens_out": 0,
+        "token_count": int(info.get("tokens_in") or 0) + int(info.get("tokens_out") or 0),
+        "tokens_in": int(info.get("tokens_in") or 0),
+        "tokens_out": int(info.get("tokens_out") or 0),
         "tool_tokens_in": 0,
         "tool_tokens_out": 0,
         "tool_cost_cents": 0,
-        "context_size": 0,
+        "context_size": int(info.get("context_size") or 0),
         "message_count": len(messages),
         "price_limit_cents": 0,
         "tree_cost_cents": 0,
@@ -220,12 +236,12 @@ def _subagent_summary(
         "created_at": run_timestamp,
         "updated_at": updated_at,
         "write_lock_enabled": True,
-        "structured_output": None,
+        "structured_output": info.get("structured_output") or structured_from_completion_outputs(outputs),
         "failure_context": None,
         "verifier": None,
         "tools": [],
         "tools_in_use": [],
-        "response_schema": None,
+        "response_schema": info.get("response_schema") or schema_from_completion_outputs(outputs),
         "benchmark_task": task.get("name"),
         "benchmark_duration_seconds": 0,
         "benchmark_world_model_mode": task.get("world_model_mode"),
@@ -251,7 +267,7 @@ def load_archive(run_path: Path) -> dict[str, ArchivedAgent]:
         # Index every spawned sub-agent in the tree so the archive renders the full
         # fan-out (not just the root). Each carries busId=<root> + parent_agent_id so
         # GET /api/agents/tree?busId=<root> returns the whole tree.
-        tree = (task.get("logs") or {}).get("tree") or {}
+        tree = canonicalize_agent_tree((task.get("logs") or {}).get("tree") or {})
         for sub_id, info in tree.items():
             sub_id = str(sub_id)
             if not sub_id or sub_id == agent_id:
@@ -310,7 +326,7 @@ class ArchiveHandler(BaseHTTPRequestHandler):
     # When set, the static archive is hot-reloaded whenever run.json changes, so a
     # single long-lived server transparently promotes from live → final snapshot.
     run_path: Optional[Path] = None
-    _run_mtime: float = -1.0
+    _run_stamp: tuple[int, int] = (-1, -1)
 
     # Endpoints served from local stubs regardless of upstream (the archive
     # frontend needs them to render, and they carry no per-agent state).
@@ -327,12 +343,13 @@ class ArchiveHandler(BaseHTTPRequestHandler):
         if path is None:
             return
         try:
-            mtime = path.stat().st_mtime
+            stat = path.stat()
         except OSError:
             return
-        if mtime == cls._run_mtime:
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        if stamp == cls._run_stamp:
             return
-        cls._run_mtime = mtime
+        cls._run_stamp = stamp
         cls.agents = load_archive_safe(path)
 
     # A direct opener with proxies disabled: the upstream is always a localhost
@@ -531,7 +548,7 @@ def configure_archive_handler(
 ) -> None:
     """Point ArchiveHandler at a run.json and/or a live box backend upstream."""
     ArchiveHandler.run_path = run_path
-    ArchiveHandler._run_mtime = -1.0
+    ArchiveHandler._run_stamp = (-1, -1)
     ArchiveHandler.agents = load_archive_safe(run_path)
     ArchiveHandler.upstream_url = (upstream_url or "").rstrip("/")
     headers: dict[str, str] = {}

@@ -13,6 +13,7 @@ are written for future Fast Mode runs.
 
 from __future__ import annotations
 
+import json
 import os
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
@@ -21,6 +22,7 @@ import structlog
 
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import current_context
+from providers.fast_cache.normalize import is_oai_demo_goal_text, rewrite_oai_demo_display_names
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
 
@@ -64,8 +66,71 @@ def _cache_replay_usage(original: Dict[str, Any]) -> Dict[str, Any]:
     return usage
 
 
+def coerce_cached_llm_payload(stored: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Replay activity-shaped ``response_schema`` rows as LLM stream content.
+
+    ``set_response_schema_activity`` writes ``{schema, title, usage}`` into the
+    same ``kind=llm`` namespace ``RoseClient.complete`` reads. Replaying that
+    blob as a stream yields empty ``content`` → "LLM returned no response
+    schema content", so Agent Settings stays on "Schema generating..." and
+    ``_format_outputs`` emits no Task Complete Output section.
+    """
+    if not isinstance(stored, dict):
+        return stored or {}
+    if stored.get("content") or stored.get("content_chunks") or stored.get("tool_calls"):
+        return stored
+    schema = stored.get("schema")
+    if not isinstance(schema, dict):
+        return stored
+    raw_fields = schema.get("fields")
+    if not isinstance(raw_fields, list) or not raw_fields:
+        return stored
+    fields: list[dict[str, Any]] = []
+    for field in raw_fields:
+        if not isinstance(field, dict) or not field.get("name") or not field.get("type"):
+            continue
+        item: Dict[str, Any] = {"name": field["name"], "type": field["type"]}
+        props = field.get("properties")
+        if isinstance(props, list) and props:
+            item["properties"] = [
+                {"name": prop["name"], "type": prop["type"]}
+                for prop in props
+                if isinstance(prop, dict) and prop.get("name") and prop.get("type")
+            ]
+        fields.append(item)
+    if not fields:
+        return stored
+    title = stored.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = "Task Output"
+    payload = {
+        "reasoning": "Cached response schema.",
+        "fields": fields,
+        "title": title.strip()[:80],
+    }
+    content = json.dumps(payload)
+    out = dict(stored)
+    out["content"] = content
+    out["content_chunks"] = [
+        {
+            "text": content,
+            "item_id": "cache:response_schema:0",
+            "output_index": 0,
+            "content_index": 0,
+            "phase": "final_answer",
+        }
+    ]
+    return out
+
+
 async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     """Reconstruct the StreamChunk sequence from a stored response."""
+    stored = coerce_cached_llm_payload(stored)
+    ctx = current_context()
+    if ctx is not None and (
+        is_oai_demo_goal_text(ctx.goal or "") or is_oai_demo_goal_text(ctx.root_goal or "")
+    ):
+        stored = rewrite_oai_demo_display_names(stored)
     yield SimpleNamespace(
         kind="metadata",
         data={
@@ -328,6 +393,39 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
                 "from_fast_cache": True,
             },
         }
+    if site == "dag_reasoning":
+        # ReasoningResponse contract: {response}. July OAi-demo root DAG
+        # caches dag_reasoning through p:5 plus a seeded assemble-final
+        # slot at p:6 (`july_assemble_final`: 50 analyses, positioning,
+        # 90-day calendar, 30 hooks, 20 engagement). Traj-end is only
+        # the fallback when that row is missing — never live Rose.
+        soft_json = (
+            '{"response":"Fast Mode cache trajectory ended; prior tool '
+            'evidence is sufficient to treat the goal as complete."}'
+        )
+        return {
+            "actual_model": "fast-mode-soft-complete",
+            "pool_name": "",
+            "request_id": "fast-mode-soft-complete",
+            "content": soft_json,
+            "content_chunks": [
+                {
+                    "text": soft_json,
+                    "item_id": "cache:soft:0",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "phase": "final_answer",
+                }
+            ],
+            "reasoning": "",
+            "tool_calls": [],
+            "codex_reasoning_items": [],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "from_fast_cache": True,
+            },
+        }
     if site in {"completion_summary", "context_compression"}:
         text = (
             "Fast Mode cache trajectory ended; the task completed successfully "
@@ -360,6 +458,84 @@ def soft_complete_on_miss(call_site: str) -> Dict[str, Any] | None:
         }
     # Unknown sites: fall through to live (or write-only).
     return None
+
+
+_JULY_GP_RESEARCH_TOOLS = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "grep",
+        "browser_use",
+        "spawn_browser_agent",
+    }
+)
+
+
+def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
+    """True for test-mass-agent-run-0 per-creator execute/plan loops.
+
+    Those namespaces are warm (July execute_loop starts at p:1). A first-step
+    miss is a lookup flake, not a cold namespace — never emit the 9-message
+    attempt_completion stub for them.
+    """
+    if (call_site or "").strip() not in {"execute_loop", "plan_loop"}:
+        return False
+    from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
+
+    return bool(july_gp_goal_hash_for_goal(getattr(ctx, "goal", None) or ""))
+
+
+def _payload_tool_name(stored: Any) -> str:
+    if not isinstance(stored, dict):
+        return ""
+    tool_calls = stored.get("tool_calls") or []
+    if tool_calls and isinstance(tool_calls[0], dict):
+        return str(tool_calls[0].get("name") or "").strip()
+    return ""
+
+
+def _july_gp_accept_payload(stored: Any, prior_tool: str) -> bool:
+    if stored is None:
+        return False
+    name = _payload_tool_name(stored)
+    if name != "attempt_completion":
+        return True
+    # Sahil/Lenny/Gabrielle July p:1 is attempt_completion (spawn work lived in
+    # nested GPs). Replaying that as the first execute step 9-msg stubs the
+    # child. Only accept completion after a real research tool in-series.
+    return prior_tool in _JULY_GP_RESEARCH_TOOLS
+
+
+async def july_gp_resolve_execute(
+    ctx: Any,
+    call_site: str,
+    stored: Any = None,
+    hit_key: Any = None,
+) -> tuple[Any, Any]:
+    """Walk July GP execute steps, skipping early attempt_completion stubs."""
+    if not is_july_gp_execute_site(ctx, call_site):
+        return stored, hit_key
+    step = getattr(ctx, "base_step", None)
+    start = 1 if step is None or int(step) < 1 else int(step)
+    prior_tool = ""
+    for current in range(start, start + 16):
+        if stored is not None and current == start:
+            cand, key = stored, hit_key
+        else:
+            cand, key = await cache_client.cache_get_position_fallback(
+                ctx.goal_hash, call_site, current
+            )
+        if cand is None:
+            continue
+        if _july_gp_accept_payload(cand, prior_tool):
+            return cand, key
+        prior_tool = _payload_tool_name(cand)
+    return None, None
+
+
+async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
+    """Resolve a July GP execute row, skipping first-step completion stubs."""
+    return await july_gp_resolve_execute(ctx, call_site)
 
 
 async def cached_complete(
@@ -395,6 +571,7 @@ async def cached_complete(
                     call_site,
                     ctx.base_step,
                 )
+            stored, hit_key = await july_gp_resolve_execute(ctx, call_site, stored, hit_key)
         except Exception as exc:  # cache read failures degrade to live
             logger.warning("fast_cache.get_error", key=key, error=str(exc))
             stored, hit_key = None, None
@@ -469,7 +646,13 @@ async def cached_complete(
             # Mode read (verify22 burned cents on cold execute/verifier/explore).
             # Emit the terminal schema payload as an explicit cold passthrough
             # replay — not soft_complete — so soft≈0 on the warm path.
-            if soft is not None and ctx.soft_complete_allowed:
+            # Known July GP execute namespaces are warm even when p:0 is absent;
+            # a first-step miss after retry is a lookup flake, not a cold stub.
+            if (
+                soft is not None
+                and ctx.soft_complete_allowed
+                and not is_july_gp_execute_site(ctx, call_site)
+            ):
                 logger.info(
                     "llm.cache.replay",
                     call_site=call_site,

@@ -73,11 +73,13 @@ from benchmarks.live_fixtures import (
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
 from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
+    canonicalize_agent_tree,
     collect_logs,
     collect_tree_messages,
     load_env_var,
     start_fly_log_collector,
     start_supabase_realtime_collector,
+    tree_child_transcript_count,
     stop_fly_log_collector,
     stop_supabase_realtime_collector,
     subscribe_supabase_realtime_agent,
@@ -9837,8 +9839,21 @@ async def run_single_task(
         if tree_agent_count and tree_agent_count > 1:
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
-                logs["tree"] = await collect_tree_messages(agent_id, tree_agents, lambda a: get_agent(base_url, a))
-                print(f"    Tree messages captured for {len(logs['tree'])} agent(s)")
+                tree = canonicalize_agent_tree(
+                    await collect_tree_messages(agent_id, tree_agents, lambda a: get_agent(base_url, a))
+                )
+                if not tree:
+                    raise RuntimeError("collect_tree_messages returned a non-agent logs.tree")
+                child_transcripts = tree_child_transcript_count(tree, agent_id)
+                if child_transcripts == 0:
+                    raise RuntimeError(
+                        "logs.tree has no child transcripts; refusing to archive empty fan-out chips"
+                    )
+                logs["tree"] = tree
+                print(
+                    f"    Tree messages captured for {len(logs['tree'])} agent(s) "
+                    f"({child_transcripts} child transcripts)"
+                )
             except Exception as tree_err:
                 print(f"    ⚠ tree-message capture failed (archive shows root only): {tree_err}")
         log_summary = []

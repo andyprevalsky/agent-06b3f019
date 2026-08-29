@@ -6080,6 +6080,8 @@ async def set_response_schema_activity(
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
             )
+            if not schema.get("fields"):
+                raise ValueError("LLM returned no response schema content")
 
             # 2. Save schema to agent record
             save_start = time.perf_counter()

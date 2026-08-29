@@ -2263,6 +2263,67 @@ def test_oai_demo_root_goal_hash_constant():
     assert normalize.OAI_DEMO_ROOT_GOAL_HASH == "4ae3193053ac1d8f"
 
 
+def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
+    """Andy-named children must reuse the July Aman cache namespace.
+
+    The display-name swap must not mint a new goalHash: that miss path
+    cold-passthroughs explore/execute into the 24s traj-end stub.
+    """
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    aman_goal = (
+        "You are analyzing ONE creator for Aman Gottumukkala, a technology founder "  # pragma: allowlist secret
+        "building a personal brand at the intersection of health, longevity, "  # pragma: allowlist secret
+        f"technology, and founder journey. Last 90 days: {window}. "  # pragma: allowlist secret
+        "Creator: Dr. Eric Topol."
+    )
+    andy_goal = aman_goal.replace("Aman Gottumukkala", "Andy Prevalsky")
+    assert "Andy Prevalsky" in andy_goal
+    assert normalize.goal_hash(andy_goal) == normalize.goal_hash(aman_goal)
+    from domains.spawn_agent.oai_demo_july import JULY_GP_GOAL_HASHES
+
+    assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
+    kayla = (
+        "You are analyzing ONE creator for Andy Prevalsky. "  # pragma: allowlist secret
+        f"Last 90 days: {window}. "  # pragma: allowlist secret
+        'Row item:\n{"creator_name": "Kayla Barnes-Lentz", "rank": 39}'
+    )
+    assert normalize.goal_hash(kayla) != JULY_GP_GOAL_HASHES["Eric Topol"]
+    other_andy = "Find the current professional profile of Andy Prevalsky, founder of Rose Labs."
+    other_aman = other_andy.replace("Andy Prevalsky", "Aman Gottumukkala")
+    assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
+
+
+def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():
+    stored = {
+        "content": "Hello Aman Gottumukkala",
+        "reasoning": "Aman's brand angle",
+        "tool_calls": [{"arguments": '{"result":"Aman Gottumukkala notes"}'}],
+    }
+    rewritten = normalize.rewrite_oai_demo_display_names(stored)
+    assert rewritten["content"] == "Hello Andy Prevalsky"
+    assert rewritten["reasoning"] == "Andy's brand angle"
+    assert "Andy Prevalsky" in rewritten["tool_calls"][0]["arguments"]
+    assert "Aman Gottumukkala" not in json.dumps(rewritten)
+
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    ctx = FastCacheContext(enabled=True, goal=f"Analyze Topol. Window {window}.")
+    token = set_context(ctx)
+    try:
+        chunks: list[Any] = []
+
+        async def collect() -> None:
+            async for chunk in rose_cache._replay(stored):
+                chunks.append(chunk)
+
+        asyncio.run(collect())
+        texts = [json.dumps(getattr(chunk, "data", {}), default=str) for chunk in chunks]
+        blob = "\n".join(texts)
+        assert "Andy Prevalsky" in blob
+        assert "Aman Gottumukkala" not in blob
+    finally:
+        reset_context(token)
+
+
 def test_position_lookup_keys_include_july_demo_aliases():
     request = {
         "pool": "rose-1-ultra",
@@ -2383,6 +2444,40 @@ def test_soft_complete_on_miss_for_explore_sites_only():
     assert soft_complete_on_miss("completion_summary") is not None
     assert soft_complete_on_miss("context_compression") is not None
     assert soft_complete_on_miss("response_schema") is None
+
+    # If the July assemble-final row is absent, dag_reasoning must
+    # traj-end rather than call live Rose ($0.63 miss + extra nested
+    # GP children on 163ad502). When p:6 exists, get-position hits it.
+    dag = soft_complete_on_miss("dag_reasoning")
+    assert dag is not None
+    assert json.loads(dag["content"])["response"]
+    assert dag["usage"]["from_fast_cache"] is True
+    assert dag["tool_calls"] == []
+
+
+def test_soft_complete_dag_reasoning_miss_does_not_call_live(mem, monkeypatch):
+    """Warm end-of-trajectory dag_reasoning miss ends via passthrough, no live Rose."""
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=6, root_goal=bench))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="dag_reasoning", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        parsed = json.loads(content)
+        assert "trajectory ended" in parsed["response"].lower()
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
 
 
 def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
@@ -2516,6 +2611,39 @@ def test_write_only_explore_continues_after_seeding_prior_step(mem, monkeypatch)
     asyncio.run(body())
 
 
+def test_coerce_activity_shaped_response_schema_payload():
+    """Activity-shaped {schema, usage} rows must replay as schema JSON, not empty content."""
+    stored = {
+        "schema": {
+            "fields": [
+                {"name": "positioning_statement", "type": "str", "required": True},
+                {
+                    "name": "top_creators_analysis",
+                    "type": "list[object]",
+                    "properties": [{"name": "creator_name", "type": "str"}],
+                },
+            ]
+        },
+        "usage": {"prompt_tokens": 1885, "completion_tokens": 301},
+    }
+    coerced = rose_cache.coerce_cached_llm_payload(stored)
+    parsed = json.loads(coerced["content"])
+    assert parsed["title"]
+    assert [field["name"] for field in parsed["fields"]] == [
+        "positioning_statement",
+        "top_creators_analysis",
+    ]
+    assert parsed["fields"][1]["properties"][0]["name"] == "creator_name"
+
+    async def body():
+        chunks = await _drain(rose_cache.replay(stored))
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        replayed = json.loads(content)
+        assert replayed["fields"][0]["name"] == "positioning_statement"
+
+    asyncio.run(body())
+
+
 def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
     """summarize_web_fetch miss returns page text passthrough, not soft stub."""
 
@@ -2555,5 +2683,231 @@ def test_swf_miss_non_bench_goes_live(mem):
             )
         )
         assert rose.calls == 1
+
+    asyncio.run(body())
+
+
+def _july_gp_child_goal() -> str:
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    return (
+        "You are analyzing ONE creator for Andy Prevalsky, a technology founder "  # pragma: allowlist secret
+        "building a personal brand at the intersection of health, longevity, "  # pragma: allowlist secret
+        f"technology, and founder journey. Last 90 days: {window}. "  # pragma: allowlist secret
+        "Creator: Dr. Eric Topol."
+    )
+
+
+def _july_web_search_payload() -> Dict[str, Any]:
+    return {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-ultra",
+        "request_id": "july-gp-p1",
+        "content": "",
+        "content_chunks": [],
+        "reasoning": "",
+        "tool_calls": [
+            {
+                "id": "call_july_gp_web_search",
+                "name": "web_search",
+                "arguments": '{"query":"Eric Topol recent content"}',
+            }
+        ],
+        "codex_reasoning_items": [],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "from_fast_cache": True},
+    }
+
+
+def test_july_gp_execute_first_step_retries_and_replays_web_search(mem, monkeypatch):
+    """First execute_loop get-position flake on a July GP child must retry, not stub.
+
+    Prod 66732839 stubbed Sahil/Lenny/Gabrielle/DeLauer/Greg because p:1 flaked
+    and trajectory_prior_exists(step=1) is false (no p:0). Replay must be
+    web_search, never attempt_completion.
+    """
+    calls = {"n": 0}
+
+    async def flake_then_hit(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        calls["n"] += 1
+        if calls["n"] == 1 or step is None or int(step) < 1:
+            return None, None
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", flake_then_hit)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        assert calls["n"] >= 2
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    asyncio.run(body())
+
+
+def test_july_gp_execute_skips_first_step_attempt_completion(mem, monkeypatch):
+    """Sahil-style July p:1 attempt_completion must not 9-msg stub the child.
+
+    Fall forward to the next research tool (web_search) instead.
+    """
+    stub = {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-ultra",
+        "request_id": "july-gp-p1-stub",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_early_complete",
+                "name": "attempt_completion",
+                "arguments": '{"result":"Fast Mode cache trajectory ended for this agent."}',
+            }
+        ],
+        "usage": {"from_fast_cache": True},
+    }
+
+    async def p1_stub_p2_search(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        if step is None or int(step) <= 1:
+            return stub, "fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:1:c:x"
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}:c:x"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", p1_stub_p2_search)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    asyncio.run(body())
+
+
+def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
+    """Known July GP execute namespaces must not emit the 9-msg traj-end stub.
+
+    After retries still miss, fall through to live rather than attempt_completion.
+    Other FM trees (Tokyo / non-July execute) keep existing cold-passthrough.
+    """
+
+    async def july_goes_live():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 1
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    async def tokyo_still_stubs():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal="Find the current professional profile of Andy Prevalsky, founder of Rose Labs.",
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion"
+
+    asyncio.run(july_goes_live())
+    asyncio.run(tokyo_still_stubs())
+
+
+def test_rose_client_july_gp_execute_retry_replays_not_stub(mem, monkeypatch):
+    """Production RoseClient.complete notch must retry July GP p:1 and replay tools."""
+    from providers.rose.client import RoseClient
+
+    calls = {"n": 0}
+
+    async def flake_then_hit(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        calls["n"] += 1
+        if calls["n"] == 1 or step is None or int(step) < 1:
+            return None, None
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}"
+
+    monkeypatch.setattr("providers.fast_cache.client.cache_get_position_fallback", flake_then_hit)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", flake_then_hit)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for c in _full_stream():
+                yield c
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="execute_loop",
+                agent_id="agent-july-gp",
+                dump_context=False,
+            )
+        )
+        assert live_calls["n"] == 0
+        assert calls["n"] >= 2
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
 
     asyncio.run(body())

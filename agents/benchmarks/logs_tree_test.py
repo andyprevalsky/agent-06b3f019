@@ -4,11 +4,11 @@ not just the root."""
 
 import asyncio
 
-from benchmarks.logs import collect_tree_messages
+from benchmarks.logs import canonicalize_agent_tree, collect_tree_messages, tree_child_transcript_count
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _fake_get_agent(store):
@@ -66,12 +66,87 @@ def test_collect_tree_messages_tolerates_fetch_failure():
     assert tree["x"]["status"] == "ACTIVE"
 
 
+def test_canonicalize_agent_tree_drops_tool_usage_rollup():
+    tree = canonicalize_agent_tree(
+        {
+            "root_agent_id": "root-1",
+            "agent_count": 54,
+            "tool_usage_count": 9,
+            "llm_call_count": 4,
+            "tokens_in": 1,
+            "child-a": {
+                "parent_agent_id": "root-1",
+                "goal": "research A",
+                "status": "COMPLETED",
+                "messages": [{"role": "ASSISTANT", "message": "A done"}],
+            },
+        }
+    )
+    assert set(tree.keys()) == {"child-a"}
+    assert tree_child_transcript_count(tree, "root-1") == 1
+    assert canonicalize_agent_tree({"agent_count": 2, "tool_usage_count": 1}) == {}
+    assert tree_child_transcript_count({"agent_count": 2}, "root-1") == 0
+
+
 def test_collect_tree_messages_status_falls_back_to_agent_obj():
     # When the tree row omits status, fall back to the fetched agent's status.
     tree_agents = [{"agent_id": "x", "parent_agent_id": None, "goal": "g"}]
     store = {"x": {"agent": {"status": "FINISHED"}, "messages": []}}
     tree = _run(collect_tree_messages("x", tree_agents, _fake_get_agent(store)))
     assert tree["x"]["status"] == "FINISHED"
+
+
+def test_collect_tree_messages_copies_response_schema_and_structured_output():
+    tree_agents = [{"agent_id": "root-1", "parent_agent_id": None, "goal": "g", "status": "COMPLETED"}]
+    store = {
+        "root-1": {
+            "agent": {
+                "status": "COMPLETED",
+                "response_schema": {"fields": [{"name": "positioning_statement", "type": "str"}]},
+                "structured_output": {"positioning_statement": "Engineer approach"},
+                "tokens_out": 29515,
+                "context_size": 185193,
+            },
+            "messages": [{"role": "ASSISTANT", "text": "done", "timestamp": "t0"}],
+        }
+    }
+    tree = _run(collect_tree_messages("root-1", tree_agents, _fake_get_agent(store)))
+    assert tree["root-1"]["response_schema"]["fields"][0]["name"] == "positioning_statement"
+    assert tree["root-1"]["structured_output"]["positioning_statement"] == "Engineer approach"
+    assert tree["root-1"]["tokens_out"] == 29515
+    assert tree["root-1"]["context_size"] == 185193
+
+
+def test_collect_tree_messages_derives_schema_from_completion_outputs():
+    tree_agents = [{"agent_id": "root-1", "parent_agent_id": None, "goal": "g", "status": "COMPLETED"}]
+    store = {
+        "root-1": {
+            "agent": {"status": "COMPLETED"},
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": "",
+                    "timestamp": "t1",
+                    "metadata": {
+                        "isFinalSummary": True,
+                        "completionSummary": {
+                            "summary": "done",
+                            "outputs": [
+                                {
+                                    "key": "positioning_statement",
+                                    "label": "Positioning Statement",
+                                    "value": "Engineer approach",
+                                }
+                            ],
+                        },
+                    },
+                }
+            ],
+        }
+    }
+    tree = _run(collect_tree_messages("root-1", tree_agents, _fake_get_agent(store)))
+    assert tree["root-1"]["response_schema"]["fields"][0]["name"] == "positioning_statement"
+    assert tree["root-1"]["structured_output"]["positioning_statement"] == "Engineer approach"
 
 
 if __name__ == "__main__":
