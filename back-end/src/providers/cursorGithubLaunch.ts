@@ -91,10 +91,15 @@ async function githubFetch(
   throw new Error(`GitHub API ${lastStatus}: ${lastBody || 'request failed'}`);
 }
 
-/** Issue body that triggers Cursor and carries the RCA prompt. */
-export function buildGithubCursorIssueBody(promptText: string): string {
+/** Issue/comment body that triggers Cursor and carries the RCA prompt. */
+export function buildGithubCursorIssueBody(name: string, promptText: string): string {
+  // Lead with the chat title — Cursor derives the agent display name from the
+  // first substantive line of the @cursor comment (verified 2026-08-29: without
+  // this, scm agents were auto-named from the description and dropped "Bug |").
   return [
     '@cursor',
+    '',
+    name.trim(),
     '',
     promptText.trim(),
     '',
@@ -170,7 +175,7 @@ export async function launchCursorCloudAgentViaGithub(
     `/repos/${owner}/${repo}/issues/${issue.number}/comments`,
     {
       method: 'POST',
-      body: JSON.stringify({ body: buildGithubCursorIssueBody(input.promptText) }),
+      body: JSON.stringify({ body: buildGithubCursorIssueBody(input.name, input.promptText) }),
     },
     fetchImpl
   );

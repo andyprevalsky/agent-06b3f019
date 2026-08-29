@@ -70,8 +70,13 @@ function testParseCursorAgentFromComment(): void {
 }
 
 function testGithubIssueBodyMentionsCursor(): void {
-  const body = buildGithubCursorIssueBody('/rca the following bug for agent with ID: [a1]\n\nx');
+  const body = buildGithubCursorIssueBody(
+    'Bug | checkout hung',
+    '/rca the following bug for agent with ID: [a1]\n\nx'
+  );
   assert.ok(body.startsWith('@cursor\n'));
+  assert.ok(body.includes('Bug | checkout hung'));
+  assert.ok(body.indexOf('Bug | checkout hung') < body.indexOf('/rca'));
   assert.ok(body.includes('[a1]'));
 }
 
