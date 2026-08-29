@@ -329,6 +329,49 @@ async function testRuns_derivesResponseSchemaFromFinalOutputs(): Promise<void> {
   }
 }
 
+async function testRuns_hubSubAgentAncestorsAndParentGoal(): Promise<void> {
+  const runId = `${RUN_ID}-ancestors`;
+  const bundle = syntheticBenchmarkBundle(runId, ROOT_AGENT, SUB_AGENT);
+  try {
+    const upload = await request(`${BASE_URL}/api/benchmarks/runs`, {
+      method: 'POST',
+      headers: internalHeaders,
+      body: JSON.stringify(bundle),
+    });
+    assertStatus(upload.status, 201, upload.data);
+
+    const detail = await request(`${BASE_URL}/api/agents/${SUB_AGENT}`, {
+      headers: internalHeaders,
+    });
+    assertStatus(detail.status, 200, detail.data);
+    const agent = (
+      detail.data as { agent: { parent_agent_id: string; parent_goal: string | null } }
+    ).agent;
+    assert(agent.parent_agent_id === ROOT_AGENT, 'archive detail parent_agent_id missing');
+    assert(
+      agent.parent_goal === 'hub blackbox goal',
+      `archive detail parent_goal ${String(agent.parent_goal)} != hub blackbox goal`
+    );
+
+    const ancestors = await request(`${BASE_URL}/api/agents/${SUB_AGENT}/ancestors`, {
+      headers: internalHeaders,
+    });
+    assertStatus(ancestors.status, 200, ancestors.data);
+    const chain = (ancestors.data as { ancestors: Array<{ id: string; goal: string }> }).ancestors;
+    assert(chain.length === 1, `expected 1 hub ancestor, got ${chain.length}`);
+    assert(chain[0].id === ROOT_AGENT, `hub ancestor id ${chain[0]?.id} != ${ROOT_AGENT}`);
+    assert(
+      chain[0].goal === 'hub blackbox goal',
+      `hub ancestor goal ${chain[0]?.goal} != hub blackbox goal`
+    );
+  } finally {
+    await request(`${BASE_URL}/api/benchmarks/runs/${runId}`, {
+      method: 'DELETE',
+      headers: internalHeaders,
+    });
+  }
+}
+
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
   try {
@@ -361,6 +404,10 @@ async function runAll(): Promise<void> {
     [
       'runs: derives response_schema from final outputs',
       testRuns_derivesResponseSchemaFromFinalOutputs,
+    ],
+    [
+      'runs: hub sub-agent ancestors + parent_goal on archive detail',
+      testRuns_hubSubAgentAncestorsAndParentGoal,
     ],
   ];
 

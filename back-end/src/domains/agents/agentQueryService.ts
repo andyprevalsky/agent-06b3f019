@@ -3,7 +3,11 @@
  */
 
 import * as repo from './repo';
-import { findAgentAcrossRuns, findTreeAcrossRuns } from '../../providers/benchmarkHubStore';
+import {
+  findAgentAcrossRuns,
+  findAncestorsAcrossRuns,
+  findTreeAcrossRuns,
+} from '../../providers/benchmarkHubStore';
 
 // ---------------------------------------------------------------------------
 // List agents
@@ -256,9 +260,21 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
 // Get ancestors
 // ---------------------------------------------------------------------------
 
-/** Get ancestor chain for breadcrumb navigation. */
-export async function getAncestors(agentId: string) {
-  return { ancestors: await repo.findAncestors(agentId) };
+/**
+ * Live Agent CTE first. Hub-archived GPs (torn-down bench stacks) have no
+ * live parent row, so the CTE is empty — fall back to the hub tree walk.
+ *
+ *   GET /?agent-id=GP
+ *     → GET /api/agents/:id          (hub archive) parent_agent_id + parent_goal
+ *     → GET /api/agents/:id/ancestors (live empty → hub tree, root first)
+ *     → breadcrumb click → GET /api/agents/:parentId
+ */
+export async function getAncestors(agentId: string, allowBenchmarkArchive = false) {
+  const live = await repo.findAncestors(agentId);
+  if (live.length > 0 || !allowBenchmarkArchive) {
+    return { ancestors: live };
+  }
+  return { ancestors: await findAncestorsAcrossRuns(agentId) };
 }
 
 // ---------------------------------------------------------------------------

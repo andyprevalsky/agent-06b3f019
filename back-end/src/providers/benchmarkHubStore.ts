@@ -393,7 +393,13 @@ function agentSummaryFromTask(
   agentId: string,
   messages: Array<Record<string, unknown>>,
   runTimestamp: string,
-  parent: { parentAgentId: string | null; busId: string; goal: string; status: string },
+  parent: {
+    parentAgentId: string | null;
+    parentGoal: string | null;
+    busId: string;
+    goal: string;
+    status: string;
+  },
   node: Record<string, unknown> = {}
 ): Record<string, unknown> {
   const tokensIn = Number(node.tokens_in ?? task.tokens_in ?? 0);
@@ -402,7 +408,7 @@ function agentSummaryFromTask(
   return {
     agent_id: agentId,
     parent_agent_id: parent.parentAgentId,
-    parent_goal: null,
+    parent_goal: parent.parentGoal,
     busId: parent.busId,
     goal: parent.goal,
     model: 'benchmark-hub',
@@ -542,6 +548,7 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
 
     const target = nodeInfo(agentId);
     const messages = target.raw.map((m, i) => frontendMessage(agentId, i, m));
+    const parentGoal = target.parent === null ? null : nodeInfo(target.parent).goal;
     const agent = agentSummaryFromTask(
       task,
       agentId,
@@ -549,6 +556,7 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
       runTimestamp,
       {
         parentAgentId: target.parent,
+        parentGoal,
         busId: rootId,
         goal: target.goal,
         status: target.status,
@@ -643,6 +651,40 @@ export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView
     }
   }
   return null;
+}
+
+/** Walk parent_agent_id from a hub tree node up to the root (root first). */
+export function ancestorsFromHubTree(
+  agentId: string,
+  tree: Array<Record<string, unknown>>
+): Array<{ id: string; goal: string }> {
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const node of tree) {
+    const id = typeof node.agent_id === 'string' ? node.agent_id : '';
+    if (id.length > 0) byId.set(id, node);
+  }
+  const chain: Array<{ id: string; goal: string }> = [];
+  const seen = new Set<string>();
+  let current = byId.get(agentId);
+  while (current) {
+    const parentId = current.parent_agent_id;
+    if (typeof parentId !== 'string' || parentId.length === 0 || seen.has(parentId)) break;
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    const goal = typeof parent.goal === 'string' && parent.goal.length > 0 ? parent.goal : 'parent';
+    chain.push({ id: parentId, goal });
+    current = parent;
+  }
+  return chain.reverse();
+}
+
+export async function findAncestorsAcrossRuns(
+  agentId: string
+): Promise<Array<{ id: string; goal: string }>> {
+  const view = await findAgentAcrossRuns(agentId);
+  if (view === null) return [];
+  return ancestorsFromHubTree(agentId, view.tree);
 }
 
 /**

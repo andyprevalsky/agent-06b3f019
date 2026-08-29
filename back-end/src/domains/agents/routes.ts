@@ -115,7 +115,7 @@ router.get(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      res.json(await queryService.getAncestors(req.params.id));
+      res.json(await queryService.getAncestors(req.params.id, canReadBenchmarkArchive(req)));
     } catch (error) {
       handleRouteError(res, error, 'Failed to fetch ancestors', { agent_id: req.params.id });
     }
