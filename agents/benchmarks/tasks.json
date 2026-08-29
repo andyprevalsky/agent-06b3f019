@@ -44,7 +44,7 @@
         "FAST_MODE_CACHE_DATABASE_URL"
       ],
       "live_targets": [],
-      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content/T9 are static_check. T1/T3–T6 and T7-schema are single_turn_llm_judge. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content/T9 are static_check. T1/T3–T6 and T7-schema are single_turn_llm_judge. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
     },
     "evaluators": [
       {
@@ -76,12 +76,20 @@
         "id": "t7-completion-summary-length",
         "method": "static_check",
         "criteria": [
-          "T7: Task Complete / completion summary is long enough to be a real deliverable, not a stub"
+          "T7: Task Complete cards show the real summary and schema outputs, not a Fast Mode ablation stub"
         ],
         "checks": [
           {
             "type": "completion_summary_length",
-            "min_chars": 200
+            "min_chars": 200,
+            "forbidden_substrings": [
+              "Fast Mode cache trajectory ended",
+              "Fast Mode soft-complet",
+              "cached trajectory",
+              "based on prior tool evidence"
+            ],
+            "require_outputs": true,
+            "include_first_level_gps": true
           }
         ]
       },
@@ -180,7 +188,7 @@
         "criteria": [
           "T7: Schema / Task Complete / assemble-final outputs are populated"
         ],
-        "judge_prompt": "Score 1.0 only if the root has a populated response_schema (fields list) and/or structured_output / Task Complete outputs / DAG assemble deliverable. Fast Mode may land the July assemble in DAG reasoning ASSISTANT chips while completionSummary.outputs is empty — that still counts when response_schema.fields or assemble_deliverable evidence is populated. FAIL when schema, structured outputs, and assemble deliverable are all empty. Use typed agent/tree fields and assemble_deliverable, not assistant claims."
+        "judge_prompt": "Score 1.0 only if Task Complete cards display the real summary and schema outputs like prod. FAIL if any completionSummary.summary contains Fast Mode / cache trajectory ended / prior tool evidence ablation. FAIL if root or first-level GP completion cards have empty outputs when response_schema.fields is populated. response_schema.fields plus assemble_deliverable is not enough when the visible Task Complete card is ablated. Use typed agent/tree completion_summary / completion_outputs_count / completion_is_ablated fields, not assistant claims."
       },
       {
         "id": "t9-no-leftover-children",

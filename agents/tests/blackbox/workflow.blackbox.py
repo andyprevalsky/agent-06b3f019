@@ -5140,6 +5140,82 @@ async def test_workflow_mark_complete_survives_summary_generation_failure():
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary():
+    """Fast Mode traj-end completion_summary must not land on the Task Complete card."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-huberman-summary"
+    wf.user_id = "u-mc"
+    wf.goal = "You are analyzing ONE creator for Andy Prevalsky."
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name", "type": "str"},
+            {"name": "posting_cadence_by_platform", "type": "str"},
+        ]
+    }
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": (
+            "Fast Mode cache trajectory ended; the task completed successfully "
+            "based on prior tool evidence."
+        ),
+        "tool_counts": {"spawn_agent": 3},
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "from_fast_cache": True,
+            "actual_model": "fast-mode-soft-complete",
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[
+                {"role": "USER", "text": "analyze Huberman"},
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "# creator_name\nAndrew Huberman\n\n"
+                        "# posting_cadence_by_platform\n"
+                        "YouTube ~2 episodes/week; Instagram ~3 posts/week.\n\n"
+                        "Huberman Lab 90-day cadence and hook formulas for Andy."
+                    ),
+                    "metadata": {
+                        "toolName": "attempt_completion",
+                        "toolStatus": "FINISHED",
+                    },
+                },
+            ],
+            structured_response=None,
+        )
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        card = (finished or {}).get("completionSummary") or {}
+        summary = str(card.get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "cached trajectory" not in summary.lower()
+        assert "Huberman" in summary
+        outputs = card.get("outputs") or []
+        assert outputs, "Task Complete must show schema outputs"
+        keys = {item.get("key") for item in outputs}
+        assert "creator_name" in keys
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_check_cost_limit_skipped_after_finished():
     """The cost limit authorizes future spend; it must not re-open a finished agent.
 
@@ -6706,6 +6782,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_mark_complete_survives_summary_failure",
         test_workflow_mark_complete_survives_summary_generation_failure,
+    )
+    await r.record_async(
+        "wf_mark_complete_replaces_fast_mode_ablation",
+        test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary,
     )
     await r.record_async(
         "wf_mark_complete_summary_cost_no_cost_limit",

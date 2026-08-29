@@ -4143,6 +4143,138 @@ def test_completion_summary_and_sms_static_checks_are_fail_closed():
     assert passed is False
     assert "exactly 1" in reason
 
+
+def test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs():
+    """T7 must fail when Task Complete is a Fast Mode stub or has no schema outputs."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {
+                "type": "completion_summary_length",
+                "min_chars": 80,
+                "forbidden_substrings": ["Fast Mode cache trajectory ended", "cached trajectory"],
+                "require_outputs": True,
+                "include_first_level_gps": True,
+            }
+        ]
+    }
+    real_summary = (
+        "Analyzed Huberman Lab cadence, hooks, and 90-day coverage gaps "
+        "for Andy Prevalsky's health and founder brand."
+    )
+    outputs = [{"key": "creator_name", "label": "Creator Name", "value": "Andrew Huberman"}]
+    root_id = "root-oai"
+    gp_id = "gp-huberman"
+    good = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": real_summary, "outputs": outputs},
+                },
+            }
+        ],
+        "_benchmark": {
+            "tree": {
+                root_id: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators",
+                    "messages": [],
+                },
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {"summary": real_summary, "outputs": outputs},
+                            },
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, good) == (True, "All declared static checks passed")
+
+    ablated = {
+        **good,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": (
+                            "Fast Mode cache trajectory ended; the task completed "
+                            "successfully based on prior tool evidence."
+                        ),
+                        "outputs": outputs,
+                    },
+                },
+            }
+        ],
+    }
+    passed, reason = _run_declared_static_check(evaluator, ablated)
+    assert passed is False
+    assert "ablat" in reason.lower() or "fast mode" in reason.lower() or "forbidden" in reason.lower()
+
+    empty_outputs = {
+        **good,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": real_summary, "outputs": []},
+                },
+            }
+        ],
+    }
+    passed, reason = _run_declared_static_check(evaluator, empty_outputs)
+    assert passed is False
+    assert "output" in reason.lower()
+
+    gp_ablated = {
+        **good,
+        "_benchmark": {
+            "tree": {
+                root_id: good["_benchmark"]["tree"][root_id],
+                gp_id: {
+                    **good["_benchmark"]["tree"][gp_id],
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Fast Mode cache trajectory ended; the task completed successfully.",
+                                    "outputs": outputs,
+                                },
+                            },
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, gp_ablated)
+    assert passed is False
+    assert "gp-" in reason.lower() or "first-level" in reason.lower() or "ablat" in reason.lower() or "fast mode" in reason.lower()
+
+
 def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
     """The incident benchmark owns deterministic summary and SMS regressions."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -16124,6 +16256,10 @@ async def run_all_tests():
     r.record(
         "declared_static_completion_summary_and_sms",
         test_completion_summary_and_sms_static_checks_are_fail_closed,
+    )
+    r.record(
+        "declared_static_completion_summary_rejects_fast_mode_ablation",
+        test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs,
     )
     r.record(
         "blue_bottle_completion_delivery_contract",

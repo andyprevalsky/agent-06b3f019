@@ -8277,6 +8277,8 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
         or explore_spawn_count >= 1
         or sum(tool_counts.values()) >= 1
     )
+    completion_cards = _completion_cards_from_messages(messages)
+    completion_card = completion_cards[-1] if completion_cards else {}
     return {
         "agent_id": agent_id,
         "parent_agent_id": node.get("parent_agent_id"),
@@ -8295,6 +8297,14 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
         "mentions_aman": mentions_aman,
         "response_schema": node.get("response_schema") or node.get("output_schema"),
         "structured_output_present": bool(node.get("structured_output") or node.get("structured_response")),
+        "completion_summary": str((completion_card or {}).get("summary") or "")[:240],
+        "completion_outputs_count": len((completion_card or {}).get("outputs") or [])
+        if isinstance((completion_card or {}).get("outputs"), list)
+        else 0,
+        "completion_is_ablated": any(
+            marker.lower() in str((completion_card or {}).get("summary") or "").lower()
+            for marker in _JUDGE_STUB_MARKERS
+        ),
     }
 
 
@@ -8402,6 +8412,9 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
                 "explore_spawn_count": int(node.get("explore_spawn_count") or 0),
                 "has_real_transcript": _has_real_gp_transcript(node),
                 "has_traj_end_stub": bool(node.get("has_traj_end_stub")),
+                "completion_summary": str(node.get("completion_summary") or "")[:240],
+                "completion_outputs_count": int(node.get("completion_outputs_count") or 0),
+                "completion_is_ablated": bool(node.get("completion_is_ablated")),
             }
         )
     return gps
@@ -9169,8 +9182,12 @@ def _root_deliverable_blob(data: dict) -> str:
 
 def _final_completion_summaries(data: dict) -> list[dict]:
     """Return durable root completion cards in transcript order."""
+    return _completion_cards_from_messages(data.get("messages", []) or [])
+
+
+def _completion_cards_from_messages(messages: list) -> list[dict]:
     summaries: list[dict] = []
-    for message in data.get("messages", []) or []:
+    for message in messages or []:
         if not isinstance(message, dict):
             continue
         metadata = message.get("metadata")
@@ -9184,6 +9201,41 @@ def _final_completion_summaries(data: dict) -> list[dict]:
         ):
             summaries.append(completion)
     return summaries
+
+
+def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: bool) -> list[dict]:
+    """Root Task Complete cards, plus first-level GP cards when requested."""
+    cards: list[dict] = []
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "root")
+    for summary in _final_completion_summaries(data):
+        cards.append(
+            {
+                "agent_id": root_id,
+                "summary": summary.get("summary"),
+                "outputs": summary.get("outputs"),
+            }
+        )
+    if not include_first_level_gps:
+        return cards
+    compact = _compact_benchmark_state_for_judge(data)
+    tree = _judge_source_tree(data)
+    for gp in compact.get("first_level_gps") or []:
+        agent_id = str(gp.get("agent_id") or "")
+        node = tree.get(agent_id) if isinstance(tree.get(agent_id), dict) else {}
+        gp_cards = _completion_cards_from_messages(node.get("messages") or [])
+        if not gp_cards:
+            cards.append({"agent_id": agent_id or "gp", "summary": "", "outputs": []})
+            continue
+        last = gp_cards[-1]
+        cards.append(
+            {
+                "agent_id": agent_id or "gp",
+                "summary": last.get("summary"),
+                "outputs": last.get("outputs"),
+            }
+        )
+    return cards
 
 
 async def _hydrate_completion_sms_events(data: dict) -> None:
@@ -9336,16 +9388,32 @@ def _run_declared_static_check(
                 return False, f"Observed tool failure: {failures[0]}"
             continue
         if check_type == "completion_summary_length":
-            summaries = _final_completion_summaries(data)
-            if not summaries:
+            cards = _completion_cards_for_static_check(
+                data,
+                include_first_level_gps=bool(check.get("include_first_level_gps")),
+            )
+            if not cards:
                 return False, "No finished completion summary was observed"
             minimum = int(check.get("min_chars", 1))
-            summary = str(summaries[-1].get("summary") or "").strip()
-            if len(summary) < minimum:
-                return (
-                    False,
-                    f"Completion summary was {len(summary)} characters; expected at least {minimum}",
-                )
+            forbidden = [str(item) for item in (check.get("forbidden_substrings") or []) if str(item).strip()]
+            require_outputs = bool(check.get("require_outputs"))
+            for card in cards:
+                summary = str(card.get("summary") or "").strip()
+                label = str(card.get("agent_id") or "root")[:8]
+                if any(marker.lower() in summary.lower() for marker in forbidden):
+                    return (
+                        False,
+                        f"T7: {label} Task Complete summary is Fast Mode-ablated",
+                    )
+                if len(summary) < minimum:
+                    return (
+                        False,
+                        f"T7: {label} completion summary was {len(summary)} characters; "
+                        f"expected at least {minimum}",
+                    )
+                outputs = card.get("outputs")
+                if require_outputs and (not isinstance(outputs, list) or not outputs):
+                    return False, f"T7: {label} Task Complete has no schema outputs"
             continue
         if check_type == "completion_sms_event":
             events = benchmark_state.get("completion_sms_events") or []

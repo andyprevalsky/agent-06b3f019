@@ -210,6 +210,60 @@ def structured_response_from_schema_headings(text: str, schema: Optional[Dict[st
     return out
 
 
+_FAST_MODE_SUMMARY_MARKERS = (
+    "fast mode cache trajectory ended",
+    "fast mode soft-complet",
+    "cached trajectory",
+    "from_fast_cache",
+    "based on prior tool evidence",
+)
+
+
+def is_ablated_completion_summary(text: Any) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    lowered = raw.lower()
+    return any(marker in lowered for marker in _FAST_MODE_SUMMARY_MARKERS)
+
+
+def last_real_completion_text(
+    context: List[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Best user-facing Task Complete body from already-replayed trajectory evidence."""
+    for message in reversed(context or []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        status = str(metadata.get("toolStatus") or "").upper()
+        text = str(message.get("text") or message.get("message") or "").strip()
+        if not text:
+            text = str(metadata.get("result") or metadata.get("content") or "").strip()
+        if is_ablated_completion_summary(text):
+            continue
+        if tool_name in {"attempt_completion", "attempt_completion_with_result"} and status in {
+            "FINISHED",
+            "",
+        }:
+            return text
+        if (
+            str(message.get("role") or "").upper() == "ASSISTANT"
+            and len(text) >= 200
+            and (
+                metadata.get("plannedToolName") == "reasoning"
+                or metadata.get("dagTaskIndex") is not None
+            )
+        ):
+            return text
+    if isinstance(structured_response, dict):
+        for value in structured_response.values():
+            if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value):
+                return value.strip()
+    return ""
+
+
 def coalesce_structured_response(
     context: List[Dict[str, Any]],
     schema: Optional[Dict[str, Any]],
@@ -4435,6 +4489,11 @@ class AgentWorkflow:
                 workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
 
             summary = summary_result.get("summary", "")
+            structured_response = self._coalesce_structured_response(context, structured_response)
+            if is_ablated_completion_summary(summary):
+                recovered = last_real_completion_text(context, structured_response)
+                if recovered:
+                    summary = recovered
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":
                 # the root completion SMS is gated on `summary` being truthy,
@@ -4477,7 +4536,6 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
-            structured_response = self._coalesce_structured_response(context, structured_response)
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",
