@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 /**
- * Unit tests for Report Bug title/prompt helpers + Cursor launch payload shaping.
+ * Unit tests for Report Bug title/prompt helpers + Cursor launch payload shaping
+ * + GitHub @cursor (source:scm) launch parsing.
  */
 
 import assert from 'node:assert/strict';
@@ -11,6 +12,11 @@ import {
   buildBugReportTitle,
 } from '../../domains/agents/reportBugService';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
+import {
+  buildGithubCursorIssueBody,
+  launchCursorCloudAgentViaGithub,
+  parseCursorAgentFromComment,
+} from '../../providers/cursorGithubLaunch';
 
 function testTitleShortDescription(): void {
   assert.equal(buildBugReportTitle('Agent stalled on tool call'), 'Agent stalled on tool call');
@@ -37,14 +43,36 @@ function testPromptIncludesRcaAndAgentId(): void {
   );
 }
 
-function testSmsIncludesDeepLink(): void {
+function testSmsScmMentionsInbox(): void {
   const sms = buildBugReportSms(
     'Bug | stalled checkout',
-    'https://cursor.com/agents/bc-abc'
+    'https://cursor.com/agents/bc-abc',
+    'scm'
   );
   assert.ok(sms.includes('Bug | stalled checkout'));
   assert.ok(sms.includes('https://cursor.com/agents/bc-abc'));
-  assert.ok(sms.toLowerCase().includes('rose inbox'));
+  assert.ok(sms.includes('source:scm'));
+}
+
+function testSmsApiMentionsFilter(): void {
+  const sms = buildBugReportSms('Bug | x', 'https://cursor.com/agents/bc-x', 'api');
+  assert.ok(sms.toLowerCase().includes('filter'));
+}
+
+function testParseCursorAgentFromComment(): void {
+  const body =
+    'Taking a look!\n\n<a href="https://cursor.com/agents/bc-575ea507-6198-4d37-9590-f99917ac7ca7?cursor_ref=pr_footer">Open</a>';
+  const parsed = parseCursorAgentFromComment(body);
+  assert.deepEqual(parsed, {
+    id: 'bc-575ea507-6198-4d37-9590-f99917ac7ca7',
+    url: 'https://cursor.com/agents/bc-575ea507-6198-4d37-9590-f99917ac7ca7',
+  });
+}
+
+function testGithubIssueBodyMentionsCursor(): void {
+  const body = buildGithubCursorIssueBody('/rca the following bug for agent with ID: [a1]\n\nx');
+  assert.ok(body.startsWith('@cursor\n'));
+  assert.ok(body.includes('[a1]'));
 }
 
 async function testLaunchPostsNamedEnvPayload(): Promise<void> {
@@ -92,14 +120,75 @@ async function testLaunchPostsNamedEnvPayload(): Promise<void> {
   }
 }
 
+async function testGithubLaunchPollsForBotComment(): Promise<void> {
+  const previousToken = process.env.GITHUB_DISPATCH_TOKEN;
+  process.env.GITHUB_DISPATCH_TOKEN = 'ghp_test_token';
+  delete process.env.GITHUB_TOKEN;
+
+  let calls = 0;
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls += 1;
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    if (method === 'POST' && url.endsWith('/issues')) {
+      return new Response(
+        JSON.stringify({ number: 42, html_url: 'https://github.com/Rose-Ai-Labs/rose/issues/42' }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (method === 'GET' && url.includes('/issues/42/comments')) {
+      return new Response(
+        JSON.stringify([
+          {
+            user: { login: 'cursor[bot]' },
+            body: 'Taking a look!\nhttps://cursor.com/agents/bc-scm-probe-1234',
+          },
+        ]),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (method === 'PATCH' && url.includes('/issues/42')) {
+      return new Response(JSON.stringify({ state: 'closed' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response('unexpected', { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    const result = await launchCursorCloudAgentViaGithub({
+      name: 'Bug | scm probe',
+      promptText: '/rca the following bug for agent with ID: [a1]\n\nprobe',
+      repo: 'Rose-Ai-Labs/rose',
+      fetchImpl,
+      pollIntervalMs: 1,
+      timeoutMs: 5_000,
+      sleep: async () => undefined,
+    });
+    assert.equal(result.id, 'bc-scm-probe-1234');
+    assert.equal(result.url, 'https://cursor.com/agents/bc-scm-probe-1234');
+    assert.equal(result.launch_source, 'scm');
+    assert.equal(result.github_issue_number, 42);
+    assert.ok(calls >= 3, `expected create+poll+close, got ${calls}`);
+  } finally {
+    if (previousToken === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
+    else process.env.GITHUB_DISPATCH_TOKEN = previousToken;
+  }
+}
+
 async function main(): Promise<void> {
   const cases: Array<[string, () => void | Promise<void>]> = [
     ['title keeps short descriptions', testTitleShortDescription],
     ['title truncates long descriptions at a word', testTitleTruncatesAtWord],
     ['chat name uses Bug | prefix', testChatNamePrefix],
     ['prompt embeds /rca + agent id', testPromptIncludesRcaAndAgentId],
-    ['SMS includes Cursor deep link + inbox note', testSmsIncludesDeepLink],
+    ['SMS scm mentions mobile inbox', testSmsScmMentionsInbox],
+    ['SMS api mentions Source filter', testSmsApiMentionsFilter],
+    ['parse cursor agent url from bot comment', testParseCursorAgentFromComment],
+    ['github issue body starts with @cursor', testGithubIssueBodyMentionsCursor],
     ['launch posts named-env Cursor payload', testLaunchPostsNamedEnvPayload],
+    ['github launch polls for cursor[bot] link', testGithubLaunchPollsForBotComment],
   ];
 
   let failed = 0;

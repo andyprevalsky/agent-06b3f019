@@ -206,6 +206,7 @@ export interface ReportAgentBugResult {
   name: string;
   url: string;
   cursor_agent_id: string;
+  launch_source?: 'scm' | 'api';
 }
 
 /**

@@ -4,9 +4,9 @@
  * Admin-only: expands into a description textarea that launches a Cursor
  * cloud agent named "Bug | <short title>" to /rca the Rose agent.
  *
- * After launch, keep Open + Copy on screen — API agents (source:api) often
- * do not show in the native mobile rose inbox, and post-await window.open
- * is blocked on iOS.
+ * After launch, keep Open + Copy on screen. Agents are launched via GitHub
+ * @cursor (source:scm) so they appear in the Cursor mobile inbox; post-await
+ * window.open is still blocked on iOS so the buttons stay required.
  */
 
 import { Bug, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
@@ -30,8 +30,8 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
           </div>
           <p className="text-sm text-foreground/90 break-words">{flow.launched.name}</p>
           <p className="text-xs text-muted-foreground">
-            API agents do not appear in the phone&apos;s main rose inbox. Tap Open (or the SMS we
-            texted you) to manage this chat.
+            Launched via GitHub so it should appear in the Cursor mobile inbox. Tap Open if you
+            don&apos;t see it yet.
           </p>
           <a
             href={flow.launched.url}
@@ -105,8 +105,8 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
               className="resize-y min-h-[100px]"
             />
             <p className="text-xs text-muted-foreground">
-              Launches a Cursor cloud agent to /rca this agent. You&apos;ll get an Open link here
-              and an SMS — API chats skip the phone&apos;s rose inbox list.
+              Launches a Cursor cloud agent via GitHub (@cursor) so it shows in your phone&apos;s
+              Cursor inbox. You&apos;ll also get an Open link and SMS.
             </p>
           </div>
           <div className="flex gap-2">

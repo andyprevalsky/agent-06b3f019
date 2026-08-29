@@ -37,3 +37,18 @@ export function getCursorCloudEnvName(): string {
   const name = process.env.CURSOR_CLOUD_ENV_NAME;
   return name !== undefined && name !== '' ? name : 'rose-ai-labs/rose';
 }
+
+/**
+ * GitHub repo used to @cursor-launch Report Bug agents (source:scm).
+ * API launches are source:api and hidden by default in the mobile inbox.
+ */
+export function getCursorBugReportGithubRepo(): string {
+  const repo = process.env.CURSOR_BUG_REPORT_GITHUB_REPO ?? process.env.GITHUB_DISPATCH_REPO;
+  return repo !== undefined && repo !== '' ? repo : 'Rose-Ai-Labs/rose';
+}
+
+/** True when at least one GitHub token can create issues for scm launch. */
+export function hasGithubIssueLaunchToken(): boolean {
+  const tokens = [process.env.GITHUB_TOKEN ?? '', process.env.GITHUB_DISPATCH_TOKEN ?? ''];
+  return tokens.some((t) => t.trim() !== '');
+}

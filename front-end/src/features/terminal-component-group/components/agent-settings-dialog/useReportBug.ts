@@ -124,7 +124,7 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
       setDescription('');
       toast({
         title: 'Bug report launched',
-        description: 'Open the Cursor link below (API agents skip the phone rose inbox).',
+        description: 'Check your Cursor mobile inbox (or Open below).',
       });
       // Best-effort: may be blocked after await on mobile Safari.
       if (typeof window !== 'undefined') {

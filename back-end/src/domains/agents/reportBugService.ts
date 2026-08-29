@@ -4,15 +4,28 @@
  * Flow:
  *   Agent Settings → Report Bug → description
  *     → POST /api/agents/:id/report-bug
- *     → Cursor Cloud Agents API
+ *     → GitHub issue + @cursor (source:scm)  ← preferred for mobile inbox
+ *     → fallback: Cursor Cloud Agents API (source:api, hidden by default)
  *     → dashboard chat named "Bug | <short title>"
+ *
+ * Why GitHub: Cursor staff document that source:api is hidden by default under
+ * Filter → Source on web/Agents Window/mobile. GitHub mentions stamp source:scm
+ * and show in the interactive inbox.
+ * https://forum.cursor.com/t/cursor-cloud-agent-filtering-is-very-confusing/167363
  */
 
 import { isAdminUser } from '../../utils/adminAccess';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
+import { launchCursorCloudAgentViaGithub } from '../../providers/cursorGithubLaunch';
 import { createLogger } from '../../providers/logger';
 import { getUserPhone, sendSms } from '../../providers/smsQueue';
-import { getCursorApiBaseUrl, getCursorApiKey, getCursorCloudEnvName } from './config';
+import {
+  getCursorApiBaseUrl,
+  getCursorApiKey,
+  getCursorBugReportGithubRepo,
+  getCursorCloudEnvName,
+  hasGithubIssueLaunchToken,
+} from './config';
 import * as repo from './repo';
 
 const log = createLogger('ReportBug');
@@ -43,7 +56,7 @@ export class ReportBugValidationError extends Error {
 
 export class ReportBugNotConfiguredError extends Error {
   constructor() {
-    super('Cursor API is not configured');
+    super('Cursor / GitHub launch is not configured');
     this.name = 'ReportBugNotConfiguredError';
   }
 }
@@ -53,6 +66,7 @@ export interface ReportBugResult {
   name: string;
   url: string;
   cursor_agent_id: string;
+  launch_source: 'scm' | 'api';
 }
 
 /** Collapse whitespace and truncate at a word boundary for the chat title. */
@@ -74,9 +88,12 @@ export function buildBugReportChatName(description: string): string {
   return `Bug | ${buildBugReportTitle(description)}`;
 }
 
-/** SMS body with the Cursor deep link — API agents skip the native mobile inbox. */
-export function buildBugReportSms(name: string, url: string): string {
-  return `Rose bug report launched: ${name}\n\nOpen in Cursor (API chats skip the phone rose inbox):\n${url}`;
+/** SMS body with the Cursor deep link. */
+export function buildBugReportSms(name: string, url: string, launchSource: 'scm' | 'api'): string {
+  if (launchSource === 'scm') {
+    return `Rose bug report launched: ${name}\n\nShould appear in your Cursor mobile inbox (source:scm):\n${url}`;
+  }
+  return `Rose bug report launched: ${name}\n\nOpen in Cursor (API source — enable Filter → Source → API if missing):\n${url}`;
 }
 
 /**
@@ -87,7 +104,8 @@ export async function notifyBugReportSms(
   userId: string,
   name: string,
   url: string,
-  roseAgentId: string
+  roseAgentId: string,
+  launchSource: 'scm' | 'api'
 ): Promise<boolean> {
   try {
     const phone = await getUserPhone(userId);
@@ -95,15 +113,15 @@ export async function notifyBugReportSms(
       log.warn('No phone for bug-report SMS', { userId });
       return false;
     }
-    const result = await sendSms(phone, buildBugReportSms(name, url), {
+    const result = await sendSms(phone, buildBugReportSms(name, url, launchSource), {
       archiveRootAgentId: roseAgentId,
-      archiveContext: { kind: 'report_bug_cursor_link' },
+      archiveContext: { kind: 'report_bug_cursor_link', launch_source: launchSource },
     });
     if (!result.success) {
       log.warn('Bug-report SMS failed', { error: result.error, userId });
       return false;
     }
-    log.info('Bug-report SMS sent', { userId, messageSid: result.messageSid });
+    log.info('Bug-report SMS sent', { userId, messageSid: result.messageSid, launchSource });
     return true;
   } catch (error) {
     log.warn('Bug-report SMS threw', {
@@ -141,8 +159,9 @@ export async function reportAgentBug(
     throw new ReportBugNotFoundError();
   }
 
+  const canScm = hasGithubIssueLaunchToken();
   const apiKey = getCursorApiKey();
-  if (apiKey === undefined) {
+  if (!canScm && apiKey === undefined) {
     throw new ReportBugNotConfiguredError();
   }
 
@@ -153,20 +172,75 @@ export async function reportAgentBug(
     rose_agent_id: agentId,
     chat_name: name,
     description_chars: trimmed.length,
+    prefer_scm: canScm,
   });
 
-  const launched = await launchCursorCloudAgent({
-    apiKey,
-    baseUrl: getCursorApiBaseUrl(),
-    name,
-    promptText,
-    envName: getCursorCloudEnvName(),
-  });
+  let launched: {
+    id: string;
+    name: string;
+    url: string;
+    launch_source: 'scm' | 'api';
+  };
 
-  // Phone manageability: native Cursor iOS inbox often omits source:api agents.
-  // SMS the deep link so the admin can open the chat without finding it in-list.
+  if (canScm) {
+    try {
+      const scm = await launchCursorCloudAgentViaGithub({
+        name,
+        promptText,
+        repo: getCursorBugReportGithubRepo(),
+      });
+      launched = {
+        id: scm.id,
+        name: scm.name,
+        url: scm.url,
+        launch_source: 'scm',
+      };
+    } catch (error) {
+      log.warn('GitHub @cursor launch failed; falling back to Cursor API', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (apiKey === undefined) throw error;
+      const api = await launchCursorCloudAgent({
+        apiKey,
+        baseUrl: getCursorApiBaseUrl(),
+        name,
+        promptText,
+        envName: getCursorCloudEnvName(),
+      });
+      launched = {
+        id: api.id,
+        name: api.name,
+        url: api.url,
+        launch_source: 'api',
+      };
+    }
+  } else {
+    if (apiKey === undefined) {
+      throw new ReportBugNotConfiguredError();
+    }
+    const api = await launchCursorCloudAgent({
+      apiKey,
+      baseUrl: getCursorApiBaseUrl(),
+      name,
+      promptText,
+      envName: getCursorCloudEnvName(),
+    });
+    launched = {
+      id: api.id,
+      name: api.name,
+      url: api.url,
+      launch_source: 'api',
+    };
+  }
+
   if (userId !== undefined) {
-    await notifyBugReportSms(userId, launched.name, launched.url, agentId);
+    await notifyBugReportSms(
+      userId,
+      launched.name,
+      launched.url,
+      agentId,
+      launched.launch_source
+    );
   }
 
   return {
@@ -174,5 +248,6 @@ export async function reportAgentBug(
     name: launched.name,
     url: launched.url,
     cursor_agent_id: launched.id,
+    launch_source: launched.launch_source,
   };
 }
