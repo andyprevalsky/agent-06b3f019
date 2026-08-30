@@ -1,23 +1,49 @@
 #!/usr/bin/env python3
-"""Replay a saved LLM dump against the current local Rose client."""
+"""Replay a saved LLM dump against the current local Rose client.
+
+Supports:
+  - browser_use dumps (legacy)
+  - planner dumps (structured PlannerResponse)
+  - generic dumps with messages + optional response_format / response_model
+
+Modes:
+  --mode exact           Send dump messages as stored (baseline for /update-prompts)
+  --mode rebuild-system  For planner dumps: rebuild system prompt via
+                         build_planner_system_prompt() while keeping non-system
+                         messages from the dump (post-edit check)
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS_DIR = REPO_ROOT / "agents"
 sys.path.insert(0, str(AGENTS_DIR))
 
+# Load agents/.env so Rose / compute tokens resolve in cloud VMs.
+_env_path = AGENTS_DIR / ".env"
+if _env_path.is_file():
+    for line in _env_path.read_text().splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
 from providers.rose import RoseClient, gpt_auth_from_token  # noqa: E402
 from providers.rose.browser_use import build_browser_use_messages, normalize_browser_use_tool_call  # noqa: E402
-from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY  # noqa: E402
+from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY, build_planner_system_prompt  # noqa: E402
+from utils.tool_schemas import PlannerResponse  # noqa: E402
 
 
 LEGACY_BROWSER_DYNAMIC_RULE_RE = re.compile(
@@ -114,7 +140,7 @@ def browser_replay_inputs(data: dict[str, Any]) -> dict[str, Any]:
     action_history = extra.get("action_history") if isinstance(extra.get("action_history"), list) else []
     available_actions = config.get("available_actions") if isinstance(config.get("available_actions"), list) else []
     if not available_actions:
-        available_actions = (extra.get("available_actions") if isinstance(extra.get("available_actions"), list) else [])
+        available_actions = extra.get("available_actions") if isinstance(extra.get("available_actions"), list) else []
     return {
         "task": task,
         "dynamic_system_context": dynamic_system_context,
@@ -135,6 +161,140 @@ def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
         str(token_used.get("accessToken")),
         account_id=token_used.get("accountId"),
     )
+
+
+def _pool_from_dump(data: dict[str, Any]) -> str:
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    pool = config.get("pool") or data.get("model") or "rose-1-ultra"
+    # Dumps sometimes store "rose-labs/rose-1-ultra" — Rose pools are bare names.
+    if isinstance(pool, str) and "/" in pool:
+        pool = pool.rsplit("/", 1)[-1]
+    return str(pool)
+
+
+def _planner_tool_counts(plan: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for task in plan.get("tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        name = str(task.get("tool_name") or "?")
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _extract_tools_description_from_dump(messages: list[dict[str, Any]]) -> str:
+    marker = "## Available Execute Tool Schemas"
+    for message in messages:
+        if message.get("role") != "system":
+            continue
+        content = str(message.get("content") or "")
+        if marker in content:
+            # Keep the schemas block (after the intro paragraph if present).
+            return content[content.index(marker) :]
+    from domains.set_plan.service import get_planner_tools_description
+
+    return get_planner_tools_description()
+
+
+def _extract_user_context_from_dump(messages: list[dict[str, Any]]) -> str:
+    for message in messages:
+        if message.get("role") != "system":
+            continue
+        content = str(message.get("content") or "")
+        if content.lstrip().startswith("# User Context"):
+            body = content
+            if body.startswith("# User Context"):
+                body = body[len("# User Context") :].lstrip("\n")
+            return body.strip()
+    return ""
+
+
+def _extract_response_schema_from_dump(messages: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    for message in messages:
+        if message.get("role") != "system":
+            continue
+        content = str(message.get("content") or "")
+        if "# Required Output Schema" not in content and "response_schema" not in content.lower():
+            continue
+        # Best-effort: leave None and let builder omit unless a JSON block is obvious.
+    return None
+
+
+def rebuild_planner_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    tools_description = _extract_tools_description_from_dump(messages)
+    user_context = _extract_user_context_from_dump(messages)
+    response_schema = _extract_response_schema_from_dump(messages)
+    system_prompt = build_planner_system_prompt(tools_description, user_context, response_schema=response_schema)
+    # Match runtime: one system message (builder already inserts boundary markers).
+    non_system = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+    return [{"role": "system", "content": system_prompt}] + non_system
+
+
+def summarize_planner_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    tasks = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
+    compact = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        compact.append(
+            {
+                "task_idx": task.get("task_idx"),
+                "tool_name": task.get("tool_name"),
+                "depends_on": task.get("depends_on"),
+                "goal": (str(task.get("goal") or "")[:160] + ("…" if len(str(task.get("goal") or "")) > 160 else "")),
+            }
+        )
+    return {
+        "title": plan.get("title"),
+        "join": plan.get("join"),
+        "task_count": len(compact),
+        "tool_counts": _planner_tool_counts(plan),
+        "tasks": compact,
+    }
+
+
+def evaluate_assertions(plan: dict[str, Any], assertions: list[str]) -> list[dict[str, Any]]:
+    """Evaluate simple planner assertions used by /update-prompts.
+
+    Supported forms:
+      min_tool:<name>:<n>
+      max_tool:<name>:<n>
+      exact_tool:<name>:<n>
+      require_tool:<name>
+      forbid_tool:<name>
+    """
+    counts = _planner_tool_counts(plan)
+    results = []
+    for raw in assertions:
+        parts = raw.split(":")
+        kind = parts[0]
+        ok = False
+        detail = ""
+        if kind == "require_tool" and len(parts) == 2:
+            name = parts[1]
+            ok = counts.get(name, 0) >= 1
+            detail = f"{name}={counts.get(name, 0)}"
+        elif kind == "forbid_tool" and len(parts) == 2:
+            name = parts[1]
+            ok = counts.get(name, 0) == 0
+            detail = f"{name}={counts.get(name, 0)}"
+        elif kind in {"min_tool", "max_tool", "exact_tool"} and len(parts) == 3:
+            name, n_s = parts[1], parts[2]
+            n = int(n_s)
+            got = counts.get(name, 0)
+            if kind == "min_tool":
+                ok = got >= n
+            elif kind == "max_tool":
+                ok = got <= n
+            else:
+                ok = got == n
+            detail = f"{name}={got} (want {kind} {n})"
+        else:
+            detail = f"unknown assertion {raw!r}"
+            ok = False
+        results.append({"assertion": raw, "pass": ok, "detail": detail})
+    return results
 
 
 async def replay_browser_use(data: dict[str, Any], *, exact: bool) -> dict[str, Any]:
@@ -186,19 +346,119 @@ async def replay_browser_use(data: dict[str, Any], *, exact: bool) -> dict[str, 
     return result
 
 
+async def replay_planner(data: dict[str, Any], *, mode: str, assertions: list[str]) -> dict[str, Any]:
+    if mode == "rebuild-system":
+        messages = rebuild_planner_messages(data)
+        replication_mode = "rebuild-system"
+    else:
+        messages = data.get("messages") or []
+        replication_mode = "exact"
+
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    requested = config.get("requested_params") if isinstance(config.get("requested_params"), dict) else {}
+    client = RoseClient()
+    response = await client.collect(
+        pool=_pool_from_dump(data),  # type: ignore[arg-type]
+        messages=messages,
+        response_model=PlannerResponse,
+        temperature=requested.get("temperature", 0.2),
+        max_tokens=requested.get("max_tokens", 16384),
+        agent_id=data.get("agent_id"),
+        call_site=f"replicate_{data.get('call_site') or 'planner'}",
+        dump_extra={
+            "replicated_from": data.get("call_site"),
+            "replication_mode": replication_mode,
+        },
+        skip_cache_write=True,
+    )
+
+    plan: dict[str, Any]
+    try:
+        plan = json.loads(response.content or "{}")
+    except json.JSONDecodeError:
+        plan = {"raw_content": response.content}
+
+    summary = summarize_planner_plan(plan) if "tasks" in plan else {"parse_error": True, "raw": plan}
+    assertion_results = evaluate_assertions(plan, assertions) if "tasks" in plan else []
+    all_pass = all(r["pass"] for r in assertion_results) if assertion_results else None
+
+    return {
+        "call_site": data.get("call_site"),
+        "replication_mode": replication_mode,
+        "actual_model": response.actual_model,
+        "usage": response.usage,
+        "timing": response.timing,
+        "request_id": response.request_id,
+        "plan_summary": summary,
+        "assertions": assertion_results,
+        "assertions_pass": all_pass,
+        "plan": plan,
+    }
+
+
+async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
+    messages = data.get("messages") or []
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    requested = config.get("requested_params") if isinstance(config.get("requested_params"), dict) else {}
+    client = RoseClient()
+    kwargs = {
+        "pool": _pool_from_dump(data),
+        "messages": messages,
+        "temperature": requested.get("temperature"),
+        "max_tokens": requested.get("max_tokens") or 8192,
+        "agent_id": data.get("agent_id"),
+        "call_site": f"replicate_{data.get('call_site') or 'generic'}",
+        "skip_cache_write": True,
+    }
+    if config.get("response_model") == "PlannerResponse" or data.get("call_site") == "planner":
+        kwargs["response_model"] = PlannerResponse
+    response = await client.collect(**kwargs)  # type: ignore[arg-type]
+    return {
+        "call_site": data.get("call_site"),
+        "actual_model": response.actual_model,
+        "content": response.content,
+        "tool_calls": response.tool_calls,
+        "usage": response.usage,
+        "timing": response.timing,
+        "request_id": response.request_id,
+    }
+
+
 async def main_async(args: argparse.Namespace) -> int:
     data = load_dump(args.dump)
     remove_goal_text(data, args.remove_goal_text or [])
     call_site = str(data.get("call_site") or "")
-    if "browser_use" not in call_site:
-        raise SystemExit("Only browser_use dumps are supported right now.")
-    result = await replay_browser_use(data, exact=args.exact)
+
+    if "browser_use" in call_site:
+        result = await replay_browser_use(data, exact=args.mode == "exact")
+    elif call_site == "planner" or (isinstance(data.get("config"), dict) and data["config"].get("response_model") == "PlannerResponse"):
+        result = await replay_planner(data, mode=args.mode, assertions=args.assert_ or [])
+    else:
+        if args.mode == "rebuild-system":
+            raise SystemExit("--mode rebuild-system is only supported for planner dumps")
+        result = await replay_generic(data)
+
     printable = json.loads(json.dumps(result, default=str))
     usage = printable.get("usage") if isinstance(printable, dict) else None
     token_used = usage.get("compute_token_used") if isinstance(usage, dict) else None
     if isinstance(token_used, dict) and token_used.get("accessToken"):
         token_used["accessToken"] = "[redacted]"
+
+    # Human-friendly planner summary first when present.
+    if isinstance(printable, dict) and printable.get("plan_summary"):
+        print("=== PLAN SUMMARY ===")
+        print(json.dumps(printable["plan_summary"], indent=2))
+        if printable.get("assertions") is not None:
+            print("=== ASSERTIONS ===")
+            for row in printable["assertions"]:
+                mark = "PASS" if row.get("pass") else "FAIL"
+                print(f"  {mark}: {row.get('assertion')} ({row.get('detail')})")
+            print(f"assertions_pass={printable.get('assertions_pass')}")
+        print("=== RAW ===")
     print(json.dumps(printable, indent=2, default=str))
+
+    if isinstance(printable, dict) and printable.get("assertions") and printable.get("assertions_pass") is False:
+        return 2
     return 0
 
 
@@ -206,9 +466,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay a saved LLM dump.")
     parser.add_argument("dump", type=Path)
     parser.add_argument(
+        "--mode",
+        choices=("exact", "rebuild-system"),
+        default="exact",
+        help="exact = dump messages as stored; rebuild-system = current planner prompt builder (planner only)",
+    )
+    parser.add_argument(
         "--exact",
         action="store_true",
-        help="Send the provider messages exactly as stored instead of rebuilding browser-use messages with current code.",
+        help="Deprecated alias for --mode exact (browser_use).",
+    )
+    parser.add_argument(
+        "--assert",
+        dest="assert_",
+        action="append",
+        default=[],
+        help="Planner assertion (repeatable): min_tool:NAME:N | max_tool:NAME:N | exact_tool:NAME:N | require_tool:NAME | forbid_tool:NAME",
     )
     parser.add_argument(
         "--remove-goal-text",
@@ -216,7 +489,10 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Remove this exact text from the # Current Goal user message before replaying. Can be repeated.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.exact:
+        args.mode = "exact"
+    return args
 
 
 def main() -> int:
