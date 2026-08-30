@@ -421,12 +421,17 @@ def _browser_use_dump_config(
     """Capture behavior-shaping values for a browser-use LLM call dump."""
     actual_model = response.actual_model or ""
     effective_model = _dump_display_model(actual_model)
+    # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh).
+    # Record the effective wire value so dumps match what was actually sent.
+    from providers.rose.claude_auth import DEFAULT_REASONING_EFFORT as _EFFORT_DEFAULT
+
+    effective_effort = _EFFORT_DEFAULT
     if mode == "gpt":
         effective_params = {
             "model": pool_spec.gpt_auth_model,
             "temperature": None,
             "max_tokens": None,
-            "reasoning_effort": None,
+            "reasoning_effort": effective_effort,
             "store": False,
             "parallel_tool_calls": True,
             "include": ["reasoning.encrypted_content"],
@@ -436,7 +441,7 @@ def _browser_use_dump_config(
             "model": pool_spec.claude_auth_model,
             "temperature": 1,
             "max_tokens": max_tokens or 8192,
-            "reasoning_effort": None,
+            "reasoning_effort": effective_effort,
             "thinking": None,
             "stream": True,
         }
@@ -445,7 +450,7 @@ def _browser_use_dump_config(
             "model": effective_model,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "reasoning_effort": None,
+            "reasoning_effort": effective_effort,
             "stream": True,
         }
     return {
@@ -459,7 +464,7 @@ def _browser_use_dump_config(
         "requested_params": {
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "reasoning_effort": None,
+            "reasoning_effort": None,  # caller omitted; builders fill default
             "thinking": None,
             "seed": None,
             "response_format": None,

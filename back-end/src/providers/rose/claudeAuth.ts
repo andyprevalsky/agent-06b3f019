@@ -79,6 +79,8 @@ interface BuildBodyOptions {
 const DEFAULT_REASONING_EFFORT = 'xhigh';
 
 function normalizeReasoningEffort(effort?: string): string {
+  // Anthropic does not accept the literal "minimal" (OpenAI chat sentinel).
+  if (effort === 'minimal') return 'low';
   if (effort === 'max') return 'xhigh';
   return effort ?? DEFAULT_REASONING_EFFORT;
 }

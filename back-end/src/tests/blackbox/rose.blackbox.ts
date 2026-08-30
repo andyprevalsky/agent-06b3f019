@@ -1912,10 +1912,13 @@ async function testClient_dumpContextWritesRequestAndOutput() {
 // ==================== WATERFALL TESTS ====================
 
 async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
-  // Provider effort shapes (must always be present; default xhigh):
-  //   Anthropic → output_config.effort
-  //   OpenAI/Codex Responses → reasoning.effort
-  //   OpenRouter → reasoning.effort
+  // EVERY Rose LLM body builder must stamp effort on the wire:
+  //   Anthropic → output_config.effort (default xhigh)
+  //   OpenAI/Codex Responses → reasoning.effort (default xhigh)
+  //   OpenRouter waterfall → reasoning.effort (default xhigh)
+  //   OpenRouter fast chat → reasoning.effort (default xhigh)
+  //   Cerebras direct → reasoning_effort: 'none' (latency path; still set)
+  //   OpenRouter→Cerebras → reasoning.effort: 'none' (latency path; still set)
   const messages: CompletionMessage[] = [
     { role: 'system', content: 'be helpful' },
     { role: 'user', content: 'hi' },
@@ -1945,6 +1948,17 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     (anthropicMed.output_config as Record<string, unknown>).effort,
     'medium',
     'anthropic explicit medium'
+  );
+
+  const anthropicMinimal = buildAnthropicBody({
+    poolSpec: pool,
+    messages,
+    effort: 'minimal',
+  });
+  assertEqual(
+    (anthropicMinimal.output_config as Record<string, unknown>).effort,
+    'low',
+    'anthropic minimal → low'
   );
 
   const codex = buildCodexResponsesBody({
@@ -1979,6 +1993,17 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     'openrouter explicit high'
   );
 
+  const openrouterMinimal = buildOpenRouterBody({
+    model: 'openai/gpt-5.6-sol',
+    messages,
+    reasoningEffort: 'minimal',
+  });
+  assertEqual(
+    (openrouterMinimal.reasoning as Record<string, unknown>).effort,
+    'low',
+    'openrouter minimal → low'
+  );
+
   // Every waterfall step for the browser-use pool must stamp effort.
   const browserPool = getPool('rose-1-browser-use');
   for (const model of browserPool.waterfall) {
@@ -1991,6 +2016,46 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
       (stepBody.reasoning as Record<string, unknown>).effort,
       'xhigh',
       `effort=xhigh on ${model}`
+    );
+  }
+
+  // Latency chat routes: effort still ALWAYS set (none for Cerebras; xhigh default for OR-fast).
+  const cerebras = buildCerebrasChatBody({ messages });
+  assertEqual(cerebras.reasoning_effort, 'none', 'cerebras stamps reasoning_effort=none');
+
+  const orCerebras = buildOpenRouterCerebrasBody({ messages });
+  assertEqual(
+    (orCerebras.reasoning as Record<string, unknown>).effort,
+    'none',
+    'openrouter→cerebras stamps reasoning.effort=none'
+  );
+
+  const orFast = buildOpenRouterFastChatBody({ messages });
+  assertEqual(
+    (orFast.reasoning as Record<string, unknown>).effort,
+    'xhigh',
+    'openrouter-fast default effort=xhigh'
+  );
+  const orFastMinimal = buildOpenRouterFastChatBody({ messages, effort: 'minimal' });
+  assertEqual(
+    (orFastMinimal.reasoning as Record<string, unknown>).effort,
+    'low',
+    'openrouter-fast minimal → low'
+  );
+
+  // Inventory: every exported body builder in this suite stamps a non-empty effort.
+  const inventory: Array<{ label: string; effort: unknown }> = [
+    { label: 'anthropic', effort: (anthropic.output_config as Record<string, unknown>).effort },
+    { label: 'codex', effort: (codex.reasoning as Record<string, unknown>).effort },
+    { label: 'openrouter', effort: (openrouter.reasoning as Record<string, unknown>).effort },
+    { label: 'cerebras', effort: cerebras.reasoning_effort },
+    { label: 'openrouter-cerebras', effort: (orCerebras.reasoning as Record<string, unknown>).effort },
+    { label: 'openrouter-fast', effort: (orFast.reasoning as Record<string, unknown>).effort },
+  ];
+  for (const { label, effort } of inventory) {
+    assert(
+      typeof effort === 'string' && effort.length > 0,
+      `${label} must stamp non-empty effort (got ${JSON.stringify(effort)})`
     );
   }
 }

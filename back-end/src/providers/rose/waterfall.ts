@@ -56,12 +56,15 @@ export function buildOpenRouterBody(opts: {
     stream: true,
     stream_options: { include_usage: true },
     // Always stamp reasoning.effort (default xhigh) so every waterfall step
-    // body is well-formed. OpenRouter accepts max/xhigh/high/medium/low/minimal/none.
+    // body is well-formed. OpenRouter accepts max/xhigh/high/medium/low/none.
+    // Map our "minimal" sentinel → "low" (matches gpt_auth / PY waterfall).
     reasoning: {
       effort:
         opts.reasoningEffort === 'max'
           ? 'xhigh'
-          : (opts.reasoningEffort ?? 'xhigh'),
+          : opts.reasoningEffort === 'minimal'
+            ? 'low'
+            : (opts.reasoningEffort ?? 'xhigh'),
     },
   };
   if (opts.responseFormat) body.response_format = opts.responseFormat;

@@ -3076,9 +3076,9 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
     """Every Rose provider body must carry effort; default is xhigh.
 
     Provider shapes:
-      - Anthropic claudeAuth → output_config.effort
-      - OpenAI/Codex Responses → reasoning.effort
-      - OpenRouter waterfall → reasoning.effort
+      - Anthropic claudeAuth → output_config.effort (default xhigh)
+      - OpenAI/Codex Responses → reasoning.effort (default xhigh)
+      - OpenRouter waterfall → reasoning.effort (default xhigh)
     """
     from providers.rose.claude_auth import DEFAULT_REASONING_EFFORT as CLAUDE_DEFAULT
     from providers.rose.gpt_auth import DEFAULT_REASONING_EFFORT as GPT_DEFAULT
@@ -3124,6 +3124,17 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
     )
     assert anthropic_med["output_config"]["effort"] == "medium"
 
+    anthropic_minimal = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        effort="minimal",
+    )
+    assert anthropic_minimal["output_config"]["effort"] == "low"
+
     codex = build_codex_responses_body(
         pool_spec=pool,
         messages=msgs,
@@ -3164,6 +3175,19 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
     )
     assert openrouter_high["reasoning"]["effort"] == "high"
 
+    openrouter_minimal = build_openrouter_body(
+        model="openai/gpt-5.6-sol",
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        effort="minimal",
+    )
+    assert openrouter_minimal["reasoning"]["effort"] == "low"
+
     # Every model in the browser-use pool must produce a well-formed body when
     # the waterfall walks it — effort present on each step.
     browser_pool = get_pool("rose-1-browser-use")
@@ -3181,6 +3205,70 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
         assert "reasoning" in step_body, f"missing reasoning on {model}"
         assert step_body["reasoning"].get("effort") == "xhigh", f"bad effort on {model}"
 
+    # Browser-use dump must record effective effort (xhigh), not None.
+    from providers.rose.client import _browser_use_dump_config
+    from providers.rose.types import RoseResponse
+
+    fake_resp = RoseResponse(
+        content="",
+        tool_calls=[],
+        reasoning="",
+        actual_model="openai/gpt-5.6-sol",
+        pool_name="rose-1-browser-use",
+        request_id="dump-effort",
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    )
+    dump = _browser_use_dump_config(
+        pool_spec=browser_pool,
+        response=fake_resp,
+        mode="waterfall",
+        max_tokens=16000,
+        temperature=1.0,
+        include_screenshot=False,
+        call_site="browser_use_step_4",
+        deadline_s=60.0,
+        claude_auth=None,
+        gpt_auth=None,
+        available_actions=["click"],
+        tools=[],
+        tool_choice="auto",
+    )
+    assert dump["reasoning_effort"] == "xhigh"
+    assert dump["effective_params"]["reasoning_effort"] == "xhigh"
+    assert dump["requested_params"]["reasoning_effort"] is None
+
+    # Inventory: every agents-side body builder stamps non-empty effort.
+    inventory = {
+        "anthropic": anthropic["output_config"]["effort"],
+        "codex": codex["reasoning"]["effort"],
+        "openrouter": openrouter["reasoning"]["effort"],
+    }
+    for label, effort in inventory.items():
+        assert isinstance(effort, str) and effort, f"{label} missing effort: {effort!r}"
+
+
+def test_all_rose_llm_call_sites_rely_on_builder_effort_default():
+    """Structural: every agents RoseClient call path either passes effort or
+    omits it (builder fills xhigh). No call site may pass effort='' / falsy
+    sentinel that would skip stamping.
+    """
+    import ast
+    from pathlib import Path
+
+    agents_root = Path(__file__).resolve().parents[2]
+    # helpers/llm.py is the choke point for agent LLM calls.
+    llm_py = (agents_root / "helpers" / "llm.py").read_text()
+    tree = ast.parse(llm_py)
+    # Collect keyword names used in call_llm / collect / complete invocations
+    # that set effort= — ensure none pass empty string.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "effort" and isinstance(kw.value, ast.Constant):
+                assert kw.value.value not in ("", None), (
+                    f"helpers/llm.py must not pass empty effort at line {node.lineno}"
+                )
 
 async def test_waterfall_falls_through_then_succeeds():
     """First model returns 500 → second model streams clean response."""
@@ -6154,6 +6242,10 @@ async def run_all_tests():
     r.record(
         "waterfall_body_builders_always_stamp_effort_xhigh",
         test_waterfall_body_builders_always_stamp_effort_xhigh_by_default,
+    )
+    r.record(
+        "all_rose_llm_call_sites_rely_on_builder_effort_default",
+        test_all_rose_llm_call_sites_rely_on_builder_effort_default,
     )
     r.record(
         "openrouter_body_no_tools_flattens_tool_history",

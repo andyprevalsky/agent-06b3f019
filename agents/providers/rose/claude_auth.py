@@ -234,9 +234,13 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     the highest reliably-streaming level — mirror gpt_auth which also routes
     our "max" sentinel to "xhigh" as the de-facto top tier.
 
+    "minimal" is an OpenAI chat sentinel; Anthropic rejects it — map to "low".
+
     Default is xhigh for every call so request bodies are always well-formed
     (effort present) unless a caller explicitly passes a different level.
     """
+    if effort == "minimal":
+        return "low"
     if effort == "max":
         return "xhigh"
     return effort or DEFAULT_REASONING_EFFORT
