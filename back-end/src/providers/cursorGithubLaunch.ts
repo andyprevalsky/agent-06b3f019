@@ -201,9 +201,7 @@ export async function launchCursorCloudAgentViaGithub(
   }
 
   if (launched === null) {
-    throw new Error(
-      `Timed out waiting for cursor[bot] on ${issue.html_url} (source:scm launch)`
-    );
+    throw new Error(`Timed out waiting for cursor[bot] on ${issue.html_url} (source:scm launch)`);
   }
 
   // Best-effort close — clutter reduction; launch already succeeded.

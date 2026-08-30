@@ -141,15 +141,7 @@ export async function notifyBugReportSms(
   }
 }
 
-export async function reportAgentBug(
-  userId: string | undefined,
-  agentId: string,
-  description: unknown
-): Promise<ReportBugResult> {
-  if (!isAdminUser(userId)) {
-    throw new ReportBugForbiddenError();
-  }
-
+function validateBugDescription(description: unknown): string {
   if (typeof description !== 'string') {
     throw new ReportBugValidationError('Description is required');
   }
@@ -162,7 +154,55 @@ export async function reportAgentBug(
       `Description must be at most ${MAX_DESCRIPTION_CHARS} characters`
     );
   }
+  return trimmed;
+}
 
+async function launchViaApi(
+  apiKey: string,
+  name: string,
+  promptText: string
+): Promise<{ id: string; name: string; url: string; launch_source: 'api' }> {
+  const api = await launchCursorCloudAgent({
+    apiKey,
+    baseUrl: getCursorApiBaseUrl(),
+    name,
+    promptText,
+    envName: getCursorCloudEnvName(),
+  });
+  return { id: api.id, name: api.name, url: api.url, launch_source: 'api' };
+}
+
+async function launchViaScmOrApiFallback(
+  name: string,
+  promptText: string,
+  apiKey: string | undefined
+): Promise<{ id: string; name: string; url: string; launch_source: 'scm' | 'api' }> {
+  try {
+    const scm = await launchCursorCloudAgentViaGithub({
+      name,
+      promptText,
+      repo: getCursorBugReportGithubRepo(),
+    });
+    return { id: scm.id, name: scm.name, url: scm.url, launch_source: 'scm' };
+  } catch (error) {
+    log.warn('GitHub @cursor launch failed; falling back to Cursor API', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (apiKey === undefined) throw error;
+    return launchViaApi(apiKey, name, promptText);
+  }
+}
+
+export async function reportAgentBug(
+  userId: string | undefined,
+  agentId: string,
+  description: unknown
+): Promise<ReportBugResult> {
+  if (!isAdminUser(userId)) {
+    throw new ReportBugForbiddenError();
+  }
+
+  const trimmed = validateBugDescription(description);
   const agent = await repo.findAgentById(agentId);
   if (agent === null) {
     throw new ReportBugNotFoundError();
@@ -187,72 +227,16 @@ export async function reportAgentBug(
     prefer_scm: canScm,
   });
 
-  let launched: {
-    id: string;
-    name: string;
-    url: string;
-    launch_source: 'scm' | 'api';
-  };
-
-  if (canScm) {
-    try {
-      const scm = await launchCursorCloudAgentViaGithub({
-        name,
-        promptText,
-        repo: getCursorBugReportGithubRepo(),
-      });
-      launched = {
-        id: scm.id,
-        name: scm.name,
-        url: scm.url,
-        launch_source: 'scm',
-      };
-    } catch (error) {
-      log.warn('GitHub @cursor launch failed; falling back to Cursor API', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      if (apiKey === undefined) throw error;
-      const api = await launchCursorCloudAgent({
-        apiKey,
-        baseUrl: getCursorApiBaseUrl(),
-        name,
-        promptText,
-        envName: getCursorCloudEnvName(),
-      });
-      launched = {
-        id: api.id,
-        name: api.name,
-        url: api.url,
-        launch_source: 'api',
-      };
-    }
-  } else {
-    if (apiKey === undefined) {
-      throw new ReportBugNotConfiguredError();
-    }
-    const api = await launchCursorCloudAgent({
-      apiKey,
-      baseUrl: getCursorApiBaseUrl(),
-      name,
-      promptText,
-      envName: getCursorCloudEnvName(),
-    });
-    launched = {
-      id: api.id,
-      name: api.name,
-      url: api.url,
-      launch_source: 'api',
-    };
-  }
+  const launched = canScm
+    ? await launchViaScmOrApiFallback(name, promptText, apiKey)
+    : apiKey === undefined
+      ? (() => {
+          throw new ReportBugNotConfiguredError();
+        })()
+      : await launchViaApi(apiKey, name, promptText);
 
   if (userId !== undefined) {
-    await notifyBugReportSms(
-      userId,
-      launched.name,
-      launched.url,
-      agentId,
-      launched.launch_source
-    );
+    await notifyBugReportSms(userId, launched.name, launched.url, agentId, launched.launch_source);
   }
 
   return {

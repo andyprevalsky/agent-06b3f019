@@ -10,7 +10,8 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 config();
 
-const BASE_URL = process.env.TEST_BASE_URL || `http://127.0.0.1:${process.env.CONDUCTOR_PORT || '3001'}`;
+const BASE_URL =
+  process.env.TEST_BASE_URL || `http://127.0.0.1:${process.env.CONDUCTOR_PORT || '3001'}`;
 const API_KEY = process.env.BACKEND_API_KEY || '';
 if (API_KEY === '') {
   throw new Error('BACKEND_API_KEY must be set (dotenv loads back-end/.env)');

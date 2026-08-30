@@ -50,11 +50,7 @@ function testPromptIncludesRcaAndAgentId(): void {
 }
 
 function testSmsScmMentionsInbox(): void {
-  const sms = buildBugReportSms(
-    'stalled checkout',
-    'https://cursor.com/agents/bc-abc',
-    'scm'
-  );
+  const sms = buildBugReportSms('stalled checkout', 'https://cursor.com/agents/bc-abc', 'scm');
   assert.ok(sms.includes('stalled checkout'));
   assert.ok(sms.includes('https://cursor.com/agents/bc-abc'));
   assert.ok(sms.includes('source:scm'));
