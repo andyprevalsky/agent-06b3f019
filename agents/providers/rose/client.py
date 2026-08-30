@@ -705,6 +705,13 @@ class RoseClient:
                             "idle_timeout_s": idle_timeout_s,
                             "provider_fast_mode": provider_fast_mode,
                         },
+                        # Effective wire effort: callers may omit; body builders
+                        # always stamp DEFAULT_REASONING_EFFORT (xhigh).
+                        "reasoning_effort": effort
+                        if effort is not None
+                        else __import__(
+                            "providers.rose.claude_auth", fromlist=["DEFAULT_REASONING_EFFORT"]
+                        ).DEFAULT_REASONING_EFFORT,
                         "response_model": response_model.__name__ if response_model else None,
                         "direct_auth": {
                             "claude": claude_auth is not None,
