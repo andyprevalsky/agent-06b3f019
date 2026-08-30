@@ -17,7 +17,7 @@ from temporalio import activity
 
 from config import load_config
 from helpers.context_compaction import project_model_context_after_compaction
-from helpers.context_scope import filter_internal_subagent_messages
+from helpers.context_scope import filter_internal_subagent_messages, select_completion_evidence_messages
 from helpers.fetch_config import _fetch_agent_data_impl
 from helpers.tracing import span
 from helpers.workflow_generation import (
@@ -876,7 +876,11 @@ async def poll_new_messages(
         # produced large transcripts (e.g. post-DAG verifier polling from epoch).
         # Completion-card recovery is the exception: Task Complete must see
         # explore web_search/web_fetch bodies tagged with subAgentId.
-        if not include_internal_subagent:
+        if include_internal_subagent:
+            # Keep only bounded FINISHED research internals so Tim Ferriss-sized
+            # explore dumps stay under Temporal's 2 MB activity payload.
+            new_messages = select_completion_evidence_messages(new_messages)
+        else:
             new_messages = filter_internal_subagent_messages(new_messages)
 
         if new_messages:

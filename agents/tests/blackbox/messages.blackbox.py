@@ -412,8 +412,14 @@ async def test_poll_messages_keeps_explore_chips_when_include_internal():
 
     fetch_body = (
         "**Params Passed:**\n\n- **url**: https://www.youtube.com/@WesRoth\n\n"
-        "**Result:**\n\nWes Roth covers AI research papers and product launches."
+        "**Result:**\n\nWes Roth covers AI research papers and product launches "
+        "in long-form YouTube explainers. Last-90-day cadence is several videos "
+        "a week with hooks that pair a lab name and a concrete capability claim. "
+        "Audience promise is stay-current AI for builders."
     )
+    thinking = {"role": "TOOL", "message": "", "timestamp": "2026-04-05T12:00:30Z",
+                "metadata": {"toolName": "spawn_agent", "title": "Explore agent thinking",
+                             "subAgentId": "explore-wes", "toolStatus": "FINISHED"}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if "/api/agents/" in str(request.url) and request.method == "GET":
@@ -428,6 +434,7 @@ async def test_poll_messages_keeps_explore_chips_when_include_internal():
                             "timestamp": "2026-04-05T12:00:00Z",
                             "metadata": {"toolName": "spawn_agent", "title": "Exploring"},
                         },
+                        thinking,
                         {
                             "role": "TOOL",
                             "message": fetch_body,
@@ -460,7 +467,8 @@ async def test_poll_messages_keeps_explore_chips_when_include_internal():
     assert (filtered[0].get("metadata") or {}).get("toolName") == "spawn_agent"
     assert all((m.get("metadata") or {}).get("subAgentId") is None for m in filtered)
     assert len(unfiltered) == 2
-    assert any((m.get("metadata") or {}).get("subAgentId") == "explore-wes" for m in unfiltered)
+    assert any((m.get("metadata") or {}).get("toolName") == "web_fetch" for m in unfiltered)
+    assert all((m.get("metadata") or {}).get("title") != "Explore agent thinking" for m in unfiltered)
     assert any(fetch_body in str(m.get("message") or "") for m in unfiltered)
 
 
