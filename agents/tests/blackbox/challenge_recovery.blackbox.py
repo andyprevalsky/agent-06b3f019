@@ -202,7 +202,15 @@ def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
     assert goal_allows_logged_out_cookie_commit(
         "Book Hotel Kabuki on hotels.com. Use guest checkout — do not sign in."
     )
+    # Exact spawn-goal shape from browser-hotel-booking 4bbd1e64: "Do not sign in"
+    # must not be treated as signed-in intent (substring "sign in" veto was the bug).
+    assert goal_allows_logged_out_cookie_commit(
+        "On hotels.com, arrange a one-night stay for one adult at Hotel Kabuki in "
+        "San Francisco. Use guest checkout only. Do not sign in and do not create "
+        "an account."
+    )
     assert goal_allows_logged_out_cookie_commit("Continue as guest without an account.")
+    assert goal_allows_logged_out_cookie_commit("Do not sign in; book as guest.")
     assert not goal_allows_logged_out_cookie_commit("Sign in with my Expedia account and book.")
     assert not goal_allows_logged_out_cookie_commit("")
     assert not goal_allows_logged_out_cookie_commit(None)

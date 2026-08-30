@@ -875,20 +875,14 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     Guest payment-boundary tasks inject site cookies that often trip challenges;
     a clean ``all_target`` strip is the intended recovery (logged-out page), not
     an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
+
+    Guest phrases are the only positive signal. Do not veto on bare ``sign in`` /
+    ``log in`` substrings — guest goals routinely say ``do not sign in``, and a
+    naive signed-in veto matches inside that negation and wrongly forces
+    preserve-auth recovery (see browser-hotel-booking 4bbd1e64).
     """
     text = (goal or "").lower()
-    signed_in_needles = (
-        "sign in",
-        "sign-in",
-        "log in",
-        "login",
-        "saved credentials",
-        "use my account",
-        "use my credentials",
-    )
-    if any(needle in text for needle in signed_in_needles):
-        return False
-    needles = (
+    guest_needles = (
         "guest checkout",
         "as guest",
         "continue as guest",
@@ -899,7 +893,7 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "do not log in",
         "don't log in",
     )
-    return any(needle in text for needle in needles)
+    return any(needle in text for needle in guest_needles)
 
 
 async def recover_from_challenge(
