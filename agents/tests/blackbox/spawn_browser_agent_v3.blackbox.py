@@ -8079,6 +8079,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
             "method": "POST",
             "status": 403,
             "resource_type": "XHR",
+            "response_ts_ms": 200,
             "body_available": False,
         }
     ]

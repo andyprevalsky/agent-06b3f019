@@ -1589,7 +1589,7 @@ async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig
     assertEqual(capturedBody.instructions, 'router-system-prompt', 'system prompt');
     assertEqual(
       JSON.stringify(capturedBody.reasoning),
-      JSON.stringify({ effort: 'medium', summary: 'auto' }),
+      JSON.stringify({ effort: 'xhigh', summary: 'auto' }),
       'reasoning config'
     );
     const text = capturedBody.text as { format?: { name?: string; strict?: boolean } };

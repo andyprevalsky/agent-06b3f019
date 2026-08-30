@@ -3059,6 +3059,7 @@ def test_instacart_catalog_uses_complete_weekly_grocery_basket():
 def test_doordash_food_plan_grocery_repro_contract():
     """DoorDash food-plan grocery repro requires manifest-exact Safeway cart, not one SKU."""
     from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
     from benchmarks.run_benchmark import (
         _doordash_food_plan_manifest_context_for_judge,
         _doordash_food_plan_prompt_override,
@@ -3087,15 +3088,32 @@ def test_doordash_food_plan_grocery_repro_contract():
     judge_prompt = cart_evaluator["judge_prompt"].lower()
     assert "one item" in judge_prompt
     assert "large item count" in judge_prompt or "high subtotal" in judge_prompt
-    # Harness must not inject clear-cart / BENCHMARK EXECUTION CONTRACT text.
-    override = _doordash_food_plan_prompt_override(task)
-    if override:
+
+    # Seed a synthetic frozen fixture so this structural test does not depend on
+    # a prior live fixture apply / .context freeze. Also proves the harness does
+    # not append BENCHMARK EXECUTION CONTRACT / clear-cart injections.
+    prior_cache = dict(bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE)
+    try:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {
+            "benchmark_goal": (
+                "Checkout-ready one-week manifest for Safeway. "
+                "SAFEWAY MANIFEST: 93/7 lean ground beef about 2.5 lb; "
+                "Add every required ingredient. Complete checkout."
+            ),
+        }
+        override = _doordash_food_plan_prompt_override(task)
+        assert override is not None
         assert "BENCHMARK EXECUTION CONTRACT" not in override
         assert "FIRST open Safeway and remove every item" not in override
-    manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
-    manifest_lower = manifest_context.lower()
-    assert "checkout-ready one-week manifest" in manifest_lower
-    assert "93/7 lean ground beef" in manifest_lower
+        assert "93/7 lean ground beef" in override.lower()
+        manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
+        manifest_lower = manifest_context.lower()
+        assert "checkout-ready one-week manifest" in manifest_lower
+        assert "93/7 lean ground beef" in manifest_lower
+    finally:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.update(prior_cache)
+
     supplemental = _doordash_food_plan_supplemental_cart_evidence(
         {
             "messages": [
