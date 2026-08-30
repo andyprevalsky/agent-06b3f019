@@ -439,7 +439,11 @@ async def mock_post_agent_message(
 
 
 @activity.defn(name="poll_new_messages")
-async def mock_poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
+async def mock_poll_new_messages(
+    agent_id: str,
+    last_checked: datetime,
+    include_internal_subagent: bool = False,
+) -> List[Dict[str, Any]]:
     _record_workflow_env_activity(agent_id, "poll_new_messages")
     return []
 
@@ -5303,6 +5307,86 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll():
+    """Explore chips are subAgentId-tagged; Task Complete still needs their bodies."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-wes-roth-summary"
+    wf.user_id = "u-mc"
+    wf.goal = "You are analyzing ONE creator for Andy Prevalsky."
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name", "type": "str"},
+            {"name": "rank_from_initial_list", "type": "int"},
+        ]
+    }
+    fetch_body = (
+        "**Params Passed:**\n\n- **url**: https://www.youtube.com/@WesRoth\n\n"
+        "**Result:**\n\n"
+        "Wes Roth covers AI research papers and product launches in long-form "
+        "YouTube explainers. Last-90-day cadence is several videos a week with "
+        "hooks that pair a lab name and a concrete capability claim. Audience "
+        "promise is stay-current AI for builders. Monetization is sponsorships "
+        "and course mentions. Gaps include founder-health operating cadence."
+    )
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "The task completed successfully; verified results are included below.",
+        "tool_counts": {"spawn_agent": 2},
+        "usage": {"from_fast_cache": True, "actual_model": "fast-mode-soft-complete"},
+    }
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "TOOL",
+            "message": "Research the YouTube creator Wes Roth",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Exploring",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": fetch_body,
+            "metadata": {
+                "toolName": "web_fetch",
+                "toolStatus": "FINISHED",
+                "title": "Fetched https://www.youtube.com/@WesRoth",
+                "subAgentId": "explore-wes",
+                "taskId": "explore-wes",
+            },
+        },
+    ]
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[{"role": "USER", "text": "analyze Wes Roth"}],
+            structured_response={"creator_name": "Wes Roth", "rank_from_initial_list": 49},
+        )
+        poll_calls = [args for name, args in fake.activity_calls if name == "poll_new_messages"]
+        assert poll_calls and len(poll_calls[0] or []) >= 3 and poll_calls[0][2] is True
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        summary = str(((finished or {}).get("completionSummary") or {}).get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "verified results are included below" not in summary.lower()
+        assert len(summary) >= 200
+        assert "Wes Roth" in summary or "AI" in summary or "YouTube" in summary
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_polls_assemble_for_schema_outputs():
     """Root DAG assemble is posted after execute_context snapshot; poll it onto the card."""
     wf = _bare_workflow_instance()
@@ -6961,6 +7045,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_mark_complete_replaces_fast_mode_ablation",
         test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary,
+    )
+    await r.record_async(
+        "wf_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll",
+        test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll,
     )
     await r.record_async(
         "wf_mark_complete_polls_assemble_for_schema_outputs",

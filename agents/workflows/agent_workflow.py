@@ -369,6 +369,38 @@ def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800)
     return clipped.strip()
 
 
+def _completion_message_identity(message: Dict[str, Any]) -> str:
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    tool_call_id = str(metadata.get("toolCallId") or "").strip()
+    if tool_call_id:
+        return f"tc:{tool_call_id}"
+    return f"{message.get('role')}|{_message_body(message)[:80]}"
+
+
+def _merge_completion_transcripts(
+    polled: Optional[List[Dict[str, Any]]],
+    context: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep both in-memory context and posted rows; prefer the longer body."""
+    merged: List[Dict[str, Any]] = []
+    seen: Dict[str, int] = {}
+    for source in (context or [], polled or []):
+        if not isinstance(source, list):
+            continue
+        for message in source:
+            if not isinstance(message, dict):
+                continue
+            key = _completion_message_identity(message)
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = len(merged)
+                merged.append(message)
+                continue
+            if len(_message_body(message)) > len(_message_body(merged[existing])):
+                merged[existing] = message
+    return merged
+
+
 def card_summary_from_evidence(
     context: List[Dict[str, Any]],
     structured_response: Optional[Dict[str, Any]] = None,
@@ -4563,16 +4595,17 @@ class AgentWorkflow:
         try:
             polled = await workflow.execute_activity(
                 poll_new_messages,
-                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc)],
+                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc), True],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except Exception as exc:
             workflow.logger.warning(f"completion transcript poll failed: {exc}")
             polled = None
-        if isinstance(polled, list) and polled:
-            return polled
-        return list(context or [])
+        return _merge_completion_transcripts(
+            polled if isinstance(polled, list) else None,
+            list(context or []),
+        )
 
     def _coalesce_structured_response(
         self, context: List[Dict], structured_response: Optional[Dict]

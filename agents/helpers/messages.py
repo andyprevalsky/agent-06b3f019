@@ -825,7 +825,11 @@ async def update_agent_tree_state(
 
 
 @activity.defn
-async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
+async def poll_new_messages(
+    agent_id: str,
+    last_checked: datetime,
+    include_internal_subagent: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Poll for ALL new messages (USER, ASSISTANT, TOOL) since last check.
 
@@ -854,7 +858,10 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         # loop/context_utils.py and workflows/agent_workflow.py); doing it here
         # keeps the Temporal payload under the 2 MB cap when sub-agents have
         # produced large transcripts (e.g. post-DAG verifier polling from epoch).
-        new_messages = filter_internal_subagent_messages(new_messages)
+        # Completion-card recovery is the exception: Task Complete must see
+        # explore web_search/web_fetch bodies tagged with subAgentId.
+        if not include_internal_subagent:
+            new_messages = filter_internal_subagent_messages(new_messages)
 
         if new_messages:
             logger.info(

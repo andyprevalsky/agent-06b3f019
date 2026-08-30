@@ -4322,7 +4322,7 @@ def test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools()
             "tree": {
                 gp_id: {
                     "parent_agent_id": root_id,
-                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Molly Maloof.",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Molly Maloof.",  # pragma: allowlist secret
                     "messages": [_reject_msg(), _reject_msg()],
                 }
             }
@@ -4339,7 +4339,7 @@ def test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools()
             "tree": {
                 gp_id: {
                     "parent_agent_id": root_id,
-                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Andrew Huberman.",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Andrew Huberman.",  # pragma: allowlist secret
                     "messages": [_search_msg(), _search_msg()],
                 }
             }
