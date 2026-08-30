@@ -1,4 +1,5 @@
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
+import { getAdminAccessToken } from '../impersonation';
 import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
 import { hydrateAgentDetail } from './hydrateAgentDetail';
 
@@ -199,6 +200,48 @@ export async function resumeAgent(agentId: string): Promise<void> {
   if (!response.ok) {
     throw new Error('Failed to resume agent');
   }
+}
+
+export interface ReportAgentBugResult {
+  success: true;
+  name: string;
+  url: string;
+  cursor_agent_id: string;
+  launch_source?: 'scm' | 'api';
+}
+
+/**
+ * Admin-only: launch a Cursor cloud agent to /rca this Rose agent.
+ * Uses the admin token so the call still works while impersonating.
+ */
+export async function reportAgentBug(
+  agentId: string,
+  description: string,
+): Promise<ReportAgentBugResult> {
+  const headers = getAuthHeaders();
+  const adminToken = getAdminAccessToken();
+  if (adminToken !== null) {
+    headers.Authorization = `Bearer ${adminToken}`;
+  }
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/report-bug`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ description }),
+  });
+
+  if (!response.ok) {
+    let message = 'Failed to report bug';
+    try {
+      const data = (await response.json()) as { error?: string };
+      if (typeof data.error === 'string' && data.error !== '') message = data.error;
+    } catch {
+      // keep default
+    }
+    throw new Error(message);
+  }
+
+  return (await response.json()) as ReportAgentBugResult;
 }
 
 // Update agent configuration

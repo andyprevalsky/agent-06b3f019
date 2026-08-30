@@ -1,3 +1,71 @@
+import { createHash } from './crypto';
+import {
+  ACTIONS_TAKEN_COUNT_RE,
+  AGENT_RECORDING_PATH_RE,
+  BROWSER_ACTION_INDEX_RE,
+  BROWSER_DOM_INDEX_RE,
+  BROWSER_TOKEN_LINE_RE,
+  CLOCK_PREFIX_RE,
+  CODEX_ID_RE,
+  CODEX_SHELL_SNAPSHOT_RE,
+  CODE_AGENT_SANDBOX_ACTION_LINE_RE,
+  CODE_AGENT_SDK_EVENTS_PREFIX,
+  CODE_AGENT_STATUS_UPDATE_RE,
+  COMMAND_CHUNK_ID_RE,
+  COMMAND_EXIT_ZERO_RE,
+  COMMAND_NORMALIZED_RUNNING_RE,
+  COMMAND_OUTPUT_ISO_TIMESTAMP_RE,
+  COMMAND_SESSION_ID_RE,
+  COMMAND_TOKEN_COUNT_RE,
+  COMMAND_UNKNOWN_PROCESS_ID_RE,
+  COMMAND_WALL_TIME_RE,
+  E2B_SANDBOX_TEXT_RE,
+  ESCAPED_CODE_AGENT_SANDBOX_ACTION_RE,
+  ESCAPED_STATUS_UPDATE_RE,
+  FILE_TIMESTAMP_PATH_LINE_RE,
+  GITHUB_CREDENTIAL_URL_RE,
+  ISO_TIMESTAMP_RE,
+  JSON_NUMERIC_VOLATILE_FIELD_RE,
+  JSON_TIMESTAMP_FIELD_RE,
+  LS_LONG_MTIME_RE,
+  NPM_INSTALL_DURATION_RE,
+  NPM_NOTICE_LINE_RE,
+  NPM_WARN_LINE_RE,
+  PACKAGE_DOWNLOAD_RATE_RE,
+  PARAM_BLOCK_RE,
+  PARAM_LINE_RE,
+  PARALLEL_RESULT_MESSAGE_RE,
+  PARALLEL_TOOL_RESULT_NAMES,
+  PIP_COLLECTING_LINE_RE,
+  PIP_DOWNLOADING_LINE_RE,
+  PIP_INSTALLING_LINE_RE,
+  PIP_PROGRESS_LINE_RE,
+  PIP_SUCCESS_LINE_RE,
+  RESOLVED_REF_RE,
+  ROSE_AGENT_REPO_SLUG_RE,
+  ROSE_AGENT_REPO_URL_RE,
+  ROSE_AGENT_WORKDIR_RE,
+  SANDBOX_FIELD_RE,
+  SECRET_FIELDS,
+  STATE_NOW_RE,
+  STATUS_UPDATE_LINE_RE,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  TIMESTAMPED_RESULT_BLOCK_RE,
+  TOOL_ID_RE,
+  TOOL_RESULT_JSON_LINE_RE,
+  USER_CONTEXT_PREFIX,
+  UUID_RE,
+  VOLATILE_OBJECT_FIELDS,
+  VOLATILE_QUERY_PARAMS,
+  VOLATILE_QUERY_PREFIXES,
+} from './fastCacheNormalizeConstants';
+import {
+  OAI_DEMO_CHILD_WINDOW,
+  OAI_DEMO_ROOT_GOAL_PREFIX,
+  canonicalizeOaiDemoGoalForHash,
+  julyGpGoalHashForGoal,
+} from './fastCacheNormalizeOaiDemo';
+
 function isVolatileParam(name: string): boolean {
   const lower = name.toLowerCase();
   if (VOLATILE_QUERY_PARAMS.has(lower)) return true;
@@ -49,98 +117,6 @@ export function normalizeUrl(rawUrl: string): string {
 
 export function sha256(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('hex');
-}
-
-const OAI_DEMO_ROOT_GOAL_PREFIX =
-  "I'm building a personal brand for health, longevity, technology, founder journey"; // pragma: allowlist secret
-const OAI_DEMO_CHILD_WINDOW = '2026-04-04 through 2026-07-03'; // pragma: allowlist secret
-const OAI_DEMO_CACHE_SOURCE_NAME = 'Aman Gottumukkala';
-const OAI_DEMO_CACHE_DISPLAY_NAME = 'Andy Prevalsky';
-
-function canonicalizeOaiDemoGoalForHash(goal: string): string {
-  if (!goal.includes(OAI_DEMO_ROOT_GOAL_PREFIX) && !goal.includes(OAI_DEMO_CHILD_WINDOW)) {
-    return goal;
-  }
-  return goal
-    .split(OAI_DEMO_CACHE_DISPLAY_NAME)
-    .join(OAI_DEMO_CACHE_SOURCE_NAME)
-    .split("Andy's")
-    .join("Aman's");
-}
-
-// July execute_loop namespaces for test-mass-agent-run-0 children. Keep in sync
-// with agents/domains/spawn_agent/oai_demo_july.py JULY_GP_GOAL_HASHES.
-const OAI_DEMO_JULY_GP_GOAL_HASHES: Record<string, string> = {
-  'andrew huberman': '5e1731f836723fb1',
-  'bryan johnson': '2ffa1fbe4843a00f',
-  'peter attia': '65d4e0248f84bef8',
-  'rhonda patrick': '2f47e3eca2f296ff',
-  'tim ferriss': '308533b0687c42f1',
-  'dave asprey': '705d208b550fabf9',
-  'gary brecka': '822459b31c94bebd',
-  'siim land': '5b50a433ea00553e',
-  'ben greenfield': '90b0a43f90f89a32',
-  'nick norwitz': '822212860717c80f',
-  'lex fridman': 'd587ab24de079872',
-  'ali abdaal': '5872737e678bfc65',
-  'chris williamson': '7499abccb0ac6254',
-  'steven bartlett': '3389a431c3c428c2',
-  'mark hyman': 'cf733069e1f8e594',
-  'david sinclair': '1eb48490335b5913',
-  'casey means': '918974d8c4516a50',
-  'gabrielle lyon': 'bfd8e1b50f417841',
-  'molly maloof': 'a9edd0c280965a52',
-  'max lugavere': '870aa798f805d115',
-  'thomas delauer': 'da9ab880f5cf47b0',
-  'michael lustgarten': '764c4fee3d3cf4a3',
-  'matt kaeberlein': 'e77071601a788aad',
-  'eric topol': 'a33288f6c3a3e484',
-  'sahil bloom': '3fd2fec61970ac83',
-  'dan koe': 'b5db973bb7c104af',
-  'justin welsh': 'ebdf32d4d67cb7b8',
-  'greg isenberg': 'b47929301a17dd66',
-  'lenny rachitsky': '185ab81fcd1829e7',
-  'gergely orosz': '4f1e222cdd445fa8',
-  'ethan mollick': '92db2b751402e7f7',
-  'allie k. miller': '122bf1458146116c',
-  'rowan cheung': 'c1a89807a217bd39',
-  'matt wolfe': '9bd2ac19e313b421',
-  'roberto nickson': '5c1c1e4873818cfd',
-  'tina huang': 'c97f6411e974f999',
-  'pieter levels': '2a5047c41ade580c',
-  'brett adcock': 'cd0f862fb5fc3094',
-  'andrew wilkinson': '3abe247e3d0191bf',
-  'naval ravikant': '4685e8b287fb3986',
-  'sam parr': 'de9db95dc0ccc267',
-  'codie sanchez': '07bda83296ad43be',
-  'marques brownlee': 'ceefe41146c9aefc',
-  'khe hy': '754e78c9cadc9979',
-  'thomas frank': 'df7ecb881efd0d2d',
-  "matt d'avella": '83865d527880b2b7',
-  'joey schweitzer': 'ed289c2a0fcc45e6',
-  'nathaniel drew': '74732a761f790f81',
-  'wes roth': '934c2b9720294e60',
-  'ranveer allahbadia': '8490ce582e612e06',
-};
-
-function normalizeOaiDemoCreatorKey(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/^dr\.?\s+/, '')
-    .split(' / ')[0]
-    .trim()
-    .replace(/\s+/g, ' ');
-}
-
-function julyGpGoalHashForGoal(goal: string): string | undefined {
-  const match =
-    goal.match(/"creator_name"\s*:\s*"([^"]+)"/) ||
-    goal.match(/"name"\s*:\s*"([^"]+)"/) ||
-    goal.match(/Creator:\s*([^\n]+)/);
-  const name = match?.[1]?.trim().replace(/\.+$/, '').trim();
-  if (!name) return undefined;
-  return OAI_DEMO_JULY_GP_GOAL_HASHES[normalizeOaiDemoCreatorKey(name)];
 }
 
 /**
@@ -685,79 +661,3 @@ export function canonicalMessages(messages: unknown): string {
 
   return stableJson(clean(messages));
 }
-
-/**
- * Build a cache key. Strings are deterministic and debuggable:
- *   fastmode:v34:<kind>:<goalHash>:<detail>
- *
- * - LLM calls use canonical request fingerprinting so prompt/schema/message edits
- *   intentionally invalidate the cache and expose regressions.
- * - web_search / web_fetch use GLOBAL CONTENT keying on the normalized query/URL
- *   because the public provider response should be reusable across goals.
- * - browser_http uses GLOBAL CONTENT keying over normalized URL/method, partitioned
- *   by auth/cookie request headers when present.
- * - file remains goal scoped; file bodies can come from signed/authenticated URLs.
- * - anthropic (code agent) uses canonical request fingerprinting over the proxied
- *   Anthropic request body.
- */
-import { createHash } from './crypto';
-import {
-  ACTIONS_TAKEN_COUNT_RE,
-  AGENT_RECORDING_PATH_RE,
-  BROWSER_ACTION_INDEX_RE,
-  BROWSER_DOM_INDEX_RE,
-  BROWSER_TOKEN_LINE_RE,
-  CLOCK_PREFIX_RE,
-  CODEX_ID_RE,
-  CODEX_SHELL_SNAPSHOT_RE,
-  CODE_AGENT_SANDBOX_ACTION_LINE_RE,
-  CODE_AGENT_SDK_EVENTS_PREFIX,
-  CODE_AGENT_STATUS_UPDATE_RE,
-  COMMAND_CHUNK_ID_RE,
-  COMMAND_EXIT_ZERO_RE,
-  COMMAND_NORMALIZED_RUNNING_RE,
-  COMMAND_OUTPUT_ISO_TIMESTAMP_RE,
-  COMMAND_SESSION_ID_RE,
-  COMMAND_TOKEN_COUNT_RE,
-  COMMAND_UNKNOWN_PROCESS_ID_RE,
-  COMMAND_WALL_TIME_RE,
-  E2B_SANDBOX_TEXT_RE,
-  ESCAPED_CODE_AGENT_SANDBOX_ACTION_RE,
-  ESCAPED_STATUS_UPDATE_RE,
-  FILE_TIMESTAMP_PATH_LINE_RE,
-  GITHUB_CREDENTIAL_URL_RE,
-  ISO_TIMESTAMP_RE,
-  JSON_NUMERIC_VOLATILE_FIELD_RE,
-  JSON_TIMESTAMP_FIELD_RE,
-  LS_LONG_MTIME_RE,
-  NPM_INSTALL_DURATION_RE,
-  NPM_NOTICE_LINE_RE,
-  NPM_WARN_LINE_RE,
-  PACKAGE_DOWNLOAD_RATE_RE,
-  PARAM_BLOCK_RE,
-  PARAM_LINE_RE,
-  PARALLEL_RESULT_MESSAGE_RE,
-  PARALLEL_TOOL_RESULT_NAMES,
-  PIP_COLLECTING_LINE_RE,
-  PIP_DOWNLOADING_LINE_RE,
-  PIP_INSTALLING_LINE_RE,
-  PIP_PROGRESS_LINE_RE,
-  PIP_SUCCESS_LINE_RE,
-  RESOLVED_REF_RE,
-  ROSE_AGENT_REPO_SLUG_RE,
-  ROSE_AGENT_REPO_URL_RE,
-  ROSE_AGENT_WORKDIR_RE,
-  SANDBOX_FIELD_RE,
-  SECRET_FIELDS,
-  STATE_NOW_RE,
-  STATUS_UPDATE_LINE_RE,
-  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-  TIMESTAMPED_RESULT_BLOCK_RE,
-  TOOL_ID_RE,
-  TOOL_RESULT_JSON_LINE_RE,
-  USER_CONTEXT_PREFIX,
-  UUID_RE,
-  VOLATILE_OBJECT_FIELDS,
-  VOLATILE_QUERY_PARAMS,
-  VOLATILE_QUERY_PREFIXES,
-} from './fastCacheNormalizeConstants';
