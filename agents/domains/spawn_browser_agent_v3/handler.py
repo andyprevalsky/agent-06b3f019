@@ -6047,7 +6047,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
         async def _create_download_persister():
             # Kernel CDP downloads_path alone does not always yield listFiles entries;
-            # materialize Content-Disposition attachments under /tmp/downloads.
+            # listen for Chrome Browser.download* events and materialize only those.
             return await BrowserDownloadPersister.create(
                 browser_session=dom_service.session,
                 session_id=session_id,

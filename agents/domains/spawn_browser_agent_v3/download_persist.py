@@ -1,11 +1,17 @@
-"""Persist browser attachment downloads into Kernel session_files (/tmp/downloads).
+"""Persist real Chrome downloads into Kernel session_files (/tmp/downloads).
 
-Kernel's CDP SetDownloadBehavior + downloads_path does not reliably materialize
-files that ``listFiles(/tmp/downloads)`` can see. When the network stack receives
-``Content-Disposition: attachment`` (or goto hits ``net::ERR_ABORTED`` on a
-download URL), capture bytes via CDP ``Network.getResponseBody`` (or an in-page
-credentialed fetch) and write them through the browser-session upload API under
-``/tmp/downloads`` so ``extract_session_files`` / attempt_completion can pass.
+Product rule: chat only gets files that Chrome would put in its Downloads
+folder — not ordinary page Fetch/XHR assets (SVG icons, map sprites, etc.).
+
+Kernel's CDP ``Browser.setDownloadBehavior`` + ``downloads_path`` does not always
+materialize bytes that ``listFiles(/tmp/downloads)`` can see. When CDP reports a
+real download (``Browser.downloadWillBegin`` / ``downloadProgress``) or goto hits
+``net::ERR_ABORTED`` on a download navigation, materialize that file via an
+in-page credentialed fetch and write it through the browser-session upload API
+under ``/tmp/downloads`` so ``extract_session_files`` / attempt_completion can pass.
+
+Do NOT sniff ``Network.responseReceived`` for Content-Disposition / URL
+extensions — that invents "downloads" from normal browsing.
 """
 
 from __future__ import annotations
@@ -24,6 +30,28 @@ logger = structlog.get_logger()
 KERNEL_DOWNLOADS_DIR = "/tmp/downloads"
 _MAX_PERSIST_BYTES = 25 * 1024 * 1024
 _ATTACHMENT_RESOURCE_TYPES = frozenset({"Document", "Fetch", "XHR", "Other"})
+# Document/archive extensions only — never image/svg/json by extension alone
+# (those are page chrome unless Chrome itself starts a download).
+_DOCUMENT_DOWNLOAD_EXTENSIONS = frozenset(
+    {
+        "zip",
+        "pdf",
+        "csv",
+        "xlsx",
+        "xls",
+        "doc",
+        "docx",
+        "gz",
+        "tgz",
+        "tar",
+        "7z",
+        "rar",
+        "mp4",
+        "mp3",
+        "txt",
+        "bin",
+    }
+)
 _FILENAME_RE = re.compile(
     r"filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;]+)|filename\s*=\s*\"([^\"]+)\"|filename\s*=\s*([^;]+)",
     re.IGNORECASE,
@@ -75,6 +103,7 @@ def filename_from_url(url: str) -> str:
 
 
 def looks_like_download_url(url: str) -> bool:
+    """True for download-shaped navigations — not bare image/svg/json page assets."""
     lower = (url or "").lower()
     if not lower.startswith(("http://", "https://")):
         return False
@@ -84,31 +113,7 @@ def looks_like_download_url(url: str) -> bool:
     basename = path.rsplit("/", 1)[-1]
     if "." in basename:
         ext = basename.rsplit(".", 1)[-1]
-        if ext in {
-            "zip",
-            "pdf",
-            "csv",
-            "xlsx",
-            "xls",
-            "doc",
-            "docx",
-            "png",
-            "jpg",
-            "jpeg",
-            "gif",
-            "webp",
-            "svg",
-            "mp4",
-            "mp3",
-            "gz",
-            "tgz",
-            "tar",
-            "7z",
-            "rar",
-            "json",
-            "txt",
-            "bin",
-        }:
+        if ext in _DOCUMENT_DOWNLOAD_EXTENSIONS:
             return True
     return False
 
@@ -120,7 +125,11 @@ def is_browser_attachment_download(
     mime_type: str = "",
     response_headers: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """True for real file attachments; false for ad/script attachment false-positives."""
+    """True for real file attachments; false for ad/script attachment false-positives.
+
+    Used only for goto ERR_ABORTED navigation fallback — not for sniffing every
+    network response. Chrome ``Browser.download*`` events do not go through this.
+    """
     if not url.startswith(("http://", "https://")):
         return False
     rtype = (resource_type or "").strip()
@@ -135,7 +144,7 @@ def is_browser_attachment_download(
         if "text/html" in lower_mime and not looks_like_download_url(url):
             return bool(filename_from_content_disposition(response_headers))
         return True
-    # No Content-Disposition: only trust download-shaped navigations/fetches.
+    # No Content-Disposition: only trust download-shaped navigations.
     return looks_like_download_url(url)
 
 
@@ -218,7 +227,11 @@ async def persist_bytes_to_session_downloads(
 
 
 class BrowserDownloadPersister:
-    """CDP Network observer that materializes attachment bodies under /tmp/downloads."""
+    """Materialize Chrome Downloads into /tmp/downloads via Browser.download* CDP events.
+
+    Only reacts when Chrome itself starts a download (same as the Downloads UI).
+    Does not sniff Network Fetch/XHR for Content-Disposition or file extensions.
+    """
 
     def __init__(
         self,
@@ -237,7 +250,7 @@ class BrowserDownloadPersister:
         self._closed = False
         self._cdp_client: Any = None
         self._tasks: Set[asyncio.Task] = set()
-        self._pending: Dict[str, Dict[str, Any]] = {}
+        self._pending_by_guid: Dict[str, Dict[str, Any]] = {}
         self._persisted_keys: Set[str] = set()
         self._generation = 0
 
@@ -283,22 +296,30 @@ class BrowserDownloadPersister:
         self._generation += 1
         generation = self._generation
         register = cdp_client.register
-        register.Network.responseReceived(
-            lambda event, session_id: self._on_response_received(event, session_id, generation)
-        )
-        register.Network.loadingFinished(
-            lambda event, session_id: self._on_loading_finished(
-                event, session_id, generation, cdp_client
+
+        # Ensure Chrome emits downloadWillBegin / downloadProgress into downloads_path.
+        try:
+            await cdp_client.send.Browser.setDownloadBehavior(
+                params={
+                    "behavior": "allow",
+                    "downloadPath": KERNEL_DOWNLOADS_DIR,
+                    "eventsEnabled": True,
+                }
             )
-        )
-        register.Network.loadingFailed(
-            lambda event, session_id: self._on_loading_failed(
-                event, session_id, generation, cdp_client
+        except Exception as exc:
+            logger.warning(
+                "[DownloadPersist] setDownloadBehavior failed; still listening for events",
+                error=str(exc)[:160],
             )
+
+        register.Browser.downloadWillBegin(
+            lambda event, session_id: self._on_download_will_begin(event, session_id, generation)
         )
-        await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
+        register.Browser.downloadProgress(
+            lambda event, session_id: self._on_download_progress(event, session_id, generation)
+        )
         logger.info(
-            "[DownloadPersist] Listening for attachment downloads",
+            "[DownloadPersist] Listening for Chrome download events",
             agent_id=self.agent_id,
             task_id=self.task_id,
             session_id=self.session_id,
@@ -320,12 +341,9 @@ class BrowserDownloadPersister:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
-        self._pending.clear()
+        self._pending_by_guid.clear()
 
-    def _request_key(self, request_id: str, generation: int) -> str:
-        return f"{generation}:{request_id}"
-
-    def _on_response_received(
+    def _on_download_will_begin(
         self,
         event: Dict[str, Any],
         session_id: str | None,
@@ -334,131 +352,114 @@ class BrowserDownloadPersister:
         if self._closed:
             return
         try:
-            request_id = event.get("requestId")
-            response = event.get("response") or {}
-            url = str(response.get("url") or "")
-            resource_type = str(event.get("type") or "")
-            mime_type = str(response.get("mimeType") or "")
-            headers = response.get("headers") or {}
-            if not request_id:
+            guid = str(event.get("guid") or "")
+            if not guid:
                 return
-            if not is_browser_attachment_download(
-                url=url,
-                resource_type=resource_type,
-                mime_type=mime_type,
-                response_headers=headers if isinstance(headers, dict) else {},
-            ):
-                return
-            key = self._request_key(str(request_id), generation)
-            self._pending[key] = {
-                "request_id": str(request_id),
-                "cdp_session_id": session_id,
+            url = str(event.get("url") or "")
+            suggested = str(event.get("suggestedFilename") or "") or filename_from_url(url)
+            self._pending_by_guid[f"{generation}:{guid}"] = {
+                "guid": guid,
                 "url": url,
-                "resource_type": resource_type,
-                "mime_type": mime_type,
-                "response_headers": headers if isinstance(headers, dict) else {},
-                "status": response.get("status"),
+                "suggested_filename": os.path.basename(suggested) or "download.bin",
+                "cdp_session_id": session_id,
             }
+            logger.info(
+                "[DownloadPersist] Chrome downloadWillBegin",
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+                guid=guid,
+                filename=suggested[:120],
+                url=url[:200],
+            )
         except Exception as exc:
-            logger.warning("[DownloadPersist] responseReceived handler failed", error=str(exc))
+            logger.warning("[DownloadPersist] downloadWillBegin handler failed", error=str(exc))
 
-    def _on_loading_finished(
+    def _on_download_progress(
         self,
         event: Dict[str, Any],
         session_id: str | None,
         generation: int,
-        cdp_client: Any,
     ) -> None:
         if self._closed:
             return
-        request_id = event.get("requestId")
-        if not request_id:
+        guid = str(event.get("guid") or "")
+        if not guid:
             return
-        key = self._request_key(str(request_id), generation)
-        meta = self._pending.pop(key, None)
-        if not meta:
+        state = str(event.get("state") or "")
+        if state != "completed":
+            if state == "canceled":
+                self._pending_by_guid.pop(f"{generation}:{guid}", None)
             return
-        task = asyncio.create_task(
-            self._persist_from_cdp(
-                meta=meta,
-                cdp_client=cdp_client,
-                cdp_session_id=session_id or meta.get("cdp_session_id"),
-            )
-        )
+        key = f"{generation}:{guid}"
+        meta = self._pending_by_guid.pop(key, None) or {
+            "guid": guid,
+            "url": "",
+            "suggested_filename": "download.bin",
+            "cdp_session_id": session_id,
+        }
+        # Prefer CDP filePath when present (local/Kernel may already have written it).
+        file_path = event.get("filePath")
+        if file_path:
+            meta["file_path"] = str(file_path)
+            meta["suggested_filename"] = os.path.basename(str(file_path)) or meta["suggested_filename"]
+        task = asyncio.create_task(self._materialize_chrome_download(meta=meta))
         self._tasks.add(task)
         task.add_done_callback(lambda done: self._tasks.discard(done))
 
-    def _on_loading_failed(
-        self,
-        event: Dict[str, Any],
-        session_id: str | None,
-        generation: int,
-        cdp_client: Any,
-    ) -> None:
-        if self._closed:
-            return
-        request_id = event.get("requestId")
-        if not request_id:
-            return
-        key = self._request_key(str(request_id), generation)
-        meta = self._pending.pop(key, None)
-        if not meta:
-            return
-        error_text = str(event.get("errorText") or "")
-        # Attachment navigations commonly abort after headers; body may still be readable.
-        if "ERR_ABORTED" not in error_text and "ERR_ABORTED" not in str(meta.get("status") or ""):
-            if not error_text:
-                return
-            if "ABORT" not in error_text.upper():
-                return
-        task = asyncio.create_task(
-            self._persist_from_cdp(
-                meta=meta,
-                cdp_client=cdp_client,
-                cdp_session_id=session_id or meta.get("cdp_session_id"),
-            )
-        )
-        self._tasks.add(task)
-        task.add_done_callback(lambda done: self._tasks.discard(done))
+    async def _session_already_has_file(self, filename: str) -> bool:
+        from domains.spawn_browser_agent_v3.repo import list_session_files
 
-    async def _persist_from_cdp(
-        self,
-        *,
-        meta: Dict[str, Any],
-        cdp_client: Any,
-        cdp_session_id: Any,
-    ) -> Optional[Dict[str, Any]]:
+        try:
+            files = await list_session_files(self.config, self.session_id)
+        except Exception:
+            return False
+        target = (filename or "").lower()
+        for info in files or []:
+            path = str(info.get("path") or "")
+            if os.path.basename(path).lower() == target:
+                return True
+        return False
+
+    async def _materialize_chrome_download(self, *, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if self._closed:
             return None
         url = str(meta.get("url") or "")
-        headers = meta.get("response_headers") or {}
-        filename = resolve_attachment_filename(url=url, response_headers=headers)
-        mime_type = mime_from_headers_or_name(
-            mime_type=str(meta.get("mime_type") or ""),
-            response_headers=headers,
-            filename=filename,
-        )
-        dedupe = f"{url}|{filename}"
+        filename = str(meta.get("suggested_filename") or "download.bin")
+        dedupe = f"{meta.get('guid')}|{url}|{filename}"
         if dedupe in self._persisted_keys:
             return None
-        body = await self._fetch_response_body(
-            request_id=str(meta.get("request_id") or ""),
-            cdp_client=cdp_client,
-            cdp_session_id=cdp_session_id,
-        )
-        if not body:
+
+        # Chrome already wrote into downloads_path — nothing to invent.
+        if await self._session_already_has_file(filename):
+            self._persisted_keys.add(dedupe)
+            logger.info(
+                "[DownloadPersist] Chrome download already in session downloads",
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+                filename=filename,
+            )
+            return {"path": f"{KERNEL_DOWNLOADS_DIR}/{filename}", "filename": filename}
+
+        if not url.startswith(("http://", "https://")):
+            logger.warning(
+                "[DownloadPersist] Completed download missing http(s) URL; cannot materialize",
+                agent_id=self.agent_id,
+                filename=filename,
+            )
             return None
-        result = await persist_bytes_to_session_downloads(
-            self.config,
-            self.session_id,
-            filename=filename,
-            content=body,
-            mime_type=mime_type,
+
+        # Kernel sometimes emits downloadProgress without listFiles seeing the file.
+        # Only then: credentialed page fetch of the *Chrome-download* URL.
+        result = await persist_navigation_download_via_page_fetch(
+            session=self.browser_session,
+            url=url,
+            session_id=self.session_id,
+            config=self.config,
         )
         if result:
             self._persisted_keys.add(dedupe)
             logger.info(
-                "[DownloadPersist] Saved attachment to session downloads",
+                "[DownloadPersist] Materialized Chrome download into session downloads",
                 agent_id=self.agent_id,
                 session_id=self.session_id,
                 path=result.get("path"),
@@ -466,34 +467,6 @@ class BrowserDownloadPersister:
                 url=url[:200],
             )
         return result
-
-    async def _fetch_response_body(
-        self,
-        *,
-        request_id: str,
-        cdp_client: Any,
-        cdp_session_id: Any,
-    ) -> Optional[bytes]:
-        if not request_id or cdp_client is None:
-            return None
-        try:
-            response = await cdp_client.send.Network.getResponseBody(
-                params={"requestId": request_id},
-                session_id=cdp_session_id,
-            )
-            body = response.get("body", "")
-            if response.get("base64Encoded"):
-                return base64.b64decode(body)
-            if isinstance(body, str):
-                return body.encode("utf-8", errors="replace")
-            return bytes(body or b"")
-        except Exception as exc:
-            logger.info(
-                "[DownloadPersist] getResponseBody unavailable",
-                request_id=request_id,
-                error=str(exc)[:160],
-            )
-            return None
 
 
 async def persist_navigation_download_via_page_fetch(
@@ -503,7 +476,7 @@ async def persist_navigation_download_via_page_fetch(
     session_id: str,
     config: Any,
 ) -> Optional[Dict[str, Any]]:
-    """Credentialed in-page fetch + session write for goto ERR_ABORTED downloads."""
+    """Credentialed in-page fetch + session write for goto ERR_ABORTED / CDP download fallback."""
     import json
 
     suggested = filename_from_url(url)
