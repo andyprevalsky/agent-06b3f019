@@ -1770,6 +1770,42 @@ def test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore():
     assert len(summary) >= 200
 
 
+def test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name():
+    """Name-only schema plus **Params Passed:** fetch bodies must still yield a real card."""
+    from workflows.agent_workflow import card_summary_from_evidence, is_ablated_completion_summary
+
+    fetch_body = (
+        "**Params Passed:**\n\n- **url**: https://www.youtube.com/@beerbiceps\n\n"
+        "**Result:**\n\n"
+        "BeerBiceps / Ranveer Allahbadia posts long-form interviews on health, "
+        "business, and spirituality. Recent 90-day cadence is about three YouTube "
+        "uploads a week with hook formulas that pair a celebrity guest and a "
+        "concrete life question. Audience promise is Indian-English self-improvement "
+        "for founders and students. Monetization mentions include Superhuman and "
+        "course launches. Gaps include quantified founder-health protocols and "
+        "week-in-the-life operating cadence."
+    )
+    assert "**params passed:**" in fetch_body.lower()
+    context = [
+        {
+            "role": "TOOL",
+            "text": fetch_body,
+            "metadata": {"toolName": "web_fetch", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "Fast Mode cache trajectory ended; prior tool evidence is sufficient.",
+            "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED"},
+        },
+    ]
+    structured = {"creator_name": "Ranveer Allahbadia", "rank_from_initial_list": 50}
+    summary = card_summary_from_evidence(context, structured)
+    assert not is_ablated_completion_summary(summary)
+    assert "Fast Mode" not in summary
+    assert "Ranveer" in summary or "BeerBiceps" in summary or "founders" in summary
+    assert len(summary) >= 200
+
+
 def test_workflow_extract_failure_context_empty_context():
     wf = _bare_workflow_instance()
     result = wf._extract_failure_context(context=[])
@@ -6689,6 +6725,10 @@ async def run_all_tests():
     r.record(
         "wf_coalesce_gp_outputs_from_explore_evidence",
         test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore,
+    )
+    r.record(
+        "wf_card_summary_uses_long_web_fetch_not_creator_name",
+        test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name,
     )
     r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
     r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)

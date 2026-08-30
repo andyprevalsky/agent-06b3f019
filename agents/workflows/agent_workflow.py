@@ -267,6 +267,9 @@ _EVIDENCE_TOOLS = {
     "spawn_agent",
     "send_message_to_user",
     "web_fetch",
+    "web_search",
+    "grep",
+    "people_search",
 }
 _FLEX_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", flags=re.MULTILINE)
 
@@ -295,6 +298,10 @@ def _is_plumbing_tool_text(text: str) -> bool:
     lowered = str(text or "").strip().lower()
     if not lowered:
         return True
+    # web_search / web_fetch bodies start with **Params Passed:** then the
+    # actual result. A long result is evidence, not chip plumbing.
+    if len(lowered) >= 200:
+        return False
     return any(marker in lowered for marker in _PLUMBING_TOOL_MARKERS)
 
 
@@ -330,7 +337,11 @@ def last_real_completion_text(
             return text
     if isinstance(structured_response, dict):
         for value in structured_response.values():
-            if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value):
+            if (
+                isinstance(value, str)
+                and len(value.strip()) >= 200
+                and not is_ablated_completion_summary(value)
+            ):
                 return value.strip()
     return ""
 
@@ -378,7 +389,7 @@ def card_summary_from_evidence(
         brief = brief_card_summary(" ".join(parts), min_chars=min_chars)
         if brief and len(brief) >= min_chars:
             return brief
-    return brief if brief and not is_ablated_completion_summary(brief) else ""
+    return ""
 
 
 def _json_objects_in_text(text: str) -> List[Dict[str, Any]]:
@@ -4734,7 +4745,11 @@ class AgentWorkflow:
             structured_response = self._coalesce_structured_response(transcript, structured_response)
             if is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200:
                 recovered = card_summary_from_evidence(transcript, structured_response)
-                if recovered and not is_ablated_completion_summary(recovered):
+                if (
+                    recovered
+                    and not is_ablated_completion_summary(recovered)
+                    and len(recovered) >= 200
+                ):
                     summary = recovered
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":
