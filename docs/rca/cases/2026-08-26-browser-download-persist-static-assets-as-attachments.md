@@ -64,7 +64,16 @@ Sibling DoorDash agent `f4cc61ef-5484-4e82-9dbc-01b21f07b5d9` posted **70** such
    download-path markers.
 
 5. Cemented blackbox: static UI asset rejection; Chrome download event
-   materialization for Kernel and Steel; Network.register not used.
+   materialization for Kernel and Steel; same-basename upload does not block
+   materialize; Network.register not used.
+
+**Verified:**
+- Kernel TinyPNG PASS — `dd990e89-2341-404a-b84f-a32b2f15457e`
+  https://www.roselabs.ai/?agent-id=dd990e89-2341-404a-b84f-a32b2f15457e
+- Steel TinyPNG PASS — `9f9ba80d-e448-4dbb-97bb-603968c45da5`
+  https://www.roselabs.ai/?agent-id=9f9ba80d-e448-4dbb-97bb-603968c45da5
+  (persister `provider=steel`, `downloads_dir=/files`; goto ERR_ABORTED
+  materialize upload with `directory=undefined`)
 
 **10k-agent behavior:** O(1) per real Chrome download event; fewer FS writes and
 ASSISTANT rows per browser completion — no new fan-in.
