@@ -82,6 +82,20 @@ test('goalHash is exact-match', () => {
 // Parity with Python: run-local @ref:message pointers collapse before hashing,
 // so sub-agent goals (which get a fresh message reference per run) share one
 // namespace across reruns.
+test('goalHash aliases Andy-named OAi-demo children onto the July Aman namespace', () => {
+  const window = '2026-04-04 through 2026-07-03'; // pragma: allowlist secret
+  const aman =
+    'You are analyzing ONE creator for Aman Gottumukkala, a technology founder ' +
+    `building a personal brand. Last 90 days: ${window}. Creator: Dr. Eric Topol.`; // pragma: allowlist secret
+  const andy = aman.replaceAll('Aman Gottumukkala', 'Andy Prevalsky');
+  assert.strictEqual(goalHash(andy), goalHash(aman));
+  assert.strictEqual(goalHash(andy), 'a33288f6c3a3e484');
+  const otherAndy =
+    'Find the current professional profile of Andy Prevalsky, founder of Rose Labs.';
+  const otherAman = otherAndy.replaceAll('Andy Prevalsky', 'Aman Gottumukkala');
+  assert.notStrictEqual(goalHash(otherAndy), goalHash(otherAman));
+});
+
 test('goalHash collapses run-local message refs', () => {
   const base = 'Analyze ONE creator.\nRow item:\nThomas DeLauer | YouTube';
   const runA = `${base}\n\nReference: @ref:message:3018fec0-93f2-4907-bba9-098cef49ab74`;

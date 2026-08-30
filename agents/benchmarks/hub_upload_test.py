@@ -7,10 +7,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from benchmarks.hub_upload import (
     DEFAULT_HUB_URL,
+    HubVisibilityError,
     durable_open_agent_url,
     hub_upload_enabled,
     is_ephemeral_hub_url,
     mirror_run_bundle_to_durable_hub,
+    prepare_run_bundle_for_upload,
     resolve_hub_upload_url,
     upload_run_bundle,
 )
@@ -165,6 +167,65 @@ def test_required_upload_retries_transient_disconnect(monkeypatch):
         assert len(attempts) == 2
     finally:
         server.shutdown()
+
+
+def test_prepare_run_bundle_strips_tool_usage_tree_and_keeps_child_transcripts():
+    body = prepare_run_bundle_for_upload(
+        {
+            "run_id": "r",
+            "tasks": [
+                {
+                    "name": "test-mass-agent-run-0",
+                    "agent_id": "root-1",
+                    "tree_agent_count": 2,
+                    "logs": {
+                        "tree": {
+                            "root_agent_id": "root-1",
+                            "agent_count": 2,
+                            "tool_usage_count": 9,
+                            "child-a": {
+                                "parent_agent_id": "root-1",
+                                "goal": "research A",
+                                "status": "COMPLETED",
+                                "messages": [{"role": "ASSISTANT", "message": "A done"}],
+                            },
+                        }
+                    },
+                }
+            ],
+        }
+    )
+    tree = body["tasks"][0]["logs"]["tree"]
+    assert set(tree.keys()) == {"child-a"}
+    assert tree["child-a"]["messages"][0]["message"] == "A done"
+
+
+def test_required_upload_rejects_empty_fanout_transcripts():
+    try:
+        prepare_run_bundle_for_upload(
+            {
+                "run_id": "r",
+                "tasks": [
+                    {
+                        "name": "test-mass-agent-run-0",
+                        "agent_id": "root-1",
+                        "tree_agent_count": 54,
+                        "logs": {
+                            "tree": {
+                                "root_agent_id": "root-1",
+                                "agent_count": 54,
+                                "tool_usage_count": 9,
+                            }
+                        },
+                    }
+                ],
+            },
+            required=True,
+        )
+    except HubVisibilityError as exc:
+        assert "child transcripts" in str(exc)
+    else:
+        raise AssertionError("expected HubVisibilityError for empty fan-out chips")
 
 
 def test_missing_key_skips(monkeypatch):

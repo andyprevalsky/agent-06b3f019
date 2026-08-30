@@ -3658,6 +3658,18 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "set_plan" not in rendered
 
 
+
+def _soft_complete_bench_goal() -> str:
+    from pathlib import Path
+    import json as _json
+    tasks = _json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
+
+
 async def test_check_progress_disables_fast_cache_read_after_verifier_parse_failure():
     """Verifier retries should not replay the same invalid cached response repeatedly."""
     from helpers.llm import check_progress
@@ -3688,14 +3700,60 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
                 model="rose",
                 call_site="verifier_execute",
                 fast_mode_cache_enabled=True,
-                fast_mode_goal="finish the task",
+                fast_mode_goal=_soft_complete_bench_goal(),
                 fast_mode_step=2,
             )
     finally:
         set_context(None)
 
     assert result["score"] == 1.0
-    assert seen_contexts == [(True, True), (False, True)]
+    # Fast Mode soft-pass fires on the first parse failure so we never flip
+    # the context to write-only live (verify8/10 cost bleed). One attempt only.
+    assert seen_contexts == [(True, True)]
+    assert (result.get("usage") or {}).get("from_fast_cache") is True
+
+
+async def test_check_progress_soft_passes_cached_fast_mode_reject():
+    """Cached verifier rejects under Fast Mode soft-pass so soft-complete execute loops exit."""
+    from helpers.llm import check_progress
+    from providers.fast_cache.context import set_context
+
+    async def fake_call_llm_verifier(*_args, **_kwargs):
+        return (
+            {
+                "score": 0.0,
+                "reasoning": "No grounded tool-result evidence was provided.",
+            },
+            {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "from_fast_cache": True,
+                "actual_model": "anthropic/claude-opus-4.8",
+            },
+        )
+
+    try:
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier),
+        ):
+            result = await check_progress(
+                context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
+                verifier_system_prompt="VERIFY",
+                model="rose",
+                call_site="verifier_execute",
+                fast_mode_cache_enabled=True,
+                fast_mode_goal=_soft_complete_bench_goal(),
+                fast_mode_step=3,
+            )
+    finally:
+        set_context(None)
+
+    assert result["score"] == 1.0
+    assert "Fast Mode cache trajectory ended" in result["reasoning"]
+    assert (result.get("usage") or {}).get("from_fast_cache") is True
+    assert (result.get("usage") or {}).get("actual_model") == "fast-mode-soft-complete"
 
 
 async def test_check_progress_fences_the_entire_verifier_retry_loop():
@@ -7443,6 +7501,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
         test_check_progress_disables_fast_cache_read_after_verifier_parse_failure,
+    )
+    await r.record_async(
+        "check_progress_soft_passes_cached_fast_mode_reject",
+        test_check_progress_soft_passes_cached_fast_mode_reject,
     )
     await r.record_async(
         "check_progress_fences_the_entire_verifier_retry_loop",

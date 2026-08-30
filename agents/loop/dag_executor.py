@@ -1011,6 +1011,8 @@ async def _execute_single_task(
                     # LLM tends to pick depth="deep" for "comprehensive" goals, turning a
                     # gating "identify the list" explore into a 50-turn crawl that blocks
                     # fan-out. Force quick here; deliberate deep research should be its own task.
+                    # SpawnAgentManager.resolve_explore_depth promotes quick→deep under
+                    # Fast Mode so July OAi-demo trajectories can still finish.
                     params["depth"] = "quick"
 
                 if type_override.get("type") in {"general_purpose", "for_each"}:

@@ -21,7 +21,8 @@
     "start_phase": null,
     "min_agent_count": 50,
     "bench": "rose-bench",
-    "group": "rose-bench"
+    "group": "rose-bench",
+    "fast_cache": "on"
   },
   {
     "name": "single-creator-arm",

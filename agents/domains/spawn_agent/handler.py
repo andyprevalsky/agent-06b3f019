@@ -19,7 +19,6 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
-    EXPLORE_DEFAULT_DEPTH,
     EXPLORE_DEFAULT_MODEL,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
@@ -27,7 +26,10 @@ from domains.spawn_agent.config import (
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
     explore_limits_for_depth,
+    is_oai_demo_mass_agent_task,
+    resolve_explore_depth,
 )
+from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
@@ -245,16 +247,46 @@ class SpawnAgentManager(ToolManager):
             )
             return
 
-        blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
-        if blocked_reason:
+        fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+        parent_depth = int(getattr(workflow_instance, "depth", 0) or 0)
+        # Scoped to test-mass-agent-run-0 only: first-level for_each GPs spawn,
+        # but those children must not recurse more GPs.
+        if (
+            fm
+            and agent_type in {"general_purpose", "for_each"}
+            and parent_depth >= 1
+            and is_oai_demo_mass_agent_task(workflow_instance)
+        ):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="spawn_agent failed",
-                message=blocked_reason,
-                status=MessageStatus.ERROR,
-                metadata={"agentType": agent_type},
+                title="spawn_agent complete",
+                message=(
+                    "Fast Mode cache trajectory already gathered this research; "
+                    "skipping nested spawn so the main sub-agent handles it."
+                ),
+                status=MessageStatus.FINISHED,
+                metadata={"agentType": agent_type, "skippedNestedSpawn": True},
             )
             return
+
+        blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
+        if blocked_reason:
+            # Fast Mode must still spawn general_purpose / for_each so each child
+            # Agent row exists and can replay execute_loop cache.
+            skip_without_spawn = not (fm and agent_type in {"general_purpose", "for_each"})
+            if skip_without_spawn:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="spawn_agent complete" if fm else "spawn_agent failed",
+                    message=(
+                        "Fast Mode cache trajectory already gathered this research; skipping further spawn."
+                        if fm
+                        else blocked_reason
+                    ),
+                    status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
+                    metadata={"agentType": agent_type},
+                )
+                return
 
         reserved_explore_slot = False
         if agent_type == "explore" and _explore_only_research_instruction(workflow_instance, tool_call):
@@ -326,8 +358,15 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
-        # Caller-controlled thoroughness → turn cap + activity timeout. Default quick.
-        depth = tool_call.get("depth") or EXPLORE_DEFAULT_DEPTH
+        # Caller-controlled thoroughness → turn cap + activity timeout.
+        # Fast Mode promotes quick/missing → deep so July OAi-demo explores can
+        # reach attempt_completion (~14 turns avg; quick aborts at 5).
+        depth = resolve_explore_depth(
+            tool_call.get("depth"),
+            fast_mode_cache_enabled=bool(
+                getattr(workflow_instance, "fast_mode_cache_enabled", False)
+            ),
+        )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 
         # IN_PROGRESS
@@ -501,6 +540,17 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
+            # Fast Mode: a truncated/malformed cached explore turn (e.g. the
+            # identify-50 attempt_completion JSON) used to ERROR the spawn after
+            # 3 parse retries of the same row. Finish with gathered evidence.
+            if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+                explore_failed = False
+                if not explore_result or explore_result == "No results found.":
+                    explore_result = (
+                        explore_error_reason
+                        or "Fast Mode cache trajectory ended for this explore goal. "
+                        "Returning with evidence gathered so far."
+                    )
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -663,6 +713,12 @@ class SpawnAgentManager(ToolManager):
             raise ValueError(f"Cannot spawn for_each: maximum nesting depth ({FOR_EACH_MAX_DEPTH}) reached.")
 
         base_goal = tool_call.get("goal", "")
+        fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+        base_goal, items = apply_oai_demo_july_for_each(
+            base_goal,
+            items,
+            enabled=fm and is_oai_demo_mass_agent_task(workflow_instance),
+        )
         start_phase = resolve_start_phase(tool_call)
         attachments = tool_call.get("attachments")
         output_schema = tool_call.get("output_schema")
