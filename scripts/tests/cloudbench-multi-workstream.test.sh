@@ -78,6 +78,10 @@ mkdir -p "$SANDBOX/back-end/scripts" "$SANDBOX/back-end/prisma" \
   "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
 printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
+# hub_upload.py imports benchmarks.logs when preparing upload bundles; keep the
+# hermetic sandbox able to resolve that package the same way a real worktree does.
+cp "$ROOT_DIR/agents/benchmarks/__init__.py" "$SANDBOX/agents/benchmarks/__init__.py"
+cp "$ROOT_DIR/agents/benchmarks/logs.py" "$SANDBOX/agents/benchmarks/logs.py"
 # run-bench-fleet preflights the guest-pg canonical seed dump before clone.
 # Keep the synthetic worktrees hermetic: real token helper + stub R2 get.
 cp "$ROOT_DIR/agents/benchmarks/seed_cache_path.py" "$SANDBOX/agents/benchmarks/seed_cache_path.py"

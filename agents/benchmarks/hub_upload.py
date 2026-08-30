@@ -18,10 +18,17 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
 import time
 from urllib.parse import quote
 import urllib.error
 import urllib.request
+
+# Match other benchmarks/* CLI helpers: when run as a script, sys.path[0] is
+# agents/benchmarks/, so `from benchmarks…` cannot resolve without agents/.
+AGENTS_DIR = Path(__file__).resolve().parents[1]
+if str(AGENTS_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENTS_DIR))
 
 DEFAULT_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 DEFAULT_HUB_URL = "https://navi-j9a9.onrender.com"
