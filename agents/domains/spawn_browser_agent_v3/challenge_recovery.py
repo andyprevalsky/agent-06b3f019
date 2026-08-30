@@ -869,33 +869,6 @@ async def minimize_passing_cookie_removal(
 _COOKIE_PROBE_WAVE_CAP = 5
 
 
-def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
-    """True when the browser task explicitly prefers guest / anonymous checkout.
-
-    Guest payment-boundary tasks inject site cookies that often trip challenges;
-    a clean ``all_target`` strip is the intended recovery (logged-out page), not
-    an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
-
-    Guest phrases are the only positive signal. Do not veto on bare ``sign in`` /
-    ``log in`` substrings — guest goals routinely say ``do not sign in``, and a
-    naive signed-in veto matches inside that negation and wrongly forces
-    preserve-auth recovery (see browser-hotel-booking 4bbd1e64).
-    """
-    text = (goal or "").lower()
-    guest_needles = (
-        "guest checkout",
-        "as guest",
-        "continue as guest",
-        "do not sign in",
-        "don't sign in",
-        "without signing in",
-        "no account needed",
-        "do not log in",
-        "don't log in",
-    )
-    return any(needle in text for needle in guest_needles)
-
-
 async def recover_from_challenge(
     *,
     source_state: StorageState,
@@ -913,8 +886,10 @@ async def recover_from_challenge(
     ``probe`` must hit ephemeral provider sessions (or a test double), **not**
     ``new_context`` on the live Kernel browser — that paints stacked Chromium
     windows into the debug view. Known anti-bot strips that probe clean may be
-    committed on the live tab; guest tasks may commit a clean ``all_target``
-    strip. Opaque cookie findings stay diagnostic and escalate to config search.
+    committed on the live tab; when ``allow_logged_out_cookie_commit`` is true
+    (tool-call param for guest/anonymous tasks), a clean ``all_target`` strip
+    may also be committed. Opaque cookie findings stay diagnostic and escalate
+    to config search.
     """
     original_digest = _state_digest(source_state)
 

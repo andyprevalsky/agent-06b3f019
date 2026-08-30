@@ -60,7 +60,6 @@ from utils.prompts import build_verifier_prompt
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
-    goal_allows_logged_out_cookie_commit,
     live_tab_looks_challenged,
     page_looks_challenged,
     recover_from_challenge,
@@ -7704,13 +7703,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 }
 
             if action_name == "recover_from_challenge":
-                recovery_reason = unified_action.get("params", {}).get("reason", "")
-                recovery_call_id = _browser_action_tool_call_id(llm_result)
-                logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
-
-                provider_exit_rejected = bool(
-                    unified_action.get("params", {}).get("provider_exit_rejected")
+                recovery_params = unified_action.get("params", {}) or {}
+                recovery_reason = recovery_params.get("reason", "")
+                allow_logged_out_cookie_commit = bool(
+                    recovery_params.get("allow_logged_out_cookie_commit")
                 )
+                recovery_call_id = _browser_action_tool_call_id(llm_result)
+                logger.info(
+                    "Browser agent requested staged challenge recovery",
+                    reason=recovery_reason,
+                    allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
+                )
+
+                provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
                 # If the live tab is already clean and this was not a hard
                 # provider-exit rejection, skip — avoids recovery loops the model
                 # invents from third-party network noise on an otherwise fine page.
@@ -7807,7 +7812,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if lanes and isinstance(lanes[0], dict)
                         else recovery_storage_state
                     )
-                    preserve_auth = not goal_allows_logged_out_cookie_commit(goal)
+                    preserve_auth = not allow_logged_out_cookie_commit
                     result = await recover_browser_challenge(
                         config,
                         task_id,
@@ -7888,9 +7893,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         progress=emit_recovery_progress,
                         provider_exit_rejected=provider_exit_rejected
                         or escalate_after_cookie_false_stable,
-                        allow_logged_out_cookie_commit=goal_allows_logged_out_cookie_commit(
-                            goal
-                        ),
+                        allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
                     )
                     if recovery.recovery == "cookies_sanitized":
                         cookie_recovery_successes += 1

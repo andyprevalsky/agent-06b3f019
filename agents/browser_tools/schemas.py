@@ -417,6 +417,13 @@ class RecoverFromChallengeBrowserTool(BaseModel):
             "the agent's own solve attempt"
         )
     )
+    allow_logged_out_cookie_commit: bool = Field(
+        default=False,
+        description=(
+            "True when the task is guest/anonymous checkout and a proven clean logged-out "
+            "cookie strip may be committed. False (default) preserves signed-in cookies."
+        ),
+    )
 
 
 class PaymentLineItem(BaseModel):

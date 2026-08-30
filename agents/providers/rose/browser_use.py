@@ -211,13 +211,14 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
             "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
-            "cookies, then parallel cookie-group reductions. The signed-in source context is not changed "
-            "during testing, and anything that may carry authentication is always preserved. If no safe "
-            "cookie fix is proven, it searches permission-compatible Kernel residential, Kernel mobile, "
-            "Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration that "
-            "passes repeated stability probes, and caches that configuration as this user's default for "
-            "future browser sessions. Provider CAPTCHA solving remains enabled throughout. The successful "
-            "recovery returns to the current URL with cookies, localStorage, and IndexedDB preserved."
+            "cookies, then parallel cookie-group reductions. By default, signed-in/auth-bearing cookies are "
+            "preserved. Set allow_logged_out_cookie_commit=true only for guest/anonymous checkout tasks so a "
+            "proven clean logged-out cookie strip may be committed. If no safe cookie fix is proven, it "
+            "searches permission-compatible Kernel residential, Kernel mobile, Kernel ISP, and Steel "
+            "managed/fixed-IP browsers in parallel, selects a configuration that passes repeated stability "
+            "probes, and caches that configuration as this user's default for future browser sessions. "
+            "Provider CAPTCHA solving remains enabled throughout. The successful recovery returns to the "
+            "current URL with cookies, localStorage, and IndexedDB preserved."
         ),
         "params": {
             "reason": {
@@ -228,6 +229,14 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     "'repeated 429s on search')."
                 ),
                 "required": True,
+            },
+            "allow_logged_out_cookie_commit": {
+                "type": "boolean",
+                "description": (
+                    "True when the task is guest/anonymous checkout and a proven clean logged-out cookie "
+                    "strip may be committed. False (default) preserves signed-in/auth-bearing cookies."
+                ),
+                "required": False,
             },
         },
     },
@@ -1368,6 +1377,20 @@ def _normalize_action_params(
         out["label"] = label
     if params.get("reason"):
         out["reason"] = params["reason"]
+    if normalized_action == "recover_from_challenge":
+        raw_guest = params.get("allow_logged_out_cookie_commit")
+        if raw_guest is None:
+            raw_guest = first_action.get("allow_logged_out_cookie_commit")
+        if raw_guest is not None:
+            if isinstance(raw_guest, str):
+                out["allow_logged_out_cookie_commit"] = raw_guest.strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "y",
+                )
+            else:
+                out["allow_logged_out_cookie_commit"] = bool(raw_guest)
 
     if params.get("seconds") is not None:
         out["time_ms"] = params["seconds"] * 1000

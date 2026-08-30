@@ -5883,6 +5883,24 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     finish_tool = finalizer_source.index("await browser_stream.finish_tools(", append_turn)
     assert history_guard < append_turn < finish_tool
 
+
+def test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal():
+    """Guest cookie commit is an explicit recover_from_challenge param, not goal sniffing."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
+    recovery_block = source[start:end]
+
+    assert "goal_allows_logged_out_cookie_commit" not in recovery_block
+    assert 'recovery_params.get("allow_logged_out_cookie_commit")' in recovery_block
+    assert "preserve_auth = not allow_logged_out_cookie_commit" in recovery_block
+    assert "allow_logged_out_cookie_commit=allow_logged_out_cookie_commit" in recovery_block
+
+
 def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
     """A target reset (proxy rotation) must re-seed passkeys, not just storage.
 
@@ -8059,6 +8077,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     }
     filtered = recorder.query_requests(url_pattern="/api/", limit=10)
     # Query string + fragment (token/sig) redacted by default; path preserved.
+    # response_ts_ms is forwarded when present so read_logs can order network rows.
     assert filtered == [
         {
             "id": "1",
@@ -8066,6 +8085,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
             "method": "POST",
             "status": 403,
             "resource_type": "XHR",
+            "response_ts_ms": 200,
             "body_available": False,
         }
     ]
@@ -18282,6 +18302,10 @@ async def run_all_tests():
     r.record(
         "recovery_reconnect_failure_drops_handles",
         test_recovery_reconnect_failure_drops_disconnected_browser_handles,
+    )
+    r.record(
+        "recovery_guest_cookie_commit_from_tool_param",
+        test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal,
     )
     r.record(
         "passkeys_reseed_on_target_reset",
