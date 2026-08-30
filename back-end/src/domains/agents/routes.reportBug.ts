@@ -10,7 +10,7 @@ import {
   ReportBugNotFoundError,
   ReportBugValidationError,
   reportAgentBug,
-} from './reportBugService';
+} from './bugReportService';
 
 const log = createLogger('ReportBug');
 const router = Router();

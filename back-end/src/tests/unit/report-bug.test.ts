@@ -10,7 +10,7 @@ import {
   buildBugReportPrompt,
   buildBugReportSms,
   buildBugReportTitle,
-} from '../../domains/agents/reportBugService';
+} from '../../domains/agents/bugReportService';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
 import {
   buildGithubCursorIssueBody,
