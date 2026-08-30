@@ -1644,10 +1644,7 @@ def test_planner_routes_retrieval_before_stateful_execution():
     from utils.prompts import build_planner_system_prompt
 
     prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
-    assert (
-        "Plan information retrieval and discovery in spawn_explore_agent before dependent execution."
-        in prompt
-    )
+    assert "Choose the lowest-total-energy retrieval path" in prompt
     assert "spawn_browser_agent may read pages only while executing a known stateful trajectory" in prompt
     assert (
         "Step 0 spawn_explore_agent retrieves the public target or route; "
@@ -1660,15 +1657,14 @@ def test_planner_routes_retrieval_before_stateful_execution():
 
 
 def test_planner_routes_programmatic_public_api_ranking_to_code_agent():
-    """Programmatic public API ranking must be planned on spawn_code_agent, not explore/reasoning."""
+    """Lowest-total-energy retrieval routes known API/script work to spawn_code_agent."""
     from tools.prompts.spawn_agent import PROMPT as SPAWN_AGENT_PROMPT
     from utils.prompts import build_planner_system_prompt
 
     prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
-    assert "plan spawn_code_agent instead of spawn_explore_agent or reasoning" in prompt
-    assert "Programmatic public API ranking" in prompt
-    assert "Do NOT use reasoning for ranking, deduplication, cutoff checks, or formatting" in prompt
-    assert "spawn_claude_code_agent for programmatic API/scripted metadata work" in prompt
+    assert "Choose the lowest-total-energy retrieval path" in prompt
+    assert "spawn_code_agent when a known structured API or script can fetch/rank/dedupe/format" in prompt
+    assert "Plan information retrieval and discovery in spawn_explore_agent before dependent execution." not in prompt
 
 
 # ============================================================================
