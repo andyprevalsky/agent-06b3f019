@@ -21,9 +21,29 @@
 
 import assert from 'node:assert';
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 
 const BACKEND_ROOT = path.resolve(__dirname, '../../..');
+const REPO_ROOT = path.resolve(BACKEND_ROOT, '..');
+
+function resolveTsxBinary(): string {
+  const candidates = [
+    path.join(BACKEND_ROOT, 'node_modules', '.bin', 'tsx'),
+    path.join(REPO_ROOT, 'node_modules', '.bin', 'tsx'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // try next
+    }
+  }
+  throw new Error(
+    `tsx binary not found for deploy-script import-safety probe (tried: ${candidates.join(', ')})`
+  );
+}
 
 /** Entry points the deploy pipeline imports in credential-scoped environments. */
 const DEPLOY_SCRIPT_MODULES = [
@@ -42,7 +62,7 @@ const ABSENT_CREDENTIALS = {
 function importsCleanly(moduleRelPath: string): { ok: boolean; detail: string } {
   try {
     const output = execFileSync(
-      path.join(BACKEND_ROOT, 'node_modules/.bin/tsx'),
+      resolveTsxBinary(),
       [
         '-e',
         `import('./${moduleRelPath}')` +
