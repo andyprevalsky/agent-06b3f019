@@ -567,7 +567,10 @@ async def run_planner_attempt(
         getattr(workflow_instance, "compute_token_lineage_key", None),
         getattr(workflow_instance, "compute_token_fast_cache_affinity_key", None),
         getattr(workflow_instance, "fast_mode_cache_enabled", False),
-        getattr(workflow_instance, "goal", None),
+        # Prefer the durable Agent-row goal (fast_cache_goal) so chat-escalation
+        # refined workflow input goals do not open a fresh empty cache namespace.
+        getattr(workflow_instance, "fast_cache_goal", None)
+        or getattr(workflow_instance, "goal", None),
         attempt,  # Fast Mode position step — planner attempt index (deterministic across runs)
     ]
 

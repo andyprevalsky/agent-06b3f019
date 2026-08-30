@@ -384,21 +384,129 @@ async def cache_get(key: str) -> Optional[Any]:
     return record.get("value") if record.get("hit") else None
 
 
-# Per-process memo of (read_enabled, goal, write_enabled, root_agent_id) keyed by agent_id, so
-# auto-resolution costs at most one backend lookup per agent per worker process.
-_AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str]]] = {}
+async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]]:
+    """Return `(value, hit_key)` for the first hitting key in `keys`, else `(None, None)`."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    if not ordered:
+        return None, None
+    if len(ordered) == 1:
+        value = await cache_get(ordered[0])
+        return (value, ordered[0]) if value is not None else (None, None)
+
+    # Prefer get-many so alias lookups stay one RTT; fall back to serial gets.
+    try:
+        records = await _fetch_cache_records_many(ordered)
+        for key in ordered:
+            record = records.get(key) or {}
+            if record.get("hit") and record.get("value") is not None:
+                return record.get("value"), key
+        return None, None
+    except _BatchUnsupported:
+        for key in ordered:
+            value = await cache_get(key)
+            if value is not None:
+                return value, key
+        return None, None
+    except Exception as exc:
+        # Transport / 5xx after get-many: try serial, but if every key still
+        # misses, re-raise so callers set lookup_failed and skip passthroughs.
+        for key in ordered:
+            try:
+                value = await cache_get(key)
+            except Exception:
+                continue
+            if value is not None:
+                return value, key
+        raise RuntimeError(f"fast-cache get-first failed: {exc}") from exc
 
 
-async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], bool, Optional[str]]:
-    """Look up (read_enabled, goal, write_enabled, root_agent_id) for an agent.
+async def cache_get_position_fallback(
+    goal_hash: str,
+    call_site: str,
+    step: Optional[int] = None,
+) -> tuple[Optional[Any], Optional[str]]:
+    """Oldest matching entry for goal/site/step when exact keys miss.
+
+    Restores the Jul 2026 OAi demo warm cache after fingerprint drift: prefer the
+    earliest row under that durable trajectory slot (the original warm write).
+
+    When ``step is None`` (content-addressed contexts), return a miss — the
+    backend position query does not compare the request fingerprint, so a
+    fallback would replay another request's value for the same call site.
+    Transport / non-404 errors raise so callers can set ``lookup_failed`` and
+    skip synthetic passthroughs.
+    """
+    if step is None:
+        return None, None
+    api_url, api_key = _backend()
+    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
+    try:
+        resp = await _shared_client().post(
+            f"{api_url}/api/fast-cache/get-position",
+            headers=backend_api_headers(api_key),
+            json=body,
+            timeout=_GET_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warning("fast_cache.get_position_error", error=str(exc)[:300])
+        raise
+    if resp.status_code != 200:
+        if resp.status_code in {404, 405}:
+            return None, None
+        logger.warning("fast_cache.get_position_failed", status=resp.status_code)
+        raise RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
+    data = resp.json()
+    if not data.get("hit"):
+        return None, None
+    return data.get("value"), data.get("key")
+
+
+async def trajectory_prior_exists(
+    goal_hash: str,
+    call_site: str,
+    step: Optional[int],
+) -> bool:
+    """True when an earlier durable slot exists for this goal/site.
+
+    Soft-complete is only valid at true end-of-trajectory (warm namespace ran
+    out of rows). Cold namespaces (no prior slot) must not soft-complete —
+    that fakes hits and diverges from July replay.
+    """
+    if not goal_hash or step is None or int(step) <= 0:
+        return False
+    try:
+        prior, _ = await cache_get_position_fallback(goal_hash, call_site, int(step) - 1)
+    except Exception:
+        return False
+    return prior is not None
+
+
+# Per-process memo of (read_enabled, goal, write_enabled, root_agent_id, root_goal)
+# keyed by agent_id, so auto-resolution costs at most one backend lookup per agent
+# per worker process.
+_AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str], Optional[str]]] = {}
+
+
+async def resolve_agent_fast_mode(
+    agent_id: str,
+) -> tuple[bool, Optional[str], bool, Optional[str], Optional[str]]:
+    """Look up (read_enabled, goal, write_enabled, root_agent_id, root_goal).
 
     `read_enabled` is the persisted Fast Mode flag. `write_enabled` may be true
-    for allowlisted accounts even when reads are off. Returns all-false on any
+    for allowlisted accounts even when reads are off. `root_goal` is the bus
+    root agent's goal (same as `goal` for roots) — used to gate soft-complete
+    stubs to exact-match `fast_cache:on` bench trees. Returns all-false on any
     error (degrade to no-cache).
     """
     if agent_id in _AGENT_FASTMODE:
         return _AGENT_FASTMODE[agent_id]
-    enabled, goal, write_enabled, root_agent_id = False, None, False, None
+    enabled, goal, write_enabled, root_agent_id, root_goal = False, None, False, None, None
     try:
         api_url, api_key = _backend()
         # Dedicated internal endpoint (API-key auth, no RLS) — the agent serializer
@@ -415,6 +523,8 @@ async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], b
             goal = data.get("goal")
             write_enabled = bool(data.get("writeEnabled", enabled))
             root_agent_id = data.get("rootAgentId") if isinstance(data.get("rootAgentId"), str) else agent_id
+            root_goal_raw = data.get("rootGoal")
+            root_goal = root_goal_raw if isinstance(root_goal_raw, str) and root_goal_raw else goal
         else:
             logger.warning("fast_cache.resolve_agent_failed", agent_id=agent_id, status=resp.status_code)
     except Exception as exc:
@@ -422,8 +532,39 @@ async def resolve_agent_fast_mode(agent_id: str) -> tuple[bool, Optional[str], b
     # Only memoize a positive resolution — a transient failure shouldn't disable
     # the cache for the rest of the run.
     if goal and (enabled or write_enabled):
-        _AGENT_FASTMODE[agent_id] = (enabled, goal, write_enabled, root_agent_id)
-    return enabled, goal, write_enabled, root_agent_id
+        _AGENT_FASTMODE[agent_id] = (enabled, goal, write_enabled, root_agent_id, root_goal)
+    return enabled, goal, write_enabled, root_agent_id, root_goal
+
+
+async def soft_complete_allowed_for_agent(
+    agent_id: Optional[str],
+    goal: Optional[str] = None,
+) -> bool:
+    """True when soft-complete stubs may fire for this agent (exact bench match).
+
+    Resolves the tree root goal when needed so for_each children under
+    ``test-mass-agent-run-0`` inherit stub eligibility.
+    """
+    if normalize.soft_complete_allowed(goal):
+        return True
+    if not agent_id:
+        return False
+    _enabled, resolved_goal, _write_enabled, _root_id, root_goal = await resolve_agent_fast_mode(agent_id)
+    return normalize.soft_complete_allowed(goal or resolved_goal, root_goal=root_goal)
+
+
+async def resolve_soft_complete_root_goal(
+    agent_id: Optional[str],
+    goal: Optional[str] = None,
+) -> Optional[str]:
+    """Return the tree-root goal used to gate soft-complete stubs."""
+    if not agent_id:
+        return goal
+    try:
+        _e, resolved_goal, _w, _r, root_goal = await resolve_agent_fast_mode(agent_id)
+        return root_goal or goal or resolved_goal
+    except Exception:
+        return goal
 
 
 async def resolve_archive_root_agent_id() -> Optional[str]:
@@ -431,7 +572,7 @@ async def resolve_archive_root_agent_id() -> Optional[str]:
     agent_id = structlog.contextvars.get_contextvars().get("agent_id")
     if isinstance(agent_id, str):
         try:
-            _enabled, _goal, _write_enabled, resolved_root = await resolve_agent_fast_mode(agent_id)
+            _enabled, _goal, _write_enabled, resolved_root, _root_goal = await resolve_agent_fast_mode(agent_id)
             if resolved_root:
                 return resolved_root
         except Exception as exc:  # archive best-effort path
@@ -451,10 +592,15 @@ async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
         return existing
     if not agent_id:
         return existing
-    enabled, resolved_goal, write_enabled, _root_agent_id = await resolve_agent_fast_mode(agent_id)
+    enabled, resolved_goal, write_enabled, _root_agent_id, root_goal = await resolve_agent_fast_mode(agent_id)
     g = goal or resolved_goal
     if g and (enabled or write_enabled):
-        ctx = FastCacheContext(enabled=enabled, goal=g, write_enabled=write_enabled)
+        ctx = FastCacheContext(
+            enabled=enabled,
+            goal=g,
+            write_enabled=write_enabled,
+            root_goal=root_goal or g,
+        )
         set_context(ctx)
         return ctx
     return existing
@@ -471,13 +617,14 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
 
     if not agent_id:
         return None
-    enabled, goal, write_enabled, _root_agent_id = await resolve_agent_fast_mode(agent_id)
+    enabled, goal, write_enabled, _root_agent_id, root_goal = await resolve_agent_fast_mode(agent_id)
     if goal and (enabled or write_enabled):
         ctx = FastCacheContext(
             enabled=enabled,
             goal=goal,
             base_step=step,
             write_enabled=write_enabled,
+            root_goal=root_goal or goal,
         )
         set_context(ctx)
         return ctx

@@ -30,6 +30,15 @@ from providers.fast_cache import rose_cache
 from providers.rose.pools import POOL_REGISTRY
 
 
+def _soft_complete_bench_goal() -> str:
+    """Exact prompt for the sole ``fast_cache:on`` task (test-mass-agent-run-0)."""
+    from pathlib import Path
+
+    tasks_path = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
+    return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
+
+
 # ---------------------------------------------------------------------------
 # Fakes / helpers
 # ---------------------------------------------------------------------------
@@ -96,6 +105,31 @@ def mem(monkeypatch):
     store = MemStore()
     monkeypatch.setattr(rose_cache.cache_client, "cache_get", store.get)
     monkeypatch.setattr(rose_cache.cache_client, "cache_set", store.set)
+
+    async def _get_first(keys):
+        for key in keys or []:
+            value = await store.get(key)
+            if value is not None:
+                return value, key
+        return None, None
+
+    async def _position_fallback(goal_hash, call_site, step=None):
+        del goal_hash, call_site, step
+        return None, None
+
+    async def _prior_exists(goal_hash, call_site, step):
+        del goal_hash, call_site
+        # Default cold; tests that need true exhaustion stub this True.
+        return bool(step is not None and int(step) > 0 and False)
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_first", _get_first)
+    monkeypatch.setattr(
+        rose_cache.cache_client, "cache_get_position_fallback", _position_fallback
+    )
+    monkeypatch.setattr(
+        rose_cache.cache_client, "trajectory_prior_exists", _prior_exists
+    )
+    store.prior_exists = _prior_exists
     return store
 
 
@@ -1888,10 +1922,19 @@ def test_passthrough_when_disabled(mem):
 
 
 def test_write_only_context_writes_without_reading(mem):
+    """WRITE_ONLY: skip cache read, call provider, write (non-soft call_site).
+
+    Write-through never soft-completes — Andy/Tamy $0 warm paths use Fast Mode
+    *read* (enabled=True). Write-only must keep calling live LLM so multi-step
+    cold seeds (explore p:2 after writing p:1) are not aborted.
+    """
+
     async def body():
         set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra")
+        )
         assert rose.calls == 1
         assert mem.get_calls == 0
         assert mem.set_calls == 1
@@ -1900,15 +1943,99 @@ def test_write_only_context_writes_without_reading(mem):
     asyncio.run(body())
 
 
+def test_write_only_continues_live_even_when_prior_slot_exists(mem, monkeypatch):
+    """Write-through must not trajectory-end-passthrough after seeding p:N.
+
+    Regression for spawn-sub-agents smoke: allowlisted write-through wrote
+    explore/execute p:1, then p:2 saw trajectory_prior_exists and stubbed
+    attempt_completion — verifier 0% loops until timeout.
+    """
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
+
+    async def body():
+        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=3))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 1
+        assert mem.set_calls == 1
+        assert chunks[0].kind == "metadata"
+        assert not any(
+            getattr(c, "data", None) and c.data.get("name") == "attempt_completion"
+            for c in chunks
+            if c.kind == "tool_call"
+        )
+
+    asyncio.run(body())
+
+
+def test_rose_client_write_only_does_not_trajectory_end_passthrough(mem, monkeypatch):
+    """RoseClient.complete write-through must match cached_complete: never stub p:N+1.
+
+    browser-smoke / spawn-sub-agents use Andy write-through with Fast Mode off.
+    Stubbing the second execute_loop as attempt_completion kills the only
+    repeatable cache_sequence_id pair and hard-fails the 40% cache ratchet.
+    """
+    from providers.rose.client import RoseClient
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(
+        "providers.fast_cache.client.trajectory_prior_exists",
+        prior_true,
+    )
+
+    async def body():
+        set_context(FastCacheContext(enabled=False, goal="browser-smoke-goal", write_enabled=True, base_step=2))
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for c in _full_stream():
+                yield c
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="execute_loop",
+                agent_id="agent-browser-smoke",
+                dump_context=False,
+            )
+        )
+        assert live_calls["n"] == 1
+        assert chunks[0].kind == "metadata"
+        assert not any(
+            getattr(c, "data", None) and c.data.get("name") == "attempt_completion"
+            for c in chunks
+            if c.kind == "tool_call"
+        )
+
+    asyncio.run(body())
+
+
 def test_write_only_context_uses_provider_fast_mode(mem):
     async def body():
         set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra")
+        )
         assert rose.calls == 1
         assert mem.set_calls == 1
         assert next(iter(mem.data.keys())) == FastCacheContext(enabled=True, goal="g").llm_key(
-            "execute_loop",
+            "response_schema",
             rose_cache.request_key_material(
                 {
                     "pool": "rose-1-ultra",
@@ -1922,10 +2049,11 @@ def test_write_only_context_uses_provider_fast_mode(mem):
 
 def test_miss_writes_assembled_response(mem):
     # #7 first run populates; #8 full (saw done) write.
+    # Non-soft call_site so cold miss still records (soft sites short-circuit).
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert rose.calls == 1
         assert len(mem.data) == 1
         stored = next(iter(mem.data.values()))
@@ -1947,7 +2075,7 @@ def test_structured_response_model_does_not_write_during_stream(mem):
         chunks = await _drain(
             rose_cache.cached_complete(
                 rose,
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 response_model=StructuredAction,
             )
@@ -1966,7 +2094,7 @@ def test_partial_stream_not_written(mem):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream()[:3])  # metadata + 2 content, NO usage/done
-        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        await _drain(rose_cache.cached_complete(rose, call_site="response_schema", pool="rose-1-ultra"))
         assert mem.data == {}
 
     asyncio.run(body())
@@ -1977,13 +2105,13 @@ def test_hit_replays_without_calling_rose(mem):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         await _drain(
-            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
 
         # Second run, fresh context (new run, same goal) — must hit.
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose2 = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose2, call_site="execute_loop", pool="rose-1-ultra"))
+        chunks = await _drain(rose_cache.cached_complete(rose2, call_site="response_schema", pool="rose-1-ultra"))
 
         assert rose2.calls == 0  # never touched Rose
         kinds = [c.kind for c in chunks]
@@ -2008,12 +2136,12 @@ def test_replay_after_write_does_not_rewrite(mem):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g"))
         await _drain(
-            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
         set_context(FastCacheContext(enabled=True, goal="g"))
         # Second run MISSes? No — same key already present → it HITS and won't write again.
         await _drain(
-            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="execute_loop", pool="rose-1-ultra")
+            rose_cache.cached_complete(FakeRose(_full_stream()), call_site="response_schema", pool="rose-1-ultra")
         )
         assert len(mem.data) == 1
         assert mem.set_calls == 1  # only the first run wrote
@@ -2030,7 +2158,7 @@ def test_partial_cache_degrades_gracefully(mem):
         await _drain(
             rose_cache.cached_complete(
                 FakeRose(_full_stream()),
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 messages=first_messages,
             )
@@ -2041,7 +2169,7 @@ def test_partial_cache_degrades_gracefully(mem):
         await _drain(
             rose_cache.cached_complete(
                 hit_rose,
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 messages=first_messages,
             )
@@ -2050,7 +2178,7 @@ def test_partial_cache_degrades_gracefully(mem):
         await _drain(
             rose_cache.cached_complete(
                 miss_rose,
-                call_site="execute_loop",
+                call_site="response_schema",
                 pool="rose-1-ultra",
                 messages=second_messages,
             )
@@ -2078,7 +2206,7 @@ def test_get_error_falls_through_to_live(monkeypatch):
         set_context(FastCacheContext(enabled=True, goal="g"))
         rose = FakeRose(_full_stream())
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
-        assert rose.calls == 1  # degraded to a live call instead of crashing
+        assert rose.calls == 1  # soft sites still degrade to live on transport errors
         assert chunks[-1].kind == "done"
 
     asyncio.run(body())
@@ -2092,7 +2220,7 @@ def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch
 
     async def fake_resolve(agent_id: str):
         assert agent_id == "agent-1"
-        return True, "persisted row goal", True, "agent-1"
+        return True, "persisted row goal", True, "agent-1", "persisted row goal"
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
@@ -2107,7 +2235,7 @@ def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
     from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
 
     async def fake_resolve(agent_id: str):
-        return False, None, False, None
+        return False, None, False, None, None
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
@@ -2129,3 +2257,657 @@ def test_goal_hash_collapses_run_local_message_refs():
     assert normalize.goal_hash(run_a) != normalize.goal_hash("Different goal" + run_a)
     # Goals without refs hash exactly as before (raw sha256 prefix).
     assert normalize.goal_hash(base) == normalize.sha256(base)[:16]
+
+
+def test_oai_demo_root_goal_hash_constant():
+    assert normalize.OAI_DEMO_ROOT_GOAL_HASH == "4ae3193053ac1d8f"
+
+
+def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
+    """Andy-named children must reuse the July Aman cache namespace.
+
+    The display-name swap must not mint a new goalHash: that miss path
+    cold-passthroughs explore/execute into the 24s traj-end stub.
+    """
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    aman_goal = (
+        "You are analyzing ONE creator for Aman Gottumukkala, a technology founder "  # pragma: allowlist secret
+        "building a personal brand at the intersection of health, longevity, "  # pragma: allowlist secret
+        f"technology, and founder journey. Last 90 days: {window}. "  # pragma: allowlist secret
+        "Creator: Dr. Eric Topol."
+    )
+    andy_goal = aman_goal.replace("Aman Gottumukkala", "Andy Prevalsky")
+    assert "Andy Prevalsky" in andy_goal
+    assert normalize.goal_hash(andy_goal) == normalize.goal_hash(aman_goal)
+    from domains.spawn_agent.oai_demo_july import JULY_GP_GOAL_HASHES
+
+    assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
+    kayla = (
+        "You are analyzing ONE creator for Andy Prevalsky. "  # pragma: allowlist secret
+        f"Last 90 days: {window}. "  # pragma: allowlist secret
+        'Row item:\n{"creator_name": "Kayla Barnes-Lentz", "rank": 39}'
+    )
+    assert normalize.goal_hash(kayla) != JULY_GP_GOAL_HASHES["Eric Topol"]
+    other_andy = "Find the current professional profile of Andy Prevalsky, founder of Rose Labs."
+    other_aman = other_andy.replace("Andy Prevalsky", "Aman Gottumukkala")
+    assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
+
+
+def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():
+    stored = {
+        "content": "Hello Aman Gottumukkala",
+        "reasoning": "Aman's brand angle",
+        "tool_calls": [{"arguments": '{"result":"Aman Gottumukkala notes"}'}],
+    }
+    rewritten = normalize.rewrite_oai_demo_display_names(stored)
+    assert rewritten["content"] == "Hello Andy Prevalsky"
+    assert rewritten["reasoning"] == "Andy's brand angle"
+    assert "Andy Prevalsky" in rewritten["tool_calls"][0]["arguments"]
+    assert "Aman Gottumukkala" not in json.dumps(rewritten)
+
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    ctx = FastCacheContext(enabled=True, goal=f"Analyze Topol. Window {window}.")
+    token = set_context(ctx)
+    try:
+        chunks: list[Any] = []
+
+        async def collect() -> None:
+            async for chunk in rose_cache._replay(stored):
+                chunks.append(chunk)
+
+        asyncio.run(collect())
+        texts = [json.dumps(getattr(chunk, "data", {}), default=str) for chunk in chunks]
+        blob = "\n".join(texts)
+        assert "Andy Prevalsky" in blob
+        assert "Aman Gottumukkala" not in blob
+    finally:
+        reset_context(token)
+
+
+def test_position_lookup_keys_include_july_demo_aliases():
+    request = {
+        "pool": "rose-1-ultra",
+        "messages": [
+            {"role": "system", "content": "static system"},
+            {"role": "user", "content": "dynamic user that must not affect july fp"},
+        ],
+        "tools": [{"name": "spawn"}],
+        "temperature": 0,
+    }
+    keys = normalize.position_lookup_keys("mass agent root goal", "dag_param_populator", 1, request)
+    assert keys[0] == normalize.position_key("mass agent root goal", "dag_param_populator", 1, request)
+    assert any(k.startswith("fastmode:v42:") for k in keys)
+    assert any(k.startswith("fastmode:v43:") for k in keys)
+    legacy_fp = normalize.oai_demo_position_request_fingerprint(request)
+    assert any(f":c:{legacy_fp}" in k for k in keys)
+    # July fingerprint ignores trailing user messages; current fingerprint must not.
+    assert normalize.oai_demo_position_request_fingerprint(request) != normalize.position_request_fingerprint(
+        request
+    )
+    # Without the user message, July and current fingerprints still differ by
+    # exclude_anthropic_family (present only in the current material).
+    static_only = {
+        "pool": "rose-1-ultra",
+        "messages": [{"role": "system", "content": "static system"}],
+        "tools": [{"name": "spawn"}],
+        "temperature": 0,
+    }
+    assert normalize.oai_demo_position_request_fingerprint(static_only) != normalize.position_request_fingerprint(
+        static_only
+    )
+
+
+def test_position_prefix_pattern_matches_durable_slot():
+    pattern = normalize.position_prefix_pattern("goal", "plan_loop", 2)
+    gh = normalize.goal_hash("goal")
+    scope = normalize.world_model_cache_scope()
+    assert pattern == f"fastmode:%:{scope}llm:{gh}:plan_loop:p:2:c:%"
+
+
+def test_build_for_each_goal_hash_matches_oai_demo_python_namespace():
+    """JS JSON.stringify hashes diverge from Python json.dumps — rekey must use Python form."""
+    from domains.spawn_agent.service import build_for_each_goal
+
+    base = (
+        "Analyze the assigned creator only for a brand strategy project.\n"
+        "Current date is 2026-07-03."
+    )
+    item = {
+        "rank": 1,
+        "name": "Andrew Huberman",
+        "primary_niche_angle": "health/longevity + performance systems",
+        "platforms": {
+            "youtube": {"url": "https://www.youtube.com/@hubermanlab", "handle": "@hubermanlab"},
+            "instagram": None,
+            "tiktok": None,
+            "substack": None,
+        },
+    }
+    py_goal = build_for_each_goal(base, item)
+    js_like = f"{base}\n\nUse this row context for the task below.\nRow item:\n{json.dumps(item, separators=(',', ':'))}"
+    assert normalize.goal_hash(py_goal) != normalize.goal_hash(js_like)
+    # Spaced separators + sort_keys must match spawn_agent (JSONB-stable).
+    spaced = (
+        f"{base}\n\nUse this row context for the task below.\nRow item:\n"
+        f"{json.dumps(item, ensure_ascii=True, sort_keys=True)}"
+    )
+    assert normalize.goal_hash(py_goal) == normalize.goal_hash(spaced)
+    # Insertion-order dumps must NOT be used — they miss the Jul OAi namespaces.
+    unsorted = (
+        f"{base}\n\nUse this row context for the task below.\nRow item:\n"
+        f"{json.dumps(item, ensure_ascii=True)}"
+    )
+    assert normalize.goal_hash(py_goal) != normalize.goal_hash(unsorted)
+
+
+def test_soft_complete_allowed_only_for_fast_cache_on_bench_goals():
+    """Soft stubs require exact match with a fast_cache:on catalog prompt (or its root)."""
+    bench = _soft_complete_bench_goal()
+    assert normalize.goal_hash(bench) == normalize.OAI_DEMO_ROOT_GOAL_HASH
+    assert normalize.OAI_DEMO_ROOT_GOAL_HASH in normalize.soft_complete_goal_hashes()
+    assert normalize.soft_complete_allowed(bench) is True
+    assert normalize.soft_complete_allowed("Order Blue Bottle at Ferry Building") is False
+    assert normalize.soft_complete_allowed("child for_each goal", root_goal=bench) is True
+    assert normalize.soft_complete_allowed("child for_each goal", root_goal="other root") is False
+    ctx = FastCacheContext(enabled=True, goal="child", root_goal=bench)
+    assert ctx.soft_complete_allowed is True
+    ctx_other = FastCacheContext(enabled=True, goal="Order coffee")
+    assert ctx_other.soft_complete_allowed is False
+
+
+def test_soft_complete_on_miss_for_explore_sites_only():
+    from providers.fast_cache.rose_cache import soft_complete_on_miss, swf_scrape_passthrough
+
+    explore = soft_complete_on_miss("explore_agent")
+    assert explore is not None
+    assert explore["tool_calls"][0]["name"] == "attempt_completion_with_result"
+    assert explore["usage"]["from_fast_cache"] is True
+
+    # SWF is no longer soft-completed — scrape passthrough returns real page text.
+    assert soft_complete_on_miss("summarize_web_fetch") is None
+    swf = swf_scrape_passthrough(
+        [{"role": "user", "content": "PAGE MARKDOWN FOR OBJECTIVE\n" + ("x" * 20)}]
+    )
+    assert swf["usage"]["from_fast_cache"] is True
+    parsed = json.loads(swf["content"])
+    assert "PAGE MARKDOWN" in parsed["summary"]
+    assert parsed["files_to_download"] == []
+
+    execute = soft_complete_on_miss("execute_loop")
+    assert execute is not None
+    assert execute["tool_calls"][0]["name"] == "attempt_completion"
+
+    assert soft_complete_on_miss("verifier_execute") is not None
+    assert soft_complete_on_miss("verifier_browser") is not None
+    v = soft_complete_on_miss("verifier_execute")
+    assert json.loads(v["content"])["score"] == 1.0
+    assert soft_complete_on_miss("completion_summary") is not None
+    assert soft_complete_on_miss("context_compression") is not None
+    assert soft_complete_on_miss("response_schema") is None
+
+    # If the July assemble-final row is absent, dag_reasoning must
+    # traj-end rather than call live Rose ($0.63 miss + extra nested
+    # GP children on 163ad502). When p:6 exists, get-position hits it.
+    dag = soft_complete_on_miss("dag_reasoning")
+    assert dag is not None
+    assert json.loads(dag["content"])["response"]
+    assert dag["usage"]["from_fast_cache"] is True
+    assert dag["tool_calls"] == []
+
+
+def test_soft_complete_dag_reasoning_miss_does_not_call_live(mem, monkeypatch):
+    """Warm end-of-trajectory dag_reasoning miss ends via passthrough, no live Rose."""
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=6, root_goal=bench))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="dag_reasoning", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        parsed = json.loads(content)
+        assert "trajectory ended" in parsed["response"].lower()
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
+def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
+    """Warm end-of-trajectory explore miss ends via passthrough replay, no live Rose."""
+
+    async def prior_true(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 0
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_true)
+    bench = _soft_complete_bench_goal()
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=5, root_goal=bench))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        kinds = [c.kind for c in chunks]
+        assert kinds[0] == "metadata"
+        assert "tool_call" in kinds and kinds[-1] == "done"
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion_with_result"
+        assert mem.set_calls == 0  # end-notch does not poison the cache
+
+    asyncio.run(body())
+
+
+def test_cold_explore_miss_passthrough_only_for_allowlisted_bench(mem):
+    """Cold allowlisted (mass-agent) namespaces passthrough; other FM goals go live."""
+
+    async def body_allowlisted():
+        bench = _soft_complete_bench_goal()
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=1, root_goal=bench))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion_with_result"
+        assert mem.set_calls == 0
+
+    async def body_non_bench_goes_live():
+        set_context(FastCacheContext(enabled=True, goal="Order Blue Bottle", base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+
+    asyncio.run(body_allowlisted())
+    asyncio.run(body_non_bench_goes_live())
+
+
+def test_cold_explore_miss_does_not_soft_complete(mem):
+    """Backward-compat alias: non-bench cold FM must not stub (goes live)."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+        # Live path may write-through the fresh response; the critical assertion is
+        # that we did not emit a soft-complete attempt_completion stub.
+
+    asyncio.run(body())
+
+
+def test_write_only_cold_execute_loop_does_not_soft(mem):
+    """Cold write-through execute_loop must not soft-complete (no prior slot).
+
+    Write-through still falls through to live so allowlisted accounts can seed
+    new namespaces; only Fast Mode *read* uses cold passthrough.
+    """
+
+    async def body():
+        set_context(FastCacheContext(enabled=False, goal="g", write_enabled=True, base_step=1))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 1
+
+    asyncio.run(body())
+
+
+def test_write_only_explore_continues_after_seeding_prior_step(mem, monkeypatch):
+    """After write-through stores explore p:1, p:2 must call live LLM (not stub)."""
+
+    async def prior_after_first(goal_hash, call_site, step):
+        del goal_hash, call_site
+        return step is not None and int(step) > 1
+
+    monkeypatch.setattr(rose_cache.cache_client, "trajectory_prior_exists", prior_after_first)
+
+    async def body():
+        set_context(
+            FastCacheContext(
+                enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=1
+            )
+        )
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+        assert mem.set_calls == 1
+
+        set_context(
+            FastCacheContext(
+                enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=2
+            )
+        )
+        rose2 = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose2, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose2.calls == 1
+        assert mem.set_calls == 2
+        assert not any(
+            getattr(c, "data", None)
+            and c.data.get("name") == "attempt_completion_with_result"
+            for c in chunks
+            if c.kind == "tool_call"
+        )
+
+    asyncio.run(body())
+
+
+def test_coerce_activity_shaped_response_schema_payload():
+    """Activity-shaped {schema, usage} rows must replay as schema JSON, not empty content."""
+    stored = {
+        "schema": {
+            "fields": [
+                {"name": "positioning_statement", "type": "str", "required": True},
+                {
+                    "name": "top_creators_analysis",
+                    "type": "list[object]",
+                    "properties": [{"name": "creator_name", "type": "str"}],
+                },
+            ]
+        },
+        "usage": {"prompt_tokens": 1885, "completion_tokens": 301},
+    }
+    coerced = rose_cache.coerce_cached_llm_payload(stored)
+    parsed = json.loads(coerced["content"])
+    assert parsed["title"]
+    assert [field["name"] for field in parsed["fields"]] == [
+        "positioning_statement",
+        "top_creators_analysis",
+    ]
+    assert parsed["fields"][1]["properties"][0]["name"] == "creator_name"
+
+    async def body():
+        chunks = await _drain(rose_cache.replay(stored))
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        replayed = json.loads(content)
+        assert replayed["fields"][0]["name"] == "positioning_statement"
+
+    asyncio.run(body())
+
+
+def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
+    """summarize_web_fetch miss returns page text passthrough, not soft stub."""
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(FastCacheContext(enabled=True, goal=bench, base_step=2, root_goal=bench))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(
+                rose,
+                call_site="summarize_web_fetch",
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "SCRAPED PAGE BODY ABOUT CREATOR"}],
+            )
+        )
+        assert rose.calls == 0
+        content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+        parsed = json.loads(content)
+        assert "SCRAPED PAGE BODY" in parsed["summary"]
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
+def test_swf_miss_non_bench_goes_live(mem):
+    """Non-allowlisted FM goals do not get SWF scrape passthrough stubs."""
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="Order coffee", base_step=2))
+        rose = FakeRose(_full_stream())
+        await _drain(
+            rose_cache.cached_complete(
+                rose,
+                call_site="summarize_web_fetch",
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "SCRAPED PAGE BODY ABOUT CREATOR"}],
+            )
+        )
+        assert rose.calls == 1
+
+    asyncio.run(body())
+
+
+def _july_gp_child_goal() -> str:
+    window = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+    return (
+        "You are analyzing ONE creator for Andy Prevalsky, a technology founder "  # pragma: allowlist secret
+        "building a personal brand at the intersection of health, longevity, "  # pragma: allowlist secret
+        f"technology, and founder journey. Last 90 days: {window}. "  # pragma: allowlist secret
+        "Creator: Dr. Eric Topol."
+    )
+
+
+def _july_web_search_payload() -> Dict[str, Any]:
+    return {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-ultra",
+        "request_id": "july-gp-p1",
+        "content": "",
+        "content_chunks": [],
+        "reasoning": "",
+        "tool_calls": [
+            {
+                "id": "call_july_gp_web_search",
+                "name": "web_search",
+                "arguments": '{"query":"Eric Topol recent content"}',
+            }
+        ],
+        "codex_reasoning_items": [],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "from_fast_cache": True},
+    }
+
+
+def test_july_gp_execute_first_step_retries_and_replays_web_search(mem, monkeypatch):
+    """First execute_loop get-position flake on a July GP child must retry, not stub.
+
+    Prod 66732839 stubbed Sahil/Lenny/Gabrielle/DeLauer/Greg because p:1 flaked
+    and trajectory_prior_exists(step=1) is false (no p:0). Replay must be
+    web_search, never attempt_completion.
+    """
+    calls = {"n": 0}
+
+    async def flake_then_hit(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        calls["n"] += 1
+        if calls["n"] == 1 or step is None or int(step) < 1:
+            return None, None
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", flake_then_hit)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        assert calls["n"] >= 2
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    asyncio.run(body())
+
+
+def test_july_gp_execute_skips_first_step_attempt_completion(mem, monkeypatch):
+    """Sahil-style July p:1 attempt_completion must not 9-msg stub the child.
+
+    Fall forward to the next research tool (web_search) instead.
+    """
+    stub = {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-ultra",
+        "request_id": "july-gp-p1-stub",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_early_complete",
+                "name": "attempt_completion",
+                "arguments": '{"result":"Fast Mode cache trajectory ended for this agent."}',
+            }
+        ],
+        "usage": {"from_fast_cache": True},
+    }
+
+    async def p1_stub_p2_search(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        if step is None or int(step) <= 1:
+            return stub, "fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:1:c:x"
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}:c:x"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", p1_stub_p2_search)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    asyncio.run(body())
+
+
+def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
+    """Known July GP execute namespaces must not emit the 9-msg traj-end stub.
+
+    After retries still miss, fall through to live rather than attempt_completion.
+    Other FM trees (Tokyo / non-July execute) keep existing cold-passthrough.
+    """
+
+    async def july_goes_live():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 1
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion" for c in chunks
+        )
+
+    async def tokyo_still_stubs():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal="Find the current professional profile of Andy Prevalsky, founder of Rose Labs.",
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion"
+
+    asyncio.run(july_goes_live())
+    asyncio.run(tokyo_still_stubs())
+
+
+def test_rose_client_july_gp_execute_retry_replays_not_stub(mem, monkeypatch):
+    """Production RoseClient.complete notch must retry July GP p:1 and replay tools."""
+    from providers.rose.client import RoseClient
+
+    calls = {"n": 0}
+
+    async def flake_then_hit(goal_hash, call_site, step=None):
+        del goal_hash, call_site
+        calls["n"] += 1
+        if calls["n"] == 1 or step is None or int(step) < 1:
+            return None, None
+        return _july_web_search_payload(), f"fastmode:v42:llm:a33288f6c3a3e484:execute_loop:p:{step}"
+
+    monkeypatch.setattr("providers.fast_cache.client.cache_get_position_fallback", flake_then_hit)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", flake_then_hit)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for c in _full_stream():
+                yield c
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="execute_loop",
+                agent_id="agent-july-gp",
+                dump_context=False,
+            )
+        )
+        assert live_calls["n"] == 0
+        assert calls["n"] >= 2
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+
+    asyncio.run(body())

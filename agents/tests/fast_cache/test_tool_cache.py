@@ -1,7 +1,8 @@
 """Fast Mode — web_search / web_fetch tool cache tests.
 
   - #1  off → provider called, nothing cached
-  - #7  on/miss → provider called once, result stored
+  - write-only → provider called once, result stored (no read)
+  - on/miss → soft-complete stub, provider NOT called, nothing stored
   - #11 on/hit → provider NOT called, cached result returned
   - #15 web_fetch key collapses cache-buster URL drift
   - #15 file download key collapses cache-buster URL drift
@@ -17,6 +18,17 @@ import pytest
 from providers.fast_cache import normalize
 import tools.web_search.handler as ws
 import domains.web_fetch.handler as wf
+import json
+from pathlib import Path
+
+
+def _soft_complete_bench_goal() -> str:
+    tasks = json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
 def _without_fast_cache_hit(value: Dict[str, Any]) -> Dict[str, Any]:
@@ -112,6 +124,45 @@ def test_web_search_write_only_stores_without_read(mem, monkeypatch):
     asyncio.run(body())
 
 
+def test_web_search_miss_soft_completes_without_provider(mem, monkeypatch):
+    async def body():
+        calls = {"n": 0}
+        bench = _soft_complete_bench_goal()
+
+        async def fake_search(query, max_tokens):
+            calls["n"] += 1
+            return {"answer": "live", "query": query}
+
+        monkeypatch.setattr(ws, "execute_search", fake_search)
+        out = await ws.web_search_activity(
+            "weather", 100, fast_mode_cache_enabled=True, fast_mode_goal=bench
+        )
+        assert calls["n"] == 0
+        assert out.pop(ws.FAST_CACHE_HIT_FIELD) is True
+        assert out["provider"] == "fast-mode-soft-complete"
+        assert mem.data == {}
+
+    asyncio.run(body())
+
+
+def test_web_search_miss_non_bench_calls_provider(mem, monkeypatch):
+    async def body():
+        calls = {"n": 0}
+
+        async def fake_search(query, max_tokens):
+            calls["n"] += 1
+            return {"answer": "live", "query": query, "sources": [], "provider": "parallel"}
+
+        monkeypatch.setattr(ws, "execute_search", fake_search)
+        out = await ws.web_search_activity(
+            "weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="Order coffee"
+        )
+        assert calls["n"] == 1
+        assert out["answer"] == "live"
+
+    asyncio.run(body())
+
+
 def test_web_search_record_then_replay(mem, monkeypatch):
     async def body():
         calls = {"n": 0}
@@ -121,11 +172,16 @@ def test_web_search_record_then_replay(mem, monkeypatch):
             return {"answer": f"result-{calls['n']}", "query": query}
 
         monkeypatch.setattr(ws, "execute_search", fake_search)
-        r1 = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
+        # Seed via write-only (Fast Mode read soft-completes misses).
+        r1 = await ws.web_search_activity(
+            "weather",
+            100,
+            fast_mode_cache_enabled=False,
+            fast_mode_goal="g",
+            fast_mode_cache_write_enabled=True,
+        )
         r2 = await ws.web_search_activity("weather", 100, fast_mode_cache_enabled=True, fast_mode_goal="g")
-        assert calls["n"] == 1  # provider hit once; #11 replay served from cache
-        # Replays are the recorded payload plus the hit marker (consumed and
-        # stripped by the tool handler for cost accounting).
+        assert calls["n"] == 1  # provider hit once on write-only; #11 replay from cache
         assert r2.pop(ws.FAST_CACHE_HIT_FIELD) is True
         assert r1 == r2
 
@@ -141,8 +197,19 @@ def test_web_search_replays_across_goals(mem, monkeypatch):
             return {"answer": f"result-{calls['n']}", "query": query}
 
         monkeypatch.setattr(ws, "execute_search", fake_search)
-        r1 = await ws.web_search_activity("Best cities to live in your 20s", 100, True, "goal-a")
-        r2 = await ws.web_search_activity(" best   cities to LIVE in your 20s ", 100, True, "goal-b")
+        r1 = await ws.web_search_activity(
+            "Best cities to live in your 20s",
+            100,
+            fast_mode_cache_enabled=False,
+            fast_mode_goal="goal-a",
+            fast_mode_cache_write_enabled=True,
+        )
+        r2 = await ws.web_search_activity(
+            " best   cities to LIVE in your 20s ",
+            100,
+            fast_mode_cache_enabled=True,
+            fast_mode_goal="goal-b",
+        )
         assert calls["n"] == 1
         assert r2.pop(ws.FAST_CACHE_HIT_FIELD) is True
         assert r1 == r2
@@ -162,6 +229,25 @@ def memwf(monkeypatch):
     return store
 
 
+def test_web_fetch_miss_soft_completes_without_provider(memwf, monkeypatch):
+    async def body():
+        calls = {"n": 0}
+        bench = _soft_complete_bench_goal()
+
+        async def fake_scrape(url):
+            calls["n"] += 1
+            return {"markdown": "live", "links": [], "metadata": {}}
+
+        monkeypatch.setattr(wf, "scrape_url", fake_scrape)
+        out = await wf.web_fetch_activity("https://x.com/a", True, bench)
+        assert calls["n"] == 0
+        assert out.pop(wf.FAST_CACHE_HIT_FIELD) is True
+        assert out["metadata"]["provider"] == "fast-mode-soft-complete"
+        assert memwf.data == {}
+
+    asyncio.run(body())
+
+
 def test_web_fetch_record_then_replay(memwf, monkeypatch):
     async def body():
         calls = {"n": 0}
@@ -172,8 +258,13 @@ def test_web_fetch_record_then_replay(memwf, monkeypatch):
 
         monkeypatch.setattr(wf, "scrape_url", fake_scrape)
 
-        # cache-buster drift between the two calls must still hit (#15)
-        r1 = await wf.web_fetch_activity("https://x.com/a?t=1", True, "g")
+        # Seed via write-only; cache-buster drift on read must still hit (#15)
+        r1 = await wf.web_fetch_activity(
+            "https://x.com/a?t=1",
+            False,
+            "g",
+            fast_mode_cache_write_enabled=True,
+        )
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "g")
         assert calls["n"] == 1
         assert r2.pop(wf.FAST_CACHE_HIT_FIELD) is True
@@ -192,7 +283,12 @@ def test_web_fetch_replays_across_goals(memwf, monkeypatch):
 
         monkeypatch.setattr(wf, "scrape_url", fake_scrape)
 
-        r1 = await wf.web_fetch_activity("https://x.com/a?t=1", True, "goal-a")
+        r1 = await wf.web_fetch_activity(
+            "https://x.com/a?t=1",
+            False,
+            "goal-a",
+            fast_mode_cache_write_enabled=True,
+        )
         r2 = await wf.web_fetch_activity("https://x.com/a?t=99999", True, "goal-b")
         assert calls["n"] == 1
         assert r2.pop(wf.FAST_CACHE_HIT_FIELD) is True
