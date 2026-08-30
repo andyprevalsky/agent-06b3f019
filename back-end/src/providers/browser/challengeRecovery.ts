@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import type { Cookie } from 'playwright';
+import type { Browser, Cookie } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
@@ -51,6 +51,21 @@ export {
   blockedResourceRequiresPaymentCdn,
   targetLooksLikePaymentDocument,
 } from './paymentCdnProbe';
+import {
+  orderConfigsForLane,
+  runLaneConfigSearch,
+  runParallelBrowserConfigSearch,
+  type ConfigSearchDependencies,
+  type LaneConfigSearchOptions,
+} from './challengeRecoveryLaneSearch';
+
+export {
+  orderConfigsForLane,
+  runLaneConfigSearch,
+  runParallelBrowserConfigSearch,
+  type ConfigSearchDependencies,
+  type LaneConfigSearchOptions,
+};
 
 const log = createLogger('BrowserChallengeRecovery');
 
@@ -65,26 +80,37 @@ export interface PreferredBrowserConfig {
   learnedAt: string;
 }
 
-export {
-  orderConfigsForLane,
-  recoveryConfigKeyForSession,
-  runLaneConfigSearch,
-  runParallelBrowserConfigSearch,
-  type CandidateProbeResult,
-  type ConfigSearchDependencies,
-  type LaneConfigSearchOptions,
-  type RecoveryCandidateSession,
-  type RecoveryStorageLane,
-  type SuccessfulRecoveryCandidate,
-} from './challengeRecoveryLaneSearch';
-import {
-  recoveryConfigKeyForSession,
-  runLaneConfigSearch,
-  type CandidateProbeResult,
-  type ConfigSearchDependencies,
-  type RecoveryCandidateSession,
-  type RecoveryStorageLane,
-} from './challengeRecoveryLaneSearch';
+export interface RecoveryCandidateSession {
+  provider: BrowserProviderName;
+  sessionId: string;
+  debugUrl: string;
+  wsUrl: string;
+  proxySource: string;
+  proxyLocation: ProxyGeoLocation;
+  profileId: string | null;
+  profileSource: string;
+  validationBrowser: Browser;
+}
+
+export interface CandidateProbeResult {
+  stablePasses: number;
+  attempts: number;
+  latencyMs: number;
+  /**
+   * True when the candidate can reach the blocked third-party resource that
+   * triggered recovery (fetch + script-load when script-shaped).
+   */
+  paymentCdnOk: boolean;
+  /** Per-host / probe-step reachability results (for ranking + logs). */
+  paymentCdnHosts?: Record<string, boolean>;
+  /**
+   * rose-1-mini classifier usage rows from this probe (forwarded into the
+   * agent ToolUsage ledger via recover-challenge → usage_by_model).
+   */
+  classifierLlmUsage?: ChallengeClassifierLlmUsage[];
+  /** Final same-site URL after the last clean probe settle (soft-redirect resume). */
+  settledUrl?: string;
+}
 
 function registrableHost(hostname: string | null | undefined): string {
   const host = String(hostname || '')
@@ -112,12 +138,52 @@ export function sameSiteNavigationUrl(
   return settled;
 }
 
+export interface SuccessfulRecoveryCandidate {
+  config: BrowserRecoveryConfig;
+  session: RecoveryCandidateSession;
+  probe: CandidateProbeResult;
+}
+
 export interface BrowserConfigSearchRuntimeDependencies {
   createKernel: typeof createKernelRecoverySession;
   createSteel: typeof createSteelRecoverySession;
   releaseKernel: typeof releaseKernelRemoteSession;
   releaseSteel: typeof releaseSteelRemoteSession;
   probe: typeof probeCandidateBrowser;
+}
+
+export interface RecoveryStorageLane {
+  key: string;
+  storageState: Record<string, unknown>;
+}
+
+/** Map a live session's provider + proxyTier back to a recovery candidate key. */
+export function recoveryConfigKeyForSession(
+  provider: string | null | undefined,
+  proxyTier: string | null | undefined
+): string | undefined {
+  const tier = (proxyTier || '').trim().toLowerCase();
+  if ((provider || '').toLowerCase() === 'steel') {
+    if (tier === 'fixed') return 'steel_fixed';
+    if (tier === 'managed' || tier === '') return 'steel_managed';
+    return undefined;
+  }
+  if ((provider || '').toLowerCase() === 'kernel') {
+    if (tier === 'none') return 'kernel_direct';
+    if (tier.startsWith('isp')) return 'kernel_isp';
+    if (tier.startsWith('mobile')) return 'kernel_mobile';
+    if (tier.includes('residential_state') || tier === 'residential_state') {
+      return 'kernel_residential_state';
+    }
+    if (tier.includes('residential_city') || tier === 'residential_city') {
+      return 'kernel_residential_city';
+    }
+    if (tier.includes('residential_country') || tier === 'residential_country') {
+      return 'kernel_residential_country';
+    }
+    if (tier.startsWith('residential')) return 'kernel_residential_city';
+  }
+  return undefined;
 }
 
 export async function probeCandidateBrowser(

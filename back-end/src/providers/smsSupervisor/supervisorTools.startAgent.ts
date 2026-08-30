@@ -44,7 +44,7 @@ export async function commitStartNewAgent(
     priceLimitCents,
   });
 
-  let agent: { id: string } | undefined;
+  let agent: { id: string; fastModeCacheEnabled?: boolean } | undefined;
   try {
     agent = await runTransactionWithRetry(async (tx) => {
       const newAgent = await tx.agent.create({
@@ -59,6 +59,9 @@ export async function commitStartNewAgent(
           reasoningMaxTokens: 2048,
           status: 'STARTING_UP',
           priceLimitCents,
+          // Match POST /api/agents default: Fast Mode on so Rose complete
+          // calls get provider_fast_mode via the agent flag trickle-down.
+          fastModeCacheEnabled: true,
         },
       });
 
@@ -97,7 +100,12 @@ export async function commitStartNewAgent(
       // user a tracking link for an agent that does not exist.
       const existing = await prisma.agent.findUnique({
         where: { id: provisionalId },
-        select: { id: true, temporalWorkflowId: true, status: true },
+        select: {
+          id: true,
+          temporalWorkflowId: true,
+          status: true,
+          fastModeCacheEnabled: true,
+        },
       });
       if (!existing) {
         log.error('start_new_agent P2002 without a committed agent row', { provisionalId });
@@ -119,8 +127,12 @@ export async function commitStartNewAgent(
           status: existing.status,
         });
         // Adopt the committed row so the workflow start below drives the agent
-        // that actually exists.
-        agent = { id: existing.id };
+        // that actually exists. Keep the row's Fast Mode flag so recovery and
+        // workflow args stay aligned (pre-migration rows may still be false).
+        agent = {
+          id: existing.id,
+          fastModeCacheEnabled: existing.fastModeCacheEnabled,
+        };
       } else {
         log.info('start_new_agent commit already done (PK collision)', { provisionalId });
         return {
@@ -138,6 +150,11 @@ export async function commitStartNewAgent(
     throw new Error(`start_new_agent could not resolve an agent row for ${provisionalId}`);
   }
   const startedAgent = agent;
+  // Prefer the persisted row value (create path + P2002 recovery); default on.
+  const resolvedFastMode =
+    'fastModeCacheEnabled' in startedAgent && typeof startedAgent.fastModeCacheEnabled === 'boolean'
+      ? startedAgent.fastModeCacheEnabled
+      : true;
 
   // Start Temporal workflow
   try {
@@ -151,6 +168,7 @@ export async function commitStartNewAgent(
         type: 'FLOAT_LLM_JUDGE',
       },
       priceLimitCents,
+      fastModeCacheEnabled: resolvedFastMode,
     });
 
     await prisma.agent.update({

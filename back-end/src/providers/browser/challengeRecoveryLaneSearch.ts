@@ -1,45 +1,13 @@
 import { createLogger } from '../logger';
 import type { BrowserRecoveryConfig } from './challengeRecoveryCandidates';
+import type {
+  CandidateProbeResult,
+  RecoveryCandidateSession,
+  RecoveryStorageLane,
+  SuccessfulRecoveryCandidate,
+} from './challengeRecovery';
 
 const log = createLogger('BrowserChallengeRecovery');
-
-export interface RecoveryCandidateSession {
-  provider: import('./types').BrowserProviderName;
-  sessionId: string;
-  debugUrl: string;
-  wsUrl: string;
-  proxySource: string;
-  proxyLocation: import('../geoip').ProxyGeoLocation;
-  profileId: string | null;
-  profileSource: string;
-  validationBrowser: import('playwright').Browser;
-}
-
-export interface CandidateProbeResult {
-  stablePasses: number;
-  attempts: number;
-  latencyMs: number;
-  /**
-   * True when the candidate can reach the blocked third-party resource that
-   * triggered recovery (fetch + script-load when script-shaped).
-   */
-  paymentCdnOk: boolean;
-  /** Per-host / probe-step reachability results (for ranking + logs). */
-  paymentCdnHosts?: Record<string, boolean>;
-  /**
-   * rose-1-mini classifier usage rows from this probe (forwarded into the
-   * agent ToolUsage ledger via recover-challenge → usage_by_model).
-   */
-  classifierLlmUsage?: import('./challengeLlmClassifier').ChallengeClassifierLlmUsage[];
-  /** Final same-site URL after the last clean probe settle (soft-redirect resume). */
-  settledUrl?: string;
-}
-
-export interface SuccessfulRecoveryCandidate {
-  config: BrowserRecoveryConfig;
-  session: RecoveryCandidateSession;
-  probe: CandidateProbeResult;
-}
 
 export interface ConfigSearchDependencies {
   create: (config: BrowserRecoveryConfig, signal: AbortSignal) => Promise<RecoveryCandidateSession>;
@@ -53,38 +21,9 @@ export interface ConfigSearchDependencies {
   release: (config: BrowserRecoveryConfig, session: RecoveryCandidateSession) => Promise<void>;
 }
 
-export interface RecoveryStorageLane {
-  key: string;
-  storageState: Record<string, unknown>;
-}
-
-/** Map a live session's provider + proxyTier back to a recovery candidate key. */
-export function recoveryConfigKeyForSession(
-  provider: string | null | undefined,
-  proxyTier: string | null | undefined
-): string | undefined {
-  const tier = (proxyTier || '').trim().toLowerCase();
-  if ((provider || '').toLowerCase() === 'steel') {
-    if (tier === 'fixed') return 'steel_fixed';
-    if (tier === 'managed' || tier === '') return 'steel_managed';
-    return undefined;
-  }
-  if ((provider || '').toLowerCase() === 'kernel') {
-    if (tier === 'none') return 'kernel_direct';
-    if (tier.startsWith('isp')) return 'kernel_isp';
-    if (tier.startsWith('mobile')) return 'kernel_mobile';
-    if (tier.includes('residential_state') || tier === 'residential_state') {
-      return 'kernel_residential_state';
-    }
-    if (tier.includes('residential_city') || tier === 'residential_city') {
-      return 'kernel_residential_city';
-    }
-    if (tier.includes('residential_country') || tier === 'residential_country') {
-      return 'kernel_residential_country';
-    }
-    if (tier.startsWith('residential')) return 'kernel_residential_city';
-  }
-  return undefined;
+export interface LaneConfigSearchOptions {
+  /** Deprioritize this candidate key (tried last inside each lane). */
+  avoidConfigKey?: string;
 }
 
 /** Order configs so the currently-failing exit is tried last within a lane. */
@@ -96,11 +35,6 @@ export function orderConfigsForLane(
   const preferred = configs.filter((config) => config.key !== avoidConfigKey);
   const avoided = configs.filter((config) => config.key === avoidConfigKey);
   return [...preferred, ...avoided];
-}
-
-export interface LaneConfigSearchOptions {
-  /** Deprioritize this candidate key (tried last inside each lane). */
-  avoidConfigKey?: string;
 }
 
 /**

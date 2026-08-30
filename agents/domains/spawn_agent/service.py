@@ -15,10 +15,10 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_DEFAULT_DEPTH,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
+    resolve_explore_depth,
 )
 from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
@@ -269,8 +269,16 @@ def coerce_for_each_items(tool_call: Dict[str, Any]) -> List[Any]:
 
 
 def build_for_each_goal(base_goal: str, item: Any) -> str:
-    """Build a per-item sub-agent goal from shared goal + row context."""
-    item_text = json.dumps(item, ensure_ascii=True) if isinstance(item, dict) else str(item)
+    """Build a per-item sub-agent goal from shared goal + row context.
+
+    ``sort_keys=True`` is required for Fast Mode stability: FastModeCacheEntry
+    values round-trip through Postgres JSONB (which reorders object keys), so
+    insertion-order dumps diverge from the Jul 2026 OAi-demo namespaces and from
+    any later replay that re-materializes items from cached JSON.
+    """
+    item_text = (
+        json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
+    )
     return f"{base_goal}\n\nUse this row context for the task below.\nRow item:\n{item_text}"
 
 
@@ -327,8 +335,15 @@ async def spawn_explore_agent_activity(
         _explore_fast_mode_goal,
         _explore_fast_mode_write_enabled,
         _,
+        _,
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
+
+    # Do NOT re-promote depth from an independently resolved Fast Mode flag.
+    # `_spawn_explore` already paired depth + max_iterations with the activity
+    # timeout using workflow_instance.fast_mode_cache_enabled. Re-resolving here
+    # from resolve_agent_fast_mode can bump iterations to deep while the caller
+    # still holds the quick timeout.
 
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
 
@@ -528,6 +543,9 @@ async def spawn_explore_agent_activity(
                 tool_call_id=tool_call_id,
                 agent_id=agent_id,
                 user_id=user_id,
+                fast_mode_cache_enabled=_explore_fast_mode_enabled,
+                fast_mode_goal=_explore_fast_mode_goal,
+                fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
                 world_model_mode=world_model_mode,
             )
         elif tool_name == "web_fetch":
@@ -655,9 +673,21 @@ async def spawn_explore_agent_activity(
     # the timestamp into the cacheable system prompt.
     current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Resolve the caller's thoroughness. The depth tag rides in the per-call goal
-    # (NOT the cacheable system prompt); the turn cap comes from the same depth.
-    effective_depth = depth or EXPLORE_DEFAULT_DEPTH
-    resolved_max_iterations = max_iterations or explore_limits_for_depth(effective_depth)[0]
+    # (NOT the cacheable system prompt); the turn cap must match the activity
+    # timeout sized by the handler. When max_iterations is provided, trust that
+    # contract — never bump iterations from a separately resolved Fast Mode flag.
+    if depth in ("quick", "medium", "deep"):
+        effective_depth = depth
+    else:
+        effective_depth = resolve_explore_depth(
+            depth,
+            fast_mode_cache_enabled=_explore_fast_mode_enabled,
+        )
+    depth_cap = explore_limits_for_depth(effective_depth)[0]
+    if max_iterations is None:
+        resolved_max_iterations = depth_cap
+    else:
+        resolved_max_iterations = max_iterations
     state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:

@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import hashlib
 import json as _json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -49,6 +50,7 @@ with workflow.unsafe.imports_passed_through():
         call_llm_activity,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
+        release_compute_token_lineage_activity,
         set_response_schema_activity,
     )
     from helpers.messages import update_agent_tree_state
@@ -160,6 +162,115 @@ TOOL_EXECUTORS = {
 APPROVAL_REQUIRED_TOOLS = {
     "call_phone_number": get_call_phone_manager,
 }
+
+
+_SNAKE_HEADING = re.compile(r"^#+\s+([a-z][a-z0-9_]{2,})\s*$", flags=re.MULTILINE)
+
+
+def structured_response_from_schema_headings(text: str, schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse `# field_name` markdown sections into a structured_response dict."""
+    if not text:
+        return {}
+    fields = schema.get("fields") or [] if isinstance(schema, dict) else []
+    names = [str(field.get("name")) for field in fields if isinstance(field, dict) and field.get("name")]
+    if not names:
+        seen: set[str] = set()
+        names = []
+        for name in _SNAKE_HEADING.findall(text):
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    if not names:
+        return {}
+    matches: List[Tuple[int, str, int]] = []
+    for name in names:
+        found = re.search(rf"^#+\s+{re.escape(name)}\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+        if found:
+            matches.append((found.start(), name, found.end()))
+    if not matches:
+        return {}
+    matches.sort()
+    out: Dict[str, Any] = {}
+    for index, (_start, name, end) in enumerate(matches):
+        next_start = matches[index + 1][0] if index + 1 < len(matches) else len(text)
+        body = text[end:next_start].strip()
+        if body:
+            out[name] = body
+    return out
+
+
+def coalesce_structured_response(
+    context: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Merge verifier output with `# field_name` sections from the transcript."""
+    merged: Dict[str, Any] = dict(structured_response) if isinstance(structured_response, dict) else {}
+    names = [
+        str(field.get("name"))
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    ]
+    if not names:
+        for message in reversed(context or []):
+            text = str(message.get("text") or message.get("message") or "")
+            extracted = structured_response_from_schema_headings(text, None)
+            if not extracted:
+                continue
+            for key, value in extracted.items():
+                if key not in merged or merged[key] in (None, "", [], {}):
+                    merged[key] = value
+        return merged or structured_response
+
+    def _missing(current: Dict[str, Any]) -> List[str]:
+        empty = (None, "", [], {})
+        return [name for name in names if name not in current or current[name] in empty]
+
+    if not _missing(merged):
+        return merged
+    for message in reversed(context or []):
+        text = str(message.get("text") or message.get("message") or "")
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if not text:
+            text = str(
+                metadata.get("result")
+                or metadata.get("content")
+                or metadata.get("message")
+                or ""
+            )
+        extracted = structured_response_from_schema_headings(text, schema)
+        if not extracted:
+            extracted = _structured_from_payload(message, names)
+        if not extracted:
+            extracted = _structured_from_payload(metadata, names)
+        if not extracted:
+            continue
+        for key, value in extracted.items():
+            if key not in merged or merged[key] in (None, "", [], {}):
+                merged[key] = value
+        if not _missing(merged):
+            break
+    return merged or structured_response
+
+
+def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
+    """Pull schema keys off a dict / JSON string without inventing values."""
+    if not names:
+        return {}
+    obj = payload
+    if isinstance(obj, str):
+        raw = obj.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                obj = _json.loads(raw)
+            except _json.JSONDecodeError:
+                return {}
+    if not isinstance(obj, dict):
+        return {}
+    nested = obj.get("structured_response") or obj.get("structuredResponse") or obj
+    if not isinstance(nested, dict):
+        return {}
+    return {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
 
 
 @workflow.defn
@@ -2106,11 +2217,13 @@ class AgentWorkflow:
         self.compute_token_fetched_at = now
         return True
 
-    async def _refresh_compute_token(self, user_id: str) -> None:
+    async def _refresh_compute_token(
+        self, user_id: str, *, force: bool = False, token_type: Optional[str] = None
+    ) -> None:
         """Fetch or refresh the selected direct compute token if missing or expired."""
         now = workflow.now()
         fetched_at = self.compute_token_fetched_at or self.claude_max_token_fetched_at
-        if fetched_at:
+        if not force and fetched_at:
             age = now - fetched_at
             if age < self.COMPUTE_TOKEN_TTL:
                 return  # Still fresh
@@ -2125,6 +2238,7 @@ class AgentWorkflow:
                     self.agent_id,
                     self.agent_id,
                     self.compute_token_fast_cache_affinity_key,
+                    token_type,
                 ],
                 start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -2139,6 +2253,29 @@ class AgentWorkflow:
             workflow.logger.warning(f"Failed to fetch compute token: {e}")
 
         self._clear_compute_token()
+
+    async def _rotate_compute_token(self, user_id: str) -> None:
+        """Release lineage, clear the cached token, and fetch the next available compute token."""
+        failed_provider = self.compute_token_provider
+        rotate_token_type: Optional[str] = None
+        if failed_provider == "claude":
+            rotate_token_type = "gpt"
+        elif failed_provider == "gpt":
+            rotate_token_type = "claude"
+        if self.compute_token_lineage_key:
+            try:
+                await workflow.execute_activity(
+                    release_compute_token_lineage_activity,
+                    args=[self.compute_token_lineage_key],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as release_error:
+                workflow.logger.warning(
+                    f"Failed to release compute token lineage during rotation: {release_error}"
+                )
+        self._clear_compute_token()
+        await self._refresh_compute_token(user_id, force=True, token_type=rotate_token_type)
 
     def _active_claude_token(self) -> Optional[str]:
         return self.claude_max_token if self.compute_token_provider == "claude" else None
@@ -3269,10 +3406,9 @@ class AgentWorkflow:
                 and not compute_token_used
             ):
                 workflow.logger.info("🔁 Claude token rotated inside RoseClient; refreshing workflow cached token")
-                self._clear_compute_token()
                 if self.user_id:
                     try:
-                        await self._refresh_compute_token(self.user_id)
+                        await self._rotate_compute_token(self.user_id)
                     except Exception as refresh_error:
                         workflow.logger.warning(
                             f"Rotation refetch failed after successful claudeAuth call: {refresh_error}"
@@ -3316,14 +3452,9 @@ class AgentWorkflow:
                             )
                         except Exception as mark_error:
                             workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
-                    # Clear cache to force refetch on next call → rotation kicks in
-                    self._clear_compute_token()
-                    # Proactively refetch so subsequent LLM calls in this phase use the
-                    # rotated token (otherwise they'd fall through to the waterfall until
-                    # the next phase boundary calls _refresh_compute_token).
                     if self.user_id:
                         try:
-                            await self._refresh_compute_token(self.user_id)
+                            await self._rotate_compute_token(self.user_id)
                         except Exception as refresh_error:
                             workflow.logger.warning(f"Rotation refetch failed: {refresh_error}")
                 else:
@@ -3339,10 +3470,9 @@ class AgentWorkflow:
                 and not compute_token_used
             ):
                 workflow.logger.info("🔁 GPT token rotated inside RoseClient; refreshing workflow cached token")
-                self._clear_compute_token()
                 if self.user_id:
                     try:
-                        await self._refresh_compute_token(self.user_id)
+                        await self._rotate_compute_token(self.user_id)
                     except Exception as refresh_error:
                         workflow.logger.warning(
                             f"GPT rotation refetch failed after successful gptAuth call: {refresh_error}"
@@ -3377,10 +3507,9 @@ class AgentWorkflow:
                             )
                         except Exception as mark_error:
                             workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
-                    self._clear_compute_token()
                     if self.user_id:
                         try:
-                            await self._refresh_compute_token(self.user_id)
+                            await self._rotate_compute_token(self.user_id)
                         except Exception as refresh_error:
                             workflow.logger.warning(f"GPT rotation refetch failed: {refresh_error}")
                 else:
@@ -3759,12 +3888,27 @@ class AgentWorkflow:
 
         if result["status"] == "max_iterations":
             await self._wait_for_response_schema_refresh()
+            verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
+            verifier_reasoning = str(result.get("verifier_reasoning") or "")
+            fm_trajectory_complete = bool(getattr(self, "fast_mode_cache_enabled", False)) and (
+                verifier_progress >= 1.0
+                or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+            )
+            if fm_trajectory_complete:
+                # Fast Mode replay hit the step cap after the verifier already
+                # accepted the cached work (100% / trajectory-end). Mark
+                # COMPLETED so the parent for_each does not ERROR the child.
+                await self._mark_complete(
+                    result.get("context", []),
+                    result.get("partial_structured_response") or result.get("structured_response"),
+                )
+                return {"status": "completed", "goal": self.goal}
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="max_iterations",
                 message="Max Steps Reached",
-                verifier_progress=result.get("verifier_progress", 0.0),
-                verifier_reasoning=result.get("verifier_reasoning", ""),
+                verifier_progress=verifier_progress,
+                verifier_reasoning=verifier_reasoning,
                 partial_structured_response=result.get("partial_structured_response"),
             )
             return {"status": "failed", "reason": "max_iterations", "goal": self.goal}
@@ -4025,12 +4169,24 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
 
+    def _coalesce_structured_response(
+        self, context: List[Dict], structured_response: Optional[Dict]
+    ) -> Optional[Dict]:
+        """Fill missing schema fields from `# field_name` sections in the transcript.
+
+        Fast Mode assemble-final (and other dag_reasoning slots) often persist the
+        deliverable as markdown headings that match the output schema, while the
+        verifier `output` dict stays empty because schema gen missed. Without this
+        merge, Task Complete has a summary but no Output section.
+        """
+        return coalesce_structured_response(context, self.output_schema, structured_response)
+
     def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
         """Convert structured_response → CompletionSummaryCard outputs format."""
-        if not structured_response or not self.output_schema:
+        if not structured_response:
             return []
 
-        fields = self.output_schema.get("fields", [])
+        fields = (self.output_schema or {}).get("fields", []) if isinstance(self.output_schema, dict) else []
         outputs = []
 
         for field in fields:
@@ -4039,11 +4195,24 @@ class AgentWorkflow:
                 outputs.append(
                     {
                         "key": field_name,
-                        "label": field.get("description", field_name.replace("_", " ").title()),
+                        "label": field.get("description") or field_name.replace("_", " ").title(),
                         "value": structured_response[field_name],
                     }
                 )
 
+        if outputs:
+            return outputs
+
+        for field_name, value in structured_response.items():
+            if not isinstance(field_name, str) or not field_name or field_name.startswith("_"):
+                continue
+            outputs.append(
+                {
+                    "key": field_name,
+                    "label": field_name.replace("_", " ").title(),
+                    "value": value,
+                }
+            )
         return outputs
 
     async def _mark_complete(self, context: List[Dict], structured_response: Optional[Dict] = None) -> None:
@@ -4205,6 +4374,7 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
+            structured_response = self._coalesce_structured_response(context, structured_response)
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",

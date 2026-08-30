@@ -875,6 +875,9 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     Guest payment-boundary tasks inject site cookies that often trip challenges;
     a clean ``all_target`` strip is the intended recovery (logged-out page), not
     an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
+
+    Guest needles are checked first: phrases like ``do not sign in`` contain the
+    substring ``sign in`` and must not be classified as signed-in preference.
     """
     text = (goal or "").lower()
     # Negated guest phrasing must not flip preserve_auth off (e.g. "do not
@@ -900,6 +903,9 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
             "anonymous checkout",
             "as guest",
             "continue as guest",
+            "check out anonymously",
+            "checkout anonymously",
+            "anonymously",
             "do not sign in",
             "don't sign in",
             "without signing in",

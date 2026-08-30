@@ -45,9 +45,7 @@ async function handleProbeCookieVariant(req: AuthRequest, res: Response): Promis
     res.json({ success: true, ...result });
   } catch (error) {
     if (error instanceof ZodError) {
-      res
-        .status(400)
-        .json({ error: 'Invalid probe-cookie-variant request', issues: error.issues });
+      res.status(400).json({ error: 'Invalid probe-cookie-variant request', issues: error.issues });
       return;
     }
     if (error instanceof SessionNotFoundError) {
@@ -107,17 +105,7 @@ async function handleRecoverChallenge(req: AuthRequest, res: Response): Promise<
 }
 
 export function registerBrowserChallengeRecoveryRoutes(router: Router): void {
-  router.get(
-    '/:taskId/captcha-telemetry',
-    authenticate,
-    asyncHandler(handleCaptchaTelemetry)
-  );
-
-  router.post(
-    '/probe-cookie-variant',
-    authenticate,
-    asyncHandler(handleProbeCookieVariant)
-  );
-
+  router.get('/:taskId/captcha-telemetry', authenticate, asyncHandler(handleCaptchaTelemetry));
+  router.post('/probe-cookie-variant', authenticate, asyncHandler(handleProbeCookieVariant));
   router.post('/recover-challenge', authenticate, asyncHandler(handleRecoverChallenge));
 }

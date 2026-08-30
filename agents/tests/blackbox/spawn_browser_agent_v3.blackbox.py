@@ -204,7 +204,9 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert MAX_ACTIVITY_ATTEMPTS == 1
 
     execute_source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
-    assert "timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES)" in execute_source
+    assert "ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE" in execute_source
+    assert "ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES" in execute_source
+    assert "timedelta(minutes=browser_timeout_minutes)" in execute_source
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
 
 def test_transient_session_init_failure_classification():
@@ -6740,6 +6742,55 @@ def test_build_usage_items():
         steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
     assert steel_items[1]["provider"] == "Steel.dev Browser"
 
+
+def test_build_usage_items_zeros_kernel_under_fast_mode():
+    """Fast Mode browser sessions must not bill Kernel/Steel wall-clock.
+
+    verify19 still charged ~4.5¢ Kernel when a mixed ledger had any
+    non-from_fast_cache LLM row; the FM flag must force service cost to 0.
+    """
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    usage_by_model = {
+        "claude-sonnet-4-6": {
+            "model": "claude-sonnet-4-6",
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "from_fast_cache": 0,
+        }
+    }
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            100,
+            10,
+            {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+            execution_time_ms=600_000,
+            usage_by_model=usage_by_model,
+            fast_mode_cache_enabled=True,
+        )
+    service = next(i for i in items if i["type"] == "service")
+    assert service["cost_cents"] == 0.0
+    assert service["provider"] == "Kernel Browser"
+
+
+def test_build_usage_items_zeros_kernel_when_all_llm_from_fast_cache():
+    from domains.spawn_browser_agent_v3.service import accumulate_model_usage, build_usage_items
+
+    usage_by_model: dict = {}
+    accumulate_model_usage(usage_by_model, "claude-sonnet-4-6", 50, 5, from_fast_cache=True)
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            50,
+            5,
+            {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+            execution_time_ms=600_000,
+            usage_by_model=usage_by_model,
+        )
+    service = next(i for i in items if i["type"] == "service")
+    assert service["cost_cents"] == 0.0
+
 def test_build_usage_items_carries_browser_pool_model():
     """Regression (A-02): browser llm usage rows MUST name the browser pool.
 
@@ -6946,11 +6997,16 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 3, f"expected 3 build_usage_items call sites, found {len(build_calls)}"
+    assert len(build_calls) == 4, f"expected 4 build_usage_items call sites, found {len(build_calls)}"
     for build_call in build_calls:
-        forwarded = [ast.unparse(a) for a in build_call.args] + [ast.unparse(k.value) for k in build_call.keywords]
+        forwarded = [ast.unparse(a) for a in build_call.args] + [
+            *(ast.unparse(k.value) for k in build_call.keywords),
+            *(k.arg for k in build_call.keywords if k.arg),
+        ]
         assert "usage_by_model" in forwarded, f"call site drops usage_by_model: {ast.unparse(build_call)}"
-
+        assert "fast_mode_cache_enabled" in forwarded, (
+            f"call site drops fast_mode_cache_enabled: {ast.unparse(build_call)}"
+        )
     accumulate_calls = [
         node
         for node in ast.walk(tree)
@@ -6965,7 +7021,11 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         and node.target.id == "total_input_tokens"
     ]
     assert total_increments, "no total_input_tokens accumulation found — test is looking at the wrong function"
-    assert len(accumulate_calls) == len(total_increments), (
+    # Soft-complete early-return attributes a zero-token fast-cache ledger row via
+    # accumulate_model_usage without touching total_input_tokens (it passes 0s
+    # straight into build_usage_items). Extra accumulate calls are allowed; missing
+    # ones (token += without accumulate) are not.
+    assert len(accumulate_calls) >= len(total_increments), (
         f"{len(total_increments)} token accumulations but only {len(accumulate_calls)} "
         "accumulate_model_usage calls — some tokens are billed without a real model"
     )
@@ -7644,6 +7704,81 @@ def test_payment_site_unlock_survives_write_lock_timeout():
     assert is_approval_valid(typed_only, "purchase", "https://roselabs.ai/test_payment") is False
 
 
+def test_user_granted_purchase_survives_past_timeout_like_2c475824():
+    """User-granted purchase write-lock must unlock the site like payment (agent 2c475824).
+
+    Prod: same browser task re-prompted Buy Now 273.518s after the user approved
+    the first purchase write-lock (Amazon sign-in + address friction), then again
+    on checkout. Amazon saved-payment never mints a card, so only the purchase
+    grant path can unlock the merchant for the activity.
+    """
+    from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        apply_user_write_lock_grant,
+        is_approval_valid,
+    )
+
+    grant_url = (
+        "https://www.amazon.com/THORNE-Creatine-Micronized-Monohydrate-Unflavored/"
+        "dp/B0DVWKPJ32?th=1"
+    )
+    second_buy_url = "https://www.amazon.com/dp/B0DVWKPJ32?th=1"
+    checkout_url = (
+        "https://www.amazon.com/checkout/p/p-106-4775000-5293821/spc"
+        "?pipelineType=Chewbacca&hasWorkingJavascript=1"
+    )
+    # Measured prod delta: write_lock_granted → second Buy Now click.
+    age_seconds = 273.518
+    assert age_seconds > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+
+    approved_at = time_module.time() - age_seconds
+    approvals = apply_user_write_lock_grant(
+        {},
+        "purchase",
+        grant_url,
+        approved_at,
+    )
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY].get("persistent") is True
+    assert is_approval_valid(approvals, "purchase", second_buy_url) is True
+    assert is_approval_valid(approvals, "purchase", checkout_url) is True
+
+    # email_send without a purchase/payment site unlock still expires at 120s.
+    email_only = apply_user_write_lock_grant(
+        {},
+        "email_send",
+        "https://mail.example.com/compose",
+        approved_at,
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in email_only
+    assert is_approval_valid(email_only, "email_send", "https://mail.example.com/compose") is False
+
+    # Non-purchase approval must not re-key an existing payment site unlock onto
+    # a different merchant (CodeRabbit: prior_payment_refs / existing site grant).
+    amazon_site = apply_user_write_lock_grant(
+        {},
+        "purchase",
+        grant_url,
+        time_module.time(),
+    )
+    amazon_base = amazon_site[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"]
+    after_email = apply_user_write_lock_grant(
+        amazon_site,
+        "email_send",
+        "https://other-merchant.example/checkout",
+        time_module.time(),
+        prior_payment_refs={"card_number": "ref"},
+    )
+    assert after_email[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == amazon_base
+    assert is_approval_valid(after_email, "purchase", second_buy_url) is True
+    assert (
+        is_approval_valid(
+            after_email, "purchase", "https://other-merchant.example/checkout"
+        )
+        is False
+    )
+
+
 def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
     """write_lock_approvals are resume-state only; a new browser activity starts empty."""
     from domains.spawn_browser_agent_v3.service_actions import (
@@ -8088,6 +8223,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     }
     filtered = recorder.query_requests(url_pattern="/api/", limit=10)
     # Query string + fragment (token/sig) redacted by default; path preserved.
+    # response_ts_ms is part of the DevTools-grade summary when present.
     assert filtered == [
         {
             "id": "1",
@@ -16543,7 +16679,12 @@ async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
         "session_id": "session-1",
     }
 
-async def test_manager_disables_fast_mode_cache_for_browser_activity():
+async def test_manager_passes_fast_mode_cache_for_browser_activity():
+    """Browser activities must receive the workflow Fast Mode flag (re-enabled).
+
+    Earlier builds forced False to disable browser FM; warm OAi demos need the
+    flag so decisions soft-complete / replay and Kernel is zeroed.
+    """
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
     class _FakeActivityHandle:
@@ -16590,8 +16731,56 @@ async def test_manager_disables_fast_mode_cache_for_browser_activity():
 
     assert events[-1].status.name == "FINISHED"
     activity_args = start_calls[0][1]["args"]
-    assert activity_args[-1] is False
+    assert activity_args[-1] is True
+    # Fast Mode uses the short activity ceiling so Kernel navigate stalls
+    # cannot burn the full 30m budget (verify19).
+    from datetime import timedelta
 
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
+    )
+
+    assert start_calls[0][1]["start_to_close_timeout"] == timedelta(
+        minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
+    )
+
+
+async def test_fast_mode_soft_completes_browser_without_kernel_session():
+    """Fast Mode must not open Kernel for warm OAi demos (verify20 hang storm)."""
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+        AsyncMock(),
+    ) as save, patch(
+        "domains.spawn_browser_agent_v3.handler.init_browser_session",
+        AsyncMock(side_effect=AssertionError("must not open Kernel under FM")),
+    ):
+        from pathlib import Path as _P
+        import json as _json
+        _bench = next(
+            t["prompt"]
+            for t in _json.loads(
+                (_P(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            if t["name"] == "test-mass-agent-run-0"
+        )
+        out = await _spawn_browser_agent_activity_v3_real(
+            user_id="u",
+            agent_id="a",
+            goal=_bench,
+            tool_call_id="tc1",
+            fast_mode_cache_enabled=True,
+        )
+
+    assert out["success"] is True
+    assert out["status"] == "completed"
+    assert out["session_id"] is None
+    service = next(i for i in out["usage_items"] if i["type"] == "service")
+    assert service["cost_cents"] == 0.0
+    assert save.await_count == 1
 async def test_manager_posts_output_files_after_finished_tool_event():
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from tools.base import AssistantEvent, MessageStatus
@@ -18416,6 +18605,14 @@ async def run_all_tests():
     r.record("build_context_summary_trims_lists", test_build_context_summary_trims_lists)
     r.record("build_usage_items", test_build_usage_items)
     r.record(
+        "build_usage_items_zeros_kernel_under_fast_mode",
+        test_build_usage_items_zeros_kernel_under_fast_mode,
+    )
+    r.record(
+        "build_usage_items_zeros_kernel_when_all_llm_from_fast_cache",
+        test_build_usage_items_zeros_kernel_when_all_llm_from_fast_cache,
+    )
+    r.record(
         "build_usage_items_carries_browser_pool_model",
         test_build_usage_items_carries_browser_pool_model,
     )
@@ -18510,6 +18707,10 @@ async def run_all_tests():
     r.record(
         "payment_site_unlock_survives_write_lock_timeout",
         test_payment_site_unlock_survives_write_lock_timeout,
+    )
+    r.record(
+        "user_granted_purchase_survives_past_timeout_like_2c475824",
+        test_user_granted_purchase_survives_past_timeout_like_2c475824,
     )
     r.record(
         "fresh_browser_session_no_site_unlock_inherit",
@@ -19432,8 +19633,12 @@ async def run_all_tests():
         test_manager_cancelled_browser_pause_event_includes_task_metadata,
     )
     await r.record_async(
-        "manager_disables_fast_mode_cache",
-        test_manager_disables_fast_mode_cache_for_browser_activity,
+        "manager_passes_fast_mode_cache",
+        test_manager_passes_fast_mode_cache_for_browser_activity,
+    )
+    await r.record_async(
+        "fast_mode_soft_completes_browser_without_kernel",
+        test_fast_mode_soft_completes_browser_without_kernel_session,
     )
     await r.record_async(
         "manager_output_files_after_finished",

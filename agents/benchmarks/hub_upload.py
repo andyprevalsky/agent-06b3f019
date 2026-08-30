@@ -96,6 +96,47 @@ def _auth_headers(*, required: bool) -> dict[str, str] | None:
     }
 
 
+def prepare_run_bundle_for_upload(bundle: dict, *, live: bool = False, required: bool = False) -> dict:
+    """Drop tool-usage-shaped logs.tree and refuse empty fan-out publishes.
+
+    `logs.tree` must be `{agent_id: {parent_agent_id, goal, status, messages}}`.
+    A `/api/tool-usage/tree` rollup in that slot makes Hub FE render every
+    for_each child as "spinning up..." with message_count=0.
+    """
+    from benchmarks.logs import canonicalize_agent_tree, tree_child_transcript_count
+
+    body = dict(bundle)
+    tasks = []
+    for task in body.get("tasks") or []:
+        if not isinstance(task, dict):
+            tasks.append(task)
+            continue
+        task = dict(task)
+        logs = dict(task.get("logs") or {})
+        raw_tree = logs.get("tree")
+        tree = canonicalize_agent_tree(raw_tree)
+        if raw_tree and not tree:
+            print("⚠️  stripped non-agent logs.tree (tool-usage rollup is not a fan-out transcript)")
+        if tree:
+            logs["tree"] = tree
+        else:
+            logs.pop("tree", None)
+        task["logs"] = logs
+        tree_agent_count = int(task.get("tree_agent_count") or 0)
+        child_transcripts = tree_child_transcript_count(tree, task.get("agent_id"))
+        if not live and tree_agent_count > 1 and child_transcripts == 0:
+            message = (
+                f"logs.tree for {task.get('name')} is missing child transcripts "
+                f"(tree_agent_count={tree_agent_count}); refusing to publish empty fan-out chips"
+            )
+            if required:
+                raise HubVisibilityError(message)
+            print(f"⚠️  {message}")
+        tasks.append(task)
+    body["tasks"] = tasks
+    return body
+
+
 def _post_run_bundle(
     base: str,
     bundle: dict,
@@ -108,7 +149,7 @@ def _post_run_bundle(
     headers = _auth_headers(required=required)
     if headers is None:
         return False
-    body = dict(bundle)
+    body = prepare_run_bundle_for_upload(bundle, live=live, required=required)
     body.setdefault("source", "manual-run")
     suffix = "?live=1" if live else ""
     request = urllib.request.Request(
