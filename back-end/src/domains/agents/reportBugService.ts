@@ -12,6 +12,13 @@
  * Filter → Source on web/Agents Window/mobile. GitHub mentions stamp source:scm
  * and show in the interactive inbox.
  * https://forum.cursor.com/t/cursor-cloud-agent-filtering-is-very-confusing/167363
+ *
+ * Platform limits on scm (not fixable from Rose):
+ * - Cursor injects a "Using the context from GitHub…" wrapper around the prompt.
+ * - Cursor auto-names the chat (often drops "Bug |"); PATCH /v1/agents/:id → 404,
+ *   so there is no post-create rename.
+ * We still set the GitHub issue title to "Bug | …" and keep the agent prompt body
+ * to exactly `/rca … [id]\n<description>` (no Rose footer / title line).
  */
 
 import { isAdminUser } from '../../utils/adminAccess';
@@ -81,7 +88,8 @@ export function buildBugReportTitle(description: string): string {
 }
 
 export function buildBugReportPrompt(agentId: string, description: string): string {
-  return `/rca the following bug for agent with ID: [${agentId}]\n\n${description.trim()}`;
+  // Exact agent-facing prompt — no blank line, no footer, no title line.
+  return `/rca the following bug for agent with ID: [${agentId}]\n${description.trim()}`;
 }
 
 export function buildBugReportChatName(description: string): string {
@@ -168,6 +176,9 @@ export async function reportAgentBug(
   const name = buildBugReportChatName(trimmed);
   const promptText = buildBugReportPrompt(agentId, trimmed);
 
+  // Prefer GitHub @cursor (source:scm) so the chat shows in the default mobile
+  // inbox. Cloud Agents API keeps Bug | + a clean prompt, but source:api is
+  // hidden under Filter → Source by default — including on phone.
   log.info('Submitting bug report to Cursor cloud agent', {
     rose_agent_id: agentId,
     chat_name: name,

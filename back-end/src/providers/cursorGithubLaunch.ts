@@ -91,20 +91,14 @@ async function githubFetch(
   throw new Error(`GitHub API ${lastStatus}: ${lastBody || 'request failed'}`);
 }
 
-/** Issue/comment body that triggers Cursor and carries the RCA prompt. */
-export function buildGithubCursorIssueBody(name: string, promptText: string): string {
-  // Lead with the chat title — Cursor derives the agent display name from the
-  // first substantive line of the @cursor comment (verified 2026-08-29: without
-  // this, scm agents were auto-named from the description and dropped "Bug |").
-  return [
-    '@cursor',
-    '',
-    name.trim(),
-    '',
-    promptText.trim(),
-    '',
-    '_Launched by Rose Report Bug (prefer source:scm so the chat shows in the Cursor mobile inbox)._',
-  ].join('\n');
+/**
+ * Comment body that triggers Cursor. Body is ONLY `@cursor` + the RCA prompt.
+ * Do not add a title line or Rose footer — those pollute the agent conversation.
+ * Cursor still injects its own "Using the context from GitHub…" wrapper (platform).
+ * Issue title carries "Bug | …"; there is no agent rename API after create.
+ */
+export function buildGithubCursorIssueBody(promptText: string): string {
+  return `@cursor\n\n${promptText.trim()}`;
 }
 
 /** Extract Cursor agent id + url from a cursor[bot] comment body. */
@@ -175,7 +169,7 @@ export async function launchCursorCloudAgentViaGithub(
     `/repos/${owner}/${repo}/issues/${issue.number}/comments`,
     {
       method: 'POST',
-      body: JSON.stringify({ body: buildGithubCursorIssueBody(input.name, input.promptText) }),
+      body: JSON.stringify({ body: buildGithubCursorIssueBody(input.promptText) }),
     },
     fetchImpl
   );

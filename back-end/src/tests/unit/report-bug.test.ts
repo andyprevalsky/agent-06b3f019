@@ -39,7 +39,7 @@ function testPromptIncludesRcaAndAgentId(): void {
   const prompt = buildBugReportPrompt('abc-123', '  It crashed after pause.  ');
   assert.equal(
     prompt,
-    '/rca the following bug for agent with ID: [abc-123]\n\nIt crashed after pause.'
+    '/rca the following bug for agent with ID: [abc-123]\nIt crashed after pause.'
   );
 }
 
@@ -71,13 +71,14 @@ function testParseCursorAgentFromComment(): void {
 
 function testGithubIssueBodyMentionsCursor(): void {
   const body = buildGithubCursorIssueBody(
-    'Bug | checkout hung',
-    '/rca the following bug for agent with ID: [a1]\n\nx'
+    '/rca the following bug for agent with ID: [a1]\nEndpoint-path formatting check'
   );
-  assert.ok(body.startsWith('@cursor\n'));
-  assert.ok(body.includes('Bug | checkout hung'));
-  assert.ok(body.indexOf('Bug | checkout hung') < body.indexOf('/rca'));
-  assert.ok(body.includes('[a1]'));
+  assert.equal(
+    body,
+    '@cursor\n\n/rca the following bug for agent with ID: [a1]\nEndpoint-path formatting check'
+  );
+  assert.equal(body.includes('Bug |'), false);
+  assert.equal(body.includes('Launched by Rose'), false);
 }
 
 async function testLaunchPostsNamedEnvPayload(): Promise<void> {
