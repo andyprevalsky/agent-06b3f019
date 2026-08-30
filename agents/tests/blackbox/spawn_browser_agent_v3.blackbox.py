@@ -432,15 +432,17 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     from domains.spawn_browser_agent_v3 import handler
 
     src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    marker = "Resolve URL for realm prep / handoff without auto-injecting DOM"
+    marker = "observe_page_state = await dom_service.get_browser_state"
     assert marker in src
-    block = src[src.index(marker) : src.index(marker) + 1200]
-    assert "observe_page_state = await dom_service.get_browser_state" in block
+    # Keep a tight window around the fetch so a distant unused assignment cannot
+    # satisfy the positive asserts while a nearby UnboundLocalError regresses.
+    start = src.index(marker)
+    block = src[start : start + 400]
     assert (
         "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
         in block
     )
-    assert "auth_runtime_state.observe_page_text(browser_state.get(\"title\")" not in block
+    assert "auth_runtime_state.observe_page_text(browser_state.get(\"title\")" not in src
 
 
 def test_max_steps_return_declares_best_effort_and_final_verifier():
@@ -8091,6 +8093,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
             "method": "POST",
             "status": 403,
             "resource_type": "XHR",
+            "response_ts_ms": 200,
             "body_available": False,
         }
     ]
