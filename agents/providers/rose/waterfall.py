@@ -95,6 +95,23 @@ def _openrouter_tool_choice(tool_choice: Any, model: str = "") -> Any:
     return tool_choice
 
 
+DEFAULT_REASONING_EFFORT = "xhigh"
+
+
+def _normalize_reasoning_effort(effort: Optional[str]) -> str:
+    """Normalize effort for OpenRouter reasoning.effort.
+
+    OpenRouter accepts max / xhigh / high / medium / low / minimal / none.
+    Our "max" sentinel maps to xhigh. Default is xhigh so every waterfall
+    step body is well-formed (effort always present).
+    """
+    if effort == "minimal":
+        return "low"
+    if effort == "max":
+        return "xhigh"
+    return effort or DEFAULT_REASONING_EFFORT
+
+
 def build_openrouter_body(
     *,
     model: str,
@@ -106,11 +123,13 @@ def build_openrouter_body(
     max_tokens: Optional[int],
     seed: Optional[int],
     provider_fast_mode: bool = False,
+    effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble the OpenRouter /chat/completions request body for one model.
 
     Deterministic in its inputs — the same call shape is reused for every
-    step of the waterfall, only `model` changes.
+    step of the waterfall, only `model` changes. Always stamps
+    ``reasoning.effort`` (default xhigh).
     """
     # Resolve tools BEFORE building messages, so the message transform knows
     # whether this request will actually declare any. Without that, tool-call
@@ -124,6 +143,7 @@ def build_openrouter_body(
         ),
         "stream": True,
         "stream_options": {"include_usage": True},
+        "reasoning": {"effort": _normalize_reasoning_effort(effort)},
     }
     if openrouter_tools:
         body["tools"] = openrouter_tools
@@ -153,6 +173,7 @@ async def waterfall_complete(
     max_tokens: Optional[int] = None,
     seed: Optional[int] = None,
     provider_fast_mode: bool = False,
+    effort: Optional[str] = None,
     openrouter_key: str,
     request_id: str,
     agent_id: Optional[str] = None,
@@ -222,6 +243,7 @@ async def waterfall_complete(
             max_tokens=max_tokens,
             seed=seed,
             provider_fast_mode=provider_fast_mode,
+            effort=effort,
         )
         emitted_user_visible = False
         try:

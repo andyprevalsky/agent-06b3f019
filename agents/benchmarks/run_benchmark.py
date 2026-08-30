@@ -2030,18 +2030,6 @@ def _run_doordash_food_plan_fixture(action: str) -> dict:
     return manifest
 
 
-DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT = (
-    "\n\nBENCHMARK EXECUTION CONTRACT: Use exactly ONE spawn_browser_agent call to build "
-    "the entire Safeway cart from the manifest before checkout. Do not spawn separate "
-    "browser agents per item, category, or small batch. "
-    "FIRST open Safeway and remove every item from any existing server-side cart — prior "
-    "sessions may leave a partial cart that must not be checked out. "
-    "Before clicking Checkout, evaluate/dump the full cart itemization and confirm every "
-    "required manifest line is present with manifest-valid quantities or a documented "
-    "manifest-allowed omission/substitution."
-)
-
-
 def _doordash_food_plan_frozen_fixture() -> dict | None:
     manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
     if manifest and manifest.get("benchmark_goal"):
@@ -2069,7 +2057,7 @@ def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
     frozen = _doordash_food_plan_frozen_fixture()
     if not frozen:
         return None
-    return frozen["execute_prompt"] + DOORDASH_FOOD_PLAN_SINGLE_BROWSER_CONTRACT
+    return frozen["execute_prompt"]
 
 
 def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:

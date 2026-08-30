@@ -449,7 +449,7 @@ async function testGptAuth_happyPathUsesCodexResponses() {
     assert(!('temperature' in (capturedBody ?? {})), 'temperature omitted for Codex backend');
     assertEqual(
       (capturedBody?.reasoning as Record<string, unknown>)?.effort,
-      'medium',
+      'xhigh',
       'default reasoning effort'
     );
     assert(
@@ -1911,6 +1911,90 @@ async function testClient_dumpContextWritesRequestAndOutput() {
 
 // ==================== WATERFALL TESTS ====================
 
+async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
+  // Provider effort shapes (must always be present; default xhigh):
+  //   Anthropic → output_config.effort
+  //   OpenAI/Codex Responses → reasoning.effort
+  //   OpenRouter → reasoning.effort
+  const messages: CompletionMessage[] = [
+    { role: 'system', content: 'be helpful' },
+    { role: 'user', content: 'hi' },
+  ];
+  const pool = getPool('rose-1-lite');
+
+  const anthropic = buildAnthropicBody({ poolSpec: pool, messages });
+  assertEqual(
+    (anthropic.output_config as Record<string, unknown>).effort,
+    'xhigh',
+    'anthropic default effort'
+  );
+
+  const anthropicMax = buildAnthropicBody({ poolSpec: pool, messages, effort: 'max' });
+  assertEqual(
+    (anthropicMax.output_config as Record<string, unknown>).effort,
+    'xhigh',
+    'anthropic max → xhigh'
+  );
+
+  const anthropicMed = buildAnthropicBody({
+    poolSpec: pool,
+    messages,
+    effort: 'medium',
+  });
+  assertEqual(
+    (anthropicMed.output_config as Record<string, unknown>).effort,
+    'medium',
+    'anthropic explicit medium'
+  );
+
+  const codex = buildCodexResponsesBody({
+    poolSpec: pool,
+    messages,
+    requestId: 'effort-default',
+  });
+  assertEqual(
+    (codex.reasoning as Record<string, unknown>).effort,
+    'xhigh',
+    'codex default effort'
+  );
+
+  const openrouter = buildOpenRouterBody({
+    model: 'openai/gpt-5.6-sol',
+    messages,
+  });
+  assertEqual(
+    (openrouter.reasoning as Record<string, unknown>).effort,
+    'xhigh',
+    'openrouter default effort'
+  );
+
+  const openrouterHigh = buildOpenRouterBody({
+    model: 'openai/gpt-5.6-sol',
+    messages,
+    reasoningEffort: 'high',
+  });
+  assertEqual(
+    (openrouterHigh.reasoning as Record<string, unknown>).effort,
+    'high',
+    'openrouter explicit high'
+  );
+
+  // Every waterfall step for the browser-use pool must stamp effort.
+  const browserPool = getPool('rose-1-browser-use');
+  for (const model of browserPool.waterfall) {
+    const stepBody = buildOpenRouterBody({ model, messages });
+    assert(
+      typeof (stepBody.reasoning as Record<string, unknown> | undefined)?.effort === 'string',
+      `effort present on ${model}`
+    );
+    assertEqual(
+      (stepBody.reasoning as Record<string, unknown>).effort,
+      'xhigh',
+      `effort=xhigh on ${model}`
+    );
+  }
+}
+
 async function testWaterfall_firstFailsSecondSucceeds() {
   process.env.OPENROUTER_API_KEY = 'or-test-key';
   const callModels: string[] = [];
@@ -3244,7 +3328,7 @@ async function testClient_lastUserMessageGetsCacheBreakpoint() {
 
 async function testClient_responseFormatTransformedToOutputConfig() {
   // OpenAI-shape response_format becomes Anthropic-shape output_config on
-  // the claudeAuth path. claudeAuth.ts also pins output_config.effort='high'
+  // the claudeAuth path. claudeAuth.ts also pins output_config.effort='xhigh'
   // — both must be present in the outbound body.
   let capturedBody: Record<string, unknown> | null = null;
   installFetchStub((url, init) => {
@@ -3277,7 +3361,7 @@ async function testClient_responseFormatTransformedToOutputConfig() {
     assert(capturedBody !== null, 'captured body');
     const oc = (capturedBody as { output_config?: Record<string, unknown> }).output_config;
     assert(oc !== undefined, 'output_config present');
-    assertEqual(oc!.effort, 'high', 'effort=high pinned');
+    assertEqual(oc!.effort, 'xhigh', 'effort=xhigh pinned');
     const fmt = oc!.format as Record<string, unknown>;
     assertEqual(fmt.type, 'json_schema', 'format.type=json_schema');
     const schema = fmt.schema as Record<string, unknown>;
@@ -3515,6 +3599,7 @@ async function main(): Promise<void> {
       name: 'client / dump context writes request and output',
       fn: testClient_dumpContextWritesRequestAndOutput,
     },
+    { name: 'waterfall / body builders always stamp effort=xhigh', fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh },
     { name: 'waterfall / first 500 → second succeeds', fn: testWaterfall_firstFailsSecondSucceeds },
     { name: 'waterfall / all fail → RoseAllFailed', fn: testWaterfall_allFailRaisesRoseAllFailed },
     {
@@ -3663,7 +3748,7 @@ async function main(): Promise<void> {
       fn: testClient_lastUserMessageGetsCacheBreakpoint,
     },
     {
-      name: 'client / response_format → output_config (effort=high)',
+      name: 'client / response_format → output_config (effort=xhigh)',
       fn: testClient_responseFormatTransformedToOutputConfig,
     },
     {

@@ -370,12 +370,21 @@ def _build_cache_namespace(
     return hashlib.sha256(material.encode()).hexdigest()[:24]
 
 
+DEFAULT_REASONING_EFFORT = "xhigh"
+
+
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
+    """Normalize effort for OpenAI Responses / Codex.
+
+    OpenAI accepts none / minimal / low / medium / high / xhigh / max (model-
+    dependent). Our "max" sentinel maps to xhigh (highest reliably-streaming
+    tier). Default is xhigh so every body always carries reasoning.effort.
+    """
     if effort == "minimal":
         return "low"
     if effort == "max":
         return "xhigh"
-    return effort or "medium"
+    return effort or DEFAULT_REASONING_EFFORT
 
 
 def build_codex_responses_body(
@@ -413,9 +422,11 @@ def build_codex_responses_body(
             cache_namespace=cache_namespace,
         ),
         "include": ["reasoning.encrypted_content"],
+        "reasoning": {
+            "effort": _normalize_reasoning_effort(effort),
+            "summary": "auto",
+        },
     }
-    if effort is not None:
-        body["reasoning"] = {"effort": _normalize_reasoning_effort(effort), "summary": "auto"}
     body["instructions"] = instructions
     responses_tools = _responses_tools(tools)
     if responses_tools:

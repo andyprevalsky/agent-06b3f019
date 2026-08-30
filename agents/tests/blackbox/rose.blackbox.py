@@ -2394,7 +2394,7 @@ def test_build_codex_responses_body_contract():
         request_id="no-system",
     )
     assert no_system_body["instructions"] == "You are a helpful assistant."
-    assert "reasoning" not in no_system_body
+    assert no_system_body["reasoning"]["effort"] == "xhigh"
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     split_system_body = build_codex_responses_body(
@@ -3063,12 +3063,123 @@ def test_build_openrouter_body_minimal_omits_optionals():
         seed=None,
     )
     assert body["stream_options"] == {"include_usage": True}
+    assert body["reasoning"]["effort"] == "xhigh"
     assert "tools" not in body
     assert "tool_choice" not in body
     assert "response_format" not in body
     assert "temperature" not in body
     assert "max_tokens" not in body
     assert "seed" not in body
+
+
+def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
+    """Every Rose provider body must carry effort; default is xhigh.
+
+    Provider shapes:
+      - Anthropic claudeAuth → output_config.effort
+      - OpenAI/Codex Responses → reasoning.effort
+      - OpenRouter waterfall → reasoning.effort
+    """
+    from providers.rose.claude_auth import DEFAULT_REASONING_EFFORT as CLAUDE_DEFAULT
+    from providers.rose.gpt_auth import DEFAULT_REASONING_EFFORT as GPT_DEFAULT
+    from providers.rose.waterfall import DEFAULT_REASONING_EFFORT as OR_DEFAULT
+
+    assert CLAUDE_DEFAULT == GPT_DEFAULT == OR_DEFAULT == "xhigh"
+
+    pool = get_pool("rose-1-lite")
+    msgs = [
+        {"role": "system", "content": "be helpful"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    anthropic = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+    )
+    assert anthropic["output_config"]["effort"] == "xhigh"
+
+    anthropic_max = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        effort="max",
+    )
+    assert anthropic_max["output_config"]["effort"] == "xhigh"
+
+    anthropic_med = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        effort="medium",
+    )
+    assert anthropic_med["output_config"]["effort"] == "medium"
+
+    codex = build_codex_responses_body(
+        pool_spec=pool,
+        messages=msgs,
+        request_id="effort-default",
+    )
+    assert codex["reasoning"]["effort"] == "xhigh"
+
+    codex_max = build_codex_responses_body(
+        pool_spec=pool,
+        messages=msgs,
+        effort="max",
+        request_id="effort-max",
+    )
+    assert codex_max["reasoning"]["effort"] == "xhigh"
+
+    openrouter = build_openrouter_body(
+        model="openai/gpt-5.6-sol",
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    assert openrouter["reasoning"]["effort"] == "xhigh"
+
+    openrouter_high = build_openrouter_body(
+        model="openai/gpt-5.6-sol",
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        effort="high",
+    )
+    assert openrouter_high["reasoning"]["effort"] == "high"
+
+    # Every model in the browser-use pool must produce a well-formed body when
+    # the waterfall walks it — effort present on each step.
+    browser_pool = get_pool("rose-1-browser-use")
+    for model in browser_pool.waterfall:
+        step_body = build_openrouter_body(
+            model=model,
+            messages=msgs,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            temperature=None,
+            max_tokens=None,
+            seed=None,
+        )
+        assert "reasoning" in step_body, f"missing reasoning on {model}"
+        assert step_body["reasoning"].get("effort") == "xhigh", f"bad effort on {model}"
 
 
 async def test_waterfall_falls_through_then_succeeds():
@@ -6040,6 +6151,10 @@ async def run_all_tests():
     )
     r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
+    r.record(
+        "waterfall_body_builders_always_stamp_effort_xhigh",
+        test_waterfall_body_builders_always_stamp_effort_xhigh_by_default,
+    )
     r.record(
         "openrouter_body_no_tools_flattens_tool_history",
         test_openrouter_body_without_tools_flattens_tool_history,

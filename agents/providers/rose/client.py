@@ -1415,6 +1415,7 @@ class RoseClient:
                     max_tokens=max_tokens,
                     seed=seed,
                     provider_fast_mode=provider_fast_mode,
+                    effort=effort,
                     openrouter_key=self._or_key(),
                     request_id=rid,
                     agent_id=agent_id,

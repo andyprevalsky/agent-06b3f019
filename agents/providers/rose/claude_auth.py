@@ -222,6 +222,9 @@ def _build_system_blocks(static_system: Optional[str], dynamic_system: Optional[
     return blocks
 
 
+DEFAULT_REASONING_EFFORT = "xhigh"
+
+
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     """Map our internal effort sentinel to Anthropic's accepted values.
 
@@ -230,10 +233,13 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     to hang without emitting a first chunk (~160s, then TTFT timeout). xhigh is
     the highest reliably-streaming level — mirror gpt_auth which also routes
     our "max" sentinel to "xhigh" as the de-facto top tier.
+
+    Default is xhigh for every call so request bodies are always well-formed
+    (effort present) unless a caller explicitly passes a different level.
     """
     if effort == "max":
         return "xhigh"
-    return effort or "high"
+    return effort or DEFAULT_REASONING_EFFORT
 
 
 def _supports_anthropic_fast_mode(model: str) -> bool:
@@ -330,16 +336,12 @@ def build_anthropic_body(
     _add_tool_cache_breakpoint(body)
     _enforce_cache_control_cap(body)
 
-    # Same anti-pattern as thinking above: `output_config.effort` is opt-in.
-    # claude-haiku-4-5 400s with "This model does not support the effort
-    # parameter" on every call when we default-set it (25× observed in one
-    # outreach-batch run). Callers that genuinely need a high-effort reasoning
-    # budget (e.g. planner_llm sets effort="max") still get it; everyone else
-    # gets Anthropic's defaults instead of a hardcoded "high".
-    if effort is not None:
-        oc = body.get("output_config") or {}
-        oc["effort"] = _normalize_reasoning_effort(effort)
-        body["output_config"] = oc
+    # Always stamp output_config.effort so every Anthropic body is well-formed.
+    # Default is xhigh; callers may override (planner_llm still passes "max",
+    # which normalizes to xhigh).
+    oc = body.get("output_config") or {}
+    oc["effort"] = _normalize_reasoning_effort(effort)
+    body["output_config"] = oc
 
     def _h(obj: Any) -> str:
         return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:8]

@@ -73,6 +73,14 @@ interface BuildBodyOptions {
   maxTokens?: number;
   temperature?: number;
   providerFastMode?: boolean;
+  effort?: string;
+}
+
+const DEFAULT_REASONING_EFFORT = 'xhigh';
+
+function normalizeReasoningEffort(effort?: string): string {
+  if (effort === 'max') return 'xhigh';
+  return effort ?? DEFAULT_REASONING_EFFORT;
 }
 
 function supportsAnthropicFastMode(model: string): boolean {
@@ -223,7 +231,7 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     system: systemBlocks,
     thinking: { type: 'adaptive' },
     temperature: 1,
-    output_config: { effort: 'high' },
+    output_config: { effort: normalizeReasoningEffort(opts.effort) },
   };
   if (opts.providerFastMode === true && supportsAnthropicFastMode(opts.poolSpec.claudeAuthModel)) {
     body.speed = 'fast';
@@ -261,7 +269,7 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
   // Set effort AFTER applyAnthropicToolConfig (which may drop output_config
   // for json_schema reasons) — effort is always valid regardless of tool mode.
   const oc = (body.output_config as Record<string, unknown> | undefined) ?? {};
-  oc.effort = 'high';
+  oc.effort = normalizeReasoningEffort(opts.effort);
   body.output_config = oc;
 
   enforceCacheBlockBudget(body);
@@ -283,6 +291,7 @@ interface ClaudeAuthOptions {
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
   providerFastMode?: boolean;
+  effort?: string;
 }
 
 /**
@@ -300,6 +309,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     maxTokens: opts.maxTokens,
     temperature: opts.temperature,
     providerFastMode: opts.providerFastMode,
+    effort: opts.effort,
   });
   // `-claude` marks the $0 OAuth path (used for cost detection downstream);
   // `-anthropic` marks the billed direct-API-key path. Both keep the claude-*

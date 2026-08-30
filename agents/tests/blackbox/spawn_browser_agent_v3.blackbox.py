@@ -208,19 +208,16 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
 
 
-def test_browser_spawn_goal_preserves_benchmark_food_plan_contract():
-    """Food-plan benchmarks must pass the root manifest goal verbatim to the browser."""
-    from domains.spawn_browser_agent_v3.handler import _browser_spawn_goal_from_parent
+def test_browser_spawn_goal_uses_tool_call_goal_verbatim():
+    """spawn_browser_agent must use the tool-call goal as-is — no parent-goal injection."""
+    import inspect
 
-    parent_goal = (
-        "Execute SAFEWAY MANIFEST lines now.\n\n"
-        "BENCHMARK EXECUTION CONTRACT: Use exactly ONE spawn_browser_agent call."
-    )
-    workflow = type("Workflow", (), {"goal": parent_goal})()
-    paraphrased = "Use the authenticated DoorDash session to buy groceries."
-    assert _browser_spawn_goal_from_parent({"goal": paraphrased}, workflow) == parent_goal
-    plain_parent = type("Workflow", (), {"goal": "Book a hotel in SF."})()
-    assert _browser_spawn_goal_from_parent({"goal": "book hotel"}, plain_parent) == "book hotel"
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    assert 'goal = tool_call.get("goal", "")' in source
+    assert "_browser_spawn_goal_from_parent" not in source
+    assert "BENCHMARK EXECUTION CONTRACT" not in source
 
 
 def test_transient_session_init_failure_classification():
@@ -17930,6 +17927,10 @@ async def run_all_tests():
     r.record(
         "stateful_browser_activity_one_thirty_minute_attempt",
         test_stateful_browser_activity_has_one_thirty_minute_attempt,
+    )
+    r.record(
+        "browser_spawn_goal_uses_tool_call_goal_verbatim",
+        test_browser_spawn_goal_uses_tool_call_goal_verbatim,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
