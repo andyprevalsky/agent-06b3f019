@@ -47,21 +47,24 @@ Sibling DoorDash agent `f4cc61ef-5484-4e82-9dbc-01b21f07b5d9` posted **70** such
 
 ## Solution
 
-**Implemented (CDP-only / Chrome Downloads):**
+**Implemented (CDP-only / Chrome Downloads, Kernel + Steel):**
 
 1. Rewrote `BrowserDownloadPersister` to listen only to `Browser.downloadWillBegin` /
    `Browser.downloadProgress`. Removed `Network.responseReceived` heuristic sniffing.
 
-2. On `downloadProgress` `completed`: if Kernel already has the file in
-   `/tmp/downloads`, do nothing; otherwise materialize via credentialed page
+2. On `downloadWillBegin` / `downloadProgress` `completed`: if the provider session
+   already has the file, do nothing; otherwise materialize via credentialed page
    fetch of the *Chrome-download URL only*.
 
-3. Kept goto `ERR_ABORTED` navigation fallback and narrowed `looks_like_download_url`
+3. Provider-aware roots: Kernel CDP + upload use `/tmp/downloads`; Steel CDP uses
+   `/files` and materialize uploads omit `directory` (backend rejects `/files`).
+
+4. Kept goto `ERR_ABORTED` navigation fallback and narrowed `looks_like_download_url`
    so bare image/svg/json extensions no longer qualify without disposition /
    download-path markers.
 
-4. Cemented blackbox: static UI asset rejection; Chrome download event
-   materialization; Network.register not used.
+5. Cemented blackbox: static UI asset rejection; Chrome download event
+   materialization for Kernel and Steel; Network.register not used.
 
 **10k-agent behavior:** O(1) per real Chrome download event; fewer FS writes and
 ASSISTANT rows per browser completion — no new fan-in.

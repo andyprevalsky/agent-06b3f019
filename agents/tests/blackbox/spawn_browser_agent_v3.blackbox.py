@@ -10733,8 +10733,20 @@ def test_is_browser_attachment_download_rejects_static_ui_assets_without_disposi
         ), url
 
 
+def test_session_upload_directory_for_provider_kernel_vs_steel():
+    """Kernel upload must pass /tmp/downloads; Steel must omit directory (Files API)."""
+    from domains.spawn_browser_agent_v3.download_persist import (
+        session_upload_directory_for_provider,
+    )
+
+    assert session_upload_directory_for_provider("kernel") == "/tmp/downloads"
+    assert session_upload_directory_for_provider("KERNEL") == "/tmp/downloads"
+    assert session_upload_directory_for_provider("steel") is None
+    assert session_upload_directory_for_provider("STEEL") is None
+
+
 async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
-    """Owning boundary: attachment bytes must land under /tmp/downloads via upload API."""
+    """Owning boundary: Kernel attachment bytes must land under /tmp/downloads via upload API."""
     from domains.spawn_browser_agent_v3 import download_persist
 
     calls = []
@@ -10759,17 +10771,19 @@ async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
         )
         return {"path": f"{directory}/{filename}", "size": len(file_content)}
 
-    with patch(
-        "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
-        new=fake_upload,
-    ):
-        out = await download_persist.persist_bytes_to_session_downloads(
-            _fake_config(),
-            "sess-1",
-            filename="rs.jpeg",
-            content=b"JPEGBYTES",
-            mime_type="image/jpeg",
-        )
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        with patch(
+            "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
+            new=fake_upload,
+        ):
+            out = await download_persist.persist_bytes_to_session_downloads(
+                _fake_config(),
+                "sess-1",
+                filename="rs.jpeg",
+                content=b"JPEGBYTES",
+                mime_type="image/jpeg",
+                provider="kernel",
+            )
     assert out == {
         "path": "/tmp/downloads/rs.jpeg",
         "size": 9,
@@ -10787,18 +10801,76 @@ async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
     ]
 
 
-async def test_browser_download_persister_materializes_chrome_download_event():
-    """Browser.downloadWillBegin materializes missing session file (Kernel often skips progress completed)."""
-    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+async def test_persist_bytes_to_session_downloads_steel_omits_directory():
+    """Steel Files API owns /files — upload must not send directory=/files (backend 400)."""
+    from domains.spawn_browser_agent_v3 import download_persist
 
-    page_fetch_calls = []
+    calls = []
+
+    async def fake_upload(
+        config,
+        session_id,
+        filename,
+        file_content,
+        mime_type="application/octet-stream",
+        *,
+        directory=None,
+    ):
+        calls.append(
+            {
+                "session_id": session_id,
+                "filename": filename,
+                "content": file_content,
+                "mime_type": mime_type,
+                "directory": directory,
+            }
+        )
+        return {"path": f"/files/{filename}", "size": len(file_content)}
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
+        with patch(
+            "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
+            new=fake_upload,
+        ):
+            out = await download_persist.persist_bytes_to_session_downloads(
+                _fake_config(),
+                "steel-sess",
+                filename="rs.jpeg",
+                content=b"JPEGBYTES",
+                mime_type="image/jpeg",
+                provider="steel",
+            )
+    assert out == {
+        "path": "/files/rs.jpeg",
+        "size": 9,
+        "filename": "rs.jpeg",
+        "mime_type": "image/jpeg",
+    }
+    assert calls == [
+        {
+            "session_id": "steel-sess",
+            "filename": "rs.jpeg",
+            "content": b"JPEGBYTES",
+            "mime_type": "image/jpeg",
+            "directory": None,
+        }
+    ]
+
+
+def _make_download_persister_cdp_harness():
+    """Shared CDP stubs for Kernel/Steel BrowserDownloadPersister create tests."""
 
     class _BrowserSend:
+        def __init__(self):
+            self.last_params = None
+
         async def setDownloadBehavior(self, params=None, session_id=None):
+            self.last_params = params or {}
             return {}
 
     class _Send:
-        Browser = _BrowserSend()
+        def __init__(self):
+            self.Browser = _BrowserSend()
 
     class _RegisterBrowser:
         def __init__(self):
@@ -10831,11 +10903,29 @@ async def test_browser_download_persister_materializes_chrome_download_event():
         async def get_or_create_cdp_session(self, *a, **kw):
             return cdp_session
 
+    return cdp_client, _BrowserSession()
+
+
+async def test_browser_download_persister_materializes_chrome_download_event():
+    """Browser.downloadWillBegin materializes missing session file (Kernel often skips progress completed)."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    page_fetch_calls = []
+    set_behavior_params = []
+    cdp_client, browser_session = _make_download_persister_cdp_harness()
+    original_set = cdp_client.send.Browser.setDownloadBehavior
+
+    async def capture_set(params=None, session_id=None):
+        set_behavior_params.append(params or {})
+        return await original_set(params=params, session_id=session_id)
+
+    cdp_client.send.Browser.setDownloadBehavior = capture_set
+
     async def fake_list(config, session_id):
         return []
 
-    async def fake_page_fetch(*, session, url, session_id, config):
-        page_fetch_calls.append({"url": url, "session_id": session_id})
+    async def fake_page_fetch(*, session, url, session_id, config, provider=None):
+        page_fetch_calls.append({"url": url, "session_id": session_id, "provider": provider})
         return {
             "path": "/tmp/downloads/rs.jpeg",
             "size": 10,
@@ -10853,13 +10943,15 @@ async def test_browser_download_persister_materializes_chrome_download_event():
                 new=fake_page_fetch,
             ):
                 persister = await BrowserDownloadPersister.create(
-                    browser_session=_BrowserSession(),
+                    browser_session=browser_session,
                     session_id="kernel-sess",
                     config=_fake_config(),
                     agent_id="agent-1",
                     task_id="task-1",
+                    provider="kernel",
                 )
                 assert persister is not None
+                assert persister.downloads_dir == "/tmp/downloads"
                 handlers = cdp_client.register.Browser.handlers
                 # willBegin alone must materialize — do not require progress completed.
                 handlers["downloadWillBegin"](
@@ -10875,15 +10967,91 @@ async def test_browser_download_persister_materializes_chrome_download_event():
                     await asyncio.gather(*list(persister._tasks), return_exceptions=True)
                 # Transition must not stack duplicate listeners.
                 await persister.transition_browser(
-                    browser_session=_BrowserSession(), session_id="kernel-sess"
+                    browser_session=browser_session, session_id="kernel-sess"
                 )
                 assert persister._listeners_attached is True
                 await persister.close()
 
+    assert set_behavior_params
+    assert set_behavior_params[0]["downloadPath"] == "/tmp/downloads"
+    assert set_behavior_params[0]["eventsEnabled"] is True
     assert page_fetch_calls == [
         {
             "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
             "session_id": "kernel-sess",
+            "provider": "kernel",
+        }
+    ]
+
+
+async def test_browser_download_persister_steel_uses_files_path():
+    """Steel persister must enable CDP downloads under /files and still materialize willBegin."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    page_fetch_calls = []
+    set_behavior_params = []
+    cdp_client, browser_session = _make_download_persister_cdp_harness()
+    original_set = cdp_client.send.Browser.setDownloadBehavior
+
+    async def capture_set(params=None, session_id=None):
+        set_behavior_params.append(params or {})
+        return await original_set(params=params, session_id=session_id)
+
+    cdp_client.send.Browser.setDownloadBehavior = capture_set
+
+    async def fake_list(config, session_id):
+        return []
+
+    async def fake_page_fetch(*, session, url, session_id, config, provider=None):
+        page_fetch_calls.append({"url": url, "session_id": session_id, "provider": provider})
+        return {
+            "path": "/files/rs.jpeg",
+            "size": 10,
+            "filename": "rs.jpeg",
+            "mime_type": "image/jpeg",
+        }
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
+        with patch(
+            "domains.spawn_browser_agent_v3.repo.list_session_files",
+            new=fake_list,
+        ):
+            with patch(
+                "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+                new=fake_page_fetch,
+            ):
+                persister = await BrowserDownloadPersister.create(
+                    browser_session=browser_session,
+                    session_id="steel-sess",
+                    config=_fake_config(),
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    provider="steel",
+                )
+                assert persister is not None
+                assert persister.downloads_dir == "/files"
+                handlers = cdp_client.register.Browser.handlers
+                handlers["downloadWillBegin"](
+                    {
+                        "guid": "guid-steel-1",
+                        "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
+                        "suggestedFilename": "rs.jpeg",
+                    },
+                    "cdp-sess",
+                )
+                await asyncio.sleep(0)
+                if persister._tasks:
+                    await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+                await persister.close()
+
+    assert set_behavior_params
+    assert set_behavior_params[0]["downloadPath"] == "/files"
+    assert set_behavior_params[0]["eventsEnabled"] is True
+    assert page_fetch_calls == [
+        {
+            "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
+            "session_id": "steel-sess",
+            "provider": "steel",
         }
     ]
 
@@ -10942,17 +11110,19 @@ async def test_browser_download_persister_ignores_network_fetch_heuristics():
         async def get_or_create_cdp_session(self, *a, **kw):
             return cdp_session
 
-    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
-        persister = await BrowserDownloadPersister.create(
-            browser_session=_BrowserSession(),
-            session_id="kernel-sess",
-            config=_fake_config(),
-            agent_id="agent-1",
-        )
-        assert persister is not None
-        assert "downloadWillBegin" in cdp_client.register.Browser.handlers
-        assert "downloadProgress" in cdp_client.register.Browser.handlers
-        await persister.close()
+    for provider in ("kernel", "steel"):
+        with patch.dict(os.environ, {"BROWSER_PROVIDER": provider}, clear=False):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=_BrowserSession(),
+                session_id=f"{provider}-sess",
+                config=_fake_config(),
+                agent_id="agent-1",
+                provider=provider,
+            )
+            assert persister is not None, provider
+            assert "downloadWillBegin" in cdp_client.register.Browser.handlers
+            assert "downloadProgress" in cdp_client.register.Browser.handlers
+            await persister.close()
 
 
 def test_dom_service_defaults_downloads_path_from_browser_provider_env():
@@ -18902,6 +19072,10 @@ async def run_all_tests():
         test_browser_downloads_path_for_provider_kernel_vs_steel,
     )
     r.record(
+        "session_upload_directory_for_provider",
+        test_session_upload_directory_for_provider_kernel_vs_steel,
+    )
+    r.record(
         "attachment_download_tinypng_vs_ad_script",
         test_is_browser_attachment_download_tinypng_vs_ad_script,
     )
@@ -18914,8 +19088,16 @@ async def run_all_tests():
         test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads,
     )
     await r.record_async(
+        "persist_bytes_to_session_downloads_steel",
+        test_persist_bytes_to_session_downloads_steel_omits_directory,
+    )
+    await r.record_async(
         "browser_download_persister_chrome_download_event",
         test_browser_download_persister_materializes_chrome_download_event,
+    )
+    await r.record_async(
+        "browser_download_persister_steel_files_path",
+        test_browser_download_persister_steel_uses_files_path,
     )
     await r.record_async(
         "browser_download_persister_ignores_network_fetch",

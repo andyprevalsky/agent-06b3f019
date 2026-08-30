@@ -1,14 +1,19 @@
-"""Persist real Chrome downloads into Kernel session_files (/tmp/downloads).
+"""Persist real Chrome downloads into provider session_files.
 
 Product rule: chat only gets files that Chrome would put in its Downloads
 folder — not ordinary page Fetch/XHR assets (SVG icons, map sprites, etc.).
 
-Kernel's CDP ``Browser.setDownloadBehavior`` + ``downloads_path`` does not always
-materialize bytes that ``listFiles(/tmp/downloads)`` can see. When CDP reports a
-real download (``Browser.downloadWillBegin`` / ``downloadProgress``) or goto hits
-``net::ERR_ABORTED`` on a download navigation, materialize that file via an
-in-page credentialed fetch and write it through the browser-session upload API
-under ``/tmp/downloads`` so ``extract_session_files`` / attempt_completion can pass.
+Providers differ on where session listing sees those bytes:
+
+- Kernel: CDP ``downloads_path`` + upload ``directory`` must be ``/tmp/downloads``
+- Steel: CDP ``downloads_path`` is ``/files``; the Files API owns that root, so
+  materialize uploads must omit ``directory`` (backend rejects ``/files``)
+
+When CDP reports a real download (``Browser.downloadWillBegin`` /
+``downloadProgress``) or goto hits ``net::ERR_ABORTED`` on a download
+navigation, materialize that file via an in-page credentialed fetch and write
+it through the browser-session upload API so ``extract_session_files`` /
+attempt_completion can pass.
 
 Do NOT sniff ``Network.responseReceived`` for Content-Disposition / URL
 extensions — that invents "downloads" from normal browsing.
@@ -25,9 +30,16 @@ from urllib.parse import unquote, urlparse
 
 import structlog
 
+from browser_tools.dom_service import (
+    KERNEL_DOWNLOADS_PATH,
+    STEEL_DOWNLOADS_PATH,
+    browser_downloads_path_for_provider,
+)
+
 logger = structlog.get_logger()
 
-KERNEL_DOWNLOADS_DIR = "/tmp/downloads"
+# Re-export for callers/tests that historically imported KERNEL_DOWNLOADS_DIR.
+KERNEL_DOWNLOADS_DIR = KERNEL_DOWNLOADS_PATH
 _MAX_PERSIST_BYTES = 25 * 1024 * 1024
 _ATTACHMENT_RESOURCE_TYPES = frozenset({"Document", "Fetch", "XHR", "Other"})
 # Document/archive extensions only — never image/svg/json by extension alone
@@ -58,9 +70,29 @@ _FILENAME_RE = re.compile(
 )
 
 
+def resolve_browser_provider(provider: Optional[str] = None) -> str:
+    return (provider or os.getenv("BROWSER_PROVIDER") or "kernel").strip().lower()
+
+
 def is_kernel_browser_provider(provider: Optional[str] = None) -> bool:
-    value = (provider or os.getenv("BROWSER_PROVIDER") or "").strip().lower()
-    return value == "kernel"
+    return resolve_browser_provider(provider) == "kernel"
+
+
+def is_steel_browser_provider(provider: Optional[str] = None) -> bool:
+    return resolve_browser_provider(provider) == "steel"
+
+
+def session_upload_directory_for_provider(provider: Optional[str] = None) -> Optional[str]:
+    """Directory form field for session file upload, or None when the provider owns the root.
+
+    Kernel needs ``directory=/tmp/downloads`` so listFiles sees the bytes.
+    Steel's Files API always lands under ``/files``; the backend route rejects
+    ``directory=/files``, so omit the field.
+    """
+    downloads = browser_downloads_path_for_provider(provider)
+    if downloads == STEEL_DOWNLOADS_PATH or is_steel_browser_provider(provider):
+        return None
+    return downloads
 
 
 def content_disposition_is_attachment(headers: Optional[Dict[str, Any]]) -> bool:
@@ -192,6 +224,7 @@ async def persist_bytes_to_session_downloads(
     filename: str,
     content: bytes,
     mime_type: str = "application/octet-stream",
+    provider: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Write bytes into the session downloads root via the provider-neutral API."""
     from domains.spawn_browser_agent_v3.repo import upload_file_to_session
@@ -208,18 +241,25 @@ async def persist_bytes_to_session_downloads(
         )
         return None
     safe_name = os.path.basename(filename) or "download.bin"
+    downloads_dir = browser_downloads_path_for_provider(provider)
+    upload_directory = session_upload_directory_for_provider(provider)
     uploaded = await upload_file_to_session(
         config,
         session_id,
         safe_name,
         content,
         mime_type,
-        directory=KERNEL_DOWNLOADS_DIR,
+        directory=upload_directory,
     )
     if not uploaded:
         return None
+    fallback_path = (
+        f"{downloads_dir.rstrip('/')}/{safe_name}"
+        if downloads_dir
+        else safe_name
+    )
     return {
-        "path": uploaded.get("path") or f"{KERNEL_DOWNLOADS_DIR}/{safe_name}",
+        "path": uploaded.get("path") or fallback_path,
         "size": uploaded.get("size") or len(content),
         "filename": safe_name,
         "mime_type": mime_type,
@@ -227,7 +267,7 @@ async def persist_bytes_to_session_downloads(
 
 
 class BrowserDownloadPersister:
-    """Materialize Chrome Downloads into /tmp/downloads via Browser.download* CDP events.
+    """Materialize Chrome Downloads into the provider session root via Browser.download* CDP.
 
     Only reacts when Chrome itself starts a download (same as the Downloads UI).
     Does not sniff Network Fetch/XHR for Content-Disposition or file extensions.
@@ -241,12 +281,15 @@ class BrowserDownloadPersister:
         config: Any,
         agent_id: str = "",
         task_id: str = "",
+        provider: Optional[str] = None,
     ) -> None:
         self.browser_session = browser_session
         self.session_id = session_id
         self.config = config
         self.agent_id = agent_id
         self.task_id = task_id
+        self.provider = resolve_browser_provider(provider)
+        self.downloads_dir = browser_downloads_path_for_provider(self.provider)
         self._closed = False
         self._cdp_client: Any = None
         self._tasks: Set[asyncio.Task] = set()
@@ -263,11 +306,12 @@ class BrowserDownloadPersister:
         config: Any,
         agent_id: str = "",
         task_id: str = "",
+        provider: Optional[str] = None,
     ) -> Optional["BrowserDownloadPersister"]:
         if not session_id or config is None:
             return None
-        if not is_kernel_browser_provider():
-            return None
+        # Kernel and Steel both emit Browser.download* when setDownloadBehavior
+        # eventsEnabled is on — do not gate on a single provider.
         if not hasattr(browser_session, "get_or_create_cdp_session"):
             return None
         persister = cls(
@@ -276,6 +320,7 @@ class BrowserDownloadPersister:
             config=config,
             agent_id=agent_id,
             task_id=task_id or "",
+            provider=provider,
         )
         try:
             await persister.start()
@@ -284,6 +329,7 @@ class BrowserDownloadPersister:
                 "[DownloadPersist] Failed to start",
                 agent_id=agent_id,
                 session_id=session_id,
+                provider=persister.provider,
                 error=str(exc),
             )
             return None
@@ -299,13 +345,15 @@ class BrowserDownloadPersister:
             await cdp_client.send.Browser.setDownloadBehavior(
                 params={
                     "behavior": "allow",
-                    "downloadPath": KERNEL_DOWNLOADS_DIR,
+                    "downloadPath": self.downloads_dir,
                     "eventsEnabled": True,
                 }
             )
         except Exception as exc:
             logger.warning(
                 "[DownloadPersist] setDownloadBehavior failed; still listening for events",
+                provider=self.provider,
+                downloads_dir=self.downloads_dir,
                 error=str(exc)[:160],
             )
 
@@ -326,13 +374,16 @@ class BrowserDownloadPersister:
                 agent_id=self.agent_id,
                 task_id=self.task_id,
                 session_id=self.session_id,
-                downloads_dir=KERNEL_DOWNLOADS_DIR,
+                provider=self.provider,
+                downloads_dir=self.downloads_dir,
             )
         else:
             logger.info(
                 "[DownloadPersist] Refreshing setDownloadBehavior after browser transition",
                 agent_id=self.agent_id,
                 session_id=self.session_id,
+                provider=self.provider,
+                downloads_dir=self.downloads_dir,
             )
 
     async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
@@ -381,11 +432,12 @@ class BrowserDownloadPersister:
                 "[DownloadPersist] Chrome downloadWillBegin",
                 agent_id=self.agent_id,
                 session_id=self.session_id,
+                provider=self.provider,
                 guid=guid,
                 filename=suggested[:120],
                 url=url[:200],
             )
-            # Kernel often emits willBegin without a completed progress event.
+            # Providers often emit willBegin without a completed progress event.
             # Materialize from the Chrome-download URL immediately (idempotent).
             self._schedule_materialize(meta)
         except Exception as exc:
@@ -420,6 +472,7 @@ class BrowserDownloadPersister:
                 os.path.basename(str(file_path)) or meta["suggested_filename"]
             )
         self._schedule_materialize(meta)
+
     async def _session_already_has_file(self, filename: str) -> bool:
         from domains.spawn_browser_agent_v3.repo import list_session_files
 
@@ -450,25 +503,31 @@ class BrowserDownloadPersister:
                 "[DownloadPersist] Chrome download already in session downloads",
                 agent_id=self.agent_id,
                 session_id=self.session_id,
+                provider=self.provider,
                 filename=filename,
             )
-            return {"path": f"{KERNEL_DOWNLOADS_DIR}/{filename}", "filename": filename}
+            return {
+                "path": f"{self.downloads_dir.rstrip('/')}/{filename}",
+                "filename": filename,
+            }
 
         if not url.startswith(("http://", "https://")):
             logger.warning(
                 "[DownloadPersist] Completed download missing http(s) URL; cannot materialize",
                 agent_id=self.agent_id,
+                provider=self.provider,
                 filename=filename,
             )
             return None
 
-        # Kernel sometimes emits downloadProgress without listFiles seeing the file.
+        # Providers sometimes emit downloadProgress without listFiles seeing the file.
         # Only then: credentialed page fetch of the *Chrome-download* URL.
         result = await persist_navigation_download_via_page_fetch(
             session=self.browser_session,
             url=url,
             session_id=self.session_id,
             config=self.config,
+            provider=self.provider,
         )
         if result:
             self._persisted_keys.add(dedupe)
@@ -476,6 +535,7 @@ class BrowserDownloadPersister:
                 "[DownloadPersist] Materialized Chrome download into session downloads",
                 agent_id=self.agent_id,
                 session_id=self.session_id,
+                provider=self.provider,
                 path=result.get("path"),
                 size=result.get("size"),
                 url=url[:200],
@@ -489,6 +549,7 @@ async def persist_navigation_download_via_page_fetch(
     url: str,
     session_id: str,
     config: Any,
+    provider: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Credentialed in-page fetch + session write for goto ERR_ABORTED / CDP download fallback."""
     import json
@@ -557,6 +618,7 @@ async def persist_navigation_download_via_page_fetch(
         filename=filename,
         content=file_bytes,
         mime_type=mime_type,
+        provider=provider,
     )
     if not uploaded:
         return None
