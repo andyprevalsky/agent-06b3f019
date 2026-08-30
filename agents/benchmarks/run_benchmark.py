@@ -9159,6 +9159,8 @@ _EXPLORE_SUMMARY_FORBIDDEN = (
     "fast mode",
     "cached trajectory",
     "verified results are included below",
+    "without a final summary",
+    "raw tool results below",
 )
 
 
@@ -9194,7 +9196,7 @@ def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[
             if not body or body.lower() in _EXPLORE_SUMMARY_STUBS:
                 continue
             lowered = body.lower()
-            if any(marker in lowered for marker in _EXPLORE_SUMMARY_FORBIDDEN) and len(body) < 400:
+            if any(marker in lowered for marker in _EXPLORE_SUMMARY_FORBIDDEN):
                 continue
             stats["best"] = max(stats["best"], len(body))
         for task_id, stats in by_task.items():

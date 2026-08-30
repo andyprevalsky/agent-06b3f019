@@ -517,6 +517,25 @@ def _payload_tool_name(stored: Any) -> str:
     return ""
 
 
+def _july_explore_completion_result(stored: Any) -> str:
+    """Return the user-facing attempt_completion result text, if any."""
+    if not isinstance(stored, dict):
+        return ""
+    tool_calls = stored.get("tool_calls") or []
+    if not tool_calls or not isinstance(tool_calls[0], dict):
+        return ""
+    raw = tool_calls[0].get("arguments") or ""
+    if isinstance(raw, dict):
+        return str(raw.get("result") or "").strip()
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if isinstance(parsed, dict):
+        return str(parsed.get("result") or "").strip()
+    return ""
+
+
 def _july_gp_accept_payload(stored: Any, prior_tool: str) -> bool:
     if stored is None:
         return False
@@ -620,6 +639,29 @@ async def july_explore_resolve(
             if _july_explore_accept_payload(cand, prior_tool, start_step=start):
                 return cand, key
             prior_tool = _payload_tool_name(cand)
+    # Trajectory exhausted after research. Recover the last long completion
+    # so the chip gets the real wrap-up instead of a soft-complete stub.
+    for goal_hash in hashes:
+        recovered = None
+        recovered_key = None
+        for current in range(1, start + 16):
+            cand, key = await cache_client.cache_get_position_fallback(
+                goal_hash, call_site, current
+            )
+            if cand is None:
+                continue
+            name = _payload_tool_name(cand)
+            if name not in {"attempt_completion", "attempt_completion_with_result"}:
+                continue
+            text = _july_explore_completion_result(cand)
+            lowered = text.lower()
+            if len(text) < 200:
+                continue
+            if "fast mode" in lowered or "cached trajectory" in lowered:
+                continue
+            recovered, recovered_key = cand, key
+        if recovered is not None:
+            return recovered, recovered_key
     return None, None
 
 

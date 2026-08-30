@@ -2752,7 +2752,8 @@ async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_ev
 
     assert "Fast Mode" not in result["result"]
     assert "Stay Curious" in result["result"]
-    assert "Raw tool results" in result["result"]
+    assert "without a final summary" not in result["result"]
+    assert "Raw tool results" not in result["result"]
 
 
 async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds():

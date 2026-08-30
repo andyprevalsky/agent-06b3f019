@@ -771,14 +771,20 @@ async def spawn_explore_agent_activity(
         # parent context. 12 KB matches the explore message truncation tier and
         # leaves headroom for evidence from up to ~3 web_search results.
         EXPLORE_FALLBACK_PAYLOAD_BUDGET = 12_000
-        joined = "\n\n".join(tool_call_results)
-        if len(joined) > EXPLORE_FALLBACK_PAYLOAD_BUDGET:
-            joined = joined[:EXPLORE_FALLBACK_PAYLOAD_BUDGET] + "\n\n[truncated]"
-        final_response = (
-            "Explore sub-agent completed without a final summary. "
-            "Raw tool results below; extract the requested values directly:\n\n"
-            f"{joined}"
-        )
+        parts: list[str] = []
+        for item in tool_call_results:
+            text = str(item)
+            marker = "**Result:**"
+            if marker in text:
+                excerpt = text.split(marker, 1)[1].strip()
+                if excerpt:
+                    parts.append(excerpt)
+            elif text.strip():
+                parts.append(text.strip())
+        compiled = "\n\n".join(parts)
+        if len(compiled) > EXPLORE_FALLBACK_PAYLOAD_BUDGET:
+            compiled = compiled[:EXPLORE_FALLBACK_PAYLOAD_BUDGET] + "\n\n[truncated]"
+        final_response = compiled
 
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;

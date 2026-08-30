@@ -3239,6 +3239,65 @@ def test_july_explore_replays_last_step_completion_summary(mem, monkeypatch):
     asyncio.run(body())
 
 
+def test_july_explore_recovers_last_completion_when_step_exhausted(mem, monkeypatch):
+    """Past the last cached row, replay the real wrap-up instead of a stub."""
+    summary = (
+        "Nick Norwitz posts about four times a week on YouTube and Substack. "
+        "Top hooks are mechanism-first metabolic explainers with June 2026 "
+        "Stay Curious view proxies from the nicknorwitzPhD channel, plus "
+        "Instagram cadence and newsletter takeaways for a new personal brand."  # pragma: allowlist secret
+    )
+    completion = {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-lite",
+        "request_id": "july-explore-recovered-complete",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_recovered_complete",
+                "name": "attempt_completion_with_result",
+                "arguments": json.dumps({"result": summary}),
+            }
+        ],
+        "usage": {"from_fast_cache": True},
+    }
+    july_hash = "1e80caff3f0e8008"
+
+    async def exhausted_after_complete(goal_hash, call_site, step=None):
+        del call_site
+        if goal_hash != july_hash or step is None:
+            return None, None
+        n = int(step)
+        if n == 5:
+            return completion, f"fastmode:v42:llm:{july_hash}:explore_agent:p:5:c:x"
+        if n < 5:
+            return _july_web_search_payload(), f"fastmode:v42:llm:{july_hash}:explore_agent:p:{n}:c:x"
+        return None, None
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", exhausted_after_complete)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_explore_molly_goal(),
+                base_step=8,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion_with_result"
+        assert "Stay Curious" in str(tc.data.get("arguments") or "")
+
+    asyncio.run(body())
+
+
 def test_july_explore_miss_does_not_cold_passthrough(mem):
     """Known July explore namespaces must not emit attempt_completion_with_result."""
 

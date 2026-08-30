@@ -4437,6 +4437,39 @@ def test_explore_completion_summary_fails_thinking_only_chip():
     assert "dcb89890" in reason
     assert "0 chars" in reason or "chip summary" in reason
 
+    fallback = {
+        **broken,
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Nick Norwitz.",  # pragma: allowlist secret
+                    "messages": [
+                        _search(),
+                        {
+                            "role": "TOOL",
+                            "message": (
+                                "Explore sub-agent completed without a final summary. "
+                                "Raw tool results below; extract the requested values directly:\n\n"
+                                + ("web_search result " * 30)
+                            ),
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Research Nick Norwitz",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                            },
+                        },
+                    ],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, fallback)
+    assert passed is False
+    assert "dcb89890" in reason
+
     healthy = {
         **broken,
         "logs": {
