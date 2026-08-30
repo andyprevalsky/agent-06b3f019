@@ -273,6 +273,22 @@ async def test_poll_messages_happy_path():
     assert result[0]["role"] == "USER"
 
 
+async def test_poll_messages_accepts_temporal_iso_string():
+    """Adding a third activity arg must not crash when Temporal delivers last_checked as ISO."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.messages import poll_new_messages
+
+        result = await poll_new_messages(
+            agent_id="agent-test-1",
+            last_checked="2020-01-01T00:00:00Z",
+        )
+
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result[0]["role"] == "USER"
+
+
 async def test_context_compaction_projection_keeps_checkpoint_tail():
     """Compaction checkpoints replace raw pre-checkpoint history for model context."""
     from helpers.context_compaction import (
@@ -980,6 +996,10 @@ async def run_all_tests():
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)
     await r.record_async("poll_messages_happy_path", test_poll_messages_happy_path)
+    await r.record_async(
+        "poll_messages_accepts_temporal_iso_string",
+        test_poll_messages_accepts_temporal_iso_string,
+    )
     await r.record_async(
         "poll_messages_keeps_explore_chips_when_include_internal",
         test_poll_messages_keeps_explore_chips_when_include_internal,

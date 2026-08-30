@@ -8,8 +8,8 @@ import os
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 import httpx
 import structlog
@@ -824,10 +824,25 @@ async def update_agent_tree_state(
         logger.debug(f"Tree state update error (non-fatal): {str(e)}")
 
 
+def _coerce_poll_since(last_checked: Union[datetime, str]) -> datetime:
+    """Temporal may deliver the since stamp as an ISO string after payload decode."""
+    if isinstance(last_checked, datetime):
+        if last_checked.tzinfo is None:
+            return last_checked.replace(tzinfo=timezone.utc)
+        return last_checked
+    raw = str(last_checked or "").strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 @activity.defn
 async def poll_new_messages(
     agent_id: str,
-    last_checked: datetime,
+    last_checked: Union[datetime, str],
     include_internal_subagent: bool = False,
 ) -> List[Dict[str, Any]]:
     """
@@ -845,11 +860,12 @@ async def poll_new_messages(
     """
     try:
         activity.heartbeat(f"Polling messages for agent {agent_id}")
+        since = _coerce_poll_since(last_checked)
 
-        logger.info(f"Polling for new messages: agent_id={agent_id}, last_checked={last_checked.isoformat()}")
+        logger.info(f"Polling for new messages: agent_id={agent_id}, last_checked={since.isoformat()}")
 
         # Use the single fetch_agent_data implementation with server-side filtering
-        data = await _fetch_agent_data_impl(agent_id, since=last_checked.isoformat())
+        data = await _fetch_agent_data_impl(agent_id, since=since.isoformat())
         new_messages = data.get("messages", [])
         new_messages = project_model_context_after_compaction(new_messages)
 
