@@ -9154,6 +9154,67 @@ def _explore_reject_loop_failures(data: dict, *, min_rejects: int = 2) -> list[s
     return failures
 
 
+_EXPLORE_SUMMARY_STUBS = frozenset({"research started.", "research started"})
+_EXPLORE_SUMMARY_FORBIDDEN = (
+    "fast mode",
+    "cached trajectory",
+    "verified results are included below",
+)
+
+
+def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[str]:
+    """GP explore chips that research but never post a user-facing wrap-up."""
+    failures: list[str] = []
+
+    def consider(messages: list, label: str) -> None:
+        by_task: dict[str, dict[str, int]] = {}
+        for message in messages or []:
+            if not isinstance(message, dict):
+                continue
+            metadata = _message_tool_meta(message)
+            if str(metadata.get("agentType") or "") != "explore":
+                continue
+            task_id = str(
+                metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or ""
+            )
+            if not task_id:
+                continue
+            stats = by_task.setdefault(task_id, {"research": 0, "best": 0})
+            tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+            if tool_name in _EXPLORE_RESEARCH_TOOLS:
+                stats["research"] += 1
+            title = str(metadata.get("title") or "")
+            if title == "Explore agent thinking":
+                continue
+            if tool_name != "spawn_agent":
+                continue
+            if str(metadata.get("toolStatus") or "").upper() != "FINISHED":
+                continue
+            body = str(message.get("message") or message.get("text") or "").strip()
+            if not body or body.lower() in _EXPLORE_SUMMARY_STUBS:
+                continue
+            lowered = body.lower()
+            if any(marker in lowered for marker in _EXPLORE_SUMMARY_FORBIDDEN) and len(body) < 400:
+                continue
+            stats["best"] = max(stats["best"], len(body))
+        for task_id, stats in by_task.items():
+            if stats["research"] == 0:
+                continue
+            if stats["best"] < min_chars:
+                failures.append(
+                    f"{label} explore {task_id[:8]} replayed {stats['research']} research tools "
+                    f"but the chip summary is {stats['best']} chars (need >= {min_chars})"
+                )
+
+    consider(data.get("messages") or [], "root")
+    tree = _judge_source_tree(data)
+    for agent_id, node in tree.items():
+        if not isinstance(node, dict):
+            continue
+        consider(node.get("messages") or [], f"gp {str(agent_id)[:8]}")
+    return failures
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -9444,6 +9505,13 @@ def _run_declared_static_check(
             )
             if loops:
                 return False, loops[0]
+            continue
+        if check_type == "explore_completion_summary":
+            missing = _explore_chip_summary_failures(
+                data, min_chars=int(check.get("min_chars", 200))
+            )
+            if missing:
+                return False, missing[0]
             continue
         if check_type == "completion_summary_length":
             cards = _completion_cards_for_static_check(

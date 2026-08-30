@@ -758,6 +758,14 @@ async def spawn_explore_agent_activity(
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
     final_response = result.get("final_response", "") or ""
+    # Soft-complete stubs are non-empty plumbing ("Fast Mode cache trajectory
+    # ended..."). Treat them as empty so the parent chip gets synthesized
+    # evidence instead of Thinking... / Research started.
+    if (
+        "fast mode" in final_response.lower()
+        or "cached trajectory" in final_response.lower()
+    ) and len(final_response) < 400:
+        final_response = ""
     if not final_response.strip() and tool_call_results:
         # Cap the synthesized payload so we don't ship 100 KB+ back through the
         # parent context. 12 KB matches the explore message truncation tier and

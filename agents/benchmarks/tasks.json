@@ -76,12 +76,16 @@
         "id": "t3-gp-explore-research-tools",
         "method": "static_check",
         "criteria": [
-          "T3: GP explore chips replay research tools; they must not loop attempt_completion_with_result rejected"
+          "T3: GP explore chips replay research tools, end with the real explore summary, and must not loop attempt_completion_with_result rejected"
         ],
         "checks": [
           {
             "type": "explore_research_not_reject_loop",
             "min_rejects": 2
+          },
+          {
+            "type": "explore_completion_summary",
+            "min_chars": 200
           }
         ]
       },
@@ -131,9 +135,9 @@
         "id": "t3-full-explore-trajectories",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "T3: Every explore child plays a full multi-turn research trajectory"
+          "T3: Every explore child plays a full multi-turn research trajectory and ends with the real explore summary, not Thinking... or Research started."
         ],
-        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. Compact evidence omits messages[] arrays — use typed tool_counts / explore_spawn_count / research_tool_count / first_level_gps. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL if first-level GPs have no explore spawns and no research tools. FAIL stub-only traj-end/cold nodes (has_traj_end_stub true). Unsupported assistant claims are not proof."
+        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. Compact evidence omits messages[] arrays — use typed tool_counts / explore_spawn_count / research_tool_count / first_level_gps. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL if first-level GPs have no explore spawns and no research tools. FAIL stub-only traj-end/cold nodes (has_traj_end_stub true). FAIL explore chips that replay research tools but never post a user-facing spawn_agent FINISHED summary (Research started. / Thinking... only). Unsupported assistant claims are not proof."
       },
       {
         "id": "t4-full-july-gp-trajectories",

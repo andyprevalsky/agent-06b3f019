@@ -564,12 +564,23 @@ async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
 _JULY_EXPLORE_RESEARCH_TOOLS = frozenset({"web_search", "web_fetch", "grep", "people_search"})
 
 
-def _july_explore_accept_payload(stored: Any, prior_tool: str) -> bool:
+def _july_explore_accept_payload(
+    stored: Any, prior_tool: str, *, start_step: int = 1
+) -> bool:
     if stored is None:
         return False
     name = _payload_tool_name(stored)
     if name in {"attempt_completion", "attempt_completion_with_result"}:
-        return prior_tool in _JULY_EXPLORE_RESEARCH_TOOLS
+        # Skip only the p:1 cold stub. After research iterations, base_step is
+        # already past 1 and the last cached row is the real explore summary —
+        # prior_tool resets to "" on each resolve, so a last-step completion
+        # used to be skipped the same way as p:1 and the chip ended on Thinking...
+        if prior_tool in _JULY_EXPLORE_RESEARCH_TOOLS:
+            return True
+        try:
+            return int(start_step) > 1
+        except (TypeError, ValueError):
+            return False
     return True
 
 
@@ -606,7 +617,7 @@ async def july_explore_resolve(
                 )
             if cand is None:
                 continue
-            if _july_explore_accept_payload(cand, prior_tool):
+            if _july_explore_accept_payload(cand, prior_tool, start_step=start):
                 return cand, key
             prior_tool = _payload_tool_name(cand)
     return None, None

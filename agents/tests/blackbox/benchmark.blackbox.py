@@ -4364,6 +4364,110 @@ def test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools()
     assert "0 research" in reason
 
 
+def test_explore_completion_summary_fails_thinking_only_chip():
+    """T3 fails Nick-style chips: research tools, then Thinking... / Research started."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "explore_completion_summary", "min_chars": 200}]}
+    explore_id = "dcb89890-94ab-40db-920d-norwitzex"
+    gp_id = "00f5a3bd-0e60-4ca4-90eb-420ef4ec8739"
+    root_id = "721e1c39-201d-41d5-820a-e8bf07203c93"
+    real_summary = (
+        "Nick Norwitz posts about four times a week on YouTube and Substack. "
+        "Top hooks are mechanism-first metabolic explainers with view proxies "
+        "from June 2026 Stay Curious issues and the @nicknorwitzPhD channel, "
+        "plus Instagram cadence notes for Andy Prevalsky's personal brand research."  # pragma: allowlist secret
+    )
+    assert len(real_summary) >= 200
+
+    def _search():
+        return {
+            "role": "TOOL",
+            "message": "Query: Nick Norwitz YouTube June 2026",
+            "metadata": {
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+                "title": "Searched the web",
+                "agentType": "explore",
+                "taskId": explore_id,
+            },
+        }
+
+    broken = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [],
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Nick Norwitz.",  # pragma: allowlist secret
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Research started.",
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Research public web/platform information for creator Nick Norwitz",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                                "fastModeParallel": True,
+                            },
+                        },
+                        _search(),
+                        _search(),
+                        {
+                            "role": "TOOL",
+                            "message": "",
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Explore agent thinking",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                            },
+                        },
+                    ],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, broken)
+    assert passed is False
+    assert "dcb89890" in reason
+    assert "0 chars" in reason or "chip summary" in reason
+
+    healthy = {
+        **broken,
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: David Sinclair.",  # pragma: allowlist secret
+                    "messages": [
+                        _search(),
+                        {
+                            "role": "TOOL",
+                            "message": real_summary,
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Research David Sinclair public content",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                            },
+                        },
+                    ],
+                }
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, healthy) == (
+        True,
+        "All declared static checks passed",
+    )
+
+
 def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
     """The incident benchmark owns deterministic summary and SMS regressions."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -13528,7 +13632,10 @@ def test_unified_catalog_delineates_bench_axes():
     assert static_by_id == {
         "t8-root-completed": ["agent_status"],
         "t10-no-tool-failures": ["no_tool_failures"],
-        "t3-gp-explore-research-tools": ["explore_research_not_reject_loop"],
+        "t3-gp-explore-research-tools": [
+            "explore_research_not_reject_loop",
+            "explore_completion_summary",
+        ],
         "t7-completion-summary-length": ["completion_summary_length"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t7-real-deliverable": ["root_deliverable_markers"],
@@ -13540,6 +13647,12 @@ def test_unified_catalog_delineates_bench_axes():
         if check.get("type") == "explore_research_not_reject_loop"
     )
     assert explore_check.get("min_rejects") == 2
+    summary_check = next(
+        check
+        for check in evaluators["t3-gp-explore-research-tools"]["checks"]
+        if check.get("type") == "explore_completion_summary"
+    )
+    assert summary_check.get("min_chars") == 200
     assert all(
         check_type in RUNTIME_STATIC_CHECK_TYPES
         for types in static_by_id.values()
@@ -16361,6 +16474,10 @@ async def run_all_tests():
     r.record(
         "declared_static_gp_explore_reject_loop",
         test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools,
+    )
+    r.record(
+        "declared_static_gp_explore_completion_summary",
+        test_explore_completion_summary_fails_thinking_only_chip,
     )
     r.record(
         "blue_bottle_completion_delivery_contract",

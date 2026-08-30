@@ -165,6 +165,13 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
             result.get("result") or result.get("final_response") or result.get("summary")
         )
         if not explore_result:
+            raw_tools = result.get("tool_call_results") or []
+            if raw_tools:
+                joined = "\n\n".join(str(item) for item in raw_tools if str(item).strip())
+                if len(joined) > 12_000:
+                    joined = joined[:12_000] + "\n\n[truncated]"
+                explore_result = user_facing_explore_result(joined)
+        if not explore_result:
             continue
         ui_goal = str(item.get("ui_goal") or "")
         await post_event(

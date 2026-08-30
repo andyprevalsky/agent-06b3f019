@@ -1537,6 +1537,59 @@ async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
         restore()
 
 
+async def test_handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbing():
+    """A Fast Mode stub result must not leave the explore chip on Thinking..."""
+    from domains.spawn_agent.handler import SpawnAgentManager, drain_fast_mode_explores
+    from tools.base import MessageStatus
+
+    evidence = (
+        "[web_search] Nick Norwitz June 2026 YouTube views and Stay Curious "
+        "Substack likes with citations from nicknorwitz.substack.com and "
+        "youtube.com/@nicknorwitzPhD covering Apr 4 to Jul 3 2026."
+    )
+    handle = _Activity(
+        result={
+            "result": "Fast Mode cache trajectory ended for this explore goal. Returning with evidence gathered so far.",
+            "tool_call_results": [evidence],
+            "accumulated_usage": [],
+            "llm_iteration_usage": [],
+        },
+        done=False,
+    )
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "You are analyzing ONE creator for Andy Prevalsky. "
+            "Research the creator's public activity in the last 90 days "
+            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
+        ),
+    )
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_local_data_summary": "local"},
+        start_activity_result=handle,
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"type": "explore", "goal": "Research Nick Norwitz last 90 days"},
+                tool_call_id="tc-oai-plumbing",
+            )
+        )
+        await drain_fast_mode_explores(wf)
+        posted = [
+            event.message
+            for event, tcid, name in wf.handled_events
+            if name == "spawn_agent" and tcid == "tc-oai-plumbing"
+        ]
+        assert any("Stay Curious" in str(message) for message in posted)
+        assert not any("Fast Mode" in str(message) for message in posted)
+    finally:
+        restore()
+
+
 async def test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot():
     """Parent must not block on the inflight cap; Temporal queues the extras."""
     from domains.spawn_agent.config import FM_EXPLORE_INFLIGHT_CAP
@@ -2658,6 +2711,50 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     assert "42 messages" in user_msg["text"]
 
 
+async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence():
+    """Soft-complete plumbing must not become the explore chip summary."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(
+        return_value={
+            "result": (
+                "Nick Norwitz June 2026 YouTube views and Stay Curious Substack "
+                "likes with citations covering Apr 4 to Jul 3 2026."
+            )
+        }
+    )
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        await execute_tool("web_search", {"query": "Nick Norwitz YouTube"}, "tc-s")
+        return {
+            "status": "completed",
+            "final_response": (
+                "Fast Mode cache trajectory ended for this explore goal. "
+                "Returning with evidence gathered so far."
+            ),
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a-norwitz",
+            user_id="u-7",
+            goal="research Nick Norwitz",
+            model="rose-1-lite",
+        )
+
+    assert "Fast Mode" not in result["result"]
+    assert "Stay Curious" in result["result"]
+    assert "Raw tool results" in result["result"]
+
+
 async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds():
     """Completion stays visible but is rejected until an evidence tool succeeds."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -3691,6 +3788,10 @@ async def run_all_tests():
         test_handler_fast_mode_oai_demo_explore_does_not_await_activity,
     )
     await r.record_async(
+        "handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbing",
+        test_handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbing,
+    )
+    await r.record_async(
         "handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot",
         test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot,
     )
@@ -3759,6 +3860,10 @@ async def run_all_tests():
     await r.record_async("network_metadata_empty", test_fetch_network_metadata_empty_people)
     # service.py
     await r.record_async("explore_activity_happy", test_spawn_explore_agent_activity_runs_run_agent_and_returns_result)
+    await r.record_async(
+        "explore_activity_replaces_fast_mode_stub",
+        test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence,
+    )
     await r.record_async(
         "explore_activity_rejects_completion_until_evidence_succeeds",
         test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds,
