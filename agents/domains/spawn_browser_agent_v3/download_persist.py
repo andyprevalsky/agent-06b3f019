@@ -252,7 +252,7 @@ class BrowserDownloadPersister:
         self._tasks: Set[asyncio.Task] = set()
         self._pending_by_guid: Dict[str, Dict[str, Any]] = {}
         self._persisted_keys: Set[str] = set()
-        self._generation = 0
+        self._listeners_attached = False
 
     @classmethod
     async def create(
@@ -293,9 +293,6 @@ class BrowserDownloadPersister:
         cdp_session = await self.browser_session.get_or_create_cdp_session()
         cdp_client = getattr(self.browser_session, "cdp_client", None) or cdp_session.cdp_client
         self._cdp_client = cdp_client
-        self._generation += 1
-        generation = self._generation
-        register = cdp_client.register
 
         # Ensure Chrome emits downloadWillBegin / downloadProgress into downloads_path.
         try:
@@ -312,19 +309,31 @@ class BrowserDownloadPersister:
                 error=str(exc)[:160],
             )
 
-        register.Browser.downloadWillBegin(
-            lambda event, session_id: self._on_download_will_begin(event, session_id, generation)
-        )
-        register.Browser.downloadProgress(
-            lambda event, session_id: self._on_download_progress(event, session_id, generation)
-        )
-        logger.info(
-            "[DownloadPersist] Listening for Chrome download events",
-            agent_id=self.agent_id,
-            task_id=self.task_id,
-            session_id=self.session_id,
-            downloads_dir=KERNEL_DOWNLOADS_DIR,
-        )
+        # Attach Browser.download* listeners once — transition_browser must not stack
+        # duplicate handlers (each would store pending under a new generation and miss
+        # progress, or fire willBegin 4x without materializing).
+        if not self._listeners_attached:
+            register = cdp_client.register
+            register.Browser.downloadWillBegin(
+                lambda event, session_id: self._on_download_will_begin(event, session_id)
+            )
+            register.Browser.downloadProgress(
+                lambda event, session_id: self._on_download_progress(event, session_id)
+            )
+            self._listeners_attached = True
+            logger.info(
+                "[DownloadPersist] Listening for Chrome download events",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                session_id=self.session_id,
+                downloads_dir=KERNEL_DOWNLOADS_DIR,
+            )
+        else:
+            logger.info(
+                "[DownloadPersist] Refreshing setDownloadBehavior after browser transition",
+                agent_id=self.agent_id,
+                session_id=self.session_id,
+            )
 
     async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
         if self._closed:
@@ -343,11 +352,15 @@ class BrowserDownloadPersister:
         self._tasks.clear()
         self._pending_by_guid.clear()
 
+    def _schedule_materialize(self, meta: Dict[str, Any]) -> None:
+        task = asyncio.create_task(self._materialize_chrome_download(meta=meta))
+        self._tasks.add(task)
+        task.add_done_callback(lambda done: self._tasks.discard(done))
+
     def _on_download_will_begin(
         self,
         event: Dict[str, Any],
         session_id: str | None,
-        generation: int,
     ) -> None:
         if self._closed:
             return
@@ -357,12 +370,13 @@ class BrowserDownloadPersister:
                 return
             url = str(event.get("url") or "")
             suggested = str(event.get("suggestedFilename") or "") or filename_from_url(url)
-            self._pending_by_guid[f"{generation}:{guid}"] = {
+            meta = {
                 "guid": guid,
                 "url": url,
                 "suggested_filename": os.path.basename(suggested) or "download.bin",
                 "cdp_session_id": session_id,
             }
+            self._pending_by_guid[guid] = meta
             logger.info(
                 "[DownloadPersist] Chrome downloadWillBegin",
                 agent_id=self.agent_id,
@@ -371,6 +385,9 @@ class BrowserDownloadPersister:
                 filename=suggested[:120],
                 url=url[:200],
             )
+            # Kernel often emits willBegin without a completed progress event.
+            # Materialize from the Chrome-download URL immediately (idempotent).
+            self._schedule_materialize(meta)
         except Exception as exc:
             logger.warning("[DownloadPersist] downloadWillBegin handler failed", error=str(exc))
 
@@ -378,7 +395,6 @@ class BrowserDownloadPersister:
         self,
         event: Dict[str, Any],
         session_id: str | None,
-        generation: int,
     ) -> None:
         if self._closed:
             return
@@ -386,26 +402,24 @@ class BrowserDownloadPersister:
         if not guid:
             return
         state = str(event.get("state") or "")
-        if state != "completed":
-            if state == "canceled":
-                self._pending_by_guid.pop(f"{generation}:{guid}", None)
+        if state == "canceled":
+            self._pending_by_guid.pop(guid, None)
             return
-        key = f"{generation}:{guid}"
-        meta = self._pending_by_guid.pop(key, None) or {
+        if state != "completed":
+            return
+        meta = self._pending_by_guid.pop(guid, None) or {
             "guid": guid,
             "url": "",
             "suggested_filename": "download.bin",
             "cdp_session_id": session_id,
         }
-        # Prefer CDP filePath when present (local/Kernel may already have written it).
         file_path = event.get("filePath")
         if file_path:
             meta["file_path"] = str(file_path)
-            meta["suggested_filename"] = os.path.basename(str(file_path)) or meta["suggested_filename"]
-        task = asyncio.create_task(self._materialize_chrome_download(meta=meta))
-        self._tasks.add(task)
-        task.add_done_callback(lambda done: self._tasks.discard(done))
-
+            meta["suggested_filename"] = (
+                os.path.basename(str(file_path)) or meta["suggested_filename"]
+            )
+        self._schedule_materialize(meta)
     async def _session_already_has_file(self, filename: str) -> bool:
         from domains.spawn_browser_agent_v3.repo import list_session_files
 

@@ -10788,7 +10788,7 @@ async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
 
 
 async def test_browser_download_persister_materializes_chrome_download_event():
-    """Browser.downloadWillBegin/Progress completed materializes missing session file."""
+    """Browser.downloadWillBegin materializes missing session file (Kernel often skips progress completed)."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
 
     page_fetch_calls = []
@@ -10861,6 +10861,7 @@ async def test_browser_download_persister_materializes_chrome_download_event():
                 )
                 assert persister is not None
                 handlers = cdp_client.register.Browser.handlers
+                # willBegin alone must materialize — do not require progress completed.
                 handlers["downloadWillBegin"](
                     {
                         "guid": "guid-1",
@@ -10869,13 +10870,14 @@ async def test_browser_download_persister_materializes_chrome_download_event():
                     },
                     "cdp-sess",
                 )
-                handlers["downloadProgress"](
-                    {"guid": "guid-1", "state": "completed", "receivedBytes": 10, "totalBytes": 10},
-                    "cdp-sess",
-                )
                 await asyncio.sleep(0)
                 if persister._tasks:
                     await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+                # Transition must not stack duplicate listeners.
+                await persister.transition_browser(
+                    browser_session=_BrowserSession(), session_id="kernel-sess"
+                )
+                assert persister._listeners_attached is True
                 await persister.close()
 
     assert page_fetch_calls == [
