@@ -111,9 +111,16 @@ async function testDoesNotOverwriteLiveAgent(): Promise<void> {
   }
 }
 
-await test(
-  'slots archived parent/child so the live ancestors CTE works',
-  testSlotsCteReadableParentChain
-);
-await test('never overwrites a live Agent row', testDoesNotOverwriteLiveAgent);
-finish();
+async function main(): Promise<void> {
+  await test(
+    'slots archived parent/child so the live ancestors CTE works',
+    testSlotsCteReadableParentChain
+  );
+  await test('never overwrites a live Agent row', testDoesNotOverwriteLiveAgent);
+  finish();
+}
+
+main().catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+  process.exit(1);
+});
