@@ -1,50 +1,25 @@
 #!/usr/bin/env tsx
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
-import type { Browser } from 'playwright';
 import {
-  buildPreferredBrowserConfig,
   browserRecoveryCandidates,
   challengeDetectionReason,
   compatiblePreferredBrowserConfig,
   isUsableDocumentTitle,
   pageLooksChallenged,
-  recoveryConfigKeyForSession,
-  runLaneConfigSearch,
-  orderConfigsForLane,
   sameSiteNavigationUrl,
   shouldPreferSteelForChallengeTarget,
-  type BrowserRecoveryConfig,
-  type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
 import {
   challengeClassifierCostCents,
   CHALLENGE_LLM_MODEL,
 } from '../../providers/browser/challengeLlmClassifier';
-import {
-  createSessionWithContextUsingDependencies,
-  type BrowserSessionCreationDependencies,
-} from '../../providers/browser';
 import { kernelCaptchaTelemetryConfig } from '../../providers/browser/captchaTelemetry';
 import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import {
   probeCookieVariantSchema,
   recoverChallengeSchema,
 } from '../../domains/browser-session/types';
-
-function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
-  return {
-    provider: config.provider,
-    sessionId: `session-${config.key}`,
-    debugUrl: `https://debug/${config.key}`,
-    wsUrl: `wss://cdp/${config.key}`,
-    proxySource: config.proxyMode,
-    proxyLocation: { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
-    profileId: null,
-    profileSource: 'challenge_candidate_ephemeral',
-    validationBrowser: {} as Browser,
-  };
-}
 
 function testCandidateMatrix(): void {
   const candidates = browserRecoveryCandidates({
@@ -119,184 +94,6 @@ function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
     /browserSession\.create\s*\(/,
     'Steel recovery candidates must remain remote-only'
   );
-}
-
-async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear(): Promise<void> {
-  const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
-  const created: string[] = [];
-  const probed: string[] = [];
-  const released: string[] = [];
-  const promoted: string[] = [];
-  let activeCreates = 0;
-  let maxActiveCreates = 0;
-
-  const winner = await runLaneConfigSearch(
-    configs,
-    [{ key: 'auth_kept', storageState: {} }],
-    {
-      create: async (config) => {
-        activeCreates += 1;
-        maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        created.push(config.key);
-        activeCreates -= 1;
-        return fakeSession(config);
-      },
-      probe: async (config, _session, lane) => {
-        assert.strictEqual(lane.key, 'auth_kept');
-        probed.push(config.key);
-        // First config fails; second fully clears — sequential, no partial promote.
-        if (probed.length === 1) {
-          return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
-        }
-        return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
-      },
-      promote: async (candidate) => {
-        promoted.push(candidate.config.key);
-      },
-      release: async (config) => {
-        released.push(config.key);
-      },
-    }
-  );
-
-  assert.strictEqual(maxActiveCreates, 1, 'configs within a lane must be sequential');
-  assert.strictEqual(probed.length, 2);
-  assert.strictEqual(winner.config.key, probed[1]);
-  assert.deepStrictEqual(promoted, [winner.config.key]);
-  assert.ok(released.includes(probed[0]!));
-}
-
-async function testParallelCookieLanesFirstFullClearWins(): Promise<void> {
-  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 2);
-  const promoted: string[] = [];
-  const probedLanes: string[] = [];
-  const winner = await runLaneConfigSearch(
-    configs,
-    [
-      { key: 'auth_kept', storageState: { cookies: [{ name: 'a' }] } },
-      { key: 'stripped', storageState: { cookies: [] } },
-    ],
-    {
-      create: async (config) => fakeSession(config),
-      probe: async (config, _session, lane) => {
-        probedLanes.push(`${lane.key}:${config.key}`);
-        await new Promise((resolve) => setTimeout(resolve, lane.key === 'stripped' ? 1 : 30));
-        if (lane.key === 'stripped') {
-          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
-        }
-        return { stablePasses: 0, attempts: 2, latencyMs: 50, paymentCdnOk: true };
-      },
-      promote: async (candidate) => {
-        promoted.push(candidate.config.key);
-      },
-      release: async () => undefined,
-    }
-  );
-  assert.ok(probedLanes.some((entry) => entry.startsWith('stripped:')));
-  assert.deepStrictEqual(promoted, [winner.config.key]);
-}
-
-async function testLaneSearchReturnsBeforeSlowSiblingFinishes(): Promise<void> {
-  /** Hotels.com: sibling auth_kept probe held recover-challenge HTTP open after
-   * promote released the live CDP — agent reconnect had no ws_url yet. */
-  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
-  let slowSiblingFinished = false;
-  const started = Date.now();
-  const winner = await runLaneConfigSearch(
-    configs,
-    [
-      { key: 'auth_kept', storageState: {} },
-      { key: 'stripped', storageState: {} },
-    ],
-    {
-      create: async (config) => fakeSession(config),
-      probe: async (_config, _session, lane) => {
-        if (lane.key === 'stripped') {
-          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
-        }
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        slowSiblingFinished = true;
-        return { stablePasses: 0, attempts: 2, latencyMs: 400, paymentCdnOk: true };
-      },
-      promote: async () => undefined,
-      release: async () => undefined,
-    }
-  );
-  const elapsed = Date.now() - started;
-  assert.strictEqual(winner.config.key, configs[0]!.key);
-  assert.ok(elapsed < 250, `must return right after promote, not wait for sibling (${elapsed}ms)`);
-  assert.equal(slowSiblingFinished, false, 'sibling probe must still be in flight when we return');
-}
-
-async function testNoStableCandidateCleansEverything(): Promise<void> {
-  const configs = browserRecoveryCandidates({ country: 'US' });
-  const released: string[] = [];
-  await assert.rejects(
-    runLaneConfigSearch(
-      configs,
-      [{ key: 'default', storageState: {} }],
-      {
-        create: async (config) => fakeSession(config),
-        probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true }),
-        promote: async () => assert.fail('zero-pass candidate must never be promoted'),
-        release: async (config) => {
-          released.push(config.key);
-        },
-      }
-    ),
-    /No stable browser configuration/
-  );
-  assert.strictEqual(released.length, configs.length);
-}
-
-async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
-  const configs = browserRecoveryCandidates({ country: 'US' });
-  const promoted: string[] = [];
-  await assert.rejects(
-    runLaneConfigSearch(
-      configs,
-      [{ key: 'default', storageState: {} }],
-      {
-        create: async (config) => fakeSession(config),
-        probe: async (config) => ({
-          stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
-          attempts: 2,
-          latencyMs: 1,
-          paymentCdnOk: true,
-        }),
-        promote: async (candidate) => {
-          promoted.push(candidate.config.key);
-        },
-        release: async () => undefined,
-      }
-    ),
-    /No stable browser configuration/
-  );
-  assert.deepStrictEqual(promoted, []);
-}
-
-function testOrderConfigsForLane(): void {
-  const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
-  const ordered = orderConfigsForLane(configs, 'kernel_residential_city');
-  assert.strictEqual(ordered[ordered.length - 1]?.key, 'kernel_residential_city');
-  assert.ok(ordered[0]?.key !== 'kernel_residential_city');
-}
-
-function testRecoveryConfigKeyForSession(): void {
-  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'isp_city'), 'kernel_isp');
-  assert.strictEqual(
-    recoveryConfigKeyForSession('kernel', 'residential_city'),
-    'kernel_residential_city'
-  );
-  assert.strictEqual(
-    recoveryConfigKeyForSession('kernel', 'residential_country'),
-    'kernel_residential_country'
-  );
-  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'none'), 'kernel_direct');
-  assert.strictEqual(recoveryConfigKeyForSession('steel', 'managed'), 'steel_managed');
-  assert.strictEqual(recoveryConfigKeyForSession('steel', 'fixed'), 'steel_fixed');
-  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'mobile_city'), 'kernel_mobile');
 }
 
 function testChallengeDetection(): void {
@@ -493,205 +290,6 @@ function testPreferredConfigCompatibility(): void {
   );
 }
 
-function providerSession(provider: 'kernel' | 'steel') {
-  return {
-    provider,
-    sessionId: `${provider}-session`,
-    debugUrl: `https://${provider}.example/debug`,
-    taskId: `${provider}-task`,
-    wsUrl: `wss://${provider}.example/cdp`,
-    proxySource: `${provider}-proxy`,
-    proxyLocation: { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
-    profileId: null,
-    profileSource: 'test',
-    validationBrowser: null,
-  } as const;
-}
-
-function steelSession() {
-  const session = providerSession('steel');
-  return {
-    sessionId: session.sessionId,
-    debugUrl: session.debugUrl,
-    taskId: session.taskId,
-    wsUrl: session.wsUrl,
-    proxySource: session.proxySource,
-    proxyLocation: session.proxyLocation,
-    steelProfileId: null,
-    profileSource: session.profileSource,
-    validationBrowser: null,
-  };
-}
-
-async function testLearnedConfigSeedsTheNextSession(): Promise<void> {
-  const location = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
-  const cached = buildPreferredBrowserConfig(
-    {
-      key: 'kernel_isp',
-      provider: 'kernel',
-      proxyMode: 'isp_city',
-      kernelProxyType: 'isp',
-      kernelSpecificity: 'city',
-    },
-    location
-  );
-  const kernelCalls: Parameters<BrowserSessionCreationDependencies['createKernel']>[] = [];
-  let steelCalls = 0;
-  const dependencies: BrowserSessionCreationDependencies = {
-    readPreferredConfig: async () => cached,
-    defaultProvider: () => 'steel',
-    createKernel: async (...args) => {
-      kernelCalls.push(args);
-      return providerSession('kernel');
-    },
-    createSteel: async () => {
-      steelCalls += 1;
-      return steelSession();
-    },
-  };
-
-  const session = await createSessionWithContextUsingDependencies(
-    'context-1',
-    'agent-1',
-    location,
-    'https://order.online/',
-    { keepValidationConnection: true },
-    dependencies
-  );
-
-  assert.strictEqual(session.provider, 'kernel');
-  assert.strictEqual(kernelCalls.length, 1, 'the next session starts with the learned provider');
-  assert.strictEqual(steelCalls, 0, 'the deployment default is not tried first');
-  assert.deepStrictEqual(kernelCalls[0]?.[4], {
-    keepValidationConnection: true,
-    exactManagedProxy: { type: 'isp', specificity: 'city' },
-  });
-}
-
-async function testLearnedSteelFixedConfigSeedsTheNextSession(): Promise<void> {
-  const location = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
-  const cached = buildPreferredBrowserConfig(
-    {
-      key: 'steel_fixed',
-      provider: 'steel',
-      proxyMode: 'fixed',
-      steelProxyMode: 'fixed',
-    },
-    location
-  );
-  let kernelCalls = 0;
-  const steelCalls: Parameters<BrowserSessionCreationDependencies['createSteel']>[] = [];
-  const dependencies: BrowserSessionCreationDependencies = {
-    readPreferredConfig: async () => cached,
-    defaultProvider: () => 'kernel',
-    createKernel: async () => {
-      kernelCalls += 1;
-      return providerSession('kernel');
-    },
-    createSteel: async (...args) => {
-      steelCalls.push(args);
-      return steelSession();
-    },
-  };
-
-  const session = await createSessionWithContextUsingDependencies(
-    'context-1',
-    'agent-1',
-    location,
-    undefined,
-    undefined,
-    dependencies
-  );
-
-  assert.strictEqual(session.provider, 'steel');
-  assert.strictEqual(kernelCalls, 0);
-  assert.strictEqual(steelCalls.length, 1);
-  assert.deepStrictEqual(steelCalls[0]?.[4], { proxyMode: 'fixed' });
-}
-
-async function testIncompatibleLearnedConfigFallsBackWithoutLeakingGeo(): Promise<void> {
-  const learnedLocation = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
-  const requestedLocation = { country: 'US', state: 'TX', city: 'DALLAS' };
-  const cached = buildPreferredBrowserConfig(
-    {
-      key: 'kernel_isp',
-      provider: 'kernel',
-      proxyMode: 'isp_city',
-      kernelProxyType: 'isp',
-      kernelSpecificity: 'city',
-    },
-    learnedLocation
-  );
-  let kernelCalls = 0;
-  const steelCalls: Parameters<BrowserSessionCreationDependencies['createSteel']>[] = [];
-  const dependencies: BrowserSessionCreationDependencies = {
-    readPreferredConfig: async () => cached,
-    defaultProvider: () => 'steel',
-    createKernel: async () => {
-      kernelCalls += 1;
-      return providerSession('kernel');
-    },
-    createSteel: async (...args) => {
-      steelCalls.push(args);
-      return { ...steelSession(), proxyLocation: requestedLocation };
-    },
-  };
-
-  await createSessionWithContextUsingDependencies(
-    'context-1',
-    'agent-1',
-    requestedLocation,
-    undefined,
-    undefined,
-    dependencies
-  );
-
-  assert.strictEqual(kernelCalls, 0);
-  assert.strictEqual(steelCalls.length, 1);
-  assert.deepStrictEqual(steelCalls[0]?.[2], requestedLocation);
-  assert.deepStrictEqual(steelCalls[0]?.[4], {});
-}
-
-async function testUnavailableLearnedConfigFallsBackToDeploymentDefault(): Promise<void> {
-  const location = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
-  const cached = buildPreferredBrowserConfig(
-    {
-      key: 'steel_fixed',
-      provider: 'steel',
-      proxyMode: 'fixed',
-      steelProxyMode: 'fixed',
-    },
-    location
-  );
-  const steelOptions: unknown[] = [];
-  let kernelCalls = 0;
-  const dependencies: BrowserSessionCreationDependencies = {
-    readPreferredConfig: async () => cached,
-    defaultProvider: () => 'kernel',
-    createKernel: async () => {
-      kernelCalls += 1;
-      return providerSession('kernel');
-    },
-    createSteel: async (_contextId, _agentId, _location, _url, options) => {
-      steelOptions.push(options);
-      throw new Error('fixed proxy temporarily unavailable');
-    },
-  };
-
-  const session = await createSessionWithContextUsingDependencies(
-    'context-1',
-    'agent-1',
-    location,
-    undefined,
-    undefined,
-    dependencies
-  );
-
-  assert.strictEqual(session.provider, 'kernel');
-  assert.strictEqual(kernelCalls, 1);
-  assert.deepStrictEqual(steelOptions, [{ proxyMode: 'fixed' }]);
-}
-
 function testRecoveryRequestSchema(): void {
   const parsed = recoverChallengeSchema.parse({
     task_id: '00000000-0000-4000-8000-000000000001',
@@ -736,8 +334,7 @@ function testRecoveryRequestSchema(): void {
 function testSameSiteNavigationUrl(): void {
   const kabuki =
     'https://www.hotels.com/Hotel-Search?destination=Hotel%20Kabuki%2C%20San%20Francisco';
-  const city =
-    'https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California';
+  const city = 'https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California';
   assert.equal(sameSiteNavigationUrl(kabuki, city), city);
   assert.equal(
     sameSiteNavigationUrl(kabuki, 'https://hotels.com/Hotel-Search?destination=SF'),
@@ -775,25 +372,15 @@ function testChallengeLlmClassifierCostRouting(): void {
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
-  await testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear();
-  await testParallelCookieLanesFirstFullClearWins();
-  await testLaneSearchReturnsBeforeSlowSiblingFinishes();
-  await testNoStableCandidateCleansEverything();
-  await testPartialStableCandidateIsNeverPromoted();
+  // Lane-search + learned-config: browser-challenge-recovery.part2.test.ts
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
-  testOrderConfigsForLane();
-  testRecoveryConfigKeyForSession();
   testSameSiteNavigationUrl();
   testChallengeDetection();
   testChallengeLlmClassifierCostRouting();
   testSteelPreferredWhenCdnHardFilterActive();
   testPreferredConfigCompatibility();
-  await testLearnedConfigSeedsTheNextSession();
-  await testLearnedSteelFixedConfigSeedsTheNextSession();
-  await testIncompatibleLearnedConfigFallsBackWithoutLeakingGeo();
-  await testUnavailableLearnedConfigFallsBackToDeploymentDefault();
   testRecoveryRequestSchema();
   process.stdout.write('PASS staged browser challenge recovery\n');
 }
