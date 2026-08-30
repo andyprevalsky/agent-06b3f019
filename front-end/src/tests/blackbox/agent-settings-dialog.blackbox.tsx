@@ -294,6 +294,7 @@ describe('AgentSettingsDialog', () => {
             name: 'Checkout never finished',
             url: 'https://cursor.com/agents/bc-bug-1',
             cursor_agent_id: 'bc-bug-1',
+            launch_source: 'scm',
           },
           { status: 201 },
         );
@@ -321,6 +322,8 @@ describe('AgentSettingsDialog', () => {
       'https://cursor.com/agents/bc-bug-1',
     );
     expect(screen.getByText('Checkout never finished')).toBeInTheDocument();
+    expect(screen.queryByText(/Bug \|/)).toBeNull();
+    expect(screen.getByText(/Launched via GitHub/)).toBeInTheDocument();
     expect(openSpy).toHaveBeenCalledWith(
       'https://cursor.com/agents/bc-bug-1',
       '_blank',

@@ -33,6 +33,9 @@ function testTitleTruncatesAtWord(): void {
 
 function testChatNamePrefix(): void {
   assert.equal(buildBugReportChatName('checkout hung'), 'checkout hung');
+  // Cursor scm auto-naming strips "Bug |" / "P0" — never force a prefix.
+  assert.equal(buildBugReportChatName('Bug | should not double').startsWith('Bug | Bug |'), false);
+  assert.equal(buildBugReportChatName('Front page broken').includes('|'), false);
 }
 
 function testPromptIncludesRcaAndAgentId(): void {
@@ -41,6 +44,9 @@ function testPromptIncludesRcaAndAgentId(): void {
     prompt,
     '/rca the following bug for agent with ID: [abc-123]\nIt crashed after pause.'
   );
+  assert.equal(prompt.includes('\n\n'), false, 'no blank line between /rca and description');
+  assert.equal(prompt.includes('Launched by Rose'), false);
+  assert.equal(prompt.startsWith('Bug |'), false);
 }
 
 function testSmsScmMentionsInbox(): void {
@@ -131,17 +137,23 @@ async function testGithubLaunchPollsForBotComment(): Promise<void> {
   delete process.env.GITHUB_TOKEN;
 
   let calls = 0;
+  let issueTitle = '';
+  let commentBody = '';
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls += 1;
     const url = String(input);
     const method = init?.method ?? 'GET';
     if (method === 'POST' && url.endsWith('/issues')) {
+      const body = JSON.parse(String(init?.body)) as { title?: string };
+      issueTitle = body.title ?? '';
       return new Response(
         JSON.stringify({ number: 42, html_url: 'https://github.com/Rose-Ai-Labs/rose/issues/42' }),
         { status: 201, headers: { 'Content-Type': 'application/json' } }
       );
     }
     if (method === 'POST' && url.includes('/issues/42/comments')) {
+      const body = JSON.parse(String(init?.body)) as { body?: string };
+      commentBody = body.body ?? '';
       return new Response(JSON.stringify({ id: 1 }), {
         status: 201,
         headers: { 'Content-Type': 'application/json' },
@@ -167,10 +179,13 @@ async function testGithubLaunchPollsForBotComment(): Promise<void> {
     return new Response('unexpected', { status: 500 });
   }) as typeof fetch;
 
+  const promptText =
+    '/rca the following bug for agent with ID: [a1]\nFE click path verify: Report Bug from Agent Settings';
+
   try {
     const result = await launchCursorCloudAgentViaGithub({
-      name: 'scm probe',
-      promptText: '/rca the following bug for agent with ID: [a1]\n\nprobe',
+      name: 'FE click path verify: Report Bug from Agent Settings',
+      promptText,
       repo: 'Rose-Ai-Labs/rose',
       fetchImpl,
       pollIntervalMs: 1,
@@ -181,6 +196,11 @@ async function testGithubLaunchPollsForBotComment(): Promise<void> {
     assert.equal(result.url, 'https://cursor.com/agents/bc-scm-probe-1234');
     assert.equal(result.launch_source, 'scm');
     assert.equal(result.github_issue_number, 42);
+    assert.equal(issueTitle, 'FE click path verify: Report Bug from Agent Settings');
+    assert.equal(issueTitle.startsWith('Bug |'), false);
+    assert.equal(commentBody, `@cursor\n\n${promptText}`);
+    assert.equal(commentBody.includes('Launched by Rose'), false);
+    assert.equal(commentBody.includes('Bug |'), false);
     assert.ok(calls >= 3, `expected create+poll+close, got ${calls}`);
   } finally {
     if (previousToken === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
