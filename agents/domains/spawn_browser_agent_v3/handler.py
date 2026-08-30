@@ -2007,17 +2007,23 @@ def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _browser_tool_result_for_history(action_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    # formatted_state already embeds url/title/viewport/tabs/dom — keep only that
+    # for read_browser_state so the model is not billed twice for the same DOM.
+    if action_name == "read_browser_state" and result.get("formatted_state"):
+        return {
+            "success": result.get("success", True),
+            "message": result.get("message", ""),
+            "formatted_state": result["formatted_state"],
+        }
     clean: Dict[str, Any] = {}
     for key, value in (result or {}).items():
         if key in {"screenshot", "screenshot_b64", "base64"}:
             continue
-        if action_name != "read_browser_state" and key in {"dom_tree"}:
+        if key in {"dom_tree"}:
             continue
         clean[key] = value
     if action_name == "screenshot" and (result.get("screenshot") or result.get("screenshot_b64")):
         clean["screenshot_attached"] = True
-    if action_name == "read_browser_state" and result.get("formatted_state"):
-        clean.setdefault("formatted_state", result["formatted_state"])
     return clean
 
 
@@ -6649,13 +6655,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             except Exception as e:
                 logger.warning("Failed to fetch OTPs", error=str(e))
 
-            # Resolve URL for realm prep / handoff without auto-injecting DOM into the LLM.
-            activity.heartbeat(f"Step {iteration} - resolving page URL")
+            # One guarded state fetch supplies URL + observe text (avoid double DOM).
+            activity.heartbeat(f"Step {iteration} - resolving page state")
             try:
-                current_url = await asyncio.wait_for(
-                    dom_service.get_current_url(fallback=current_url),
+                observe_page_state = await asyncio.wait_for(
+                    dom_service.get_browser_state(include_screenshot=False),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
+                current_url = str(observe_page_state.get("url") or current_url)
             except asyncio.TimeoutError:
                 recovered = await _recover_browser_step(
                     f"browser_url_timeout_{BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS}s",
@@ -6673,7 +6680,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     continue
                 raise
             await record_passkey_usage_once()
-            observe_page_state = await dom_service.get_browser_state(include_screenshot=False)
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
 
             # Clicks, form submissions, and server redirects can cross an auth
@@ -8712,10 +8718,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
                 write_lock_notification = None
                 write_lock_notification_usage = None
+                write_lock_browser_state = None
 
                 try:
                     activity.heartbeat(f"Step {iteration} - generating write lock notification")
-                    write_lock_browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                    # Screenshot required so checkout-preview fallback can fire when
+                    # item images / media candidates are missing.
+                    write_lock_browser_state = await dom_service.get_browser_state(include_screenshot=True)
                     notification_result = await _generate_write_lock_notification(
                         rose_client=rose_client,
                         task_prompt=task_prompt,
@@ -8776,7 +8785,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     url=current_url,
                 )
 
-                checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
+                # Reuse the just-fetched write-lock state (no browser action since).
+                checkpoint_state = write_lock_browser_state or await dom_service.get_browser_state(
+                    include_screenshot=False
+                )
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
@@ -8853,9 +8865,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 # plain question. Best-effort — the workflow falls back to build_payment_question.
                 payment_write_lock_notification = None
                 payment_write_lock_notification_usage = None
+                payment_notification_state = None
                 try:
                     activity.heartbeat(f"Step {iteration} - generating payment approval notification")
-                    payment_notification_state = await dom_service.get_browser_state(include_screenshot=False)
+                    payment_notification_state = await dom_service.get_browser_state(include_screenshot=True)
                     payment_notification_result = await _generate_write_lock_notification(
                         rose_client=rose_client,
                         task_prompt=task_prompt,
@@ -8895,7 +8908,10 @@ Based on this feedback, I need to continue working on the task and address the i
                         error=str(notification_error),
                     )
 
-                checkpoint_state = await dom_service.get_browser_state(include_screenshot=False)
+                # Reuse payment notification state when available (no action since).
+                checkpoint_state = payment_notification_state or await dom_service.get_browser_state(
+                    include_screenshot=False
+                )
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 

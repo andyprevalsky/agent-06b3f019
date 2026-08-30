@@ -28,7 +28,7 @@ async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear()
   let maxActiveCreates = 0;
 
   const winner = await runLaneConfigSearch(configs, [{ key: 'auth_kept', storageState: {} }], {
-    create: async (config) => {
+    create: async (config, _signal) => {
       activeCreates += 1;
       maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -36,7 +36,7 @@ async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear()
       activeCreates -= 1;
       return fakeSession(config);
     },
-    probe: async (config, _session, lane) => {
+    probe: async (config, _session, lane, _signal) => {
       assert.strictEqual(lane.key, 'auth_kept');
       probed.push(config.key);
       // First config fails; second fully clears — sequential, no partial promote.
@@ -71,8 +71,8 @@ async function testParallelCookieLanesFirstFullClearWins(): Promise<void> {
       { key: 'stripped', storageState: { cookies: [] } },
     ],
     {
-      create: async (config) => fakeSession(config),
-      probe: async (config, _session, lane) => {
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, lane, _signal) => {
         probedLanes.push(`${lane.key}:${config.key}`);
         await new Promise((resolve) => setTimeout(resolve, lane.key === 'stripped' ? 1 : 30));
         if (lane.key === 'stripped') {
@@ -103,7 +103,7 @@ async function testLaneSearchReturnsBeforeSlowSiblingFinishes(): Promise<void> {
       { key: 'stripped', storageState: {} },
     ],
     {
-      create: async (config) => fakeSession(config),
+      create: async (config, _signal) => fakeSession(config),
       probe: async (_config, _session, lane) => {
         if (lane.key === 'stripped') {
           return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
@@ -127,7 +127,7 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
   const released: string[] = [];
   await assert.rejects(
     runLaneConfigSearch(configs, [{ key: 'default', storageState: {} }], {
-      create: async (config) => fakeSession(config),
+      create: async (config, _signal) => fakeSession(config),
       probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true }),
       promote: async () => assert.fail('zero-pass candidate must never be promoted'),
       release: async (config) => {
@@ -144,8 +144,8 @@ async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
   const promoted: string[] = [];
   await assert.rejects(
     runLaneConfigSearch(configs, [{ key: 'default', storageState: {} }], {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => ({
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, _lane, _signal) => ({
         stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
         attempts: 2,
         latencyMs: 1,

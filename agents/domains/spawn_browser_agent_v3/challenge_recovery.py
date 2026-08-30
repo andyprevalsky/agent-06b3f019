@@ -877,21 +877,39 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
     """
     text = (goal or "").lower()
-    # Guest needles first — "do not sign in" contains the substring "sign in"
-    # and must not be classified as a signed-in preference.
-    guest_needles = (
-        "guest checkout",
-        "as guest",
-        "continue as guest",
-        "do not sign in",
-        "don't sign in",
-        "without signing in",
-        "no account needed",
-        "do not log in",
-        "don't log in",
+    # Negated guest phrasing must not flip preserve_auth off (e.g. "do not
+    # continue as guest; sign in with my account" still contains "as guest").
+    negated_guest_needles = (
+        "do not continue as guest",
+        "don't continue as guest",
+        "do not checkout as guest",
+        "don't checkout as guest",
+        "not as guest",
+        "do not use guest",
+        "don't use guest",
+        "avoid guest",
     )
-    if any(needle in text for needle in guest_needles):
-        return True
+    if any(needle in text for needle in negated_guest_needles):
+        # Fall through to signed-in / default preserve-auth handling.
+        pass
+    else:
+        # Guest needles before signed-in — "do not sign in" contains "sign in"
+        # and must not be classified as a signed-in preference.
+        guest_needles = (
+            "guest checkout",
+            "anonymous checkout",
+            "as guest",
+            "continue as guest",
+            "do not sign in",
+            "don't sign in",
+            "without signing in",
+            "without logging in",
+            "no account needed",
+            "do not log in",
+            "don't log in",
+        )
+        if any(needle in text for needle in guest_needles):
+            return True
     signed_in_needles = (
         "sign in",
         "sign-in",

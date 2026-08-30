@@ -447,7 +447,10 @@ export async function searchAndPromoteBrowserConfig(
   });
 
   const searchDependencies: ConfigSearchDependencies = {
-    create: async (config) => {
+    create: async (config, signal) => {
+      if (signal.aborted) {
+        throw new Error('lane_aborted');
+      }
       if (config.provider === 'kernel') {
         const session = config.omitManagedProxy
           ? await dependencies.createKernel(current.agentId, proxyLocation, {
@@ -457,6 +460,10 @@ export async function searchAndPromoteBrowserConfig(
               type: config.kernelProxyType ?? 'residential',
               specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
             });
+        if (signal.aborted) {
+          await dependencies.releaseKernel(session.sessionId).catch(() => {});
+          throw new Error('lane_aborted');
+        }
         return { provider: 'kernel', ...session };
       }
       const session = await dependencies.createSteel({
@@ -464,10 +471,17 @@ export async function searchAndPromoteBrowserConfig(
         proxyMode: config.steelProxyMode ?? 'managed',
         userAgent: input.userAgent,
       });
+      if (signal.aborted) {
+        await dependencies.releaseSteel(session.sessionId).catch(() => {});
+        throw new Error('lane_aborted');
+      }
       return { provider: 'steel', ...session };
     },
-    probe: async (config, session, lane) =>
-      dependencies.probe(
+    probe: async (config, session, lane, signal) => {
+      if (signal.aborted) {
+        throw new Error('lane_aborted');
+      }
+      return dependencies.probe(
         session,
         input.targetUrl,
         lane.storageState,
@@ -480,7 +494,8 @@ export async function searchAndPromoteBrowserConfig(
           recoveryReason: input.recoveryReason,
         },
         billing
-      ),
+      );
+    },
     promote: async ({ config, session }) => {
       const updated = await prisma.$transaction(async (tx) => {
         const replaced = await tx.browserSession.updateMany({

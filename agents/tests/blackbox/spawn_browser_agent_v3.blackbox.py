@@ -432,12 +432,13 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     from domains.spawn_browser_agent_v3 import handler
 
     src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    marker = "observe_page_state = await dom_service.get_browser_state"
+    marker = "observe_page_state = await asyncio.wait_for("
     assert marker in src
+    assert "dom_service.get_browser_state(include_screenshot=False)" in src
     # Keep a tight window around the fetch so a distant unused assignment cannot
     # satisfy the positive asserts while a nearby UnboundLocalError regresses.
     start = src.index(marker)
-    block = src[start : start + 400]
+    block = src[start : start + 1200]
     assert (
         "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
         in block
@@ -3737,7 +3738,8 @@ def test_read_browser_state_tool_result_keeps_formatted_state_in_history():
         },
     )
     assert clean["formatted_state"] == formatted
-    assert "dom_tree" in clean
+    assert "dom_tree" not in clean
+    assert "url" not in clean
 
 def _fake_config(
     backend_url: str = "https://backend.example.com",

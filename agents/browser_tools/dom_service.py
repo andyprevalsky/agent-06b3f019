@@ -1434,12 +1434,20 @@ class DOMService:
             logger.error(f"📸 Failed to analyze screenshot: {error}")
 
     async def get_current_url(self, *, fallback: str = "") -> str:
-        """Return the focused tab URL without serializing the DOM tree."""
+        """Return the focused tab URL without serializing the DOM tree.
+
+        Prefer a page/CDP URL read over ``get_browser_state_summary`` — that
+        path still builds the DOM via DOMWatchdog even when screenshots are off.
+        """
         if not self._session:
             return fallback
         try:
-            state = await self._session.get_browser_state_summary(include_screenshot=False)
-            return str(state.url or fallback)
+            page = await self._session.get_current_page()
+            page_url = getattr(page, "url", None)
+            if page_url:
+                return str(page_url)
+            evaluated = await page.evaluate("() => location.href")
+            return str(evaluated or fallback)
         except Exception as error:
             logger.warning(f"Failed to read current URL: {error}")
             return fallback

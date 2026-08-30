@@ -42,11 +42,12 @@ export interface SuccessfulRecoveryCandidate {
 }
 
 export interface ConfigSearchDependencies {
-  create: (config: BrowserRecoveryConfig) => Promise<RecoveryCandidateSession>;
+  create: (config: BrowserRecoveryConfig, signal: AbortSignal) => Promise<RecoveryCandidateSession>;
   probe: (
     config: BrowserRecoveryConfig,
     session: RecoveryCandidateSession,
-    lane: RecoveryStorageLane
+    lane: RecoveryStorageLane,
+    signal: AbortSignal
   ) => Promise<CandidateProbeResult>;
   promote: (winner: SuccessfulRecoveryCandidate) => Promise<void>;
   release: (config: BrowserRecoveryConfig, session: RecoveryCandidateSession) => Promise<void>;
@@ -125,16 +126,60 @@ export async function runLaneConfigSearch(
   const orderedConfigs = orderConfigsForLane(configs, avoidConfigKey);
   const abort = new AbortController();
   const claimLock = { claimed: false };
+  /** Sessions still owned by in-flight sibling lanes — released on winner claim. */
+  const activeSessions = new Set<{
+    config: BrowserRecoveryConfig;
+    session: RecoveryCandidateSession;
+  }>();
+
+  const releaseActiveSessions = async () => {
+    const pending = [...activeSessions];
+    activeSessions.clear();
+    await Promise.all(
+      pending.map(({ config, session }) => dependencies.release(config, session).catch(() => {}))
+    );
+  };
+
+  abort.signal.addEventListener(
+    'abort',
+    () => {
+      void releaseActiveSessions();
+    },
+    { once: true }
+  );
+
+  const throwIfAborted = () => {
+    if (abort.signal.aborted || claimLock.claimed) {
+      throw new Error('lane_aborted');
+    }
+  };
+
+  const runWithAbort = async <T>(work: Promise<T>): Promise<T> => {
+    throwIfAborted();
+    return await new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(new Error('lane_aborted'));
+      abort.signal.addEventListener('abort', onAbort, { once: true });
+      work.then(
+        (value) => {
+          abort.signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        (error) => {
+          abort.signal.removeEventListener('abort', onAbort);
+          reject(error);
+        }
+      );
+    });
+  };
 
   const runLane = async (lane: RecoveryStorageLane): Promise<SuccessfulRecoveryCandidate> => {
     for (const config of orderedConfigs) {
-      if (abort.signal.aborted || claimLock.claimed) {
-        throw new Error('lane_aborted');
-      }
+      throwIfAborted();
       let session: RecoveryCandidateSession;
       try {
-        session = await dependencies.create(config);
+        session = await runWithAbort(dependencies.create(config, abort.signal));
       } catch (error) {
+        if (error instanceof Error && error.message === 'lane_aborted') throw error;
         log.warn('Challenge recovery lane candidate create failed', {
           laneKey: lane.key,
           configKey: config.key,
@@ -144,12 +189,15 @@ export async function runLaneConfigSearch(
         });
         continue;
       }
+      const tracked = { config, session };
+      activeSessions.add(tracked);
       if (abort.signal.aborted || claimLock.claimed) {
+        activeSessions.delete(tracked);
         await dependencies.release(config, session).catch(() => {});
         throw new Error('lane_aborted');
       }
       try {
-        const probe = await dependencies.probe(config, session, lane);
+        const probe = await runWithAbort(dependencies.probe(config, session, lane, abort.signal));
         log.info('Challenge recovery lane candidate probed', {
           laneKey: lane.key,
           configKey: config.key,
@@ -160,10 +208,13 @@ export async function runLaneConfigSearch(
           latencyMs: probe.latencyMs,
         });
         if (probe.stablePasses === probe.attempts && probe.attempts > 0) {
+          activeSessions.delete(tracked);
           return { config, session, probe };
         }
+        activeSessions.delete(tracked);
         await dependencies.release(config, session).catch(() => {});
       } catch (error) {
+        activeSessions.delete(tracked);
         log.warn('Challenge recovery lane candidate probe failed', {
           laneKey: lane.key,
           configKey: config.key,
@@ -257,7 +308,8 @@ export async function runParallelBrowserConfigSearch(
     create: ConfigSearchDependencies['create'];
     probe: (
       config: BrowserRecoveryConfig,
-      session?: RecoveryCandidateSession
+      session?: RecoveryCandidateSession,
+      signal?: AbortSignal
     ) => Promise<CandidateProbeResult>;
     promote: ConfigSearchDependencies['promote'];
     release: ConfigSearchDependencies['release'];
@@ -270,8 +322,8 @@ export async function runParallelBrowserConfigSearch(
     configs,
     [{ key: 'default', storageState: {} }],
     {
-      create: dependencies.create,
-      probe: async (config, session, _lane) => dependencies.probe(config, session),
+      create: (config, signal) => dependencies.create(config, signal),
+      probe: async (config, session, _lane, signal) => dependencies.probe(config, session, signal),
       promote: dependencies.promote,
       release: dependencies.release,
     },

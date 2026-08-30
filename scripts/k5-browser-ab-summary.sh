@@ -65,7 +65,7 @@ def summarize(label, path):
         total_f += f
         rate = f"{p}/5" if len(sts) >= 5 else f"{p}/{len(sts)} ({sts})"
         print(f"  {t}: {rate}")
-    print(f"  TOTAL: {total_p}/{total_p+total_f}")
+    print(f"  TOTAL: {total_p}/{len(TASKS) * 5} (completed: {total_p + total_f}/{len(TASKS) * 5})")
 
 for arg in sys.argv[1:]:
     label, path = arg.split(":", 1)
