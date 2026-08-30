@@ -210,6 +210,12 @@ def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
     assert not goal_allows_logged_out_cookie_commit(
         "Do not continue as guest; sign in with my account."
     )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Don't check out as guest; use my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not check out as guest; sign in with my account."
+    )
     assert not goal_allows_logged_out_cookie_commit("Sign in with my Expedia account and book.")
     assert not goal_allows_logged_out_cookie_commit("")
     assert not goal_allows_logged_out_cookie_commit(None)

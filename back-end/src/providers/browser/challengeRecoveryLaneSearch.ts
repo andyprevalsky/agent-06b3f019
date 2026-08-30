@@ -110,9 +110,14 @@ export async function runLaneConfigSearch(
     for (const config of orderedConfigs) {
       throwIfAborted();
       let session: RecoveryCandidateSession;
+      // Keep the create promise so a result that lands after abort can still be released.
+      const createPromise = dependencies.create(config, abort.signal);
       try {
-        session = await runWithAbort(dependencies.create(config, abort.signal));
+        session = await runWithAbort(createPromise);
       } catch (error) {
+        void createPromise
+          .then((lateSession) => dependencies.release(config, lateSession))
+          .catch(() => {});
         if (error instanceof Error && error.message === 'lane_aborted') throw error;
         log.warn('Challenge recovery lane candidate create failed', {
           laneKey: lane.key,

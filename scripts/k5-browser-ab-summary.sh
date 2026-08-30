@@ -45,8 +45,14 @@ def parse_log(path: Path):
             if m:
                 statuses.append(m.group(2))
         if statuses:
-            # report card repeats; take last 5 unique task runs from tail
-            final[t] = statuses[-5:] if len(statuses) >= 5 else statuses
+            # report-card rows repeat within a snapshot; collapse consecutive
+            # duplicates so one attempt is not counted many times, then keep
+            # the last five unique attempt outcomes.
+            deduped = []
+            for status in statuses:
+                if not deduped or deduped[-1] != status:
+                    deduped.append(status)
+            final[t] = deduped[-5:] if len(deduped) >= 5 else deduped
     return final
 
 def summarize(label, path):

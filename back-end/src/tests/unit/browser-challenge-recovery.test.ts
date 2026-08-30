@@ -254,6 +254,58 @@ async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
   assert.deepStrictEqual(promoted, []);
 }
 
+async function testLateCreateAfterAbortIsReleased(): Promise<void> {
+  /** When a sibling lane wins, in-flight create must still be released if it
+   * resolves after abort — otherwise CDP sessions leak. */
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
+  const releasedSessionIds: string[] = [];
+  let slowCreateStarted = false;
+  let releaseSlowCreate: (() => void) | undefined;
+  const slowCreateGate = new Promise<void>((resolve) => {
+    releaseSlowCreate = resolve;
+  });
+
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: {} },
+      { key: 'stripped', storageState: {} },
+    ],
+    {
+      create: async (config, _signal) => {
+        if (!slowCreateStarted) {
+          slowCreateStarted = true;
+          await slowCreateGate;
+          return {
+            ...fakeSession(config),
+            sessionId: `session-${config.key}-late`,
+          };
+        }
+        return fakeSession(config);
+      },
+      probe: async (_config, _session, lane, _signal) => {
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+      },
+      promote: async () => undefined,
+      release: async (_config, session) => {
+        releasedSessionIds.push(session.sessionId);
+      },
+    }
+  );
+
+  assert.strictEqual(winner.config.key, configs[0]!.key);
+  releaseSlowCreate!();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(
+    releasedSessionIds.includes(`session-${configs[0]!.key}-late`),
+    `late create after abort must be released (got ${JSON.stringify(releasedSessionIds)})`
+  );
+}
+
 function testOrderConfigsForLane(): void {
   const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
   const ordered = orderConfigsForLane(configs, 'kernel_residential_city');
@@ -455,6 +507,7 @@ async function main(): Promise<void> {
   await testLaneSearchReturnsBeforeSlowSiblingFinishes();
   await testNoStableCandidateCleansEverything();
   await testPartialStableCandidateIsNeverPromoted();
+  await testLateCreateAfterAbortIsReleased();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.

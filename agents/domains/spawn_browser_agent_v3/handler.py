@@ -7019,10 +7019,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 )
                 if browser_recorder:
                     with contextlib.suppress(Exception):
-                        observation_state = await dom_service.get_browser_state(include_screenshot=False)
+                        # Reuse observe_page_state from earlier in this iteration —
+                        # a second unbounded get_browser_state can stall 90-260s on
+                        # a frozen challenge renderer (no timeout wrapper here).
                         await browser_recorder.record_observation(
                             iteration=iteration,
-                            browser_state=observation_state,
+                            browser_state=observe_page_state,
                             action_entries=action_entries,
                         )
 

@@ -47,7 +47,16 @@ echo "sha=$(git rev-parse HEAD) log=$LOG" | tee -a "$LOG"
 
 set +e
 bash scripts/run-bench --local --max-concurrency 5 "${REPEATED[@]}" 2>&1 | tee -a "$LOG"
-EC=${PIPESTATUS[0]}
+PIPE_ECS=("${PIPESTATUS[@]}")
+BENCH_EC=${PIPE_ECS[0]:-1}
+TEE_EC=${PIPE_ECS[1]:-0}
+if [ "$BENCH_EC" -ne 0 ]; then
+  EC=$BENCH_EC
+elif [ "$TEE_EC" -ne 0 ]; then
+  EC=$TEE_EC
+else
+  EC=0
+fi
 set -e
 
 echo "finished_at=$(date -Is) exit_code=$EC" >>"$META"

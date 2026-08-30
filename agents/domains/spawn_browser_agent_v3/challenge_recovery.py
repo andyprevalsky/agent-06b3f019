@@ -887,6 +887,8 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "don't continue as guest",
         "do not checkout as guest",
         "don't checkout as guest",
+        "do not check out as guest",
+        "don't check out as guest",
         "not as guest",
         "do not use guest",
         "don't use guest",
