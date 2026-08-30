@@ -5276,7 +5276,12 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
                         "# creator_name\nAndrew Huberman\n\n"
                         "# posting_cadence_by_platform\n"
                         "YouTube ~2 episodes/week; Instagram ~3 posts/week.\n\n"
-                        "Huberman Lab 90-day cadence and hook formulas for Andy."
+                        "Huberman Lab 90-day cadence pairs lab-guest interviews with "
+                        "protocol recaps. Hooks name a hormone or sleep lever plus a "
+                        "concrete action. Audience is founder-operators who want "
+                        "operating systems, not wellness slogans. Monetization is "
+                        "sponsorships and a premium newsletter. Gaps include weekly "
+                        "founder-recovery operating cadence Andy can own."
                     ),
                     "metadata": {
                         "toolName": "attempt_completion",
