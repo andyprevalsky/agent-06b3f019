@@ -14,6 +14,7 @@ import {
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
 import {
   buildGithubCursorIssueBody,
+  isUncertainGithubTransportError,
   launchCursorCloudAgentViaGithub,
   parseCursorAgentFromComment,
   ScmDispatchUnknownError,
@@ -306,6 +307,60 @@ async function testLaunchPassesAbortSignal(): Promise<void> {
   }
 }
 
+async function testGithubCommentTransportFailureIsUnknown(): Promise<void> {
+  const previousToken = process.env.GITHUB_DISPATCH_TOKEN;
+  process.env.GITHUB_DISPATCH_TOKEN = 'ghp_test_token';
+  delete process.env.GITHUB_TOKEN;
+
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    if (method === 'POST' && url.endsWith('/issues')) {
+      return new Response(
+        JSON.stringify({ number: 77, html_url: 'https://github.com/Rose-Ai-Labs/rose/issues/77' }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (method === 'POST' && url.includes('/issues/77/comments')) {
+      const err = new Error('The operation was aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
+    return new Response('unexpected', { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () =>
+        launchCursorCloudAgentViaGithub({
+          name: 'transport probe',
+          promptText: '/rca the following bug for agent with ID: [a1]\ntransport',
+          repo: 'Rose-Ai-Labs/rose',
+          fetchImpl,
+          pollIntervalMs: 1,
+          timeoutMs: 5,
+          sleep: async () => undefined,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ScmDispatchUnknownError);
+        assert.ok(String(error.message).includes('outcome unknown'));
+        return true;
+      }
+    );
+  } finally {
+    if (previousToken === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
+    else process.env.GITHUB_DISPATCH_TOKEN = previousToken;
+  }
+}
+
+function testUncertainTransportClassifier(): void {
+  const abort = new Error('aborted');
+  abort.name = 'AbortError';
+  assert.equal(isUncertainGithubTransportError(abort), true);
+  assert.equal(isUncertainGithubTransportError(new Error('GitHub API 403: forbidden')), false);
+  assert.equal(isUncertainGithubTransportError(new Error('fetch failed')), true);
+}
+
 async function main(): Promise<void> {
   const cases: Array<[string, () => void | Promise<void>]> = [
     ['title keeps short descriptions', testTitleShortDescription],
@@ -322,6 +377,11 @@ async function main(): Promise<void> {
       'github launch timeout after dispatch is ScmDispatchUnknownError',
       testGithubLaunchTimeoutAfterDispatchIsUnknown,
     ],
+    [
+      'github comment transport failure is ScmDispatchUnknownError',
+      testGithubCommentTransportFailureIsUnknown,
+    ],
+    ['uncertain transport classifier', testUncertainTransportClassifier],
     ['Cursor API launch passes AbortSignal', testLaunchPassesAbortSignal],
   ];
 

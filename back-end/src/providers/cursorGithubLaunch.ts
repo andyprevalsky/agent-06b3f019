@@ -81,6 +81,15 @@ function withRequestDeadline(init: RequestInit): RequestInit {
   return { ...init, signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS) };
 }
 
+/** True when we never got a GitHub HTTP status — dispatch may still have landed. */
+export function isUncertainGithubTransportError(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  if (error.name === 'AbortError' || error.name === 'TimeoutError') return true;
+  // githubFetch formats confirmed HTTP failures as `GitHub API <status>: …`
+  if (/^GitHub API \d+:/.test(error.message)) return false;
+  return true;
+}
+
 async function githubFetch(
   path: string,
   init: RequestInit,
@@ -195,15 +204,28 @@ export async function launchCursorCloudAgentViaGithub(
 
   // Cursor watches issue/PR *comments* for @cursor — body-only mentions on create
   // do not reliably start an agent (proved 2026-08-29 on issue #1108).
-  // Once this POST succeeds, SCM dispatch is committed — do not API-fallback.
-  await githubFetch(
-    `/repos/${owner}/${repo}/issues/${issue.number}/comments`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ body: buildGithubCursorIssueBody(input.promptText) }),
-    },
-    fetchImpl
-  );
+  // Once GitHub accepts this POST, SCM dispatch is committed — do not API-fallback.
+  // A timeout/transport error after accept is also unknown (comment may have landed).
+  try {
+    await githubFetch(
+      `/repos/${owner}/${repo}/issues/${issue.number}/comments`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ body: buildGithubCursorIssueBody(input.promptText) }),
+      },
+      fetchImpl
+    );
+  } catch (error) {
+    if (isUncertainGithubTransportError(error)) {
+      throw new ScmDispatchUnknownError(
+        `SCM @cursor comment POST outcome unknown on ${issue.html_url}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        issue.html_url
+      );
+    }
+    throw error;
+  }
 
   const deadline = Date.now() + timeoutMs;
   let launched: { id: string; url: string } | null = null;

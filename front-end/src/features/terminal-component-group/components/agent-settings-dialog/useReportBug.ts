@@ -15,7 +15,7 @@
  * Copy must stay as explicit user-gesture buttons.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { reportAgentBug, useToast, type AgentDetail } from '../../hooks';
 
 interface UseReportBugOptions {
@@ -50,9 +50,13 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
   const [launched, setLaunched] = useState<LaunchedBugReport | null>(null);
   const [description, setDescription] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Bumped on dialog close / agent switch so in-flight submits cannot apply
+  // stale results to a different agent or a closed dialog.
+  const submitGenerationRef = useRef(0);
 
   useEffect(() => {
     if (!open) {
+      submitGenerationRef.current += 1;
       setShowComposer(false);
       setLaunched(null);
       setDescription('');
@@ -61,6 +65,7 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
   }, [open]);
 
   useEffect(() => {
+    submitGenerationRef.current += 1;
     setShowComposer(false);
     setLaunched(null);
     setDescription('');
@@ -113,9 +118,13 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
       return;
     }
 
+    const generation = submitGenerationRef.current;
+    const submittedAgentId = agent.agent_id;
     setIsSubmitting(true);
     try {
-      const result = await reportAgentBug(agent.agent_id, trimmed);
+      const result = await reportAgentBug(submittedAgentId, trimmed);
+      if (submitGenerationRef.current !== generation) return;
+      if (agent.agent_id !== submittedAgentId) return;
       const launchSource = result.launch_source === 'api' ? 'api' : 'scm';
       setLaunched({
         name: result.name,
@@ -137,13 +146,16 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
         window.open(result.url, '_blank', 'noopener,noreferrer');
       }
     } catch (error) {
+      if (submitGenerationRef.current !== generation) return;
       toast({
         title: 'Could not report bug',
         description: error instanceof Error ? error.message : 'Failed to launch cloud agent',
         variant: 'destructive',
       });
     } finally {
-      setIsSubmitting(false);
+      if (submitGenerationRef.current === generation) {
+        setIsSubmitting(false);
+      }
     }
   }, [agent, description, toast]);
 
