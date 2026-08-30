@@ -295,7 +295,10 @@ class BrowserDownloadPersister:
         self._tasks: Set[asyncio.Task] = set()
         self._pending_by_guid: Dict[str, Dict[str, Any]] = {}
         self._persisted_keys: Set[str] = set()
-        self._listeners_attached = False
+        # Track which CDP client the Browser.download* handlers are bound to.
+        # A lifetime boolean would skip re-register after transition_browser
+        # swaps the client (proxy rotation / Steel auth restart).
+        self._listeners_bound_to: Any = None
 
     @classmethod
     async def create(
@@ -357,10 +360,10 @@ class BrowserDownloadPersister:
                 error=str(exc)[:160],
             )
 
-        # Attach Browser.download* listeners once — transition_browser must not stack
-        # duplicate handlers (each would store pending under a new generation and miss
-        # progress, or fire willBegin 4x without materializing).
-        if not self._listeners_attached:
+        # Bind Browser.download* listeners to this CDP client. Same client
+        # (refresh after setDownloadBehavior only) must not stack duplicates;
+        # a replacement client after transition_browser must re-register.
+        if self._listeners_bound_to is not cdp_client:
             register = cdp_client.register
             register.Browser.downloadWillBegin(
                 lambda event, session_id: self._on_download_will_begin(event, session_id)
@@ -368,7 +371,7 @@ class BrowserDownloadPersister:
             register.Browser.downloadProgress(
                 lambda event, session_id: self._on_download_progress(event, session_id)
             )
-            self._listeners_attached = True
+            self._listeners_bound_to = cdp_client
             logger.info(
                 "[DownloadPersist] Listening for Chrome download events",
                 agent_id=self.agent_id,
@@ -498,15 +501,25 @@ class BrowserDownloadPersister:
             )
             return None
 
-        # Providers sometimes emit downloadProgress without listFiles seeing the file.
-        # Only then: credentialed page fetch of the *Chrome-download* URL.
-        result = await persist_navigation_download_via_page_fetch(
-            session=self.browser_session,
-            url=url,
-            session_id=self.session_id,
-            config=self.config,
-            provider=self.provider,
-        )
+        # Prefer the CDP filePath via the provider Files API when present —
+        # listFiles can miss the entry while content-by-path still works.
+        # Fall back to a credentialed page fetch of the Chrome-download URL.
+        file_path = str(meta.get("file_path") or "").strip()
+        result: Optional[Dict[str, Any]] = None
+        if file_path:
+            result = await self._materialize_from_provider_file_path(
+                file_path=file_path,
+                filename=filename,
+            )
+        if not result:
+            result = await persist_navigation_download_via_page_fetch(
+                session=self.browser_session,
+                url=url,
+                session_id=self.session_id,
+                config=self.config,
+                provider=self.provider,
+                trust_download=True,
+            )
         if result:
             self._persisted_keys.add(dedupe)
             logger.info(
@@ -520,6 +533,38 @@ class BrowserDownloadPersister:
             )
         return result
 
+    async def _materialize_from_provider_file_path(
+        self,
+        *,
+        file_path: str,
+        filename: str,
+    ) -> Optional[Dict[str, Any]]:
+        from domains.spawn_browser_agent_v3.repo import download_session_file
+
+        downloaded = await download_session_file(self.config, self.session_id, file_path)
+        if not downloaded or not downloaded.get("content"):
+            return None
+        content = downloaded["content"]
+        mime_type = str(
+            downloaded.get("mime_type")
+            or mime_from_headers_or_name(mime_type="", filename=filename)
+        )
+        uploaded = await persist_bytes_to_session_downloads(
+            self.config,
+            self.session_id,
+            filename=filename,
+            content=content,
+            mime_type=mime_type,
+            provider=self.provider,
+        )
+        if not uploaded:
+            return None
+        return {
+            **uploaded,
+            "content_type": mime_type,
+            "source_path": file_path,
+        }
+
 
 async def persist_navigation_download_via_page_fetch(
     *,
@@ -528,8 +573,14 @@ async def persist_navigation_download_via_page_fetch(
     session_id: str,
     config: Any,
     provider: Optional[str] = None,
+    trust_download: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Credentialed in-page fetch + session write for goto ERR_ABORTED / CDP download fallback."""
+    """Credentialed in-page fetch + session write for goto ERR_ABORTED / CDP download fallback.
+
+    When ``trust_download`` is True (Chrome ``Browser.download*`` path), skip the
+    Content-Disposition / URL-extension heuristic — Chrome already decided this
+    is a Downloads-folder file (e.g. TinyPNG ``inline; filename=rs.png``).
+    """
     import json
 
     suggested = filename_from_url(url)
@@ -576,7 +627,7 @@ async def persist_navigation_download_via_page_fetch(
     file_bytes = base64.b64decode(payload["base64"])
     filename = str(payload.get("filename") or suggested)
     headers = {"content-disposition": str(payload.get("disposition") or "attachment")}
-    if not (
+    if not trust_download and not (
         is_browser_attachment_download(
             url=url,
             resource_type="Document",
