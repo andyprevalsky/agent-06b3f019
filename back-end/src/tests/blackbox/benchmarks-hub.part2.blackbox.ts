@@ -8,6 +8,7 @@
  *   npx tsx src/tests/blackbox/benchmarks-hub.part2.blackbox.ts
  */
 
+import { PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
 import { syntheticBenchmarkBundle } from './benchmarks-hub.testkit';
 
@@ -364,6 +365,21 @@ async function testRuns_hubSubAgentAncestorsAndParentGoal(): Promise<void> {
       chain[0].goal === 'hub blackbox goal',
       `hub ancestor goal ${chain[0]?.goal} != hub blackbox goal`
     );
+
+    const prisma = new PrismaClient();
+    try {
+      const child = await prisma.agent.findUnique({ where: { id: SUB_AGENT } });
+      assert(child !== null, 'hub upload must slot an Agent row for the sub-agent');
+      assert(child.parentAgentId === ROOT_AGENT, 'slotted child parentAgentId missing');
+      assert(child.deletedAt !== null, 'slotted row must stay archived so GET /agents uses hub');
+      const detailMessages = (detail.data as { messages: Array<{ text: string }> }).messages;
+      assert(
+        detailMessages.some((message) => message.text === 'sub result'),
+        'GET /agents must still serve the hub transcript, not an empty live stub'
+      );
+    } finally {
+      await prisma.$disconnect();
+    }
   } finally {
     await request(`${BASE_URL}/api/benchmarks/runs/${runId}`, {
       method: 'DELETE',

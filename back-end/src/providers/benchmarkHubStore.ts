@@ -24,6 +24,10 @@ import {
   schemaFromCompletionOutputs,
   structuredFromCompletionOutputs,
 } from './benchmarkHubOutputs';
+import {
+  deleteHubAncestorSkeletonsFromBundle,
+  slotHubAncestorSkeletonsFromBundle,
+} from './benchmarkHubAncestors';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -248,6 +252,7 @@ export async function putRun(
     live: storedSummary.live,
     tasks: storedSummary.tasks.length,
   });
+  await slotHubAncestorSkeletonsFromBundle(bundle);
   return storedSummary;
 }
 
@@ -604,13 +609,16 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
  * Returns false when the run id was not present.
  */
 export async function deleteRun(runId: string): Promise<boolean> {
-  return withIndexLock(async () => {
+  const bundle = await getRunBundle(runId);
+  const removed = await withIndexLock(async () => {
     const index = await listRuns();
     const next = index.filter((r) => r.run_id !== runId);
     if (next.length === index.length) return false;
     await putObject('index.json', JSON.stringify(next));
     return true;
   });
+  if (removed && bundle) await deleteHubAncestorSkeletonsFromBundle(bundle);
+  return removed;
 }
 
 // agentId → run_id resolution cache (bundles are immutable once final; a live
