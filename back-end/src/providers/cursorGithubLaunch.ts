@@ -16,6 +16,27 @@ const log = createLogger('CursorGithubLaunch');
 const AGENT_URL_RE = /https:\/\/cursor\.com\/agents\/(bc-[a-zA-Z0-9-]+)/i;
 const DEFAULT_POLL_MS = 1_000;
 const DEFAULT_TIMEOUT_MS = 45_000;
+/** Bound every GitHub API request so a stalled socket cannot hang Report Bug. */
+const GITHUB_REQUEST_TIMEOUT_MS = 15_000;
+
+/** Official Cursor GitHub App login that posts the agent deep link. */
+export const CURSOR_GITHUB_BOT_LOGIN = 'cursor[bot]';
+
+/**
+ * Raised after the `@cursor` comment was accepted by GitHub but the agent
+ * deep link was not observed before the poll deadline (or poll failed).
+ * Callers must NOT fall back to the Cloud Agents API — that would create a
+ * duplicate agent if Cursor finishes after the timeout.
+ */
+export class ScmDispatchUnknownError extends Error {
+  readonly githubIssueUrl: string | undefined;
+
+  constructor(message: string, githubIssueUrl?: string) {
+    super(message);
+    this.name = 'ScmDispatchUnknownError';
+    this.githubIssueUrl = githubIssueUrl;
+  }
+}
 
 export interface LaunchCursorViaGithubInput {
   name: string;
@@ -53,6 +74,13 @@ function githubTokens(): string[] {
   ];
 }
 
+function withRequestDeadline(init: RequestInit): RequestInit {
+  if (init.signal !== undefined && init.signal !== null) {
+    return init;
+  }
+  return { ...init, signal: AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS) };
+}
+
 async function githubFetch(
   path: string,
   init: RequestInit,
@@ -67,16 +95,19 @@ async function githubFetch(
   let lastBody = '';
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
-    const response = await fetchImpl(`https://api.github.com${path}`, {
-      ...init,
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'User-Agent': 'rose-report-bug',
-        ...(init.headers ?? {}),
-      },
-    });
+    const response = await fetchImpl(
+      `https://api.github.com${path}`,
+      withRequestDeadline({
+        ...init,
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'rose-report-bug',
+          ...(init.headers ?? {}),
+        },
+      })
+    );
     if (response.ok) return response;
     lastStatus = response.status;
     lastBody = (await response.text()).slice(0, 500);
@@ -129,10 +160,9 @@ export async function launchCursorCloudAgentViaGithub(
     throw new Error(`Invalid GitHub repo: ${input.repo}`);
   }
 
+  // Do not log name/prompt — they carry customer incident text.
   log.info('Launching Cursor agent via GitHub @cursor', {
-    name: input.name,
     repo: input.repo,
-    prompt_preview: input.promptText.slice(0, 200),
   });
 
   const createRes = await githubFetch(
@@ -165,6 +195,7 @@ export async function launchCursorCloudAgentViaGithub(
 
   // Cursor watches issue/PR *comments* for @cursor — body-only mentions on create
   // do not reliably start an agent (proved 2026-08-29 on issue #1108).
+  // Once this POST succeeds, SCM dispatch is committed — do not API-fallback.
   await githubFetch(
     `/repos/${owner}/${repo}/issues/${issue.number}/comments`,
     {
@@ -176,32 +207,45 @@ export async function launchCursorCloudAgentViaGithub(
 
   const deadline = Date.now() + timeoutMs;
   let launched: { id: string; url: string } | null = null;
-  while (Date.now() < deadline) {
-    await sleep(pollMs);
-    const commentsRes = await githubFetch(
-      `/repos/${owner}/${repo}/issues/${issue.number}/comments?per_page=20`,
-      { method: 'GET' },
-      fetchImpl
-    );
-    const comments = (await commentsRes.json()) as Array<{
-      user?: { login?: string };
-      body?: string;
-    }>;
-    for (const comment of comments) {
-      const login = comment.user?.login ?? '';
-      if (!login.toLowerCase().includes('cursor')) continue;
-      const body = comment.body ?? '';
-      const parsed = parseCursorAgentFromComment(body);
-      if (parsed !== null) {
-        launched = parsed;
-        break;
+  try {
+    while (Date.now() < deadline) {
+      await sleep(pollMs);
+      const commentsRes = await githubFetch(
+        `/repos/${owner}/${repo}/issues/${issue.number}/comments?per_page=20`,
+        { method: 'GET' },
+        fetchImpl
+      );
+      const comments = (await commentsRes.json()) as Array<{
+        user?: { login?: string };
+        body?: string;
+      }>;
+      for (const comment of comments) {
+        const login = comment.user?.login ?? '';
+        // Exact Cursor GitHub App identity — not any login containing "cursor".
+        if (login !== CURSOR_GITHUB_BOT_LOGIN) continue;
+        const body = comment.body ?? '';
+        const parsed = parseCursorAgentFromComment(body);
+        if (parsed !== null) {
+          launched = parsed;
+          break;
+        }
       }
+      if (launched !== null) break;
     }
-    if (launched !== null) break;
+  } catch (error) {
+    throw new ScmDispatchUnknownError(
+      `SCM @cursor comment dispatched on ${issue.html_url} but polling failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      issue.html_url
+    );
   }
 
   if (launched === null) {
-    throw new Error(`Timed out waiting for cursor[bot] on ${issue.html_url} (source:scm launch)`);
+    throw new ScmDispatchUnknownError(
+      `Timed out waiting for cursor[bot] on ${issue.html_url} after SCM dispatch (source:scm)`,
+      issue.html_url
+    );
   }
 
   // Best-effort close — clutter reduction; launch already succeeded.
@@ -226,7 +270,6 @@ export async function launchCursorCloudAgentViaGithub(
 
   log.info('Cursor agent launched via GitHub (source:scm)', {
     cursor_agent_id: launched.id,
-    name: input.name,
     url: launched.url,
     issue_number: issue.number,
   });

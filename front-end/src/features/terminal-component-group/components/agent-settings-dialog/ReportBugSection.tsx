@@ -4,9 +4,10 @@
  * Admin-only: expands into a description textarea that launches a Cursor
  * cloud agent titled from the description to /rca the Rose agent.
  *
- * After launch, keep Open + Copy on screen. Agents are launched via GitHub
- * @cursor (source:scm) so they appear in the Cursor mobile inbox; post-await
- * window.open is still blocked on iOS so the buttons stay required.
+ * After launch, keep Open + Copy on screen. Preferred path is GitHub @cursor
+ * (source:scm) for the Cursor mobile inbox; API fallback may be used when
+ * SCM cannot dispatch. Post-await window.open is still blocked on iOS so the
+ * buttons stay required.
  */
 
 import { Bug, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
@@ -21,6 +22,7 @@ interface ReportBugSectionProps {
 
 export default function ReportBugSection({ flow }: ReportBugSectionProps) {
   if (flow.launched !== null) {
+    const isScm = flow.launched.launch_source === 'scm';
     return (
       <div className="space-y-3 pt-4 border-t border-border/60" data-testid="report-bug-launched">
         <div className="space-y-1">
@@ -30,8 +32,9 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
           </div>
           <p className="text-sm text-foreground/90 break-words">{flow.launched.name}</p>
           <p className="text-xs text-muted-foreground">
-            Launched via GitHub so it should appear in the Cursor mobile inbox. Tap Open if you
-            don&apos;t see it yet.
+            {isScm
+              ? 'Launched via GitHub so it should appear in the Cursor mobile inbox. Tap Open if you don\u2019t see it yet.'
+              : 'Launched via the Cursor API (not GitHub). Enable Filter \u2192 Source \u2192 API in Cursor if you don\u2019t see it in the inbox, or tap Open.'}
           </p>
           <a
             href={flow.launched.url}
@@ -105,8 +108,8 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
               className="resize-y min-h-[100px]"
             />
             <p className="text-xs text-muted-foreground">
-              Launches a Cursor cloud agent via GitHub (@cursor) so it shows in your phone&apos;s
-              Cursor inbox. You&apos;ll also get an Open link and SMS.
+              Prefers GitHub (@cursor) so the chat can show in your phone&apos;s Cursor inbox.
+              You&apos;ll also get an Open link and SMS.
             </p>
           </div>
           <div className="flex gap-2">

@@ -324,6 +324,7 @@ describe('AgentSettingsDialog', () => {
     expect(screen.getByText('Checkout never finished')).toBeInTheDocument();
     expect(screen.queryByText(/Bug \|/)).toBeNull();
     expect(screen.getByText(/Launched via GitHub/)).toBeInTheDocument();
+    expect(screen.queryByText(/Cursor API/)).toBeNull();
     expect(openSpy).toHaveBeenCalledWith(
       'https://cursor.com/agents/bc-bug-1',
       '_blank',
@@ -334,5 +335,36 @@ describe('AgentSettingsDialog', () => {
     expect(openSpy).toHaveBeenCalledTimes(2);
 
     openSpy.mockRestore();
+  });
+
+  it('shows API guidance when Report Bug falls back to Cursor API', async () => {
+    mockSession(ANDY_USER_ID);
+    const u = userEvent.setup();
+    vi.spyOn(window, 'open').mockImplementation(() => null);
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/report-bug`, async () => {
+        return HttpResponse.json(
+          {
+            success: true,
+            name: 'API fallback case',
+            url: 'https://cursor.com/agents/bc-bug-api',
+            cursor_agent_id: 'bc-bug-api',
+            launch_source: 'api',
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<AgentSettingsDialog agent={makeAgent()} />);
+    await u.click(document.querySelector('button')!);
+    await u.click(await screen.findByTestId('report-bug-open'));
+    const textarea = await screen.findByTestId('report-bug-description');
+    await u.type(textarea, 'API fallback case');
+    await u.click(screen.getByTestId('report-bug-submit'));
+
+    expect(await screen.findByTestId('report-bug-launched')).toBeInTheDocument();
+    expect(screen.getByText(/Launched via the Cursor API/)).toBeInTheDocument();
+    expect(screen.queryByText(/Launched via GitHub/)).toBeNull();
   });
 });

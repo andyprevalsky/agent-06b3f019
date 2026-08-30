@@ -27,6 +27,7 @@ export interface LaunchedBugReport {
   name: string;
   url: string;
   cursor_agent_id: string;
+  launch_source: 'scm' | 'api';
 }
 
 export interface UseReportBugResult {
@@ -115,16 +116,21 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
     setIsSubmitting(true);
     try {
       const result = await reportAgentBug(agent.agent_id, trimmed);
+      const launchSource = result.launch_source === 'api' ? 'api' : 'scm';
       setLaunched({
         name: result.name,
         url: result.url,
         cursor_agent_id: result.cursor_agent_id,
+        launch_source: launchSource,
       });
       setShowComposer(false);
       setDescription('');
       toast({
         title: 'Bug report launched',
-        description: 'Check your Cursor mobile inbox (or Open below).',
+        description:
+          launchSource === 'scm'
+            ? 'Check your Cursor mobile inbox (or Open below).'
+            : 'Open the link below (API launch — enable Filter → Source → API if missing).',
       });
       // Best-effort: may be blocked after await on mobile Safari.
       if (typeof window !== 'undefined') {

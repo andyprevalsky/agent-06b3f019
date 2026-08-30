@@ -7,6 +7,9 @@ import { createLogger } from './logger';
 
 const log = createLogger('CursorCloudAgents');
 
+/** Bound every Cursor API request so a stalled socket cannot hang Report Bug. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export interface LaunchCursorCloudAgentInput {
   apiKey: string;
   baseUrl: string;
@@ -37,10 +40,9 @@ export async function launchCursorCloudAgent(
     env: { type: 'cloud', name: input.envName },
   };
 
+  // Do not log name/prompt — they carry customer incident text.
   log.info('Launching Cursor cloud agent', {
-    name: input.name,
     env_name: input.envName,
-    prompt_preview: input.promptText.slice(0, 200),
   });
 
   const response = await fetch(url, {
@@ -50,6 +52,7 @@ export async function launchCursorCloudAgent(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const rawText = await response.text();
@@ -94,6 +97,6 @@ export async function launchCursorCloudAgent(
     throw new Error('Cursor API returned no agent id');
   }
 
-  log.info('Cursor cloud agent launched', { cursor_agent_id: id, name, url: agentUrl });
+  log.info('Cursor cloud agent launched', { cursor_agent_id: id, url: agentUrl });
   return { id, name, url: agentUrl, status };
 }

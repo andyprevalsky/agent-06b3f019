@@ -16,6 +16,7 @@ import {
   buildGithubCursorIssueBody,
   launchCursorCloudAgentViaGithub,
   parseCursorAgentFromComment,
+  ScmDispatchUnknownError,
 } from '../../providers/cursorGithubLaunch';
 
 function testTitleShortDescription(): void {
@@ -159,6 +160,10 @@ async function testGithubLaunchPollsForBotComment(): Promise<void> {
       return new Response(
         JSON.stringify([
           {
+            user: { login: 'cursor-helper' },
+            body: 'https://cursor.com/agents/bc-spoofed-should-ignore',
+          },
+          {
             user: { login: 'cursor[bot]' },
             body: 'Taking a look!\nhttps://cursor.com/agents/bc-scm-probe-1234',
           },
@@ -204,6 +209,103 @@ async function testGithubLaunchPollsForBotComment(): Promise<void> {
   }
 }
 
+async function testGithubLaunchTimeoutAfterDispatchIsUnknown(): Promise<void> {
+  const previousToken = process.env.GITHUB_DISPATCH_TOKEN;
+  process.env.GITHUB_DISPATCH_TOKEN = 'ghp_test_token';
+  delete process.env.GITHUB_TOKEN;
+
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    if (method === 'POST' && url.endsWith('/issues')) {
+      return new Response(
+        JSON.stringify({ number: 99, html_url: 'https://github.com/Rose-Ai-Labs/rose/issues/99' }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (method === 'POST' && url.includes('/issues/99/comments')) {
+      return new Response(JSON.stringify({ id: 1 }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (method === 'GET' && url.includes('/issues/99/comments')) {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response('unexpected', { status: 500 });
+  }) as typeof fetch;
+
+  let now = 1_000;
+  const originalNow = Date.now;
+  Date.now = () => now;
+
+  try {
+    await assert.rejects(
+      () =>
+        launchCursorCloudAgentViaGithub({
+          name: 'timeout probe',
+          promptText: '/rca the following bug for agent with ID: [a1]\ntimeout',
+          repo: 'Rose-Ai-Labs/rose',
+          fetchImpl,
+          pollIntervalMs: 1,
+          timeoutMs: 5,
+          sleep: async () => {
+            now += 10;
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof ScmDispatchUnknownError);
+        assert.ok(String(error.message).includes('after SCM dispatch'));
+        assert.equal(
+          (error as ScmDispatchUnknownError).githubIssueUrl,
+          'https://github.com/Rose-Ai-Labs/rose/issues/99'
+        );
+        return true;
+      }
+    );
+  } finally {
+    Date.now = originalNow;
+    if (previousToken === undefined) delete process.env.GITHUB_DISPATCH_TOKEN;
+    else process.env.GITHUB_DISPATCH_TOKEN = previousToken;
+  }
+}
+
+async function testLaunchPassesAbortSignal(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  let sawSignal = false;
+
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    sawSignal = init?.signal instanceof AbortSignal;
+    return new Response(
+      JSON.stringify({
+        agent: {
+          id: 'bc-test-signal',
+          name: 'signal',
+          url: 'https://cursor.com/agents/bc-test-signal',
+          status: 'ACTIVE',
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as typeof fetch;
+
+  try {
+    await launchCursorCloudAgent({
+      apiKey: 'key_test',
+      baseUrl: 'https://api.cursor.com/v1',
+      name: 'signal',
+      promptText: '/rca the following bug for agent with ID: [a1]\nsignal',
+      envName: 'rose-ai-labs/rose',
+    });
+    assert.equal(sawSignal, true, 'Cursor API fetch must pass AbortSignal');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 async function main(): Promise<void> {
   const cases: Array<[string, () => void | Promise<void>]> = [
     ['title keeps short descriptions', testTitleShortDescription],
@@ -216,6 +318,11 @@ async function main(): Promise<void> {
     ['github issue body starts with @cursor', testGithubIssueBodyMentionsCursor],
     ['launch posts named-env Cursor payload', testLaunchPostsNamedEnvPayload],
     ['github launch polls for cursor[bot] link', testGithubLaunchPollsForBotComment],
+    [
+      'github launch timeout after dispatch is ScmDispatchUnknownError',
+      testGithubLaunchTimeoutAfterDispatchIsUnknown,
+    ],
+    ['Cursor API launch passes AbortSignal', testLaunchPassesAbortSignal],
   ];
 
   let failed = 0;

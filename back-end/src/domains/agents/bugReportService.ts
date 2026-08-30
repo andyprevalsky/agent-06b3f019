@@ -23,7 +23,10 @@
 
 import { isAdminUser } from '../../utils/adminAccess';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
-import { launchCursorCloudAgentViaGithub } from '../../providers/cursorGithubLaunch';
+import {
+  launchCursorCloudAgentViaGithub,
+  ScmDispatchUnknownError,
+} from '../../providers/cursorGithubLaunch';
 import { createLogger } from '../../providers/logger';
 import { getUserPhone, sendSms } from '../../providers/smsQueue';
 import {
@@ -185,7 +188,16 @@ async function launchViaScmOrApiFallback(
     });
     return { id: scm.id, name: scm.name, url: scm.url, launch_source: 'scm' };
   } catch (error) {
-    log.warn('GitHub @cursor launch failed; falling back to Cursor API', {
+    // After GitHub accepted the @cursor comment, Cursor may still finish after
+    // our poll deadline. Falling back to the API would create a duplicate RCA.
+    if (error instanceof ScmDispatchUnknownError) {
+      log.warn('SCM @cursor dispatched but outcome unknown; not falling back to API', {
+        error: error.message,
+        github_issue_url: error.githubIssueUrl,
+      });
+      throw error;
+    }
+    log.warn('GitHub @cursor launch failed before dispatch; falling back to Cursor API', {
       error: error instanceof Error ? error.message : String(error),
     });
     if (apiKey === undefined) throw error;
@@ -220,9 +232,9 @@ export async function reportAgentBug(
   // Prefer GitHub @cursor (source:scm) so the chat shows in the default mobile
   // inbox. Cloud Agents API can set an exact name, but source:api is hidden
   // under Filter → Source by default — including on phone.
+  // Do not log chat_name / description — they carry customer incident text.
   log.info('Submitting bug report to Cursor cloud agent', {
     rose_agent_id: agentId,
-    chat_name: name,
     description_chars: trimmed.length,
     prefer_scm: canScm,
   });
