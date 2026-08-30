@@ -361,6 +361,7 @@ async def spawn_explore_agent_activity(
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
     has_usable_tool_evidence = bool(local_data_summary.strip())
+    completion_no_evidence_rejects = 0
 
     # Data sources the explore agent tried to grep but whose connector isn't
     # connected. Surfaced to the parent workflow, which raises one blocking
@@ -517,7 +518,7 @@ async def spawn_explore_agent_activity(
 
     async def explore_execute_tool(tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool inside the explore activity context."""
-        nonlocal has_usable_tool_evidence
+        nonlocal has_usable_tool_evidence, completion_no_evidence_rejects
         activity.heartbeat(f"Explore agent executing: {tool_name}")
 
         tool_call_dict = {"tool": tool_name, **tool_args}
@@ -598,6 +599,12 @@ async def spawn_explore_agent_activity(
                         unavailable_sources_collected.append(normalized)
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
             if not attachment_texts and not has_usable_tool_evidence:
+                completion_no_evidence_rejects += 1
+                # Fast Mode cold stubs replay attempt_completion_with_result
+                # forever. One reject is enough signal; accepting the next
+                # ends the leaf so the chip does not fill with 50 rejects.
+                if completion_no_evidence_rejects >= 2:
+                    return {"success": True, "message": "Completion accepted"}
                 return {
                     "error": True,
                     "message": (

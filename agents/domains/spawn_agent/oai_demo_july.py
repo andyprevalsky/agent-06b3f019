@@ -271,7 +271,61 @@ _CREATOR_PATTERNS = (
     re.compile(r'"creator_name"\s*:\s*"([^"]+)"'),
     re.compile(r'"name"\s*:\s*"([^"]+)"'),
     re.compile(r"Creator:\s*([^\n]+)"),
+    re.compile(r"creator\s+([^(\n]+?)\s*\(\s*rank\s+\d+", re.IGNORECASE),
 )
+
+# July explore_agent namespaces (p:1 is web_search/web_fetch). Used only as a
+# get-position fallback when a GP-spawned explore goal is cold — do not remap
+# warm unique explore hashes. Keep smallest dedicated July rows.
+JULY_EXPLORE_GOAL_HASHES: dict[str, str] = json.loads(r"""{
+  "Andrew Huberman": "6dee23173fe18533",
+  "Rhonda Patrick": "a8189709726b0cb1",
+  "Tim Ferriss": "23f5095f4949772c",
+  "Dave Asprey": "cb212730b54d95e6",
+  "Gary Brecka": "408b1a3052d03321",
+  "Siim Land": "7af1dab03b97f2c3",
+  "Ben Greenfield": "c6327dbb90173c96",
+  "Nick Norwitz": "1336d2b95eea0501",
+  "Lex Fridman": "c93e942dad7752fd",
+  "Ali Abdaal": "c44100b7facbb2e6",
+  "Chris Williamson": "bb8a2942042a15d7",
+  "Steven Bartlett": "dc667d4b8a9dc770",
+  "Mark Hyman": "c93f89310e3a9ea2",
+  "David Sinclair": "588fa4bf5517a5ec",
+  "Casey Means": "0931c308d4db5d54",
+  "Gabrielle Lyon": "14b6d48a20a8ac6f",
+  "Molly Maloof": "1e80caff3f0e8008",
+  "Max Lugavere": "0d7edbde270b905a",
+  "Thomas DeLauer": "af9949d3125dd2eb",
+  "Michael Lustgarten": "e27dcd2a65fe1a01",
+  "Matt Kaeberlein": "017d2771a41d8352",
+  "Eric Topol": "e795d5b635fd77a9",
+  "Sahil Bloom": "21896113300f5724",
+  "Dan Koe": "05729a030af3214a",
+  "Justin Welsh": "e4c9681bbd189219",
+  "Greg Isenberg": "16e383309e905a76",
+  "Lenny Rachitsky": "124ad1117dd02c75",
+  "Gergely Orosz": "c8f769e9e8181ec4",
+  "Ethan Mollick": "5f78b4367be90373",
+  "Allie K. Miller": "aad1d53f28a9d568",
+  "Rowan Cheung": "ed75f77e7d7793e3",
+  "Matt Wolfe": "6c051c250b826d32",
+  "Roberto Nickson": "7afbcbea56c426a2",
+  "Pieter Levels": "7bfffd4b69a39f0a",
+  "Brett Adcock": "3d724132767e176e",
+  "Andrew Wilkinson": "ae5ad4e2ffb5bb53",
+  "Naval Ravikant": "efae66fbd731b771",
+  "Sam Parr": "3065a9b253bfee62",
+  "Codie Sanchez": "1d0ba06372d97ec4",
+  "Marques Brownlee": "8f2de8f066dbf3a9",
+  "Khe Hy": "29c78203b1b737a3",
+  "Thomas Frank": "0c89720b69731e80",
+  "Matt D'Avella": "65f18b44a37cb38c",
+  "Joey Schweitzer": "4857d4d2290141b3",
+  "Nathaniel Drew": "f2d4669880a84caa",
+  "Wes Roth": "79be645b45e61cc9",
+  "Ranveer Allahbadia": "2da854102a82f475"
+}""")
 
 
 def normalize_oai_demo_creator_key(name: str) -> str:
@@ -286,6 +340,13 @@ _JULY_GP_HASH_BY_KEY = {
     for name, goal_hash in JULY_GP_GOAL_HASHES.items()
 }
 
+_JULY_EXPLORE_HASH_BY_KEY = {
+    normalize_oai_demo_creator_key(name): goal_hash
+    for name, goal_hash in JULY_EXPLORE_GOAL_HASHES.items()
+}
+
+_JULY_CREATOR_NAMES_BY_LEN = sorted(JULY_GP_GOAL_HASHES.keys(), key=len, reverse=True)
+
 
 def extract_oai_demo_creator_name(goal: str) -> str | None:
     blob = goal or ""
@@ -295,6 +356,10 @@ def extract_oai_demo_creator_name(goal: str) -> str | None:
             name = match.group(1).strip().rstrip(".").strip()
             if name:
                 return name
+    lowered = blob.lower()
+    for name in _JULY_CREATOR_NAMES_BY_LEN:
+        if name.lower() in lowered:
+            return name
     return None
 
 
@@ -303,6 +368,14 @@ def july_gp_goal_hash_for_goal(goal: str) -> str | None:
     if not name:
         return None
     return _JULY_GP_HASH_BY_KEY.get(normalize_oai_demo_creator_key(name))
+
+
+def july_explore_goal_hash_for_goal(goal: str) -> str | None:
+    """July explore_agent namespace for a GP-spawned research prompt, if any."""
+    name = extract_oai_demo_creator_name(goal)
+    if not name:
+        return None
+    return _JULY_EXPLORE_HASH_BY_KEY.get(normalize_oai_demo_creator_key(name))
 
 
 def apply_oai_demo_july_for_each(

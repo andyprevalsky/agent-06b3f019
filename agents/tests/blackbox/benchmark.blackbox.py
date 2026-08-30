@@ -4275,6 +4275,95 @@ def test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs(
     assert "gp-" in reason.lower() or "first-level" in reason.lower() or "ablat" in reason.lower() or "fast mode" in reason.lower()
 
 
+def test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools():
+    """T3 static check fails Molly-style explore chips: reject loop, no web_search."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "explore_research_not_reject_loop", "min_rejects": 2}]}
+    explore_id = "472dac8c-aca1-4f0a-9c0d-mollyexplore"
+    gp_id = "1cd8d21f-dafd-4f58-9671-d43ca01f0f91"
+    root_id = "52898a93-af92-40ed-ad3b-2a2db6755fe7"
+
+    def _reject_msg():
+        return {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "attempt_completion_with_result",
+                "toolStatus": "ERROR",
+                "title": "attempt_completion_with_result rejected",
+                "taskId": explore_id,
+            },
+        }
+
+    def _search_msg():
+        return {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+                "title": "web_search",
+                "taskId": explore_id,
+            },
+        }
+
+    broken = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_search",
+                    "title": "web_search",
+                    "taskId": "root-explore-task",
+                },
+            }
+        ],
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Molly Maloof.",
+                    "messages": [_reject_msg(), _reject_msg()],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, broken)
+    assert passed is False
+    assert "472dac8c" in reason
+    assert "0 research" in reason
+
+    healthy = {
+        **broken,
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Andrew Huberman.",
+                    "messages": [_search_msg(), _search_msg()],
+                }
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, healthy) == (True, "All declared static checks passed")
+
+    via_benchmark_tree = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [],
+        "_benchmark": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "messages": [_reject_msg(), _reject_msg(), _reject_msg()],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, via_benchmark_tree)
+    assert passed is False
+    assert "0 research" in reason
+
+
 def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
     """The incident benchmark owns deterministic summary and SMS regressions."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -13419,6 +13508,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert set(evaluators) == {
         "t8-root-completed",
         "t10-no-tool-failures",
+        "t3-gp-explore-research-tools",
         "t7-completion-summary-length",
         "t1-andy-only",
         "t2-fifty-first-level-gps",
@@ -13438,11 +13528,18 @@ def test_unified_catalog_delineates_bench_axes():
     assert static_by_id == {
         "t8-root-completed": ["agent_status"],
         "t10-no-tool-failures": ["no_tool_failures"],
+        "t3-gp-explore-research-tools": ["explore_research_not_reject_loop"],
         "t7-completion-summary-length": ["completion_summary_length"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t7-real-deliverable": ["root_deliverable_markers"],
         "t9-no-leftover-children": ["tree_agent_status"],
     }
+    explore_check = next(
+        check
+        for check in evaluators["t3-gp-explore-research-tools"]["checks"]
+        if check.get("type") == "explore_research_not_reject_loop"
+    )
+    assert explore_check.get("min_rejects") == 2
     assert all(
         check_type in RUNTIME_STATIC_CHECK_TYPES
         for types in static_by_id.values()
@@ -16260,6 +16357,10 @@ async def run_all_tests():
     r.record(
         "declared_static_completion_summary_rejects_fast_mode_ablation",
         test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs,
+    )
+    r.record(
+        "declared_static_gp_explore_reject_loop",
+        test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools,
     )
     r.record(
         "blue_bottle_completion_delivery_contract",

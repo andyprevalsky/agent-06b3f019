@@ -2694,6 +2694,40 @@ async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_su
     assert completion_results[1]["success"] is True
 
 
+async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completion():
+    """A Fast Mode completion stub must not reject-loop the explore chip."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    completion_results = []
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        completion_results.append(
+            await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1")
+        )
+        completion_results.append(
+            await execute_tool("attempt_completion_with_result", {"result": "again"}, "tc2")
+        )
+        return {
+            "status": "completed",
+            "final_response": "ended without evidence",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research X", model="m")
+
+    assert completion_results[0]["error"] is True
+    assert "no evidence tool has succeeded" in completion_results[0]["message"]
+    assert completion_results[1]["success"] is True
+
+
 async def test_spawn_explore_agent_activity_error_status_returned():
     """run_agent non-completed status returns error while preserving best effort."""
     from unittest.mock import AsyncMock, patch
@@ -3728,6 +3762,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_rejects_completion_until_evidence_succeeds",
         test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds,
+    )
+    await r.record_async(
+        "explore_activity_accepts_second_no_evidence_completion",
+        test_spawn_explore_agent_activity_accepts_second_no_evidence_completion,
     )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
     await r.record_async(

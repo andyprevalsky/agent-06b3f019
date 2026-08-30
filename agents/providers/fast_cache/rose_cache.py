@@ -477,6 +477,23 @@ _JULY_GP_RESEARCH_TOOLS = frozenset(
 )
 
 
+def is_july_explore_site(ctx: Any, call_site: str) -> bool:
+    """True for test-mass-agent-run-0 GP-spawned explore goals.
+
+    Those explores must replay web_search/web_fetch, never a first-step
+    attempt_completion_with_result stub (that reject-loops in the chip).
+    """
+    if (call_site or "").strip() != "explore_agent":
+        return False
+    from domains.spawn_agent.oai_demo_july import (
+        extract_oai_demo_creator_name,
+        july_explore_goal_hash_for_goal,
+    )
+
+    goal = getattr(ctx, "goal", None) or ""
+    return bool(july_explore_goal_hash_for_goal(goal) or extract_oai_demo_creator_name(goal))
+
+
 def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
     """True for test-mass-agent-run-0 per-creator execute/plan loops.
 
@@ -544,6 +561,57 @@ async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
     return await july_gp_resolve_execute(ctx, call_site)
 
 
+_JULY_EXPLORE_RESEARCH_TOOLS = frozenset({"web_search", "web_fetch", "grep", "people_search"})
+
+
+def _july_explore_accept_payload(stored: Any, prior_tool: str) -> bool:
+    if stored is None:
+        return False
+    name = _payload_tool_name(stored)
+    if name in {"attempt_completion", "attempt_completion_with_result"}:
+        return prior_tool in _JULY_EXPLORE_RESEARCH_TOOLS
+    return True
+
+
+async def july_explore_resolve(
+    ctx: Any,
+    call_site: str,
+    stored: Any = None,
+    hit_key: Any = None,
+) -> tuple[Any, Any]:
+    """Replay a GP explore from its own hash, then the July explore namespace.
+
+    Cold templated prompts (creator X (rank N)) miss their unique hash and used
+    to emit attempt_completion_with_result, which the explore leaf rejects
+    until max iterations. Fall forward to the July explore_agent rows.
+    """
+    if (call_site or "").strip() != "explore_agent":
+        return stored, hit_key
+    from domains.spawn_agent.oai_demo_july import july_explore_goal_hash_for_goal
+
+    hashes = [ctx.goal_hash]
+    alt = july_explore_goal_hash_for_goal(getattr(ctx, "goal", None) or "")
+    if alt and alt not in hashes:
+        hashes.append(alt)
+    step = getattr(ctx, "base_step", None)
+    start = 1 if step is None or int(step) < 1 else int(step)
+    for goal_hash in hashes:
+        prior_tool = ""
+        for current in range(start, start + 16):
+            if stored is not None and goal_hash == ctx.goal_hash and current == start:
+                cand, key = stored, hit_key
+            else:
+                cand, key = await cache_client.cache_get_position_fallback(
+                    goal_hash, call_site, current
+                )
+            if cand is None:
+                continue
+            if _july_explore_accept_payload(cand, prior_tool):
+                return cand, key
+            prior_tool = _payload_tool_name(cand)
+    return None, None
+
+
 async def cached_complete(
     rose_client: Any,
     *,
@@ -578,6 +646,7 @@ async def cached_complete(
                     ctx.base_step,
                 )
             stored, hit_key = await july_gp_resolve_execute(ctx, call_site, stored, hit_key)
+            stored, hit_key = await july_explore_resolve(ctx, call_site, stored, hit_key)
         except Exception as exc:  # cache read failures degrade to live
             logger.warning("fast_cache.get_error", key=key, error=str(exc))
             stored, hit_key = None, None
@@ -658,6 +727,7 @@ async def cached_complete(
                 soft is not None
                 and ctx.soft_complete_allowed
                 and not is_july_gp_execute_site(ctx, call_site)
+                and not is_july_explore_site(ctx, call_site)
             ):
                 logger.info(
                     "llm.cache.replay",

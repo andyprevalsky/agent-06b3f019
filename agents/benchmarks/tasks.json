@@ -73,6 +73,19 @@
         ]
       },
       {
+        "id": "t3-gp-explore-research-tools",
+        "method": "static_check",
+        "criteria": [
+          "T3: GP explore chips replay research tools; they must not loop attempt_completion_with_result rejected"
+        ],
+        "checks": [
+          {
+            "type": "explore_research_not_reject_loop",
+            "min_rejects": 2
+          }
+        ]
+      },
+      {
         "id": "t7-completion-summary-length",
         "method": "static_check",
         "criteria": [

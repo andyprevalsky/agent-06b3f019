@@ -9103,6 +9103,57 @@ def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[di
     )
 
 
+_EXPLORE_RESEARCH_TOOLS = frozenset({"web_search", "web_fetch", "grep", "people_search"})
+
+
+def _message_tool_meta(message: dict) -> dict:
+    metadata = message.get("metadata") if isinstance(message, dict) else None
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _explore_reject_loop_failures(data: dict, *, min_rejects: int = 2) -> list[str]:
+    """GP explore chips that only reject completion (no search/fetch) are broken."""
+    failures: list[str] = []
+
+    def consider(messages: list, label: str) -> None:
+        by_task: dict[str, dict[str, int]] = {}
+        for message in messages or []:
+            if not isinstance(message, dict):
+                continue
+            metadata = _message_tool_meta(message)
+            tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+            title = str(metadata.get("title") or "")
+            task_id = str(
+                metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or ""
+            )
+            if not task_id:
+                continue
+            stats = by_task.setdefault(task_id, {"rejects": 0, "research": 0})
+            if "attempt_completion_with_result rejected" in title:
+                stats["rejects"] += 1
+            if tool_name in _EXPLORE_RESEARCH_TOOLS:
+                stats["research"] += 1
+        for task_id, stats in by_task.items():
+            if stats["rejects"] >= min_rejects and stats["research"] == 0:
+                failures.append(
+                    f"{label} explore {task_id[:8]} had {stats['rejects']} "
+                    "attempt_completion_with_result rejects and 0 research tools"
+                )
+
+    consider(data.get("messages") or [], "root")
+    tree = _judge_source_tree(data)
+    for agent_id, node in tree.items():
+        if not isinstance(node, dict):
+            continue
+        consider(node.get("messages") or [], f"gp {str(agent_id)[:8]}")
+    return failures
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -9386,6 +9437,13 @@ def _run_declared_static_check(
             failures = _tool_runtime_failures(data)
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
+            continue
+        if check_type == "explore_research_not_reject_loop":
+            loops = _explore_reject_loop_failures(
+                data, min_rejects=int(check.get("min_rejects", 3))
+            )
+            if loops:
+                return False, loops[0]
             continue
         if check_type == "completion_summary_length":
             cards = _completion_cards_for_static_check(
