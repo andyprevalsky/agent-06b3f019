@@ -3,7 +3,7 @@ id: 2026-08-25-guest-do-not-sign-in-blocks-cookie-commit
 date: 2026-08-25
 title: Guest cookie-commit gated by tool param, not goal sniffing
 surface: browser
-component: recover_from_challenge allow_logged_out_cookie_commit tool param
+component: recover_from_challenge auth_cookies_are_preserved tool param
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: goal_allows_logged_out_cookie_commit signed-in substring veto matched inside "do not sign in" before guest needles ran, forcing preserve_auth config search on hotels.com guest checkout
@@ -22,7 +22,7 @@ tags:
 sources:
   - agent 4bbd1e64-f570-4c40-8167-9f72ccafb217
   - fleet/local run 20260825_185100_browser-hotel-booking
-repro: cd agents && source venv/bin/activate && python tests/blackbox/rose_browser_use.blackbox.py recover_from_challenge_guest_cookie_commit_flag
+repro: cd agents && source venv/bin/activate && python tests/blackbox/rose_browser_use.blackbox.py recover_from_challenge_auth_cookies_are_preserved_flag
 status: fixed
 ---
 
@@ -44,17 +44,20 @@ language. A signed-in substring veto (`"sign in"`) matched inside
 `"Do not sign in"` and returned `False`, so guest commit stayed off.
 
 User feedback: goal sniffing is smell — the acting agent should set the flag
-on the `recover_from_challenge` tool call.
+on the `recover_from_challenge` tool call. Param should be framed as
+`auth_cookies_are_preserved` (true = keep logged-in state on the new machine;
+false = explore fresh cookie state, may lose auth but can clear a poisoned
+cookie forcing anti-bot).
 
 ## Solution
 
 1. Delete `goal_allows_logged_out_cookie_commit`.
-2. Add optional `allow_logged_out_cookie_commit` bool param on
-   `recover_from_challenge` (default false = preserve auth).
-3. Handler reads the param from the tool call; provider-exit synthetic recovery
-   keeps the default (preserve auth).
+2. Add optional `auth_cookies_are_preserved` bool on `recover_from_challenge`
+   (default true). Handler maps `allow_logged_out_cookie_commit = not
+   auth_cookies_are_preserved`.
+3. Provider-exit synthetic recovery keeps the default (preserve auth).
 
-Cemented in `test_recover_from_challenge_normalizes_guest_cookie_commit_flag`
+Cemented in `test_recover_from_challenge_normalizes_auth_cookies_are_preserved_flag`
 and `test_guest_path_commits_clean_all_target_strip`.
 
 ## Human feedback
@@ -64,3 +67,7 @@ logic sounds smelly"
 
 User (2026-08-30): "can we just completely disable it, and instead let the
 flag be set as a param in tool call for recover from captcha?"
+
+User (2026-08-30): param should mean auth_cookies_are_preserved — true when
+logged in and the new machine must keep auth; false to explore fresh cookies
+(may lose auth, may fix poisoned anti-bot cookie).

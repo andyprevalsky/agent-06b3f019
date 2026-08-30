@@ -7705,14 +7705,20 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             if action_name == "recover_from_challenge":
                 recovery_params = unified_action.get("params", {}) or {}
                 recovery_reason = recovery_params.get("reason", "")
-                allow_logged_out_cookie_commit = bool(
-                    recovery_params.get("allow_logged_out_cookie_commit")
-                )
+                # Default true: preserve authenticated cookies unless the model
+                # explicitly opts into a fresh-cookie machine search.
+                if "auth_cookies_are_preserved" in recovery_params:
+                    auth_cookies_are_preserved = bool(
+                        recovery_params.get("auth_cookies_are_preserved")
+                    )
+                else:
+                    auth_cookies_are_preserved = True
+                allow_logged_out_cookie_commit = not auth_cookies_are_preserved
                 recovery_call_id = _browser_action_tool_call_id(llm_result)
                 logger.info(
                     "Browser agent requested staged challenge recovery",
                     reason=recovery_reason,
-                    allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
+                    auth_cookies_are_preserved=auth_cookies_are_preserved,
                 )
 
                 provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
@@ -7812,7 +7818,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if lanes and isinstance(lanes[0], dict)
                         else recovery_storage_state
                     )
-                    preserve_auth = not allow_logged_out_cookie_commit
+                    preserve_auth = auth_cookies_are_preserved
                     result = await recover_browser_challenge(
                         config,
                         task_id,

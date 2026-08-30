@@ -417,11 +417,14 @@ class RecoverFromChallengeBrowserTool(BaseModel):
             "the agent's own solve attempt"
         )
     )
-    allow_logged_out_cookie_commit: bool = Field(
-        default=False,
+    auth_cookies_are_preserved: bool = Field(
+        default=True,
         description=(
-            "True when the task is guest/anonymous checkout and a proven clean logged-out "
-            "cookie strip may be committed. False (default) preserves signed-in cookies."
+            "True when the current browser session is logged in and the new machine must "
+            "maintain the current authenticated state to pass the goal/task. False when you "
+            "want to explore machines that have a fresh cookie state (and thus potentially "
+            "lose auth status, but potentially fix a bad cookie which is poisoning every "
+            "session with a forced anti-bot)."
         ),
     )
 

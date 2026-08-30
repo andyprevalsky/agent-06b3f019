@@ -211,14 +211,15 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
             "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
-            "cookies, then parallel cookie-group reductions. By default, signed-in/auth-bearing cookies are "
-            "preserved. Set allow_logged_out_cookie_commit=true only for guest/anonymous checkout tasks so a "
-            "proven clean logged-out cookie strip may be committed. If no safe cookie fix is proven, it "
-            "searches permission-compatible Kernel residential, Kernel mobile, Kernel ISP, and Steel "
-            "managed/fixed-IP browsers in parallel, selects a configuration that passes repeated stability "
-            "probes, and caches that configuration as this user's default for future browser sessions. "
-            "Provider CAPTCHA solving remains enabled throughout. The successful recovery returns to the "
-            "current URL with cookies, localStorage, and IndexedDB preserved."
+            "cookies, then parallel cookie-group reductions. Set auth_cookies_are_preserved=true when the "
+            "current session is logged in and the replacement machine must keep that authenticated state. "
+            "Set auth_cookies_are_preserved=false to explore machines with a fresh cookie state (may lose "
+            "auth, but can clear a poisoned cookie that forces anti-bot on every session). If no safe "
+            "cookie fix is proven, it searches permission-compatible Kernel residential, Kernel mobile, "
+            "Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration that "
+            "passes repeated stability probes, and caches that configuration as this user's default for "
+            "future browser sessions. Provider CAPTCHA solving remains enabled throughout. The successful "
+            "recovery returns to the current URL with cookies, localStorage, and IndexedDB preserved."
         ),
         "params": {
             "reason": {
@@ -230,11 +231,14 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 ),
                 "required": True,
             },
-            "allow_logged_out_cookie_commit": {
+            "auth_cookies_are_preserved": {
                 "type": "boolean",
                 "description": (
-                    "True when the task is guest/anonymous checkout and a proven clean logged-out cookie "
-                    "strip may be committed. False (default) preserves signed-in/auth-bearing cookies."
+                    "True when the current browser session is logged in and the new machine must "
+                    "maintain the current authenticated state to pass the goal/task. False when you "
+                    "want to explore machines that have a fresh cookie state (and thus potentially "
+                    "lose auth status, but potentially fix a bad cookie which is poisoning every "
+                    "session with a forced anti-bot). Defaults to true."
                 ),
                 "required": False,
             },
@@ -1378,19 +1382,19 @@ def _normalize_action_params(
     if params.get("reason"):
         out["reason"] = params["reason"]
     if normalized_action == "recover_from_challenge":
-        raw_guest = params.get("allow_logged_out_cookie_commit")
-        if raw_guest is None:
-            raw_guest = first_action.get("allow_logged_out_cookie_commit")
-        if raw_guest is not None:
-            if isinstance(raw_guest, str):
-                out["allow_logged_out_cookie_commit"] = raw_guest.strip().lower() in (
+        raw_preserve = params.get("auth_cookies_are_preserved")
+        if raw_preserve is None:
+            raw_preserve = first_action.get("auth_cookies_are_preserved")
+        if raw_preserve is not None:
+            if isinstance(raw_preserve, str):
+                out["auth_cookies_are_preserved"] = raw_preserve.strip().lower() in (
                     "1",
                     "true",
                     "yes",
                     "y",
                 )
             else:
-                out["allow_logged_out_cookie_commit"] = bool(raw_guest)
+                out["auth_cookies_are_preserved"] = bool(raw_preserve)
 
     if params.get("seconds") is not None:
         out["time_ms"] = params["seconds"] * 1000

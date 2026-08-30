@@ -5885,7 +5885,7 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
 
 
 def test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal():
-    """Guest cookie commit is an explicit recover_from_challenge param, not goal sniffing."""
+    """Auth-cookie preserve is an explicit recover_from_challenge param, not goal sniffing."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -5896,8 +5896,9 @@ def test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal():
     recovery_block = source[start:end]
 
     assert "goal_allows_logged_out_cookie_commit" not in recovery_block
-    assert 'recovery_params.get("allow_logged_out_cookie_commit")' in recovery_block
-    assert "preserve_auth = not allow_logged_out_cookie_commit" in recovery_block
+    assert '"auth_cookies_are_preserved" in recovery_params' in recovery_block
+    assert "preserve_auth = auth_cookies_are_preserved" in recovery_block
+    assert "allow_logged_out_cookie_commit = not auth_cookies_are_preserved" in recovery_block
     assert "allow_logged_out_cookie_commit=allow_logged_out_cookie_commit" in recovery_block
 
 

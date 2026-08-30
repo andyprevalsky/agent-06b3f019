@@ -138,11 +138,11 @@ def test_recover_from_challenge_normalizes_and_preserves_reason():
         result = normalize_browser_use_response(completion)
         assert result["action"] == "recover_from_challenge", result
         assert result["params"].get("reason"), result
-        assert "allow_logged_out_cookie_commit" not in result["params"]
+        assert "auth_cookies_are_preserved" not in result["params"]
 
 
-def test_recover_from_challenge_normalizes_guest_cookie_commit_flag():
-    """Guest checkout recovery flag is an explicit tool param, not goal sniffing."""
+def test_recover_from_challenge_normalizes_auth_cookies_are_preserved_flag():
+    """Auth-cookie preserve flag is an explicit tool param (default preserve when omitted)."""
     for raw, expected in (
         (True, True),
         (False, False),
@@ -159,14 +159,14 @@ def test_recover_from_challenge_normalizes_guest_cookie_commit_flag():
                     {
                         "recover_from_challenge": {
                             "reason": "Bot or Not on hotels.com search",
-                            "allow_logged_out_cookie_commit": raw,
+                            "auth_cookies_are_preserved": raw,
                         }
                     }
                 ],
             }
         )
         assert result["action"] == "recover_from_challenge", result
-        assert result["params"]["allow_logged_out_cookie_commit"] is expected, (raw, result)
+        assert result["params"]["auth_cookies_are_preserved"] is expected, (raw, result)
 
 
 def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
@@ -176,8 +176,8 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
     assert "parallel cookie-group reductions" in description
-    assert "allow_logged_out_cookie_commit=true" in description
-    assert "guest/anonymous checkout" in description
+    assert "auth_cookies_are_preserved=true" in description
+    assert "fresh cookie state" in description
     assert "Kernel residential" in description
     assert "Kernel mobile" in description
     assert "ISP" in description
@@ -187,11 +187,13 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     assert "rotate_ip" not in BROWSER_USE_TOOLS
     reason = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["reason"]["description"]
     assert "challenge blocks the page" in reason
-    guest_flag = BROWSER_USE_TOOLS["recover_from_challenge"]["params"][
-        "allow_logged_out_cookie_commit"
+    preserve_flag = BROWSER_USE_TOOLS["recover_from_challenge"]["params"][
+        "auth_cookies_are_preserved"
     ]
-    assert guest_flag["type"] == "boolean"
-    assert "guest" in guest_flag["description"].lower()
+    assert preserve_flag["type"] == "boolean"
+    assert "authenticated state" in preserve_flag["description"]
+    assert "fresh cookie state" in preserve_flag["description"]
+    assert "poisoning" in preserve_flag["description"]
 
 
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
@@ -2029,8 +2031,8 @@ async def run_all_tests():
         test_recover_from_challenge_normalizes_and_preserves_reason,
     )
     r.record(
-        "recover_from_challenge_guest_cookie_commit_flag",
-        test_recover_from_challenge_normalizes_guest_cookie_commit_flag,
+        "recover_from_challenge_auth_cookies_are_preserved_flag",
+        test_recover_from_challenge_normalizes_auth_cookies_are_preserved_flag,
     )
     r.record(
         "recover_from_challenge_stages",
