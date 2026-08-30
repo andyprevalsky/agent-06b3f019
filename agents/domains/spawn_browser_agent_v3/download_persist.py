@@ -473,20 +473,6 @@ class BrowserDownloadPersister:
             )
         self._schedule_materialize(meta)
 
-    async def _session_already_has_file(self, filename: str) -> bool:
-        from domains.spawn_browser_agent_v3.repo import list_session_files
-
-        try:
-            files = await list_session_files(self.config, self.session_id)
-        except Exception:
-            return False
-        target = (filename or "").lower()
-        for info in files or []:
-            path = str(info.get("path") or "")
-            if os.path.basename(path).lower() == target:
-                return True
-        return False
-
     async def _materialize_chrome_download(self, *, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if self._closed:
             return None
@@ -496,20 +482,12 @@ class BrowserDownloadPersister:
         if dedupe in self._persisted_keys:
             return None
 
-        # Chrome already wrote into downloads_path — nothing to invent.
-        if await self._session_already_has_file(filename):
-            self._persisted_keys.add(dedupe)
-            logger.info(
-                "[DownloadPersist] Chrome download already in session downloads",
-                agent_id=self.agent_id,
-                session_id=self.session_id,
-                provider=self.provider,
-                filename=filename,
-            )
-            return {
-                "path": f"{self.downloads_dir.rstrip('/')}/{filename}",
-                "filename": filename,
-            }
+        # Do NOT skip solely because a same-basename file already exists in the
+        # session. TinyPNG (and similar) upload the source as rs.jpeg under the
+        # provider downloads root, then Chrome downloads the compressed output
+        # with the same suggestedFilename — skipping leaves the original bytes
+        # and fails the compressed file_pointer. Always materialize Chrome
+        # download URLs; upload overwrite is idempotent. Dedupe is guid-keyed.
 
         if not url.startswith(("http://", "https://")):
             logger.warning(

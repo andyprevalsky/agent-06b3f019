@@ -11056,6 +11056,66 @@ async def test_browser_download_persister_steel_uses_files_path():
     ]
 
 
+async def test_browser_download_persister_materializes_despite_same_basename_upload():
+    """Same-name session upload must not block Chrome-download materialize (TinyPNG rs.jpeg)."""
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    page_fetch_calls = []
+    cdp_client, browser_session = _make_download_persister_cdp_harness()
+
+    async def fake_list(config, session_id):
+        # Original upload already occupies /files/rs.jpeg (or /tmp/downloads/rs.jpeg).
+        return [{"path": "/files/rs.jpeg", "size": 207364}]
+
+    async def fake_page_fetch(*, session, url, session_id, config, provider=None):
+        page_fetch_calls.append({"url": url, "session_id": session_id, "provider": provider})
+        return {
+            "path": "/files/rs.jpeg",
+            "size": 149852,
+            "filename": "rs.jpeg",
+            "mime_type": "image/jpeg",
+        }
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
+        with patch(
+            "domains.spawn_browser_agent_v3.repo.list_session_files",
+            new=fake_list,
+        ):
+            with patch(
+                "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+                new=fake_page_fetch,
+            ):
+                persister = await BrowserDownloadPersister.create(
+                    browser_session=browser_session,
+                    session_id="steel-sess",
+                    config=_fake_config(),
+                    agent_id="agent-1",
+                    provider="steel",
+                )
+                assert persister is not None
+                handlers = cdp_client.register.Browser.handlers
+                handlers["downloadWillBegin"](
+                    {
+                        "guid": "guid-same-name",
+                        "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
+                        "suggestedFilename": "rs.jpeg",
+                    },
+                    "cdp-sess",
+                )
+                await asyncio.sleep(0)
+                if persister._tasks:
+                    await asyncio.gather(*list(persister._tasks), return_exceptions=True)
+                await persister.close()
+
+    assert page_fetch_calls == [
+        {
+            "url": "https://tinypng.com/backend/opt/download/x/rs.jpeg",
+            "session_id": "steel-sess",
+            "provider": "steel",
+        }
+    ], "must materialize even when upload already uses the same basename"
+
+
 async def test_browser_download_persister_ignores_network_fetch_heuristics():
     """Network.responseReceived must not be registered — no invented page-asset downloads."""
     from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
@@ -19098,6 +19158,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_download_persister_steel_files_path",
         test_browser_download_persister_steel_uses_files_path,
+    )
+    await r.record_async(
+        "browser_download_persister_same_basename_upload",
+        test_browser_download_persister_materializes_despite_same_basename_upload,
     )
     await r.record_async(
         "browser_download_persister_ignores_network_fetch",

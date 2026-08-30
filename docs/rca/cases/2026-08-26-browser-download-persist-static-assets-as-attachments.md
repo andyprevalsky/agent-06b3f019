@@ -24,7 +24,7 @@ sources:
   - agent 59f35244-d66d-4fc5-bada-5134e37e0816
   - agent f4cc61ef-5484-4e82-9dbc-01b21f07b5d9
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py (attachment_download_rejects_static_ui_assets + browser_download_persister_ignores_network_fetch)
-status: open
+status: fixed
 ---
 
 ## Problem
