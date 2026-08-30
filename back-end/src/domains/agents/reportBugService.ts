@@ -6,7 +6,7 @@
  *     → POST /api/agents/:id/report-bug
  *     → GitHub issue + @cursor (source:scm)  ← preferred for mobile inbox
  *     → fallback: Cursor Cloud Agents API (source:api, hidden by default)
- *     → dashboard chat named "Bug | <short title>"
+ *     → dashboard chat titled from the description (no forced prefix)
  *
  * Why GitHub: Cursor staff document that source:api is hidden by default under
  * Filter → Source on web/Agents Window/mobile. GitHub mentions stamp source:scm
@@ -15,10 +15,10 @@
  *
  * Platform limits on scm (not fixable from Rose):
  * - Cursor injects a "Using the context from GitHub…" wrapper around the prompt.
- * - Cursor auto-names the chat (often drops "Bug |"); PATCH /v1/agents/:id → 404,
- *   so there is no post-create rename.
- * We still set the GitHub issue title to "Bug | …" and keep the agent prompt body
- * to exactly `/rca … [id]\n<description>` (no Rose footer / title line).
+ * - Cursor auto-names the chat from the prompt; PATCH /v1/agents/:id → 404, so
+ *   there is no post-create rename. Forced prefixes like "Bug |" are stripped.
+ * We set the GitHub issue title from the description and keep the agent prompt
+ * body to exactly `/rca … [id]\n<description>` (no Rose footer / title line).
  */
 
 import { isAdminUser } from '../../utils/adminAccess';
@@ -93,7 +93,8 @@ export function buildBugReportPrompt(agentId: string, description: string): stri
 }
 
 export function buildBugReportChatName(description: string): string {
-  return `Bug | ${buildBugReportTitle(description)}`;
+  // No Bug | / P0 prefix — Cursor scm auto-naming strips those; plain title only.
+  return buildBugReportTitle(description);
 }
 
 /** SMS body with the Cursor deep link. */
@@ -177,8 +178,8 @@ export async function reportAgentBug(
   const promptText = buildBugReportPrompt(agentId, trimmed);
 
   // Prefer GitHub @cursor (source:scm) so the chat shows in the default mobile
-  // inbox. Cloud Agents API keeps Bug | + a clean prompt, but source:api is
-  // hidden under Filter → Source by default — including on phone.
+  // inbox. Cloud Agents API can set an exact name, but source:api is hidden
+  // under Filter → Source by default — including on phone.
   log.info('Submitting bug report to Cursor cloud agent', {
     rose_agent_id: agentId,
     chat_name: name,

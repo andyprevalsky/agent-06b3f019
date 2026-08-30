@@ -95,7 +95,7 @@ async function githubFetch(
  * Comment body that triggers Cursor. Body is ONLY `@cursor` + the RCA prompt.
  * Do not add a title line or Rose footer — those pollute the agent conversation.
  * Cursor still injects its own "Using the context from GitHub…" wrapper (platform).
- * Issue title carries "Bug | …"; there is no agent rename API after create.
+ * Issue title is the short description; there is no agent rename API after create.
  */
 export function buildGithubCursorIssueBody(promptText: string): string {
   return `@cursor\n\n${promptText.trim()}`;

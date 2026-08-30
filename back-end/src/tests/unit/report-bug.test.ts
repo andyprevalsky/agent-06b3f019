@@ -32,7 +32,7 @@ function testTitleTruncatesAtWord(): void {
 }
 
 function testChatNamePrefix(): void {
-  assert.equal(buildBugReportChatName('checkout hung'), 'Bug | checkout hung');
+  assert.equal(buildBugReportChatName('checkout hung'), 'checkout hung');
 }
 
 function testPromptIncludesRcaAndAgentId(): void {
@@ -45,17 +45,17 @@ function testPromptIncludesRcaAndAgentId(): void {
 
 function testSmsScmMentionsInbox(): void {
   const sms = buildBugReportSms(
-    'Bug | stalled checkout',
+    'stalled checkout',
     'https://cursor.com/agents/bc-abc',
     'scm'
   );
-  assert.ok(sms.includes('Bug | stalled checkout'));
+  assert.ok(sms.includes('stalled checkout'));
   assert.ok(sms.includes('https://cursor.com/agents/bc-abc'));
   assert.ok(sms.includes('source:scm'));
 }
 
 function testSmsApiMentionsFilter(): void {
-  const sms = buildBugReportSms('Bug | x', 'https://cursor.com/agents/bc-x', 'api');
+  const sms = buildBugReportSms('x', 'https://cursor.com/agents/bc-x', 'api');
   assert.ok(sms.toLowerCase().includes('filter'));
 }
 
@@ -77,7 +77,6 @@ function testGithubIssueBodyMentionsCursor(): void {
     body,
     '@cursor\n\n/rca the following bug for agent with ID: [a1]\nEndpoint-path formatting check'
   );
-  assert.equal(body.includes('Bug |'), false);
   assert.equal(body.includes('Launched by Rose'), false);
 }
 
@@ -95,7 +94,7 @@ async function testLaunchPostsNamedEnvPayload(): Promise<void> {
       JSON.stringify({
         agent: {
           id: 'bc-test-1',
-          name: 'Bug | stalled',
+          name: 'stalled',
           url: 'https://cursor.com/agents/bc-test-1',
           status: 'ACTIVE',
         },
@@ -108,13 +107,13 @@ async function testLaunchPostsNamedEnvPayload(): Promise<void> {
     const result = await launchCursorCloudAgent({
       apiKey: 'key_test',
       baseUrl: 'https://api.cursor.com/v1',
-      name: 'Bug | stalled',
+      name: 'stalled',
       promptText: '/rca the following bug for agent with ID: [a1]\n\nstalled',
       envName: 'rose-ai-labs/rose',
     });
     assert.equal(capturedUrl, 'https://api.cursor.com/v1/agents');
     assert.ok(capturedAuth.startsWith('Basic '), 'uses Basic auth');
-    assert.equal(capturedBody?.name, 'Bug | stalled');
+    assert.equal(capturedBody?.name, 'stalled');
     assert.deepEqual(capturedBody?.prompt, {
       text: '/rca the following bug for agent with ID: [a1]\n\nstalled',
     });
@@ -170,7 +169,7 @@ async function testGithubLaunchPollsForBotComment(): Promise<void> {
 
   try {
     const result = await launchCursorCloudAgentViaGithub({
-      name: 'Bug | scm probe',
+      name: 'scm probe',
       promptText: '/rca the following bug for agent with ID: [a1]\n\nprobe',
       repo: 'Rose-Ai-Labs/rose',
       fetchImpl,
@@ -193,7 +192,7 @@ async function main(): Promise<void> {
   const cases: Array<[string, () => void | Promise<void>]> = [
     ['title keeps short descriptions', testTitleShortDescription],
     ['title truncates long descriptions at a word', testTitleTruncatesAtWord],
-    ['chat name uses Bug | prefix', testChatNamePrefix],
+    ['chat name is plain title without prefix', testChatNamePrefix],
     ['prompt embeds /rca + agent id', testPromptIncludesRcaAndAgentId],
     ['SMS scm mentions mobile inbox', testSmsScmMentionsInbox],
     ['SMS api mentions Source filter', testSmsApiMentionsFilter],

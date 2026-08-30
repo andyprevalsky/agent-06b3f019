@@ -291,7 +291,7 @@ describe('AgentSettingsDialog', () => {
         return HttpResponse.json(
           {
             success: true,
-            name: 'Bug | Checkout never finished',
+            name: 'Checkout never finished',
             url: 'https://cursor.com/agents/bc-bug-1',
             cursor_agent_id: 'bc-bug-1',
           },
@@ -320,7 +320,7 @@ describe('AgentSettingsDialog', () => {
       'href',
       'https://cursor.com/agents/bc-bug-1',
     );
-    expect(screen.getByText('Bug | Checkout never finished')).toBeInTheDocument();
+    expect(screen.getByText('Checkout never finished')).toBeInTheDocument();
     expect(openSpy).toHaveBeenCalledWith(
       'https://cursor.com/agents/bc-bug-1',
       '_blank',

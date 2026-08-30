@@ -22,7 +22,7 @@
  *     |
  *     +--> [REPORT_BUG] <-- admin only; composer open for bug description
  *             |
- *             +--> (submit) --> Cursor cloud agent "Bug | <title>"
+ *             +--> (submit) --> Cursor cloud agent titled from description
  *             +--> (cancel) --> [IDLE]
  *
  * Delete-flow state is owned by useDeleteFlow; price-limit editing state is

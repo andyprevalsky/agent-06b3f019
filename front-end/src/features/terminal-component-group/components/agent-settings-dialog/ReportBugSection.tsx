@@ -2,7 +2,7 @@
  * Report Bug section in AgentSettingsDialog.
  *
  * Admin-only: expands into a description textarea that launches a Cursor
- * cloud agent named "Bug | <short title>" to /rca the Rose agent.
+ * cloud agent titled from the description to /rca the Rose agent.
  *
  * After launch, keep Open + Copy on screen. Agents are launched via GitHub
  * @cursor (source:scm) so they appear in the Cursor mobile inbox; post-await
