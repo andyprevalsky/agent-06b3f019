@@ -886,38 +886,43 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         .replace("\u2018", "'")
         .replace("\u02bc", "'")
     )
-    # Bounded negation window: "do not/don't/never/avoid/not" + up to a few
-    # words before a guest/anonymous target. Strips spans so positive needles
-    # do not fire on negated alternatives ("guest checkout, not anonymous").
     guest_target = (
         r"(?:as an? guest|as a guest|as guest|guest checkout|anonymous checkout|"
         r"anonymously|without (?:logging|signing) in)"
     )
-    negated_guest = re.compile(
-        rf"(?:do not|don't|never|avoid|not)\s+(?:\w+[\s,;-]+){{0,4}}{guest_target}"
+    # Prefix / coordinated negation: "no/do not/... [words] guest-target [or target]*"
+    guest_scan_text = re.sub(
+        rf"(?:(?:do not|don't|never|avoid|no|not)\s+(?:\w+[\s,;-]*){{0,6}})+{guest_target}"
+        rf"(?:\s+or\s+{guest_target})*",
+        " ",
+        text,
     )
-    guest_scan_text = negated_guest.sub(" ", text)
-    # Guest needles before signed-in — "do not sign in" contains "sign in"
-    # and must not be classified as a signed-in preference.
-    guest_needles = (
-        "guest checkout",
-        "anonymous checkout",
-        "as a guest",
-        "as guest",
-        "continue as a guest",
-        "continue as guest",
-        "check out anonymously",
-        "checkout anonymously",
-        "anonymously",
-        "do not sign in",
-        "don't sign in",
-        "without signing in",
-        "without logging in",
-        "no account needed",
-        "do not log in",
-        "don't log in",
+    # Suffix negation: "guest checkout is not what I want"
+    guest_scan_text = re.sub(
+        rf"{guest_target}\s+(?:is not|isn't|not what|not for me|not desired|not wanted)",
+        " ",
+        guest_scan_text,
     )
-    if any(needle in guest_scan_text for needle in guest_needles):
+    # Phrase-boundary guest indicators (avoid "was a guest" matching "as a guest").
+    guest_phrases = (
+        r"\bguest checkout\b",
+        r"\banonymous checkout\b",
+        r"\bas a guest\b",
+        r"\bas guest\b",
+        r"\bcontinue as a guest\b",
+        r"\bcontinue as guest\b",
+        r"\bcheck out anonymously\b",
+        r"\bcheckout anonymously\b",
+        r"\banonymously\b",
+        r"\bdo not sign in\b",
+        r"\bdon't sign in\b",
+        r"\bwithout signing in\b",
+        r"\bwithout logging in\b",
+        r"\bno account needed\b",
+        r"\bdo not log in\b",
+        r"\bdon't log in\b",
+    )
+    if any(re.search(pattern, guest_scan_text) for pattern in guest_phrases):
         return True
     signed_in_needles = (
         "sign in",

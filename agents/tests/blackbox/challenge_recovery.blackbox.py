@@ -233,6 +233,18 @@ def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
         "Do not shop anonymously; use my account"
     )
     assert not goal_allows_logged_out_cookie_commit(
+        "No guest checkout; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Guest checkout is not what I want; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not use either guest checkout or anonymous checkout; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "I was a guest before; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
         "Don't check out as guest; use my account."
     )
     assert not goal_allows_logged_out_cookie_commit(
