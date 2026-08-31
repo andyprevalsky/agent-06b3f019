@@ -650,12 +650,17 @@ def _browser_resume_continuity_state(
     action_history: Any,
     visited_urls: List[str],
     verifier_checkpoints: List[Dict[str, Any]],
+    browser_turn_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Serialize compact, browser-sourced continuity for a resumed activity."""
+    # Bound the transcript so Temporal resume payloads stay small; keep enough
+    # recent tool results (incl. read_browser_state) for the next LLM turn.
+    compact_turns = list(browser_turn_messages or [])[-40:]
     return {
         "action_history": action_history.get_entries()[-30:],
         "visited_urls": list(visited_urls[-30:]),
         "verifier_checkpoints": list(verifier_checkpoints[-3:]),
+        "browser_turn_messages": compact_turns,
     }
 
 
@@ -4371,6 +4376,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "action_history",
     "visited_urls",
     "verifier_checkpoints",
+    "browser_turn_messages",
 )
 
 
@@ -5473,7 +5479,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
     _heartbeat_task = asyncio.create_task(_background_heartbeat())
     action_entries: List[Dict[str, Any]] = []
-    browser_turn_messages: List[Dict[str, Any]] = []
+    browser_turn_messages: List[Dict[str, Any]] = [
+        message
+        for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
+        if isinstance(message, dict)
+    ]
     otp_user_messages: List[Dict[str, str]] = []
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}
@@ -6702,6 +6712,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     params=unified_action.get("params", {}),
                     result=result,
                 )
+                _append_browser_turn_messages(
+                    browser_turn_messages,
+                    unified_action=unified_action,
+                    result=result,
+                    tool_call_id=f"write-lock-resume-{iteration}",
+                )
 
                 continue
 
@@ -7773,6 +7789,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         action_history=action_history,
                         visited_urls=visited_urls,
                         verifier_checkpoints=verifier_checkpoints,
+                        browser_turn_messages=browser_turn_messages,
                     ),
                 }
 
@@ -8932,6 +8949,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         action_history=action_history,
                         visited_urls=visited_urls,
                         verifier_checkpoints=verifier_checkpoints,
+                        browser_turn_messages=browser_turn_messages,
                     ),
                 }
 
@@ -9055,6 +9073,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         action_history=action_history,
                         visited_urls=visited_urls,
                         verifier_checkpoints=verifier_checkpoints,
+                        browser_turn_messages=browser_turn_messages,
                     ),
                 }
 
