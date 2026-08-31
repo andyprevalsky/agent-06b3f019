@@ -25,6 +25,67 @@ interface InFlightFastCacheRead {
 
 const MEMORY_CACHE_TTL_MS = Number(process.env.FAST_CACHE_MEMORY_TTL_MS ?? '300000');
 const MEMORY_CACHE_MAX_ENTRIES = Number(process.env.FAST_CACHE_MEMORY_MAX_ENTRIES ?? '50000');
+// Observed official-4w unique-token misses waited 3.8s on shared-cache prisma
+// before awaitCacheFirst started live (hits stayed ≤635ms). Cap the lookup so a
+// miss can start Cerebras inside the 5s chat-lifecycle ratchet.
+export const FAST_CACHE_LOOKUP_BUDGET_MS = Number(
+  process.env.FAST_CACHE_LOOKUP_BUDGET_MS ?? '750'
+);
+
+export class FastCacheLookupBudgetExceededError extends Error {
+  readonly budgetMs: number;
+  constructor(budgetMs: number) {
+    super(`fast_cache prisma lookup exceeded ${budgetMs}ms`);
+    this.name = 'FastCacheLookupBudgetExceededError';
+    this.budgetMs = budgetMs;
+  }
+}
+
+export function withLookupBudget<T>(promise: Promise<T>, budgetMs: number): Promise<T> {
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) {
+    return promise;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new FastCacheLookupBudgetExceededError(budgetMs));
+    }, budgetMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+function resolveKeysAsMiss(
+  keys: string[],
+  result: Record<string, CacheGetResult>,
+  inFlight: Map<string, InFlightFastCacheRead>
+): void {
+  const miss: CacheGetResult = { hit: false, value: null, blobPath: null };
+  for (const key of keys) {
+    const entry = inFlight.get(key);
+    if (!entry) continue;
+    result[key] = cloneCacheResult(miss);
+    entry.resolve(cloneCacheResult(miss));
+    inFlight.delete(key);
+  }
+}
+
+function fillMemoryFromLateRows(rows: FastCacheReadRow[]): void {
+  for (const row of rows) {
+    writeMemoryCache(row.key, row.goalHash, {
+      hit: true,
+      value: row.value,
+      blobPath: row.blobPath,
+    });
+  }
+}
 
 function getMemoryCache(): Map<string, FastCacheMemoryEntry> {
   if (!globalForFastCachePrisma.fastCacheMemory) {
@@ -242,15 +303,23 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
     missed_key_count: keysToFetch.length,
     row_count: 0,
   };
+  const findManyPromise = fastCachePrisma.fastModeCacheEntry.findMany({
+    where: { key: { in: keysToFetch } },
+    select: { key: true, value: true, blobPath: true, goalHash: true },
+  });
   let rows: FastCacheReadRow[] = [];
   try {
     rows = await withSpan('fast_cache.prisma_find_many', dbSpanMeta, async () => {
-      const rows = await fastCachePrisma.fastModeCacheEntry.findMany({
-        where: { key: { in: keysToFetch } },
-        select: { key: true, value: true, blobPath: true, goalHash: true },
-      });
-      dbSpanMeta.row_count = rows.length;
-      return rows;
+      try {
+        const rows = await withLookupBudget(findManyPromise, FAST_CACHE_LOOKUP_BUDGET_MS);
+        dbSpanMeta.row_count = rows.length;
+        return rows;
+      } catch (error) {
+        if (error instanceof FastCacheLookupBudgetExceededError) {
+          dbSpanMeta.timed_out = true;
+        }
+        throw error;
+      }
     });
 
     await withSpan(
@@ -276,17 +345,22 @@ export async function cacheGetMany(keys: string[]): Promise<Record<string, Cache
       }
     );
   } catch (error) {
-    for (const key of keysToFetch) {
-      const entry = inFlight.get(key);
-      if (entry) {
-        entry.reject(error);
-        inFlight.delete(key);
+    if (error instanceof FastCacheLookupBudgetExceededError) {
+      resolveKeysAsMiss(keysToFetch, result, inFlight);
+      void findManyPromise.then(fillMemoryFromLateRows).catch(() => undefined);
+    } else {
+      for (const key of keysToFetch) {
+        const entry = inFlight.get(key);
+        if (entry) {
+          entry.reject(error);
+          inFlight.delete(key);
+        }
       }
+      if (waits.length > 0) {
+        await Promise.allSettled(waits);
+      }
+      throw error;
     }
-    if (waits.length > 0) {
-      await Promise.allSettled(waits);
-    }
-    throw error;
   }
   await waitPromise;
   return result;
