@@ -496,29 +496,31 @@ function RecordingWithLiveTrajectory({
   playheadSec: number;
   children: React.ReactNode;
 }) {
-  // Desktop: video stays full-width; live trajectory hangs off its right edge
-  // (does not shrink the browser/recording view). Mobile: stack under the video.
+  // Desktop: keep the browser/recording centered; live trajectory hangs off its
+  // right (off-center is fine). No shadow on the panel. Mobile: stack under.
   return (
     <div
       data-testid="recording-with-live-trajectory"
-      className="relative flex flex-col gap-3"
+      className="flex justify-center"
     >
-      <div className="w-full">{children}</div>
-      <div
-        data-testid="recording-live-trajectory-panel"
-        className="flex w-full flex-col lg:absolute lg:top-0 lg:bottom-0 lg:left-full lg:z-20 lg:ml-2 lg:w-80"
-      >
-        <div className="flex max-h-[min(40vh,20rem)] flex-col rounded-md border border-border bg-card p-2 shadow-lg lg:max-h-none lg:h-full">
-          <div className="mb-1 flex items-baseline justify-between gap-2">
-            <p className="text-xs font-medium text-foreground">Live trajectory</p>
-            <p
-              data-testid="recording-playhead"
-              className="font-mono text-[10px] text-muted-foreground"
-            >
-              t={playheadSec.toFixed(1)}s
-            </p>
+      <div className="relative flex w-full max-w-4xl flex-col gap-3">
+        <div className="w-full">{children}</div>
+        <div
+          data-testid="recording-live-trajectory-panel"
+          className="flex w-full flex-col lg:absolute lg:inset-y-0 lg:left-full lg:z-20 lg:ml-2 lg:w-72"
+        >
+          <div className="flex max-h-[min(40vh,20rem)] flex-col rounded-md border border-border bg-card p-2 lg:h-full lg:max-h-none">
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <p className="text-xs font-medium text-foreground">Live trajectory</p>
+              <p
+                data-testid="recording-playhead"
+                className="font-mono text-[10px] text-muted-foreground"
+              >
+                t={playheadSec.toFixed(1)}s
+              </p>
+            </div>
+            <TrajectoryList steps={steps} activeIndex={activeIndex} live />
           </div>
-          <TrajectoryList steps={steps} activeIndex={activeIndex} live />
         </div>
       </div>
     </div>
