@@ -2435,11 +2435,23 @@ async def test_cc_execute_tool_emits_assistant_events_for_files():
 
 
 async def test_cc_execute_tool_cancelled_status_yields_error():
-    """Activity returning status='cancelled' yields an ERROR event."""
+    """Activity status='cancelled' yields chip-terminal task_complete with task_id.
+
+    ClaudeCodeChip only leaves spinning_up when a task-scoped message has
+    action_type=task_complete. Pause/cancel must emit task_complete (not
+    session_cancelled) and include task_id so the chip can match it.
+    """
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
-    handle = _FakeActivityHandle(result={"status": "cancelled", "message": "cancelled"})
+    handle = _FakeActivityHandle(
+        result={
+            "status": "cancelled",
+            "message": "cancelled",
+            "task_id": "task-cancel-1",
+            "code_provider": "claude",
+        }
+    )
     fake = _FakeCCWorkflow(handle)
     restore = _patch_cc_workflow(fake)
     try:
@@ -2456,6 +2468,10 @@ async def test_cc_execute_tool_cancelled_status_yields_error():
 
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title or "cancelled" in error.title.lower()
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("task_id") == "task-cancel-1"
+    assert error.metadata.get("success") is False
+    assert error.metadata.get("toolName") == "spawn_claude_code_agent"
 
 
 async def test_cc_execute_tool_cancelled_error_path():
@@ -2482,6 +2498,10 @@ async def test_cc_execute_tool_cancelled_error_path():
 
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title
+    # Await raised before activity returned task_id — still emit task_complete so
+    # MessageBubble keeps routing through ClaudeCodeChip (session_cancelled does not).
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("success") is False
 
 
 async def test_cc_execute_tool_generic_exception_yields_error():
@@ -2511,7 +2531,7 @@ async def test_cc_execute_tool_generic_exception_yields_error():
 
 
 async def test_cc_execute_tool_paused_cancels_activity():
-    """is_paused=True triggers activity_handle.cancel() and cancelled path."""
+    """is_paused=True triggers activity_handle.cancel() and chip-terminal cancel."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
@@ -2519,7 +2539,14 @@ async def test_cc_execute_tool_paused_cancels_activity():
         def done(self):
             return False  # Not done, so the pause branch cancels it
 
-    handle = _PausedHandle(result={"status": "cancelled", "message": "paused"})
+    handle = _PausedHandle(
+        result={
+            "status": "cancelled",
+            "message": "paused",
+            "task_id": "task-pause-1",
+            "code_provider": "codex",
+        }
+    )
     fake = _FakeCCWorkflow(handle)
     restore = _patch_cc_workflow(fake)
     try:
@@ -2534,6 +2561,10 @@ async def test_cc_execute_tool_paused_cancels_activity():
     assert handle._cancelled is True
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("task_id") == "task-pause-1"
+    assert error.metadata.get("code_provider") == "codex"
+    assert error.metadata.get("success") is False
 
 
 async def run_all_tests():

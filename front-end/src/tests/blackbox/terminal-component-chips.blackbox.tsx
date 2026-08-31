@@ -338,6 +338,90 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByText('Something broke')).toBeInTheDocument();
   });
 
+  it('clears spinning_up on pause cancel task_complete (Session Cancelled)', () => {
+    // Mirrors the durable pause path: activity/handler posts task_complete titled
+    // Session Cancelled. Without this, the chip stays on Spinning up forever.
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+          ws_url: 'wss://example.test',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (842s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_complete',
+          title: 'Session Cancelled',
+          toolStatus: 'ERROR',
+          success: false,
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
+  it('keeps cancel terminal after a late agent_observation heartbeat', () => {
+    // Prod race: heartbeat can land after cancel (agent_logs showed working 872s
+    // after Session Cancelled). Terminality must be sticky.
+    messagesRef.current = [
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_complete',
+          title: 'Session Cancelled',
+          toolStatus: 'ERROR',
+          success: false,
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (872s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
+  it('treats legacy session_cancelled with task_id as terminal', () => {
+    messagesRef.current = [
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'session_cancelled',
+          title: 'Claude Code Session Cancelled',
+          toolStatus: 'ERROR',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
   it('renders verifying state from system message metadata', () => {
     messagesRef.current = [
       makeMsg({

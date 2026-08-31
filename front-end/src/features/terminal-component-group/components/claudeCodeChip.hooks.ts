@@ -106,8 +106,19 @@ export function useClaudeCodeChipState(
         ? 'codex'
         : initialCodeProvider;
 
-    const complete = lastMessage?.metadata?.action_type === 'task_complete';
-    const success = isTaskCompletionSuccess(lastMessage);
+    // Terminality is sticky: a late agent_observation heartbeat after pause
+    // cancel must not reopen the chip (prod race: heartbeat 872s after cancel).
+    const completionMsg = [...taskMessages]
+      .reverse()
+      .find(
+        (m) =>
+          m.metadata?.action_type === 'task_complete' ||
+          m.metadata?.action_type === 'session_cancelled',
+      );
+    const complete = !!completionMsg;
+    const success =
+      completionMsg?.metadata?.action_type === 'task_complete' &&
+      isTaskCompletionSuccess(completionMsg);
 
     const verifying =
       !complete &&
@@ -119,7 +130,6 @@ export function useClaudeCodeChipState(
     const schema = initMessage?.metadata?.output_schema as
       { fields: ResponseSchemaField[] } | undefined;
 
-    const completionMsg = taskMessages.find((m) => m.metadata?.action_type === 'task_complete');
     const extracted = completionMsg?.metadata?.structured_response as
       Record<string, unknown> | undefined;
 

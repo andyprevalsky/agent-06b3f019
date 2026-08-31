@@ -164,12 +164,25 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
             if was_cancelled or (result and result.get("status") == "cancelled"):
                 logger.info("[ClaudeCode] Agent cancelled", agent_id=agent_id)
+                # Chip terminality requires action_type=task_complete + task_id.
+                # session_cancelled without task_id leaves ClaudeCodeChip stuck on
+                # "Spinning up..." after pause (hub agent 182cf2ab / task 45ce853d).
+                cancel_metadata = {
+                    "toolName": "spawn_claude_code_agent",
+                    "action_type": "task_complete",
+                    "success": False,
+                }
+                if result:
+                    if result.get("task_id"):
+                        cancel_metadata["task_id"] = result["task_id"]
+                    if result.get("code_provider"):
+                        cancel_metadata["code_provider"] = result["code_provider"]
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Claude Code Session Cancelled",
                     message="User paused the agent",
                     status=MessageStatus.ERROR,
-                    metadata={"action_type": "session_cancelled", "toolName": "spawn_claude_code_agent"},
+                    metadata=cancel_metadata,
                 )
                 return
 

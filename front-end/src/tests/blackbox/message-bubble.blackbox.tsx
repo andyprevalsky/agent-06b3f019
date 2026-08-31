@@ -750,6 +750,24 @@ describe('MessageBubble', () => {
     });
   });
 
+  it('renders session_cancelled branch for Claude Code tool', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'User paused the agent',
+      metadata: {
+        toolCallId: 'tc-21b',
+        toolName: 'spawn_claude_code_agent',
+        action_type: 'session_cancelled',
+        task_id: 'cc-cancelled',
+        toolStatus: 'ERROR',
+      },
+    });
+    const { container } = renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => {
+      expect(container.querySelector('img[alt="Claude Code"]')).not.toBeNull();
+    });
+  });
+
   it('renders USER message with image file_pointer showing loading placeholder', async () => {
     const msg = baseMessage({
       role: 'USER',
