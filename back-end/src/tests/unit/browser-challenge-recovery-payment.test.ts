@@ -88,8 +88,8 @@ async function testRequirePaymentCdnHardFilterIsIgnoredForLlmOnlyGate(): Promise
   const winner = await runParallelBrowserConfigSearch(
     configs,
     {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => ({
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, _signal) => ({
         stablePasses: 2,
         attempts: 2,
         latencyMs: 1,
@@ -113,8 +113,8 @@ async function testCfOnlyAvoidPicksFastestNonAvoided(): Promise<void> {
   const winner = await runParallelBrowserConfigSearch(
     configs,
     {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => ({
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, _signal) => ({
         stablePasses: 2,
         attempts: 2,
         latencyMs: config.key === 'kernel_isp' ? 1 : config.key === 'steel_managed' ? 9000 : 100,
@@ -147,8 +147,8 @@ async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
   const winner = await runParallelBrowserConfigSearch(
     configs,
     {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => ({
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, _signal) => ({
         stablePasses: 2,
         attempts: 2,
         latencyMs:
@@ -185,8 +185,8 @@ async function testHardPaymentCdnFilterKeepsOnlyWorkingConfig(): Promise<void> {
   const winner = await runParallelBrowserConfigSearch(
     configs,
     {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => {
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, _signal) => {
         if (config.key === 'steel_managed') {
           return {
             stablePasses: 2,

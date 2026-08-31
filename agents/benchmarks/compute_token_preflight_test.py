@@ -1108,6 +1108,31 @@ def test_usable_direct_compute_token_query_accepts_non_rate_limited():
         assert rb._local_db_has_usable_direct_compute_token() is True
 
 
+def test_usable_direct_compute_token_sql_excludes_auth_error_failure_reason():
+    """CONNECTED + auth_error must not count as usable (waterfall bleed gate).
+
+    Live repro (victoria_bench_descend_daily_e2_preflight, 2026-08-31):
+    gpt_code CONNECTED + failureReason=auth_error + rateLimitedUntil NULL made the
+    old EXISTS query return true while Claude was rate-limited → agents billed
+    OpenRouter waterfall under BENCHMARK_REQUIRE_COMPUTE_TOKENS=1.
+    """
+    captured: dict[str, str] = {}
+
+    def _capture(sql: str) -> str:
+        captured["sql"] = sql
+        return "f"
+
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_run_local_victoria_sql", side_effect=_capture),
+    ):
+        assert rb._local_db_has_usable_direct_compute_token() is False
+    sql = captured["sql"]
+    assert 'COALESCE("failureReason", \'\') = \'\'' in sql or "failureReason" in sql
+    assert "auth_error" not in sql  # filter is empty-string, not a hard-coded enum list
+    assert "rateLimitedUntil" in sql
+
+
 def test_require_compute_tokens_preflight_fails_closed_when_only_rate_limited():
     """BENCHMARK_REQUIRE_COMPUTE_TOKENS=1 must abort before waterfall when pool is rate-limited."""
     with (

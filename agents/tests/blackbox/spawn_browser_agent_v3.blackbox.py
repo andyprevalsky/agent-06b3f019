@@ -425,6 +425,29 @@ async def test_action_history_resume_preserves_monotonic_step_numbers():
     )
     assert fresh_entry.step == 1
 
+def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state():
+    """No-cache refactor removed loop-level browser_state but left observe_page_text
+    reading browser_state.get('title') before any assignment — UnboundLocalError at
+    browser init (handler.py ~6676). Guard the explicit observe_page_state fetch."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    marker = "observe_page_state = await asyncio.wait_for("
+    assert marker in src
+    assert "dom_service.get_browser_state(include_screenshot=False)" in src
+    # Keep a tight window around the fetch so a distant unused assignment cannot
+    # satisfy the positive asserts while a nearby UnboundLocalError regresses.
+    start = src.index(marker)
+    block = src[start : start + 1200]
+    assert (
+        "auth_runtime_state.observe_page_text(observe_page_state.get(\"title\")"
+        in block
+    )
+    assert "auth_runtime_state.observe_page_text(browser_state.get(\"title\")" not in src
+
+
 def test_max_steps_return_declares_best_effort_and_final_verifier():
     """The max_iterations exit must wire the best-effort field AND run the final
     verifier salvage — guards against a silent revert of the RCA fix. Asserts on
@@ -614,7 +637,7 @@ def test_browser_task_prompt_does_not_duplicate_system_prompt():
         turn_messages=[],
     )
 
-    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    assert [message["role"] for message in messages] == ["system", "user"]
     assert "You are a browser automation agent" in messages[0]["content"]
     assert "You are a browser automation agent" not in messages[1]["content"]
     assert messages[1]["content"] == "# Current Goal\nBuy socks"
@@ -3681,21 +3704,12 @@ async def test_browser_diagnostics_capture_console_and_redacted_network_metadata
         assert log_send.enabled_session_ids == ["cdp-1"]
 
 
-def test_browser_turn_history_preserves_state_before_tool_result():
+def test_browser_turn_history_appends_tool_call_without_auto_state():
     from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
 
     turns = []
     _append_browser_turn_messages(
         turns,
-        task="# Current Goal\nBuy socks",
-        browser_state={
-            "url": "https://example.com/cart",
-            "title": "Cart",
-            "viewport": {"width": 1280, "height": 800},
-            "dom_tree": "[7]<button>Checkout</button>",
-            "screenshot": "AAAA",
-        },
-        include_screenshot=False,
         unified_action={
             "action": "click",
             "thinking": "Click checkout.",
@@ -3706,13 +3720,28 @@ def test_browser_turn_history_preserves_state_before_tool_result():
         tool_call_id="call_123",
     )
 
-    assert [message["role"] for message in turns] == ["user", "assistant", "tool"]
-    assert "Current URL: https://example.com/cart - Cart" in turns[0]["content"]
-    assert "[7]<button>Checkout</button>" in turns[0]["content"]
-    assert isinstance(turns[0]["content"], str)
-    assert turns[1]["content"] == "Click checkout."
-    assert turns[1]["tool_calls"][0]["function"]["name"] == "click"
-    assert turns[2]["name"] == "click"
+    assert [message["role"] for message in turns] == ["assistant", "tool"]
+    assert turns[0]["content"] == "Click checkout."
+    assert turns[0]["tool_calls"][0]["function"]["name"] == "click"
+    assert turns[1]["name"] == "click"
+
+
+def test_read_browser_state_tool_result_keeps_formatted_state_in_history():
+    from domains.spawn_browser_agent_v3.handler import _browser_tool_result_for_history
+
+    formatted = "# Current Browser State\n\nCurrent URL: https://example.com/cart\nInteractive elements:\n[7]<button>Checkout</button>"
+    clean = _browser_tool_result_for_history(
+        "read_browser_state",
+        {
+            "success": True,
+            "formatted_state": formatted,
+            "dom_tree": "[7]<button>Checkout</button>",
+            "url": "https://example.com/cart",
+        },
+    )
+    assert clean["formatted_state"] == formatted
+    assert "dom_tree" not in clean
+    assert "url" not in clean
 
 def _fake_config(
     backend_url: str = "https://backend.example.com",
@@ -16783,6 +16812,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         async def get_browser_state(self, include_screenshot=False):
             return {"url": "https://example.com/login", "screenshot": None}
 
+        async def get_current_url(self, *, fallback: str = ""):
+            return fallback or "https://example.com/login"
+
         def start_captcha_telemetry_indicator(self, poll_phase):
             self._captcha_poll = poll_phase
 
@@ -18461,6 +18493,132 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
+def test_compact_browser_turn_messages_drops_leading_orphan_tool():
+    """Resume compaction must not start on a tool row (OpenAI pairing)."""
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_resume_continuity_state,
+        _compact_browser_turn_messages_for_resume,
+    )
+
+    class _History:
+        def get_entries(self):
+            return []
+
+    long_turns = []
+    for i in range(45):
+        long_turns.append(
+            {
+                "role": "assistant",
+                "content": f"think-{i}",
+                "tool_calls": [
+                    {
+                        "id": f"call-{i}",
+                        "type": "function",
+                        "function": {"name": "click", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        long_turns.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{i}",
+                "name": "click",
+                "content": "{}",
+            }
+        )
+        if i % 5 == 0:
+            long_turns.append({"role": "user", "content": f"nudge-{i}"})
+
+    compact = _compact_browser_turn_messages_for_resume(long_turns, limit=40)
+    assert compact, "expected non-empty compact transcript"
+    assert compact[0].get("role") != "tool"
+    assert len(compact) <= 40
+
+    state = _browser_resume_continuity_state(
+        action_history=_History(),
+        visited_urls=[],
+        verifier_checkpoints=[],
+        browser_turn_messages=long_turns,
+    )
+    assert state["browser_turn_messages"][0].get("role") != "tool"
+
+
+def test_compact_browser_turn_messages_strips_embedded_screenshots():
+    """Resume compaction must strip base64 screenshot media from turn payloads."""
+    from domains.spawn_browser_agent_v3.handler import (
+        _compact_browser_turn_messages_for_resume,
+    )
+
+    turns = [
+        {
+            "role": "assistant",
+            "content": "capturing challenge",
+            "tool_calls": [
+                {
+                    "id": "call-shot",
+                    "type": "function",
+                    "function": {"name": "screenshot", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-shot",
+            "name": "screenshot",
+            "content": "{}",
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Screenshot captured by the screenshot tool."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64," + ("A" * 1200),
+                    },
+                },
+            ],
+        },
+    ]
+    compact = _compact_browser_turn_messages_for_resume(turns, limit=40)
+    blob = str(compact)
+    assert "data:image/png;base64," not in blob
+    assert "AAAA" not in blob
+    assert '"type": "image_url"' not in blob and "'type': 'image_url'" not in blob
+    assert any(message.get("role") == "user" for message in compact)
+    assert "[image omitted from Temporal resume]" in blob
+
+
+def test_final_screenshot_fetch_isolated_from_verifier_errors():
+    """Confirmed completion must survive a final-screenshot capture failure."""
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    marker = "Failed to capture final screenshot"
+    assert marker in source
+    # The capture sits in its own try/except before upload / completed return.
+    idx = source.index(marker)
+    window = source[max(0, idx - 500) : idx + 400]
+    assert "except Exception as screenshot_error" in window
+    assert "last_screenshot_b64 = None" in window
+
+
+def test_handoff_autofill_invalidates_observe_page_state_prefetch():
+    """Payment auto-fill must drop observe_page_state before later prefetch reuse."""
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "observe_page_state = {}" in source
+    autofill = source.index("Auto-filling payment fields on handoff page")
+    invalidate = source.index(
+        "observe_page_state = {}",
+        autofill,
+    )
+    prefetch = source.index("prefetched_browser_state=observe_page_state", autofill)
+    assert invalidate < prefetch
+
+
 def test_browser_tool_events_declare_action_type():
     """Every workflow-scope spawn_browser_agent event must declare action_type.
 
@@ -18655,8 +18813,16 @@ async def run_all_tests():
         test_pending_write_lock_action_rehydrates_url_and_remaps_dom_target,
     )
     r.record(
-        "browser_turn_history_preserves_state",
-        test_browser_turn_history_preserves_state_before_tool_result,
+        "browser_turn_history_no_auto_state",
+        test_browser_turn_history_appends_tool_call_without_auto_state,
+    )
+    r.record(
+        "read_browser_state_history_keeps_formatted_state",
+        test_read_browser_state_tool_result_keeps_formatted_state_in_history,
+    )
+    r.record(
+        "auth_title_observation_fetches_fresh_state",
+        test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state,
     )
 
     # service_crypto — pure
@@ -20227,6 +20393,22 @@ async def run_all_tests():
     await r.record_async(
         "goto_action_returns_current_url_for_recovery_fallback",
         test_goto_action_returns_current_url_for_recovery_fallback,
+    )
+    r.record(
+        "compact_browser_turn_messages_drops_leading_orphan_tool",
+        test_compact_browser_turn_messages_drops_leading_orphan_tool,
+    )
+    r.record(
+        "compact_browser_turn_messages_strips_embedded_screenshots",
+        test_compact_browser_turn_messages_strips_embedded_screenshots,
+    )
+    r.record(
+        "final_screenshot_fetch_isolated_from_verifier_errors",
+        test_final_screenshot_fetch_isolated_from_verifier_errors,
+    )
+    r.record(
+        "handoff_autofill_invalidates_observe_page_state_prefetch",
+        test_handoff_autofill_invalidates_observe_page_state_prefetch,
     )
     r.record(
         "browser_tool_events_declare_action_type",
