@@ -496,37 +496,35 @@ function RecordingWithLiveTrajectory({
   playheadSec: number;
   children: React.ReactNode;
 }) {
-  // Desktop: keep the browser/recording centered; live trajectory hangs off its
-  // right (off-center is fine). No shadow on the panel. Mobile: stack under.
+  // Trajectory is purely out-of-flow (absolute) so it never shifts the recording
+  // or surrounding UI. It hangs off the right of the player via left-full.
   return (
     <div
       data-testid="recording-with-live-trajectory"
-      className="flex justify-center"
+      className="relative w-full"
     >
-      <div className="relative flex w-full max-w-4xl flex-col gap-3">
-        <div className="w-full">{children}</div>
-        <div
-          data-testid="recording-live-trajectory-panel"
-          className="flex w-full flex-col lg:absolute lg:inset-y-0 lg:left-full lg:z-20 lg:ml-2 lg:w-72"
-        >
-          <div className="flex max-h-[min(40vh,20rem)] flex-col rounded-md border border-border bg-card p-2 lg:h-full lg:max-h-none">
-            <div className="mb-1 flex items-baseline justify-between gap-2">
-              <p className="text-xs font-medium text-foreground">Live trajectory</p>
-              <p
-                data-testid="recording-playhead"
-                className="font-mono text-[10px] text-muted-foreground"
-              >
-                t={playheadSec.toFixed(1)}s
-              </p>
-            </div>
-            <TrajectoryList steps={steps} activeIndex={activeIndex} live />
+      {children}
+      <aside
+        data-testid="recording-live-trajectory-panel"
+        className="pointer-events-none absolute inset-y-0 left-full z-20 ml-2 flex w-72 flex-col"
+        aria-label="Live trajectory"
+      >
+        <div className="pointer-events-auto flex h-full min-h-0 flex-col rounded-md border border-border bg-card p-2">
+          <div className="mb-1 flex shrink-0 items-baseline justify-between gap-2">
+            <p className="text-xs font-medium text-foreground">Live trajectory</p>
+            <p
+              data-testid="recording-playhead"
+              className="font-mono text-[10px] text-muted-foreground"
+            >
+              t={playheadSec.toFixed(1)}s
+            </p>
           </div>
+          <TrajectoryList steps={steps} activeIndex={activeIndex} live />
         </div>
-      </div>
+      </aside>
     </div>
   );
 }
-
 function TrajectoryList({
   steps,
   activeIndex,
@@ -547,7 +545,7 @@ function TrajectoryList({
   return (
     <ol
       data-testid={live ? 'recording-live-trajectory' : 'trajectory-list'}
-      className={`${live ? 'min-h-0 flex-1 max-h-[min(40vh,20rem)] lg:max-h-none' : 'max-h-80'} space-y-1 overflow-auto text-xs`}
+      className={`${live ? 'min-h-0 flex-1' : 'max-h-80'} space-y-1 overflow-auto text-xs`}
     >
       {steps.map((s, i) => {
         const isActive = i === activeIndex;
