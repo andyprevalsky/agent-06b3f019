@@ -8080,6 +8080,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             if bool(config_result.get("storage_state_preloaded"))
                             else "live tab verified clean"
                         )
+                        auth_cookie_note = (
+                            "authenticated cookies were preserved"
+                            if auth_cookies_are_preserved
+                            else "fresh-cookie recovery was allowed (auth cookies not required)"
+                        )
                         recovery_message = (
                             f"Recovered by selecting {config_key}; {verified_phrase}"
                             + (
@@ -8087,11 +8092,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 if blocked_resource_url
                                 else ""
                             )
-                            + "; signed-in state was preserved."
+                            + f"; {auth_cookie_note}."
                         )
                     else:
+                        auth_cookie_note = (
+                            "authenticated cookies were preserved"
+                            if auth_cookies_are_preserved
+                            else "fresh-cookie recovery was allowed (auth cookies not required)"
+                        )
                         recovery_message = (
-                            "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
+                            "Recovered by removing a proven non-auth cookie subset; "
+                            f"{auth_cookie_note}."
                         )
                     if current_url:
                         recovery_message = (

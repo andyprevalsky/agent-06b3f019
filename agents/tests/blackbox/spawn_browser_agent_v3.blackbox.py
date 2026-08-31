@@ -5900,6 +5900,9 @@ def test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal():
     assert "preserve_auth = auth_cookies_are_preserved" in recovery_block
     assert "allow_logged_out_cookie_commit = not auth_cookies_are_preserved" in recovery_block
     assert "allow_logged_out_cookie_commit=allow_logged_out_cookie_commit" in recovery_block
+    assert "fresh-cookie recovery was allowed" in source
+    assert "authenticated cookies were preserved" in source
+    assert "signed-in state was preserved" not in source
 
 
 def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
