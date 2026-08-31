@@ -161,6 +161,7 @@ export const PostMessageResponse = z.object({
 export const StatusResponse = z.object({
   agent_id: z.string().uuid(),
   status: z.string(),
+  temporal_workflow_id: z.string().nullable(),
 });
 
 export const UpdateStatusResponse = z.object({

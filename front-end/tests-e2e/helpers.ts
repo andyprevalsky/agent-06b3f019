@@ -308,11 +308,18 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
   // "did not persist temporal_workflow_id" / fetch-error abort). The 5s
   // FULL_LIFECYCLE_RATCHET_MS assertion is unchanged — this only bounds one
   // poll so retries can still reach a healthy read inside the 15s milestone.
+  // Poll GET /api/agents/:id/status (id+status+temporal_workflow_id) instead of
+  // GET /api/agents/:id. The detail handler loads relations + all messages +
+  // tool usages; 4 Playwright workers abort the 2.5s budget on that path.
   const PER_REQUEST_TIMEOUT_MS = 2_500;
   const POLL_INTERVAL_MS = 150;
 
   while (Date.now() < deadline) {
-    const url = `${BACKEND_URL}/api/agents/${agentId}`;
+    // Poll the light status row, not GET /api/agents/:id (getAgentDetail loads
+    // relations + every message + tool usages). Four Playwright workers hitting
+    // that every 150ms abort the 2.5s per-request budget while Temporal has
+    // already started — false "did not persist temporal_workflow_id".
+    const url = `${BACKEND_URL}/api/agents/${agentId}/status`;
     let res: Response;
     try {
       res = await fetch(url, {
@@ -332,20 +339,18 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
     } catch {
       data = { raw: rawBody };
     }
-    const agent = data.agent as
-      { temporal_workflow_id?: unknown; status?: unknown; status_message?: unknown } | undefined;
-    const workflowId = agent?.temporal_workflow_id;
+    const workflowId = data.temporal_workflow_id;
+    const status = data.status;
     if (res.ok && typeof workflowId === 'string' && workflowId !== '') return workflowId;
 
     lastState = `${res.status} ${JSON.stringify({
       temporal_workflow_id: workflowId ?? null,
-      status: agent?.status ?? null,
-      status_message: agent?.status_message ?? null,
+      status: status ?? null,
     })}`;
     if (!res.ok && res.status !== 404) {
       throw new Error(`Agent ${agentId} Temporal-start check failed: ${lastState}`);
     }
-    if (agent?.status === 'FAILED' || agent?.status === 'CANCELLED') {
+    if (status === 'FAILED' || status === 'CANCELLED') {
       throw new Error(`Agent ${agentId} terminated before Temporal startup: ${lastState}`);
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));

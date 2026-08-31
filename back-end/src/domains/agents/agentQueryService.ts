@@ -282,7 +282,7 @@ export async function getAncestors(agentId: string, allowBenchmarkArchive = fals
 // Get agent status
 // ---------------------------------------------------------------------------
 
-/** Get agent status only (for browser agent pause check). */
+/** Get agent status + Temporal workflow id (pause checks and light startup polls). */
 export async function getAgentStatus(agentId: string) {
   const agent = await repo.findAgentStatus(agentId);
 
@@ -293,6 +293,7 @@ export async function getAgentStatus(agentId: string) {
   return {
     agent_id: agent.id,
     status: agent.status,
+    temporal_workflow_id: agent.temporalWorkflowId,
   };
 }
 
