@@ -2,7 +2,6 @@ import type { CreateAgentBody } from './types';
 import { isNonRealWorldModelMode, normalizeWorldModelMode } from '../../providers/worldModelMode';
 import { isAdminUser } from '../../utils/adminAccess';
 export { normalizeWorldModelMode } from '../../providers/worldModelMode';
-const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
 
 export class WorldModelModeAccessError extends Error {
   constructor() {
@@ -18,22 +17,22 @@ export function assertWorldModelModeAccess(body: CreateAgentBody, userId: string
   }
 }
 
-/** Apply account-scoped Fast Mode defaults for root agents only. */
-export function applyFastModeDefault(body: CreateAgentBody, userId: string): void {
+/**
+ * Apply Fast Mode defaults for root agents only.
+ * Every root agent defaults Fast Mode on unless the caller opts out or Simulator
+ * mode forces provider-cache reads off.
+ */
+export function applyFastModeDefault(body: CreateAgentBody, _userId: string): void {
   if (isNonRealWorldModelMode(body.world_model_mode)) {
     body.fast_mode_cache_enabled = false;
     return;
   }
-  if (
-    body.fast_mode_cache_enabled === undefined &&
-    body.parent_agent_id === undefined &&
-    DEFAULT_FAST_MODE_USER_IDS.has(userId)
-  ) {
+  if (body.fast_mode_cache_enabled === undefined && body.parent_agent_id === undefined) {
     body.fast_mode_cache_enabled = true;
   }
 }
 
-/** A sub-agent inherits Fast Mode reads from its parent unless explicitly set. */
+/** A sub-agent inherits Fast Mode from its parent unless explicitly set. */
 export function applyFastModeInheritance(
   body: CreateAgentBody,
   parentFastModeCacheEnabled: boolean | null | undefined
@@ -41,9 +40,9 @@ export function applyFastModeInheritance(
   if (
     body.fast_mode_cache_enabled === undefined &&
     body.parent_agent_id !== undefined &&
-    parentFastModeCacheEnabled === true
+    typeof parentFastModeCacheEnabled === 'boolean'
   ) {
-    body.fast_mode_cache_enabled = true;
+    body.fast_mode_cache_enabled = parentFastModeCacheEnabled;
   }
 }
 

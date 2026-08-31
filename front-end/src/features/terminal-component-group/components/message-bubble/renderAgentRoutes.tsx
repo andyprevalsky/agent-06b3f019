@@ -27,6 +27,7 @@ export function renderAgentRoutes({ props, routing }: Args): ReactElement | null
     waitForChecks,
     thinkingStreamTokenCount,
     thinkingStreamStartedAtMs,
+    streamingMetricsBySubAgentId,
     hideSubAgentTreeHeader,
   } = props;
 
@@ -59,6 +60,7 @@ export function renderAgentRoutes({ props, routing }: Args): ReactElement | null
         waitForChecks={waitForChecks}
         thinkingStreamTokenCount={thinkingStreamTokenCount}
         thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+        streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
         onTypingComplete={onTypingComplete}
       />
     );

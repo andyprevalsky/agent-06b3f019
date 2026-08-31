@@ -1,6 +1,14 @@
 /**
  * Renders the agent's output schema fields (name, type, required flag, description).
  * Shows a placeholder while the schema is still being generated.
+ *
+ * STATE:
+ *   fields.length > 0  ──► list field name / type / required / description
+ *   fields empty       ──► "Schema generating..."
+ *
+ * Fields come from GET /api/agents/:id `response_schema`, or from
+ * hydrateAgentDetail() which copies Task Complete `completionSummary.outputs`
+ * when Hub archives omit the schema.
  */
 
 import { FileJson } from 'lucide-react';

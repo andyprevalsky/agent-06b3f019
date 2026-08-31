@@ -19,6 +19,7 @@ import {
   BACKEND_URL,
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
+  IS_PROD,
   TEST_API_KEY,
   attachRecorder,
   createAgent,
@@ -125,6 +126,9 @@ async function openFullscreenFromChip(page: import('@playwright/test').Page): Pr
 }
 
 test.describe('browser-take-control', () => {
+  // Direct DB seed is local-only; production semantic cannot write BrowserSession rows.
+  test.skip(IS_PROD, 'Take-control seed requires local DB; skip against production');
+
   test('user can take and hand back control from the browser status chip', async ({ page }) => {
     const rec = attachRecorder(page);
     const agentId = await createAgent('Semantic test: browser take control via status chip.');

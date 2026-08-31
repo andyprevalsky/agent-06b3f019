@@ -105,6 +105,7 @@ const CatalogTaskSchema = z.object({
       last_attempt_at: z.string().nullable(),
       last_status: z.string().nullable(),
       last_fast_mode: z.boolean(),
+      last_five_passed: z.boolean().optional(),
     })
     .nullable(),
 });
@@ -355,13 +356,20 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
     const root = rootView.data as {
       agent: { agent_id: string; busId: string };
       messages: Array<{ text: string }>;
-      tree: Array<{ agent_id: string; parent_agent_id: string | null }>;
+      tree: Array<{
+        agent_id: string;
+        parent_agent_id: string | null;
+        message_count: number;
+        status: string;
+      }>;
     };
     assert(root.agent.agent_id === ROOT_AGENT, 'root agent id mismatch');
     assert(root.messages.length === 2, `root messages ${root.messages.length} != 2`);
     assert(root.tree.length === 2, `tree size ${root.tree.length} != 2`);
     const sub = root.tree.find((n) => n.agent_id === SUB_AGENT);
     assert(sub?.parent_agent_id === ROOT_AGENT, 'sub-agent parent link missing');
+    assert((sub?.message_count ?? 0) > 0, 'sub-agent tree node must carry a transcript');
+    assert(sub?.status === 'COMPLETED', `sub-agent status ${sub?.status} != COMPLETED`);
 
     // sub-agent transcript (the fan-out renders)
     const subView = await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}/agents/${SUB_AGENT}`, {
@@ -443,16 +451,23 @@ async function testAgents_mainPanelFallbackServesBenchmarkAgents(): Promise<void
       headers: internalHeaders,
     });
     assertStatus(tree.status, 200, tree.data);
-    const ids = (tree.data as { agents: Array<{ agent_id: string }> }).agents.map(
-      (a) => a.agent_id
-    );
+    const ids = (
+      tree.data as { agents: Array<{ agent_id: string; message_count: number; status: string }> }
+    ).agents.map((a) => a.agent_id);
     assert(ids.includes(ROOT_AGENT) && ids.includes(SUB_AGENT), `tree fallback wrong: ${ids}`);
+    const subNode = (
+      tree.data as { agents: Array<{ agent_id: string; message_count: number; status: string }> }
+    ).agents.find((a) => a.agent_id === SUB_AGENT);
+    assert((subNode?.message_count ?? 0) > 0, 'tree fallback child must not be spinning-up empty');
+    assert(subNode?.status === 'COMPLETED', 'tree fallback child status');
 
     // sub-agent transcript through the normal route too
     const sub = await request(`${BASE_URL}/api/agents/${SUB_AGENT}`, {
       headers: internalHeaders,
     });
     assertStatus(sub.status, 200, sub.data);
+    const subBody = sub.data as { messages: Array<{ text: string }> };
+    assert((subBody.messages?.length ?? 0) > 0, 'sub-agent fallback transcript missing');
   } finally {
     await request(`${BASE_URL}/api/benchmarks/runs/${RUN_ID}`, {
       method: 'DELETE',

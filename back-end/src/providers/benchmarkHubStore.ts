@@ -19,6 +19,11 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3
 import fs from 'fs';
 import path from 'path';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
+import {
+  completionOutputsFromMessages,
+  schemaFromCompletionOutputs,
+  structuredFromCompletionOutputs,
+} from './benchmarkHubOutputs';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -388,8 +393,12 @@ function agentSummaryFromTask(
   agentId: string,
   messages: Array<Record<string, unknown>>,
   runTimestamp: string,
-  parent: { parentAgentId: string | null; busId: string; goal: string; status: string }
+  parent: { parentAgentId: string | null; busId: string; goal: string; status: string },
+  node: Record<string, unknown> = {}
 ): Record<string, unknown> {
+  const tokensIn = Number(node.tokens_in ?? task.tokens_in ?? 0);
+  const tokensOut = Number(node.tokens_out ?? task.tokens_out ?? 0);
+  const outputs = completionOutputsFromMessages(messages);
   return {
     agent_id: agentId,
     parent_agent_id: parent.parentAgentId,
@@ -404,13 +413,13 @@ function agentSummaryFromTask(
     status: parent.status,
     status_message: `Benchmark hub archive: ${String(task.name ?? '')}`,
     temporal_workflow_id: `benchmark-hub-${agentId}`,
-    token_count: Number(task.tokens_in ?? 0) + Number(task.tokens_out ?? 0),
-    tokens_in: Number(task.tokens_in ?? 0),
-    tokens_out: Number(task.tokens_out ?? 0),
+    token_count: tokensIn + tokensOut,
+    tokens_in: tokensIn,
+    tokens_out: tokensOut,
     tool_tokens_in: 0,
     tool_tokens_out: 0,
     tool_cost_cents: 0,
-    context_size: 0,
+    context_size: Number(node.context_size ?? task.context_size ?? 0),
     message_count: messages.length,
     price_limit_cents: 0,
     tree_cost_cents: Number(task.cost_cents ?? 0),
@@ -423,16 +432,57 @@ function agentSummaryFromTask(
         ? (messages[messages.length - 1].timestamp ?? runTimestamp)
         : runTimestamp,
     write_lock_enabled: true,
-    structured_output: null,
+    structured_output:
+      node.structured_output ??
+      task.structured_output ??
+      structuredFromCompletionOutputs(outputs) ??
+      null,
     failure_context: null,
     verifier: null,
     tools: [],
     tools_in_use: [],
-    response_schema: null,
+    response_schema:
+      node.response_schema ?? task.response_schema ?? schemaFromCompletionOutputs(outputs) ?? null,
     benchmark_task: task.name ?? null,
     benchmark_duration_seconds: Number(task.duration_seconds ?? 0),
     benchmark_world_model_mode: task.world_model_mode ?? null,
   };
+}
+
+const TOOL_USAGE_TREE_KEYS = new Set([
+  'root_agent_id',
+  'agent_count',
+  'tool_usage_count',
+  'llm_call_count',
+  'tokens_in',
+  'tokens_out',
+  'total_cost_cents',
+  'total_cost_dollars',
+  'total_tokens_from_tools',
+  'cache_read_input_tokens',
+  'cache_creation_input_tokens',
+]);
+
+function isAgentTreeNode(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const node = value as Record<string, unknown>;
+  return (
+    Array.isArray(node.messages) ||
+    'parent_agent_id' in node ||
+    typeof node.goal === 'string' ||
+    typeof node.status === 'string'
+  );
+}
+
+/** Keep agent-id-keyed transcript nodes; drop `/api/tool-usage/tree` rollups. */
+export function canonicalAgentTree(raw: unknown): Record<string, Record<string, unknown>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!key || TOOL_USAGE_TREE_KEYS.has(key) || !isAgentTreeNode(value)) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /**
@@ -449,7 +499,7 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
     const rootId = typeof task.agent_id === 'string' ? task.agent_id : '';
     if (!rootId) continue;
     const logs = (task.logs ?? {}) as Record<string, unknown>;
-    const tree = (logs.tree ?? {}) as Record<string, Record<string, unknown>>;
+    const tree = canonicalAgentTree(logs.tree);
     const isRoot = agentId === rootId;
     const inTree = Object.prototype.hasOwnProperty.call(tree, agentId);
     if (!isRoot && !inTree) continue;
@@ -492,12 +542,19 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
 
     const target = nodeInfo(agentId);
     const messages = target.raw.map((m, i) => frontendMessage(agentId, i, m));
-    const agent = agentSummaryFromTask(task, agentId, messages, runTimestamp, {
-      parentAgentId: target.parent,
-      busId: rootId,
-      goal: target.goal,
-      status: target.status,
-    });
+    const agent = agentSummaryFromTask(
+      task,
+      agentId,
+      messages,
+      runTimestamp,
+      {
+        parentAgentId: target.parent,
+        busId: rootId,
+        goal: target.goal,
+        status: target.status,
+      },
+      tree[agentId] ?? {}
+    );
 
     const treeIds = new Set<string>([rootId, ...Object.keys(tree)]);
     const treeNodes = [...treeIds].map((id) => {
@@ -511,6 +568,20 @@ export async function getRunAgent(runId: string, agentId: string): Promise<HubAg
         tools_in_use: [],
         message_count: info.raw.length,
         tree_cost_cents: id === rootId ? Number(task.cost_cents ?? 0) : 0,
+        output_schema:
+          (tree[id] ?? {}).response_schema ??
+          (id === rootId ? task.response_schema : null) ??
+          schemaFromCompletionOutputs(completionOutputsFromMessages(info.raw)) ??
+          null,
+        structured_output:
+          (tree[id] ?? {}).structured_output ??
+          (id === rootId ? task.structured_output : null) ??
+          structuredFromCompletionOutputs(completionOutputsFromMessages(info.raw)) ??
+          null,
+        tokens_in: Number((tree[id] ?? {}).tokens_in ?? (id === rootId ? task.tokens_in : 0) ?? 0),
+        tokens_out: Number(
+          (tree[id] ?? {}).tokens_out ?? (id === rootId ? task.tokens_out : 0) ?? 0
+        ),
       };
     });
 
@@ -585,10 +656,10 @@ export async function findTreeAcrossRuns(
   if (view === null) return null;
   return view.tree.map((node) => ({
     ...node,
-    tokens_in: 0,
-    tokens_out: 0,
-    output_schema: null,
-    structured_output: null,
+    tokens_in: Number(node.tokens_in ?? 0),
+    tokens_out: Number(node.tokens_out ?? 0),
+    output_schema: node.output_schema ?? null,
+    structured_output: node.structured_output ?? null,
     failure_context: undefined,
     created_at: null,
     updated_at: null,

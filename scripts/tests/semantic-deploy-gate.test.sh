@@ -81,7 +81,12 @@ require_text "$LIFECYCLE_SPEC" "const FULL_LIFECYCLE_RATCHET_MS = 5_000;" "lifec
 require_text "$LIFECYCLE_SPEC" "mode: 'parallel'" "chat paths must run concurrently"
 require_text "$LIFECYCLE_SPEC" "test.use({ trace: 'off', video: 'off' });" "latency measurements must exclude Playwright recording overhead"
 require_text "$ROOT_DIR/front-end/tests-e2e/helpers.ts" "waitForTemporalWorkflow" "agent lifecycle ratchet must expose an authoritative Temporal-start helper"
-require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 500;" "one stalled lifecycle poll must not consume half of the five-second ratchet"
+# Per-request poll bound must cover documented prod edge stalls (~2.5s) so a
+# saturated GH Actions→Render path can still observe an already-persisted
+# temporal_workflow_id. Do NOT ratchet this down toward the 5s lifecycle SLA —
+# that assertion lives on FULL_LIFECYCLE_RATCHET_MS; starving the poll recreates
+# the July 18 false-negative (RCA 2026-07-18, recurred 2026-08-31 after 500ms).
+require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 2_500;" "temporal-workflow poll per-request timeout must stay at 2500ms to cover prod edge stalls"
 require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle terminal must wait for persisted Temporal startup"
 
 # CI runs UI semantics and the latency ratchet as concurrent jobs. The ratchet
@@ -106,6 +111,10 @@ fi
 require_text "$RUNNER" 'node scripts/generate-prod-test-session.mjs' "production semantics must not install backend dependencies only to generate auth"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
+require_text "$RUNNER" 'FRONTEND_URL="${FRONTEND_URL:-https://www.roselabs.ai}"' "prod semantic default frontend must be www (apex 307s and flakes on some runners)"
+require_text "$RUNNER" 'curl -4 -sfL --max-time 20 -o /dev/null "$FRONTEND_URL"' "prod frontend probe must force IPv4, follow redirects, and bound wait"
+require_text "$WORKFLOW" "default: https://www.roselabs.ai" "workflow_dispatch frontend default must match the hardened www probe"
+require_text "$DEPLOY_COMMAND" "-f frontend_url=https://www.roselabs.ai" "/deploy production semantic dispatch must target www"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 1" "latency ratchet must avoid renderer contention"
 require_text "$WORKFLOW" "--prod chat-lifecycle-latency" "production gate must run the lifecycle ratchet"

@@ -517,7 +517,8 @@ export async function fetchComputeTokenForUser(
     const userToken = await fetchComputeUserToken(userId, pinnedTokenType);
     if (userToken) return userToken;
   }
-  return fetchComputePoolToken(options?.excludePoolTokenIds, pinnedTokenType);
+  const poolToken = await fetchComputePoolToken(options?.excludePoolTokenIds, pinnedTokenType);
+  return poolToken;
 }
 
 export async function heartbeatComputeTokenLineage(lineageKey: string) {

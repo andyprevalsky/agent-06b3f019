@@ -10,12 +10,10 @@
  *     npx tsx scripts/seed-browser-take-control-e2e.ts
  */
 import { randomUUID } from 'node:crypto';
-import { config } from 'dotenv';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
 
-config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '../.env') });
+// Callers inject DATABASE_URL / DIRECT_URL (see browser-take-control.spec.ts). Do not load
+// dotenv here — production semantic CI only installs front-end deps, so `dotenv` is absent.
 
 const prisma = new PrismaClient();
 

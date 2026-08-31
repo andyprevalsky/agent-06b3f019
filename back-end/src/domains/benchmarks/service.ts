@@ -2,6 +2,7 @@ import { benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig 
 import { readCatalogTasks } from './catalog';
 import { createLogger } from '../../providers/logger';
 import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
+import { computeTaskStats } from './hubCatalogService';
 
 const log = createLogger('Benchmarks');
 void log; // logger retained for future route-level diagnostics
@@ -25,9 +26,15 @@ export interface TestPrompt {
   prompt: string;
   attachmentUrls: string[];
   tags: string[];
+  /**
+   * True when run history has ≥5 attempts for this task and the most recent
+   * 5 all passed — drives the green check in the query-box prompt list.
+   */
+  lastFivePassed: boolean;
 }
 
 interface CatalogTaskShape {
+  name?: unknown;
   title?: unknown;
   description?: unknown;
   prompt: string;
@@ -51,8 +58,15 @@ interface CatalogTaskShape {
  *   the live tunnel URL.
  * - Bare attachment names become `/test-assets/*` public paths.
  * - Catalog `tags` pass through so the picker can filter prompts by tag.
+ * - `lastFivePassed` joins per-task run history (committed ledger + hub
+ *   completed runs) so the picker can show a green check for stable tasks.
+ *
+ * Diagram:
+ *   task_attempts.jsonl + hub runs → computeTaskStats.last_five_passed
+ *        → GET /test-prompts.lastFivePassed → PromptList green check
  */
-export function getTestPrompts(): TestPrompt[] {
+export async function getTestPrompts(): Promise<TestPrompt[]> {
+  const stats = await computeTaskStats();
   return (getTasks() as CatalogTaskShape[])
     .filter((task) => (task.runner ?? 'agent') === 'agent')
     .map((task) => {
@@ -62,6 +76,7 @@ export function getTestPrompts(): TestPrompt[] {
           ? [task.attachment]
           : [];
       const title = typeof task.title === 'string' ? task.title : '';
+      const name = typeof task.name === 'string' ? task.name : '';
       return {
         title,
         description: typeof task.description === 'string' ? task.description : title,
@@ -70,6 +85,7 @@ export function getTestPrompts(): TestPrompt[] {
         tags: Array.isArray(task.tags)
           ? (task.tags as unknown[]).filter((tag): tag is string => typeof tag === 'string')
           : [],
+        lastFivePassed: stats.get(name)?.last_five_passed === true,
       };
     });
 }
