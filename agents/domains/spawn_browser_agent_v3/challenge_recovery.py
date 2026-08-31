@@ -900,6 +900,12 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "do not use guest",
         "don't use guest",
         "avoid guest",
+        "do not use anonymous checkout",
+        "don't use anonymous checkout",
+        "do not check out anonymously",
+        "don't check out anonymously",
+        "do not checkout anonymously",
+        "don't checkout anonymously",
     )
     if any(needle in text for needle in negated_guest_needles):
         # Fall through to signed-in / default preserve-auth handling.

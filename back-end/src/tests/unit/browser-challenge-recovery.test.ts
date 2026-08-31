@@ -306,6 +306,52 @@ async function testLateCreateAfterAbortIsReleased(): Promise<void> {
   );
 }
 
+async function testAbortedProbeDoesNotDoubleRelease(): Promise<void> {
+  /** Sibling win clears activeSessions via abort listener; the losing probe's
+   * catch must not release the same remote session a second time. */
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
+  const releaseCounts = new Map<string, number>();
+  let releaseSlowProbe: (() => void) | undefined;
+  const slowProbeGate = new Promise<void>((resolve) => {
+    releaseSlowProbe = resolve;
+  });
+
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: {} },
+      { key: 'stripped', storageState: {} },
+    ],
+    {
+      create: async (config, _signal) => ({
+        ...fakeSession(config),
+        sessionId: `session-${config.key}`,
+      }),
+      probe: async (_config, _session, lane, _signal) => {
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        await slowProbeGate;
+        return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+      },
+      promote: async () => undefined,
+      release: async (_config, session) => {
+        releaseCounts.set(session.sessionId, (releaseCounts.get(session.sessionId) ?? 0) + 1);
+      },
+    }
+  );
+
+  assert.strictEqual(winner.config.key, configs[0]!.key);
+  releaseSlowProbe!();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const authKeptReleases = releaseCounts.get(`session-${configs[0]!.key}`) ?? 0;
+  assert.strictEqual(
+    authKeptReleases,
+    1,
+    `aborted probe must release auth_kept session once (got ${authKeptReleases})`
+  );
+}
+
 function testOrderConfigsForLane(): void {
   const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
   const ordered = orderConfigsForLane(configs, 'kernel_residential_city');
@@ -508,6 +554,7 @@ async function main(): Promise<void> {
   await testNoStableCandidateCleansEverything();
   await testPartialStableCandidateIsNeverPromoted();
   await testLateCreateAfterAbortIsReleased();
+  await testAbortedProbeDoesNotDoubleRelease();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.

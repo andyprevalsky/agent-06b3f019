@@ -153,7 +153,9 @@ export async function runLaneConfigSearch(
         activeSessions.delete(tracked);
         await dependencies.release(config, session).catch(() => {});
       } catch (error) {
-        activeSessions.delete(tracked);
+        // abort listener may already have cleared+released this session when a
+        // sibling won; only release locally when we still own the track entry.
+        const ownsSession = activeSessions.delete(tracked);
         log.warn('Challenge recovery lane candidate probe failed', {
           laneKey: lane.key,
           configKey: config.key,
@@ -161,7 +163,9 @@ export async function runLaneConfigSearch(
           proxyMode: config.proxyMode,
           error: error instanceof Error ? error.message : String(error),
         });
-        await dependencies.release(config, session).catch(() => {});
+        if (ownsSession) {
+          await dependencies.release(config, session).catch(() => {});
+        }
         if (abort.signal.aborted || claimLock.claimed) {
           throw new Error('lane_aborted');
         }

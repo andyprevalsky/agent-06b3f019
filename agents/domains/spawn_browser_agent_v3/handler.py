@@ -7095,7 +7095,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 "task": task_prompt,
                                 "dynamic_system_context": dynamic_system_context,
                                 "turn_messages": browser_turn_messages,
-                                "browser_state": {},
+                                # url/title enter the Fast Mode cache key via
+                                # canonical_browser_use_request — empty {} would
+                                # replay a stale decision after a page change.
+                                "browser_state": {
+                                    "url": observe_page_state.get("url") or current_url,
+                                    "title": observe_page_state.get("title"),
+                                },
                                 "action_entries": action_entries,
                                 "config": {
                                     "browser_use_mode": browser_use_mode,
@@ -8254,7 +8260,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         tool_call_id=verifier_call_id,
                     )
 
-                    verifier_browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                    verifier_browser_state = await asyncio.wait_for(
+                        dom_service.get_browser_state(include_screenshot=False),
+                        timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                    )
                     verifier_context = await build_browser_verifier_context(
                         goal=goal,
                         current_url=current_url,
@@ -8366,8 +8375,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             session_id, user_id, config, exclude_paths=uploaded_paths
                         )
 
-                        final_screenshot_state = await dom_service.get_browser_state(
-                            include_screenshot=True
+                        final_screenshot_state = await asyncio.wait_for(
+                            dom_service.get_browser_state(include_screenshot=True),
+                            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                         )
                         last_screenshot_b64 = final_screenshot_state.get("screenshot")
                         if last_screenshot_b64:
