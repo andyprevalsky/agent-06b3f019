@@ -180,6 +180,20 @@ set +e
 SUPERVISOR_PID=""
 SIGNAL_EXIT=0
 PENDING_SIGNAL=""
+# TERM/INT/HUP must reach nested run_logged_command + run-bench, not just the
+# batch-wrapper subshell. The supervisor is launched in its own process group.
+signal_supervisor() {
+    local signal_name="$1"
+    if [ -z "$SUPERVISOR_PID" ]; then
+        return 0
+    fi
+    if ! kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+        return 0
+    fi
+    kill -s "$signal_name" -- "-$SUPERVISOR_PID" 2>/dev/null \
+        || kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
+}
+
 forward_signal() {
     signal_name="$1"
     signal_exit="$2"
@@ -187,10 +201,8 @@ forward_signal() {
     trap - HUP INT TERM
     if [ -n "$SUPERVISOR_PID" ]; then
         PENDING_SIGNAL=""
-        if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
-            kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
-            wait "$SUPERVISOR_PID" 2>/dev/null || true
-        fi
+        signal_supervisor "$signal_name"
+        wait "$SUPERVISOR_PID" 2>/dev/null || true
     else
         PENDING_SIGNAL="$signal_name"
     fi
@@ -276,6 +288,9 @@ run_smoke_batch() {
 # when the sole pooled OAuth credential is rate-limited, Claude Code smoke
 # tasks become the deploy-approved loud SKIP instead of failing the whole
 # compute-token sync / preflight. Fleet/cloud require-pass does NOT set this.
+# Monitor mode puts the background supervisor in its own process group so
+# signal_supervisor can TERM the wrapper, run_logged_command, and run-bench.
+set -m
 (
     run_smoke_batch local "${LOCAL_CACHE_TASKS[@]}"
     local_ec=$?
@@ -283,10 +298,11 @@ run_smoke_batch() {
     run_smoke_batch shared "${SHARED_CACHE_TASKS[@]}"
 ) &
 SUPERVISOR_PID=$!
+set +m
 if [ -n "$PENDING_SIGNAL" ]; then
     pending_signal="$PENDING_SIGNAL"
     PENDING_SIGNAL=""
-    kill -s "$pending_signal" "$SUPERVISOR_PID" 2>/dev/null || true
+    signal_supervisor "$pending_signal"
 fi
 wait "$SUPERVISOR_PID"
 RUN_EXIT=$?
