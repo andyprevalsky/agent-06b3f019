@@ -218,6 +218,12 @@ def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
         "Do not continue as guest; sign in with my account."
     )
     assert not goal_allows_logged_out_cookie_commit(
+        "Don't proceed as guest; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "do not proceed as a guest; sign in with my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
         "Don't check out as guest; use my account."
     )
     assert not goal_allows_logged_out_cookie_commit(

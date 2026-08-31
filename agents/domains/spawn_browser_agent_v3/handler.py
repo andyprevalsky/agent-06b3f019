@@ -655,8 +655,13 @@ def _compact_browser_turn_messages_for_resume(
     Standalone user nudges between assistant/tool pairs mean a naive ``[-N:]``
     slice can start on a ``tool`` message. OpenAI-compatible providers reject
     that orphan because it has no preceding assistant ``tool_calls`` entry.
+    Also strip embedded screenshot/media payloads so Temporal activity results
+    stay under the payload limit across write-lock / payment resumes.
     """
-    compact_turns = list(browser_turn_messages or [])[-limit:]
+    compact_turns = [
+        _compact_simulated_resume_value(message)
+        for message in list(browser_turn_messages or [])[-limit:]
+    ]
     while compact_turns and compact_turns[0].get("role") == "tool":
         compact_turns.pop(0)
     return compact_turns

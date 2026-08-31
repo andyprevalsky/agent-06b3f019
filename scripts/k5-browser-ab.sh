@@ -3,6 +3,13 @@
 set -eo pipefail
 
 LABEL="${1:?usage: k5-browser-ab.sh <presync|postsync>}"
+case "$LABEL" in
+  presync|postsync) ;;
+  *)
+    echo "usage: k5-browser-ab.sh <presync|postsync>" >&2
+    exit 1
+    ;;
+esac
 ROOT="${2:-/workspace}"
 LOG_DIR="/workspace/.context/k5-ab"
 mkdir -p "$LOG_DIR"
@@ -30,7 +37,9 @@ for t in "${TASKS[@]}"; do
 done
 
 export ROSE_USE_SYSTEM_PG=true
-export HOME=/home/ubuntu
+# Preserve caller HOME (macOS Codex ~/.codex/auth.json); default only when unset
+# so cloud/ngrok still resolve under /home/ubuntu.
+export HOME="${HOME:-/home/ubuntu}"
 export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${LABEL}-k5-${STAMP}"
 
 {

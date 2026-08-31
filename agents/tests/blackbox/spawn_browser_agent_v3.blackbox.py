@@ -18544,6 +18544,50 @@ def test_compact_browser_turn_messages_drops_leading_orphan_tool():
     assert state["browser_turn_messages"][0].get("role") != "tool"
 
 
+def test_compact_browser_turn_messages_strips_embedded_screenshots():
+    """Resume compaction must strip base64 screenshot media from turn payloads."""
+    from domains.spawn_browser_agent_v3.handler import (
+        _compact_browser_turn_messages_for_resume,
+    )
+
+    turns = [
+        {
+            "role": "assistant",
+            "content": "capturing challenge",
+            "tool_calls": [
+                {
+                    "id": "call-shot",
+                    "type": "function",
+                    "function": {"name": "screenshot", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-shot",
+            "name": "screenshot",
+            "content": "{}",
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Screenshot captured by the screenshot tool."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64," + ("A" * 1200),
+                    },
+                },
+            ],
+        },
+    ]
+    compact = _compact_browser_turn_messages_for_resume(turns, limit=40)
+    blob = str(compact)
+    assert "data:image/png;base64," not in blob
+    assert "AAAA" not in blob
+    assert any(message.get("role") == "user" for message in compact)
+
+
 def test_final_screenshot_fetch_isolated_from_verifier_errors():
     """Confirmed completion must survive a final-screenshot capture failure."""
     from pathlib import Path
@@ -20351,6 +20395,10 @@ async def run_all_tests():
     r.record(
         "compact_browser_turn_messages_drops_leading_orphan_tool",
         test_compact_browser_turn_messages_drops_leading_orphan_tool,
+    )
+    r.record(
+        "compact_browser_turn_messages_strips_embedded_screenshots",
+        test_compact_browser_turn_messages_strips_embedded_screenshots,
     )
     r.record(
         "final_screenshot_fetch_isolated_from_verifier_errors",
