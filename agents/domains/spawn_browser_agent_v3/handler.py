@@ -8817,7 +8817,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     activity.heartbeat(f"Step {iteration} - generating write lock notification")
                     # Screenshot required so checkout-preview fallback can fire when
                     # item images / media candidates are missing.
-                    write_lock_browser_state = await dom_service.get_browser_state(include_screenshot=True)
+                    write_lock_browser_state = await asyncio.wait_for(
+                        dom_service.get_browser_state(include_screenshot=True),
+                        timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                    )
                     notification_result = await _generate_write_lock_notification(
                         rose_client=rose_client,
                         task_prompt=task_prompt,
@@ -8879,8 +8882,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
                 # Reuse the just-fetched write-lock state (no browser action since).
-                checkpoint_state = write_lock_browser_state or await dom_service.get_browser_state(
-                    include_screenshot=False
+                checkpoint_state = write_lock_browser_state or await asyncio.wait_for(
+                    dom_service.get_browser_state(include_screenshot=False),
+                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
@@ -8961,7 +8965,10 @@ Based on this feedback, I need to continue working on the task and address the i
                 payment_notification_state = None
                 try:
                     activity.heartbeat(f"Step {iteration} - generating payment approval notification")
-                    payment_notification_state = await dom_service.get_browser_state(include_screenshot=True)
+                    payment_notification_state = await asyncio.wait_for(
+                        dom_service.get_browser_state(include_screenshot=True),
+                        timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                    )
                     payment_notification_result = await _generate_write_lock_notification(
                         rose_client=rose_client,
                         task_prompt=task_prompt,
@@ -9002,8 +9009,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
 
                 # Reuse payment notification state when available (no action since).
-                checkpoint_state = payment_notification_state or await dom_service.get_browser_state(
-                    include_screenshot=False
+                checkpoint_state = payment_notification_state or await asyncio.wait_for(
+                    dom_service.get_browser_state(include_screenshot=False),
+                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                 )
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)

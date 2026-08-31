@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Summarize k=5 A/B results from benchmark logs
 set -eo pipefail
-python3 <<'PY'
+python3 - "$@" <<'PY'
 import json, re, sys
 from collections import defaultdict
 from pathlib import Path
