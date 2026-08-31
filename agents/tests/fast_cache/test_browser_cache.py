@@ -309,6 +309,49 @@ def test_browser_use_record_then_replay(mem):
     asyncio.run(body())
 
 
+def test_browser_use_cache_key_includes_page_url(mem):
+    """Page URL must partition the Fast Mode key so a navigation cannot replay
+    a decision recorded on a different page with the same action history."""
+
+    async def body():
+        calls = {"n": 0}
+
+        async def live():
+            calls["n"] += 1
+            return {"action": "click", "index": calls["n"]}
+
+        base = {
+            "task": "click next",
+            "turn_messages": [],
+            "action_entries": [{"action": "scroll", "params": {"direction": "down"}}],
+            "config": {"browser_use_mode": None},
+        }
+        page_a = {**base, "browser_state": {"url": "https://shop.example/a", "title": "A"}}
+        page_b = {**base, "browser_state": {"url": "https://shop.example/b", "title": "B"}}
+        assert normalize.canonical_browser_use_request(page_a) != normalize.canonical_browser_use_request(
+            page_b
+        )
+        await browser_use_cache.cached_browser_decision(
+            enabled=False, write_enabled=True, goal="g", request=page_a, call_llm=live
+        )
+        assert calls["n"] == 1
+        # Same trajectory on a different URL must miss (non-bench goal → live).
+        r_b = await browser_use_cache.cached_browser_decision(
+            enabled=True, goal="g", request=page_b, call_llm=live
+        )
+        assert calls["n"] == 2
+        assert r_b.get("index") == 2
+        # Exact same page URL still replays page_a's decision.
+        r_a2 = await browser_use_cache.cached_browser_decision(
+            enabled=True, goal="g", request=page_a, call_llm=live
+        )
+        assert calls["n"] == 2
+        assert r_a2.get("action") == "click"
+        assert r_a2.get("index") == 1
+
+    asyncio.run(body())
+
+
 def test_browser_use_soft_completes_on_miss(mem):
     async def body():
         calls = {"n": 0}

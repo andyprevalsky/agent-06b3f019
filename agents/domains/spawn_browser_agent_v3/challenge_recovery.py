@@ -879,23 +879,50 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     Guest needles are checked first: phrases like ``do not sign in`` contain the
     substring ``sign in`` and must not be classified as signed-in preference.
     """
-    text = (goal or "").lower()
-    guest_needles = (
-        "guest checkout",
-        "as guest",
-        "continue as guest",
-        "check out anonymously",
-        "checkout anonymously",
-        "anonymous checkout",
-        "anonymously",
-        "do not sign in",
-        "don't sign in",
-        "without signing in",
-        "no account needed",
-        "do not log in",
-        "don't log in",
+    text = (
+        (goal or "")
+        .lower()
+        .replace("\u2019", "'")
+        .replace("\u2018", "'")
+        .replace("\u02bc", "'")
     )
-    if any(needle in text for needle in guest_needles):
+    guest_target = (
+        r"(?:as an? guest|as a guest|as guest|guest checkout|anonymous checkout|"
+        r"anonymously|without (?:logging|signing) in)"
+    )
+    # Prefix / coordinated negation: "no/do not/... [words] guest-target [or target]*"
+    guest_scan_text = re.sub(
+        rf"(?:(?:do not|don't|never|avoid|no|not)\s+(?:\w+[\s,;-]*){{0,6}})+{guest_target}"
+        rf"(?:\s+or\s+{guest_target})*",
+        " ",
+        text,
+    )
+    # Suffix negation: "guest checkout is not what I want"
+    guest_scan_text = re.sub(
+        rf"{guest_target}\s+(?:is not|isn't|not what|not for me|not desired|not wanted)",
+        " ",
+        guest_scan_text,
+    )
+    # Phrase-boundary guest indicators (avoid "was a guest" matching "as a guest").
+    guest_phrases = (
+        r"\bguest checkout\b",
+        r"\banonymous checkout\b",
+        r"\bas a guest\b",
+        r"\bas guest\b",
+        r"\bcontinue as a guest\b",
+        r"\bcontinue as guest\b",
+        r"\bcheck out anonymously\b",
+        r"\bcheckout anonymously\b",
+        r"\banonymously\b",
+        r"\bdo not sign in\b",
+        r"\bdon't sign in\b",
+        r"\bwithout signing in\b",
+        r"\bwithout logging in\b",
+        r"\bno account needed\b",
+        r"\bdo not log in\b",
+        r"\bdon't log in\b",
+    )
+    if any(re.search(pattern, guest_scan_text) for pattern in guest_phrases):
         return True
     signed_in_needles = (
         "sign in",
