@@ -9,7 +9,8 @@
  *     - EXPANDED:  shows a 3-tab view.
  *
  * TAB (only meaningful while EXPANDED):
- *   [RESULT] <-> [TRAJECTORY] <-> [RECORDING]   (default RESULT)
+ *   [RESULT] <-> [RECORDING]   (default RESULT)
+ *   RECORDING = video player + live trajectory side panel (scrub-synced)
  *
  * RECORDING URL (lazy, only when RECORDING tab first opened):
  *   recording_view_url (Kernel replay): [IDLE] --open--> [READY] (iframe URL directly)
@@ -33,7 +34,7 @@
  * metadata.task_id (each browser step is its own message).
  */
 import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
-import { ChevronDown, Clapperboard, ListOrdered, FileText, Globe } from 'lucide-react';
+import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
 import { useAgentContext } from '../hooks';
 import type { FilePointer, Message, OutputSchema } from '@/lib/api';
@@ -46,7 +47,7 @@ import {
   type TrajectoryStep,
 } from './browser-agent-chip/recordingTrajectorySync';
 
-type Tab = 'result' | 'trajectory' | 'recording';
+type Tab = 'result' | 'recording';
 
 interface BrowserAgentChipProps {
   message: Message;
@@ -355,15 +356,8 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
             <TabButton active={tab === 'result'} onClick={() => setTab('result')} icon={FileText}>
               Result
             </TabButton>
-            <TabButton
-              active={tab === 'trajectory'}
-              onClick={() => setTab('trajectory')}
-              icon={ListOrdered}
-            >
-              Trajectory ({trajectory.length})
-            </TabButton>
             <TabButton active={tab === 'recording'} onClick={openRecording} icon={Clapperboard}>
-              Recording
+              Recording ({trajectory.length})
             </TabButton>
           </div>
 
@@ -373,8 +367,6 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                 {resultText}
               </pre>
             )}
-
-            {tab === 'trajectory' && <TrajectoryList steps={trajectory} activeIndex={-1} />}
 
             {tab === 'recording' && (
               <div>

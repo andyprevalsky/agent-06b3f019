@@ -102,8 +102,8 @@ function recordingMsgWithId(
 
 async function openRecordingTab() {
   fireEvent.click(screen.getByTestId('browser-agent-chip-header'));
-  await waitFor(() => expect(screen.getByText('Recording')).toBeInTheDocument());
-  fireEvent.click(screen.getByText('Recording'));
+  await waitFor(() => expect(screen.getByText(/^Recording/)).toBeInTheDocument());
+  fireEvent.click(screen.getByText(/^Recording/));
 }
 
 describe('BrowserAgentChip recording', () => {
@@ -407,6 +407,17 @@ describe('BrowserAgentChip recording', () => {
       expect(active).toHaveTextContent('Pick Almond Oat Latte');
     });
     expect(screen.getByTestId('recording-playhead')).toHaveTextContent('t=45.0s');
+  });
+
+
+  it('exposes only Result and Recording tabs (trajectory lives inside Recording)', async () => {
+    const messages = [anchorMsg, recordingMsg({ recording_view_url: KERNEL_VIEW_URL })];
+    renderChip(messages, anchorMsg);
+
+    fireEvent.click(screen.getByTestId('browser-agent-chip-header'));
+    await waitFor(() => expect(screen.getByText(/^Recording/)).toBeInTheDocument());
+    expect(screen.getByText('Result')).toBeInTheDocument();
+    expect(screen.queryByText(/^Trajectory/)).not.toBeInTheDocument();
   });
 
 });
