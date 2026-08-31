@@ -883,12 +883,19 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     # Negated guest phrasing must not flip preserve_auth off (e.g. "do not
     # continue as guest; sign in with my account" still contains "as guest").
     negated_guest_needles = (
+        "do not continue as a guest",
+        "don't continue as a guest",
         "do not continue as guest",
         "don't continue as guest",
+        "do not checkout as a guest",
+        "don't checkout as a guest",
         "do not checkout as guest",
         "don't checkout as guest",
+        "do not check out as a guest",
+        "don't check out as a guest",
         "do not check out as guest",
         "don't check out as guest",
+        "not as a guest",
         "not as guest",
         "do not use guest",
         "don't use guest",
@@ -903,7 +910,9 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         guest_needles = (
             "guest checkout",
             "anonymous checkout",
+            "as a guest",
             "as guest",
+            "continue as a guest",
             "continue as guest",
             "check out anonymously",
             "checkout anonymously",

@@ -203,6 +203,7 @@ def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
         "Book Hotel Kabuki on hotels.com. Use guest checkout — do not sign in."
     )
     assert goal_allows_logged_out_cookie_commit("Continue as guest without an account.")
+    assert goal_allows_logged_out_cookie_commit("Check out as a guest without an account.")
     assert goal_allows_logged_out_cookie_commit("Complete anonymous checkout without logging in.")
     assert goal_allows_logged_out_cookie_commit(
         "Buy the item and check out anonymously without creating an account."
@@ -215,6 +216,9 @@ def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
     )
     assert not goal_allows_logged_out_cookie_commit(
         "Do not check out as guest; sign in with my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not check out as a guest; sign in with my account."
     )
     assert not goal_allows_logged_out_cookie_commit("Sign in with my Expedia account and book.")
     assert not goal_allows_logged_out_cookie_commit("")

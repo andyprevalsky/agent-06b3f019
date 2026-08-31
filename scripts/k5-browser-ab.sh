@@ -6,7 +6,9 @@ LABEL="${1:?usage: k5-browser-ab.sh <presync|postsync>}"
 ROOT="${2:-/workspace}"
 LOG_DIR="/workspace/.context/k5-ab"
 mkdir -p "$LOG_DIR"
-STAMP=$(date +%Y%m%d_%H%M%S)
+# Collision-resistant run id: second stamp + pid + random so concurrent
+# same-LABEL invocations never share log/meta/Temporal queue names.
+STAMP="$(date +%Y%m%d_%H%M%S)_$$_${RANDOM}"
 LOG="$LOG_DIR/${LABEL}-k5-${STAMP}.log"
 META="$LOG_DIR/${LABEL}-k5-${STAMP}.meta"
 
