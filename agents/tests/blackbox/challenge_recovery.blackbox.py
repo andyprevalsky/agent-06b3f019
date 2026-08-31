@@ -197,6 +197,31 @@ async def test_guest_path_commits_clean_all_target_strip():
     assert any("Guest path" in event[2] for event in events)
 
 
+async def test_guest_path_prefers_all_target_over_known_challenge_when_both_clean():
+    """auth_cookies_are_preserved=false must prefer full target clear over weak challenge strip."""
+    source = _state(
+        _cookie("cf_clearance"),
+        _cookie("prefs"),
+        _cookie("poison"),
+        _cookie("cart"),
+    )
+    before = copy.deepcopy(source)
+
+    async def probe(candidate):
+        # Both known_challenge (cf_clearance removed) and all_target (all removed) look clean.
+        return "cf_clearance" not in {cookie["name"] for cookie in candidate["cookies"]}
+
+    result, events, committed, config_inputs = await _run(
+        source, probe, allow_logged_out_cookie_commit=True
+    )
+    assert result.recovery == "cookies_sanitized"
+    assert set(committed) == {cookie_key(cookie) for cookie in before["cookies"]}
+    assert cookie_key(_cookie("cf_clearance")) in committed
+    assert cookie_key(_cookie("poison")) in committed
+    assert config_inputs == []
+    assert any("Guest path" in event[2] for event in events)
+
+
 async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
     source = _state(_cookie("opaque_state"), _cookie("prefs"), _cookie("cart"))
     before = copy.deepcopy(source)
@@ -971,6 +996,10 @@ async def run_all_tests():
     await result.record_async(
         "guest_path_commits_clean_all_target",
         test_guest_path_commits_clean_all_target_strip,
+    )
+    await result.record_async(
+        "guest_path_prefers_all_target_over_known_challenge",
+        test_guest_path_prefers_all_target_over_known_challenge_when_both_clean,
     )
     await result.record_async(
         "opaque_auth_cookie_preserved",

@@ -998,16 +998,10 @@ async def recover_from_challenge(
     if _state_digest(source_state) != original_digest:
         raise RuntimeError("Challenge recovery mutated its source browser state")
 
-    if known_safe and clean_by_label.get("known_challenge"):
-        await progress(
-            "apply_cookie_fix",
-            "Applying the proven known-challenge cookie strip on the live tab and "
-            "requiring one clean navigation.",
-        )
-        if await commit_cookie_removals(known_safe):
-            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
-        return await search_with_preserved_auth_state(known_safe)
-
+    # When fresh-cookie recovery is allowed, prefer the stronger all_target strip
+    # over a known-challenge-only strip if both probed clean. Preferring the weak
+    # strip first left poisoned non-challenge cookies on the live tab (Hotels.com
+    # GraphQL 429 soft-blocks after Bot-or-Not clear).
     all_target_keys = tuple(target_keys)
     if (
         allow_logged_out_cookie_commit
@@ -1022,6 +1016,16 @@ async def recover_from_challenge(
         if await commit_cookie_removals(all_target_keys):
             return ChallengeRecoveryResult("cookies_sanitized", all_target_keys)
         return await search_with_preserved_auth_state()
+
+    if known_safe and clean_by_label.get("known_challenge"):
+        await progress(
+            "apply_cookie_fix",
+            "Applying the proven known-challenge cookie strip on the live tab and "
+            "requiring one clean navigation.",
+        )
+        if await commit_cookie_removals(known_safe):
+            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
+        return await search_with_preserved_auth_state(known_safe)
 
     diagnostic_clean = any(
         clean_by_label.get(label)
