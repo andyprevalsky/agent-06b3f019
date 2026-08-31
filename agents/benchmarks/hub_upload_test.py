@@ -235,6 +235,34 @@ def test_missing_key_skips(monkeypatch):
     assert upload_run_bundle({"run_id": "r"}) is False
 
 
+def test_hub_upload_script_resolves_benchmarks_without_pythonpath(tmp_path):
+    """Cloudbench runs `python agents/benchmarks/hub_upload.py` with empty PYTHONPATH."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    script = repo / "agents/benchmarks/hub_upload.py"
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text('{"run_id": "script-path", "tasks": []}')
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONPATH", "BENCHMARK_HUB_UPLOAD_URL", "BENCHMARK_HUB_API_KEY", "BACKEND_API_KEY"}
+    }
+    proc = subprocess.run(
+        [sys.executable, str(script), "--upload-final", str(bundle)],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    assert "No module named 'benchmarks'" not in combined, combined
+
+
 if __name__ == "__main__":
     import pytest
 

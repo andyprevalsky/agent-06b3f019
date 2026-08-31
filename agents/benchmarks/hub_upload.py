@@ -18,10 +18,17 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
 import time
 from urllib.parse import quote
 import urllib.error
 import urllib.request
+
+# `python agents/benchmarks/hub_upload.py` puts this file's directory on
+# sys.path, not `agents/`. Cloudbench copies run the script that way.
+_AGENTS_ROOT = Path(__file__).resolve().parent.parent
+if str(_AGENTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(_AGENTS_ROOT))
 
 DEFAULT_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 DEFAULT_HUB_URL = "https://navi-j9a9.onrender.com"
