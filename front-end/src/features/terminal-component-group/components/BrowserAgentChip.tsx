@@ -29,6 +29,8 @@
  *        │
  *        ▼
  *   side panel highlight + scrollIntoView
+ *   (desktop: trajectory docks over the right of the full-size video;
+ *    mobile: trajectory stacks under the video)
  *
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
@@ -313,7 +315,9 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   return (
     <div
       data-testid="browser-agent-chip"
-      className="my-1 w-full overflow-hidden rounded-lg border border-border bg-card text-sm"
+      className={`my-1 w-full rounded-lg border border-border bg-card text-sm ${
+        expanded && tab === 'recording' ? 'overflow-visible' : 'overflow-hidden'
+      }`}
     >
       {/* Header — toggles expansion. Collapsed shows only the result. */}
       <button
@@ -492,23 +496,30 @@ function RecordingWithLiveTrajectory({
   playheadSec: number;
   children: React.ReactNode;
 }) {
+  // Desktop: video stays full-width; live trajectory hangs off its right edge
+  // (does not shrink the browser/recording view). Mobile: stack under the video.
   return (
     <div
       data-testid="recording-with-live-trajectory"
-      className="flex flex-col gap-3 lg:flex-row lg:items-stretch"
+      className="relative flex flex-col gap-3"
     >
-      <div className="min-w-0 flex-1">{children}</div>
-      <div className="flex w-full shrink-0 flex-col lg:w-80">
-        <div className="mb-1 flex items-baseline justify-between gap-2">
-          <p className="text-xs font-medium text-foreground">Live trajectory</p>
-          <p
-            data-testid="recording-playhead"
-            className="font-mono text-[10px] text-muted-foreground"
-          >
-            t={playheadSec.toFixed(1)}s
-          </p>
+      <div className="w-full">{children}</div>
+      <div
+        data-testid="recording-live-trajectory-panel"
+        className="flex w-full flex-col lg:absolute lg:top-0 lg:bottom-0 lg:left-full lg:z-20 lg:ml-2 lg:w-80"
+      >
+        <div className="flex max-h-[min(40vh,20rem)] flex-col rounded-md border border-border bg-card p-2 shadow-lg lg:max-h-none lg:h-full">
+          <div className="mb-1 flex items-baseline justify-between gap-2">
+            <p className="text-xs font-medium text-foreground">Live trajectory</p>
+            <p
+              data-testid="recording-playhead"
+              className="font-mono text-[10px] text-muted-foreground"
+            >
+              t={playheadSec.toFixed(1)}s
+            </p>
+          </div>
+          <TrajectoryList steps={steps} activeIndex={activeIndex} live />
         </div>
-        <TrajectoryList steps={steps} activeIndex={activeIndex} live />
       </div>
     </div>
   );
@@ -534,7 +545,7 @@ function TrajectoryList({
   return (
     <ol
       data-testid={live ? 'recording-live-trajectory' : 'trajectory-list'}
-      className={`${live ? 'max-h-[min(75vh,32rem)]' : 'max-h-80'} space-y-1 overflow-auto text-xs`}
+      className={`${live ? 'min-h-0 flex-1 max-h-[min(40vh,20rem)] lg:max-h-none' : 'max-h-80'} space-y-1 overflow-auto text-xs`}
     >
       {steps.map((s, i) => {
         const isActive = i === activeIndex;
