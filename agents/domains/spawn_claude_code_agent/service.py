@@ -338,62 +338,85 @@ def _log_code_agent_event(
     task_id: str,
     sandbox_id: str,
 ) -> None:
-    """Promote high-value sandbox events into retained worker logs."""
-    if event.get("provider") != "codex":
-        return
+    """Promote high-value sandbox events into retained worker logs.
 
+    Codex Fast Mode events stay provider-specific. Claude (and Codex) tool /
+    turn progress must also land at info so local + prod log retention keep
+    tool_use / tool_result / agent_message / result visible in bench run JSON
+    — debug-only lines are often dropped by prod log drains.
+    """
+    provider = event.get("provider")
     event_type = event.get("type")
-    if event_type == "fast_cache_proxy_started":
-        logger.info(
-            "[ClaudeCode] Codex Fast Mode proxy started",
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            base_url=event.get("base_url"),
-            target=event.get("target"),
-        )
-        return
 
-    if event_type == "fast_cache_proxy_request":
+    if provider == "codex":
+        if event_type == "fast_cache_proxy_started":
+            logger.info(
+                "[ClaudeCode] Codex Fast Mode proxy started",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                base_url=event.get("base_url"),
+                target=event.get("target"),
+            )
+            return
+
+        if event_type == "fast_cache_proxy_request":
+            logger.info(
+                "[ClaudeCode] Codex Fast Mode proxy request",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                method=event.get("method"),
+                path=event.get("path"),
+                status=event.get("status"),
+                cache=event.get("cache"),
+            )
+            return
+
+        if event_type == "fast_cache_proxy_error":
+            logger.warning(
+                "[ClaudeCode] Codex Fast Mode proxy error",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                method=event.get("method"),
+                path=event.get("path"),
+                error=event.get("error"),
+            )
+            return
+
+        if event_type == "usage":
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            input_tokens = usage.get("input_tokens") or 0
+            cached_input_tokens = usage.get("cached_input_tokens") or 0
+            cached_pct = (
+                round((cached_input_tokens / input_tokens) * 100, 1) if input_tokens else 0.0
+            )
+            logger.info(
+                "[ClaudeCode] Codex turn usage",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cached_input_pct=cached_pct,
+                output_tokens=usage.get("output_tokens") or 0,
+                reasoning_output_tokens=usage.get("reasoning_output_tokens") or 0,
+            )
+            return
+
+    # Progress events for Claude Code + Codex — must survive info-level retention.
+    if event_type in {"tool_use", "tool_result", "agent_message", "result", "error", "session"}:
+        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
         logger.info(
-            "[ClaudeCode] Codex Fast Mode proxy request",
+            "[ClaudeCode] Code-agent event",
             agent_id=agent_id,
             task_id=task_id,
             sandbox_id=sandbox_id,
-            method=event.get("method"),
-            path=event.get("path"),
+            provider=provider,
+            event_type=event_type,
+            tool_name=tool_name,
             status=event.get("status"),
-            cache=event.get("cache"),
-        )
-        return
-
-    if event_type == "fast_cache_proxy_error":
-        logger.warning(
-            "[ClaudeCode] Codex Fast Mode proxy error",
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            method=event.get("method"),
-            path=event.get("path"),
-            error=event.get("error"),
-        )
-        return
-
-    if event_type == "usage":
-        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-        input_tokens = usage.get("input_tokens") or 0
-        cached_input_tokens = usage.get("cached_input_tokens") or 0
-        cached_pct = round((cached_input_tokens / input_tokens) * 100, 1) if input_tokens else 0.0
-        logger.info(
-            "[ClaudeCode] Codex turn usage",
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            input_tokens=input_tokens,
-            cached_input_tokens=cached_input_tokens,
-            cached_input_pct=cached_pct,
-            output_tokens=usage.get("output_tokens") or 0,
-            reasoning_output_tokens=usage.get("reasoning_output_tokens") or 0,
         )
 
 

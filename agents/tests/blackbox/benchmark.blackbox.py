@@ -14104,6 +14104,100 @@ def test_retired_tasks_hidden_from_suite_and_listing():
     assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
 
 
+def test_fetch_local_worker_logs_reads_benchmark_context_worker_files():
+    """Isolated stacks write worker*.log under BENCHMARK_CONTEXT_DIR — must be scraped."""
+    import tempfile
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = os.path.join(tmp, "logs")
+        os.makedirs(log_dir)
+        line = json.dumps(
+            {
+                "timestamp": "2026-08-31T03:00:00.000000+00:00",
+                "event": "[ClaudeCode] Code-agent event",
+                "agent_id": agent_id,
+                "event_type": "tool_use",
+                "tool_name": "Bash",
+            }
+        )
+        with open(os.path.join(log_dir, "worker.log"), "w") as handle:
+            handle.write(line + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-08-31T02:00:00.000000+00:00",
+                        "event": "too-old",
+                        "agent_id": agent_id,
+                    }
+                )
+                + "\n"
+            )
+            handle.write('{"event":"other-agent","agent_id":"ffffffff-0000-0000-0000-000000000000"}\n')
+
+        with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": tmp}, clear=False):
+            matched = logs.fetch_local_worker_logs(
+                agent_id,
+                datetime(2026, 8, 31, 2, 30, tzinfo=timezone.utc),
+            )
+
+    assert len(matched) == 1
+    assert "tool_use" in matched[0]
+    assert agent_id in matched[0]
+
+
+async def test_collect_logs_prefers_local_worker_logs_over_remote_placeholders():
+    """Run JSON must keep local Claude Code progress, not ClickHouse/Fly DNS stubs."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    local_line = json.dumps(
+        {
+            "timestamp": "2026-08-31T03:10:00+00:00",
+            "event": "[ClaudeCode] Code-agent event",
+            "agent_id": agent_id,
+            "event_type": "tool_use",
+        }
+    )
+
+    with (
+        patch.object(logs, "fetch_local_worker_logs", return_value=[local_line]),
+        patch.object(logs, "get_flyio_logs_for_agent", return_value=[]),
+        patch.object(
+            logs,
+            "fetch_flyio_logs_snapshot",
+            new_callable=AsyncMock,
+            return_value=["[fly.io] 0 logs for agent 11111111-2222"],
+        ),
+        patch.object(
+            logs,
+            "fetch_clickhouse_worker_logs",
+            new_callable=AsyncMock,
+            return_value=["[clickhouse] Error: [Errno -2] Name or service not known"],
+        ),
+        patch.object(logs, "fetch_render_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "fetch_supabase_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "get_supabase_realtime_logs_for_agent", return_value=[]),
+        patch.object(logs, "extract_message_transcript", return_value=[]),
+    ):
+        result = await logs.collect_logs(
+            agent_id,
+            {},
+            datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc),
+        )
+
+    assert result["worker_logs"] == [local_line]
+    assert not any(line.startswith("[fly.io]") for line in result["worker_logs"])
+    assert not any(line.startswith("[clickhouse]") for line in result["worker_logs"])
+
+
 def test_agent_latency_reads_isolated_benchmark_stack_logs():
     """agent_latency.py must see isolated-stack logs, not just the shared ones.
 
@@ -16009,6 +16103,14 @@ async def run_all_tests():
     )
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
+    r.record(
+        "fetch_local_worker_logs_reads_benchmark_context",
+        test_fetch_local_worker_logs_reads_benchmark_context_worker_files,
+    )
+    await r.record_async(
+        "collect_logs_prefers_local_worker_logs",
+        test_collect_logs_prefers_local_worker_logs_over_remote_placeholders,
+    )
     r.record(
         "agent_latency_explicit_context_excludes_neighbor_stacks",
         test_agent_latency_explicit_context_excludes_neighbor_stacks,

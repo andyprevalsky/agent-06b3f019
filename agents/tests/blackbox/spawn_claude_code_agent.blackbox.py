@@ -1670,6 +1670,35 @@ def test_log_code_agent_event_promotes_codex_fast_cache_request():
     assert kwargs["cache"] == "miss"
 
 
+def test_log_code_agent_event_promotes_claude_tool_use_to_info():
+    """Claude tool_use/tool_result progress must be info-level so run JSON keeps it."""
+    from domains.spawn_claude_code_agent import service
+
+    fake_logger = MagicMock()
+    with patch.object(service, "logger", fake_logger):
+        service._log_code_agent_event(
+            {
+                "version": 1,
+                "provider": "claude",
+                "type": "tool_use",
+                "name": "Bash",
+                "status": "running",
+            },
+            agent_id="agent-1",
+            task_id="task-1",
+            sandbox_id="sandbox-1",
+        )
+
+    fake_logger.info.assert_called_once()
+    args, kwargs = fake_logger.info.call_args
+    assert args[0] == "[ClaudeCode] Code-agent event"
+    assert kwargs["agent_id"] == "agent-1"
+    assert kwargs["provider"] == "claude"
+    assert kwargs["event_type"] == "tool_use"
+    assert kwargs["tool_name"] == "Bash"
+    fake_logger.debug.assert_not_called()
+
+
 def test_codex_completed_turn_count_counts_unique_turn_completed_events():
     """Codex completed turns come from turn.completed SDK events, not status heartbeats."""
     from domains.spawn_claude_code_agent import service
@@ -2685,6 +2714,10 @@ async def run_all_tests():
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
+    r.record(
+        "log_claude_tool_use_event",
+        test_log_code_agent_event_promotes_claude_tool_use_to_info,
+    )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity
     await r.record_async(
