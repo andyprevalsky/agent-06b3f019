@@ -143,6 +143,10 @@ test('chat router caches successful output without gating downstream work', () =
   );
   assert.ok(router.includes('fastMode.writeEnabled'), 'router must honor write-through accounts');
   assert.ok(router.includes('cacheGet(cacheKey)'), 'router must read before live LLM');
+  assert.ok(
+    router.includes('awaitCacheFirst: true'),
+    'router must wait for Fast Mode cache before starting Cerebras'
+  );
   assert.ok(router.includes('cacheSet({'), 'router must store successful router output');
   assert.ok(
     router.includes('isValidRouterCacheJson(json)'),
