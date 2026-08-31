@@ -6072,6 +6072,74 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
+def _require_compute_tokens_enabled() -> bool:
+    """Opt-in cost gate: abort local benches when no direct compute path is usable.
+
+    When set, the harness refuses to start agents that would fall through to the
+    paid OpenRouter waterfall (claudeAuth/gptAuth unavailable or rate-limited).
+    Descend and other cost-capped runs set ``BENCHMARK_REQUIRE_COMPUTE_TOKENS=1``.
+    """
+    return os.environ.get("BENCHMARK_REQUIRE_COMPUTE_TOKENS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _local_db_has_usable_direct_compute_token() -> bool:
+    """True when the isolated DB holds a non-rate-limited direct compute credential.
+
+    Mirrors the selection filters used by compute-token fetch: CONNECTED + active +
+    encrypted credentials present + ``rateLimitedUntil`` null/past + empty
+    ``failureReason``, for either ``claude_code`` or ``gpt_code`` (user-owned or
+    pooling-enabled).
+
+    ``failureReason='auth_error'`` must NOT count as usable: those rows are still
+    ``CONNECTED`` in the DB after a failed refresh, and treating them as healthy
+    lets ``BENCHMARK_REQUIRE_COMPUTE_TOKENS=1`` pass then fall through to the
+    paid OpenRouter waterfall (descend-daily e2-preflight 2026-08-31).
+    """
+    if not _local_victoria_database_url():
+        return False
+    user = _sql_literal(USER_ID)
+    usable_query = f"""
+        SELECT EXISTS (
+          SELECT 1
+          FROM "Integration"
+          WHERE name IN ('claude_code', 'gpt_code')
+            AND status = 'CONNECTED'
+            AND "isActive" = TRUE
+            AND COALESCE(config->>'encryptedCredentials', '') <> ''
+            AND ("rateLimitedUntil" IS NULL OR "rateLimitedUntil" < NOW())
+            AND COALESCE("failureReason", '') = ''
+            AND (
+              "poolingEnabled" = TRUE
+              OR "userId" = {user}
+            )
+        );
+    """.strip()
+    try:
+        result = _run_local_victoria_sql(usable_query)
+    except Exception as error:
+        print(f"    ⚠️  Could not query usable compute tokens: {error}")
+        return False
+    return result.splitlines()[-1].strip().lower() in {"t", "true", "1"}
+
+
+def _assert_require_compute_tokens_satisfied() -> None:
+    """Fail closed when the cost gate is on and no direct compute path is usable."""
+    if not _require_compute_tokens_enabled():
+        return
+    if _local_db_has_usable_direct_compute_token():
+        return
+    raise RuntimeError(
+        "BENCHMARK_REQUIRE_COMPUTE_TOKENS=1 but no usable direct compute token "
+        "(claude_code/gpt_code CONNECTED, active, not rate-limited). "
+        "Refusing to start agents that would bill the paid waterfall — wait for "
+        "compute to recover or replenish the pool."
+    )
+
+
 async def _refresh_local_compute_tokens_for_run(
     base_url: str,
     *,
@@ -6120,6 +6188,7 @@ async def _refresh_local_compute_tokens_for_run(
         # that is the stale/rotated-token signal this overlay was built to catch.
         if _local_codex_auth_path().is_file() and not _refresh_local_gpt_token_from_codex_auth(database_url):
             raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
+        _assert_require_compute_tokens_satisfied()
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
@@ -6156,6 +6225,7 @@ async def _refresh_local_compute_tokens_for_run(
     database_url = _local_victoria_database_url()
     if database_url:
         _refresh_local_claude_token_from_keychain(database_url)
+    _assert_require_compute_tokens_satisfied()
 
 
 def _snapshot_browser_state(ctx: LiveFixtureContext, *, include_passwords: bool) -> dict:

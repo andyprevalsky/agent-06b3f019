@@ -18,6 +18,7 @@ import batchRoutes from './routes.batch';
 import alertRoutes from './routes.alerts';
 import statusRoutes from './routes.status';
 import archiveRoutes from './routes.archive';
+import reportBugRoutes from './routes.reportBug';
 import { handleRouteError, noCacheHeaders } from './routes.helpers';
 
 const router = Router();
@@ -83,6 +84,7 @@ router.get(
 
 router.use('/', archiveRoutes);
 router.use('/', alertRoutes);
+router.use('/', reportBugRoutes);
 
 router.get(
   '/:id',

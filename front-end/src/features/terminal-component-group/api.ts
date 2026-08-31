@@ -208,6 +208,7 @@ export {
   resumeBrowserSession,
   MAX_FILE_SIZE,
   MAX_TOTAL_ATTACHMENTS_SIZE,
+  reportAgentBug,
 } from '@/lib/api';
 
 export type {
@@ -222,6 +223,7 @@ export type {
   Tool,
   PeoplePaginatedResponse,
   Person,
+  ReportAgentBugResult,
 } from '@/lib/api';
 
 export { subscribeToAttentionRequests, unsubscribe } from '@/lib/realtime';

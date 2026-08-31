@@ -203,8 +203,76 @@ def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
         "Book Hotel Kabuki on hotels.com. Use guest checkout — do not sign in."
     )
     assert goal_allows_logged_out_cookie_commit("Continue as guest without an account.")
+    assert goal_allows_logged_out_cookie_commit("Check out as a guest without an account.")
+    assert goal_allows_logged_out_cookie_commit("Complete anonymous checkout without logging in.")
     assert goal_allows_logged_out_cookie_commit(
         "Buy the item and check out anonymously without creating an account."
+    )
+    assert goal_allows_logged_out_cookie_commit(
+        "Use guest checkout, not anonymous checkout"
+    )
+    assert goal_allows_logged_out_cookie_commit(
+        "Use anonymous checkout, not as a guest"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not continue as guest; sign in with my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Don't proceed as guest; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "do not proceed as a guest; sign in with my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not check out without logging in; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not continue without logging in; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not shop anonymously; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "No guest checkout; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Guest checkout is not what I want; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not use either guest checkout or anonymous checkout; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "I was a guest before; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Don't check out as guest; use my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not check out as guest; sign in with my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not check out as a guest; sign in with my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not use anonymous checkout; sign in with my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Don't check out anonymously; use my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Do not continue anonymously; use my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Don't continue anonymously; sign in with my account."
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "not guest checkout; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "not anonymously; use my account"
+    )
+    assert not goal_allows_logged_out_cookie_commit(
+        "Don’t continue anonymously; use my account."  # curly apostrophe
     )
     assert not goal_allows_logged_out_cookie_commit("Sign in with my Expedia account and book.")
     assert not goal_allows_logged_out_cookie_commit("")
