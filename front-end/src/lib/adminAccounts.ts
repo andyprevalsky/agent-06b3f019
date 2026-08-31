@@ -8,8 +8,11 @@ export interface AdminAccount {
 }
 
 export const ADMIN_ACCOUNTS: readonly AdminAccount[] = [
-  { userId: '1f85ff25-6e29-4c1b-8739-f917bd101a30', name: 'Andy' },
-  { userId: '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', name: 'Tamy' },
+  { userId: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', name: 'Andy' },
+  { userId: '8283e892-b0a4-4298-9ef7-b95bcc67e46b', name: 'Tamy' },
+  // Legacy ids — still treated as admin so older fixtures/sessions keep working.
+  { userId: '1f85ff25-6e29-4c1b-8739-f917bd101a30', name: 'Andy (legacy)' },
+  { userId: '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', name: 'Tamy (legacy)' },
 ];
 
 export const ADMIN_USER_IDS: readonly string[] = ADMIN_ACCOUNTS.map((account) => account.userId);
