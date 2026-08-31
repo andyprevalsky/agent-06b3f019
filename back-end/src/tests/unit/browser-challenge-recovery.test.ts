@@ -407,10 +407,12 @@ async function testProbeCandidateBrowserSettlesOnAbort(): Promise<void> {
     abort.signal
   );
 
-  for (let i = 0; i < 40 && !solveStarted; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.ok(solveStarted, 'solver must start before abort');
+  await new Promise<void>((resolve, reject) => {
+    let n = 0;
+    const tick = () =>
+      solveStarted ? resolve() : n++ >= 40 ? reject(new Error('solver must start before abort')) : setTimeout(tick, 10);
+    tick();
+  });
   const started = Date.now();
   abort.abort();
   await assert.rejects(probePromise, (error: unknown) => {

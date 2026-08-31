@@ -10,8 +10,16 @@ const RANDO = 'not-an-admin';
 
 // Hardcoded prod allowlist.
 assert.equal(ADMIN_USER_IDS.has(ANDY), true, 'Andy legacy id is a hardcoded admin');
-assert.equal(ADMIN_USER_IDS.has('c49b4ce3-3489-499d-bfbd-846d04ba6275'), true, 'Andy current id is a hardcoded admin');
-assert.equal(ADMIN_USER_IDS.has('8283e892-b0a4-4298-9ef7-b95bcc67e46b'), true, 'Tamara current id is a hardcoded admin');
+assert.equal(
+  ADMIN_USER_IDS.has('c49b4ce3-3489-499d-bfbd-846d04ba6275'),
+  true,
+  'Andy current id is a hardcoded admin'
+);
+assert.equal(
+  ADMIN_USER_IDS.has('8283e892-b0a4-4298-9ef7-b95bcc67e46b'),
+  true,
+  'Tamara current id is a hardcoded admin'
+);
 assert.equal(isAdminUser(ANDY), true);
 assert.equal(isAdminUser('c49b4ce3-3489-499d-bfbd-846d04ba6275'), true);
 assert.equal(isAdminUser(TAMY), true);

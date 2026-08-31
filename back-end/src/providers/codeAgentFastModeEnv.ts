@@ -8,7 +8,10 @@
  */
 
 import { createHash } from './crypto';
-import { shouldWriteFastModeCacheForUser, resolveFastModeWriteEnabled } from './fastCacheAccountPolicy';
+import {
+  shouldWriteFastModeCacheForUser,
+  resolveFastModeWriteEnabled,
+} from './fastCacheAccountPolicy';
 
 export { shouldWriteFastModeCacheForUser, resolveFastModeWriteEnabled };
 
