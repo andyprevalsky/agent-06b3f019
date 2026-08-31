@@ -29,13 +29,14 @@
  *        │
  *        ▼
  *   side panel highlight + scrollIntoView
- *   (desktop: trajectory docks over the right of the full-size video;
- *    mobile: trajectory stacks under the video)
+ *   (fixed portal hanging off the recording — no layout/scroll shift,
+ *    z-index above terminal chrome so it stays visible)
  *
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
  */
-import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
 import { useAgentContext } from '../hooks';
@@ -315,9 +316,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   return (
     <div
       data-testid="browser-agent-chip"
-      className={`my-1 w-full rounded-lg border border-border bg-card text-sm ${
-        expanded && tab === 'recording' ? 'overflow-visible' : 'overflow-hidden'
-      }`}
+      className="my-1 w-full overflow-hidden rounded-lg border border-border bg-card text-sm"
     >
       {/* Header — toggles expansion. Collapsed shows only the result. */}
       <button
@@ -496,35 +495,81 @@ function RecordingWithLiveTrajectory({
   playheadSec: number;
   children: React.ReactNode;
 }) {
-  // Trajectory is purely out-of-flow (absolute) so it never shifts the recording
-  // or surrounding UI. It hangs off the right of the player via left-full.
+  // Fixed portal anchored to the recording box — zero layout/scroll impact on the
+  // conversation, and z-index above terminal chrome so it is never clipped/hidden.
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const [panelStyle, setPanelStyle] = useState<CSSProperties | null>(null);
+
+  useLayoutEffect(() => {
+    const PANEL_W = 288; // w-72
+    const GAP = 8;
+
+    const sync = () => {
+      const el = anchorRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const spaceRight = window.innerWidth - r.right - GAP;
+      // Prefer hanging off the right; if there is not enough room, overlay the
+      // right edge of the recording instead of shoving page layout.
+      const left =
+        spaceRight >= PANEL_W ? r.right + GAP : Math.max(GAP, r.right - PANEL_W);
+      setPanelStyle({
+        position: 'fixed',
+        top: Math.max(GAP, r.top),
+        left,
+        height: Math.max(120, r.height),
+        width: PANEL_W,
+        zIndex: 9999,
+      });
+    };
+
+    sync();
+    const ro = new ResizeObserver(sync);
+    if (anchorRef.current) ro.observe(anchorRef.current);
+    window.addEventListener('resize', sync);
+    // Capture scroll from any nested terminal scroller.
+    window.addEventListener('scroll', sync, true);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', sync);
+      window.removeEventListener('scroll', sync, true);
+    };
+  }, []);
+
   return (
     <div
+      ref={anchorRef}
       data-testid="recording-with-live-trajectory"
       className="relative w-full"
     >
       {children}
-      <aside
-        data-testid="recording-live-trajectory-panel"
-        className="pointer-events-none absolute inset-y-0 left-full z-20 ml-2 flex w-72 flex-col"
-        aria-label="Live trajectory"
-      >
-        <div className="pointer-events-auto flex h-full min-h-0 flex-col rounded-md border border-border bg-card p-2">
-          <div className="mb-1 flex shrink-0 items-baseline justify-between gap-2">
-            <p className="text-xs font-medium text-foreground">Live trajectory</p>
-            <p
-              data-testid="recording-playhead"
-              className="font-mono text-[10px] text-muted-foreground"
-            >
-              t={playheadSec.toFixed(1)}s
-            </p>
-          </div>
-          <TrajectoryList steps={steps} activeIndex={activeIndex} live />
-        </div>
-      </aside>
+      {panelStyle &&
+        createPortal(
+          <aside
+            data-testid="recording-live-trajectory-panel"
+            style={panelStyle}
+            className="flex flex-col"
+            aria-label="Live trajectory"
+          >
+            <div className="flex h-full min-h-0 flex-col rounded-md border border-border bg-card p-2">
+              <div className="mb-1 flex shrink-0 items-baseline justify-between gap-2">
+                <p className="text-xs font-medium text-foreground">Live trajectory</p>
+                <p
+                  data-testid="recording-playhead"
+                  className="font-mono text-[10px] text-muted-foreground"
+                >
+                  t={playheadSec.toFixed(1)}s
+                </p>
+              </div>
+              <TrajectoryList steps={steps} activeIndex={activeIndex} live />
+            </div>
+          </aside>,
+          document.body,
+        )}
     </div>
   );
 }
+
 function TrajectoryList({
   steps,
   activeIndex,
