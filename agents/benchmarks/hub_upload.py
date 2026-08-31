@@ -103,6 +103,70 @@ def _auth_headers(*, required: bool) -> dict[str, str] | None:
     }
 
 
+_TOOL_USAGE_TREE_KEYS = frozenset(
+    {
+        "root_agent_id",
+        "agent_count",
+        "tool_usage_count",
+        "llm_call_count",
+        "tokens_in",
+        "tokens_out",
+        "total_cost_cents",
+        "total_cost_dollars",
+        "total_tokens_from_tools",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    }
+)
+
+
+def _fallback_canonicalize_agent_tree(raw):
+    """Keep only agent-id-keyed nodes with parent/goal/status/messages."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key, value in raw.items():
+        if not key or key in _TOOL_USAGE_TREE_KEYS or not isinstance(value, dict):
+            continue
+        if not (
+            isinstance(value.get("messages"), list)
+            or "parent_agent_id" in value
+            or isinstance(value.get("goal"), str)
+            or isinstance(value.get("status"), str)
+        ):
+            continue
+        out[str(key)] = value
+    return out
+
+
+def _fallback_tree_child_transcript_count(tree, root_id):
+    canonical = _fallback_canonicalize_agent_tree(tree)
+    return sum(
+        1
+        for agent_id, info in canonical.items()
+        if agent_id != root_id and isinstance(info.get("messages"), list) and info["messages"]
+    )
+
+
+def _load_tree_helpers():
+    """Load tree helpers from sibling logs.py, or use local fallbacks.
+
+    Cloudbench copies this file as a raw script. A colliding `benchmarks`
+    package on sys.path must not win, and a fixture that only copied
+    hub_upload.py must still upload.
+    """
+    import importlib.util
+
+    logs_path = Path(__file__).resolve().parent / "logs.py"
+    if logs_path.is_file():
+        spec = importlib.util.spec_from_file_location("_hub_upload_logs", logs_path)
+        if spec is not None and spec.loader is not None:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.canonicalize_agent_tree, module.tree_child_transcript_count
+    return _fallback_canonicalize_agent_tree, _fallback_tree_child_transcript_count
+
+
 def prepare_run_bundle_for_upload(bundle: dict, *, live: bool = False, required: bool = False) -> dict:
     """Drop tool-usage-shaped logs.tree and refuse empty fan-out publishes.
 
@@ -110,7 +174,7 @@ def prepare_run_bundle_for_upload(bundle: dict, *, live: bool = False, required:
     A `/api/tool-usage/tree` rollup in that slot makes Hub FE render every
     for_each child as "spinning up..." with message_count=0.
     """
-    from benchmarks.logs import canonicalize_agent_tree, tree_child_transcript_count
+    canonicalize_agent_tree, tree_child_transcript_count = _load_tree_helpers()
 
     body = dict(bundle)
     tasks = []
