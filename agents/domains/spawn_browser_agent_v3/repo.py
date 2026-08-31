@@ -549,6 +549,7 @@ async def recover_browser_challenge(
     blocked_resource_url: str = "",
     require_payment_cdn: bool = False,
     preserve_auth: Optional[bool] = None,
+    blocked_config_keys: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run the backend cookie-lane + sequential browser-configuration search."""
     payload: Dict[str, Any] = {
@@ -569,6 +570,8 @@ async def recover_browser_challenge(
         payload["require_payment_cdn"] = True
     if preserve_auth is not None:
         payload["preserve_auth"] = preserve_auth
+    if blocked_config_keys:
+        payload["blocked_config_keys"] = list(blocked_config_keys)
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/recover-challenge",

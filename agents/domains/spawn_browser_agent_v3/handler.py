@@ -5403,6 +5403,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # document GET looks clean — cookie-stage recovery then false-succeeds forever.
     # After one cookies_sanitized result, escalate subsequent recoveries to config search.
     cookie_recovery_successes = 0
+    # Configs that cleared ephemeral probes but failed again on the live task.
+    # Excluded on later recoveries until the catalog is fully exhausted (backend
+    # expires the blacklist and returns blacklist_expired=true).
+    dead_browser_config_keys: set[str] = set()
+    last_promoted_browser_config_key: str | None = None
     # Sticky hard filter: once a critical third-party resource block triggered
     # recovery on this task, later recoveries still re-verify that URL.
     require_payment_cdn = False
@@ -7943,6 +7948,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         else recovery_storage_state
                     )
                     preserve_auth = not goal_allows_logged_out_cookie_commit(goal)
+                    # Previous promote failed again under live use — blackhole it.
+                    if last_promoted_browser_config_key:
+                        dead_browser_config_keys.add(last_promoted_browser_config_key)
                     result = await recover_browser_challenge(
                         config,
                         task_id,
@@ -7954,9 +7962,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         blocked_resource_url=verify_url,
                         require_payment_cdn=require_payment_cdn,
                         preserve_auth=preserve_auth,
+                        blocked_config_keys=sorted(dead_browser_config_keys),
                     )
                     if result.get("rate_limited"):
                         raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
+                    if result.get("blacklist_expired"):
+                        dead_browser_config_keys.clear()
                     return result
 
                 challenge_classifier_usages: list = []
@@ -8036,6 +8047,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if not isinstance(new_cdp_url, str) or not new_cdp_url:
                             raise RuntimeError("Challenge recovery selected a browser without a CDP URL")
                         try:
+                            # CDP Network.setUserAgentOverride is session-scoped and does
+                            # not survive backend→agent reconnect. Re-attach the same
+                            # fingerprint the probe classified under (not a post-classify
+                            # rewrite of page state).
                             reconnected = await _reconnect_browser_stack_after_rotation(
                                 new_cdp_url=new_cdp_url,
                                 old_dom_service=dom_service,
@@ -8087,11 +8102,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 current_url=current_url,
                                 restore_cookies=True,
                             )
-                        # The rotated target came up with a fresh, empty virtual
-                        # authenticator. Re-seed the passkeys we already hold so
-                        # passkey auth survives the reset exactly like the cookies
-                        # and localStorage restored just above.
-                        await sync_passkeys_onto_target(context="after proxy rotation")
+                        # Preloaded challenge winners already carried auth/storage from
+                        # the probe session. Re-seeding passkeys here rewrites identity
+                        # after classify; only seed when we did not atomic-promote.
+                        if not bool(config_result.get("storage_state_preloaded")):
+                            await sync_passkeys_onto_target(context="after proxy rotation")
 
                         if browser_recorder is not None:
                             with contextlib.suppress(Exception):
@@ -8135,52 +8150,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             humanizer_factory=BrowserHumanizer,
                         )
 
-                        # Preloaded winners already classified clean once on this
-                        # remote session (single-nav probe). Skip a second live-tab
-                        # LLM verify — resume at the settled URL instead.
-                        if not bool(config_result.get("storage_state_preloaded")):
-                            await emit_recovery_progress(
-                                "live_verify",
-                                "Verifying the promoted browser cleared the challenge on the live tab.",
-                            )
-                            live_verify_dom_tree = None
-                            with contextlib.suppress(Exception):
-                                live_verify_state = await dom_service.get_browser_state(
-                                    include_screenshot=False
-                                )
-                                live_verify_dom_tree = (
-                                    str(live_verify_state.get("dom_tree") or "") or None
-                                )
-                            live_verify_url = str(
-                                config_result.get("saved_url") or current_url or ""
-                            ).strip() or current_url
-                            if not await verify_live_page_cleared_challenge(
-                                input_page,
-                                live_verify_url,
-                                attempts=1,
-                                agent_id=agent_id,
-                                user_id=user_id,
-                                claude_token=token_state.access_token,
-                                claude_token_source=token_state.source,
-                                claude_token_pool_id=token_state.pool_token_id,
-                                gpt_token=gpt_token,
-                                gpt_account_id=gpt_account_id,
-                                gpt_token_source=gpt_token_source,
-                                gpt_token_pool_id=gpt_token_pool_id,
-                                usage_collector=challenge_classifier_usages,
-                                agent_dom_tree=live_verify_dom_tree,
-                                network_recorder=browser_network_recorder,
-                                recovery_reason=str(recovery_reason or "") or None,
-                            ):
-                                provider = config_result.get("provider")
-                                proxy_tier = config_result.get("proxy_tier")
-                                config_key = (
-                                    config_result.get("config_key") or f"{provider}/{proxy_tier}"
-                                )
-                                raise RuntimeError(
-                                    f"Promoted {config_key} passed candidate probes but the live tab "
-                                    "is still challenged"
-                                )
+                        # Atomic promote: probe already classified this remote session
+                        # with agent fingerprint + tool-parity DOM/network. No post-promote
+                        # live verify — durability comes from blacklist on re-challenge.
                         saved_resume = str(config_result.get("saved_url") or "").strip()
                         if saved_resume.startswith(("http://", "https://")):
                             current_url = saved_resume
@@ -8198,14 +8170,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         provider = config_result.get("provider")
                         proxy_tier = config_result.get("proxy_tier")
                         config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                        last_promoted_browser_config_key = (
+                            str(config_result.get("config_key") or "") or None
+                        )
+                        if last_promoted_browser_config_key:
+                            dead_browser_config_keys.discard(last_promoted_browser_config_key)
                         blocked_resource_url = str(
                             unified_action.get("params", {}).get("blocked_resource_url") or ""
                         ).strip()
-                        verified_phrase = (
-                            "probe already verified clean"
-                            if bool(config_result.get("storage_state_preloaded"))
-                            else "live tab verified clean"
-                        )
+                        # Atomic promote: ephemeral probe already classified this
+                        # same remote session with agent fingerprint + tool-parity
+                        # DOM/network inputs. No post-promote live verify.
+                        verified_phrase = "probe already verified clean"
                         recovery_message = (
                             f"Recovered by selecting {config_key}; {verified_phrase}"
                             + (

@@ -81,6 +81,7 @@ async function handleRecoverChallenge(req: AuthRequest, res: Response): Promise<
       recoveryReason: input.recovery_reason,
       requirePaymentCdn: input.require_payment_cdn,
       preserveAuth: input.preserve_auth,
+      blockedConfigKeys: input.blocked_config_keys,
     });
     res.json({ success: true, ...result });
   } catch (error) {

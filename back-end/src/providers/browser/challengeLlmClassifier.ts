@@ -162,7 +162,7 @@ export async function captureCleanedDom(page: Page): Promise<string> {
   }
 }
 
-type NetworkSummaryEntry = {
+export type NetworkSummaryEntry = {
   url?: string;
   name?: string;
   status?: number | null;

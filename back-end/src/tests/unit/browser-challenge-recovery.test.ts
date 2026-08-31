@@ -9,6 +9,7 @@ import {
   pageLooksChallenged,
   recoveryConfigKeyForSession,
   runLaneConfigSearch,
+  applyConfigBlacklist,
   orderConfigsForLane,
   shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
@@ -616,6 +617,59 @@ function testSteelPreferredWhenCdnHardFilterActive(): void {
   assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }
 
+
+function testConfigBlacklistExcludesUntilExhausted(): void {
+  const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
+  assert.ok(configs.length >= 3);
+  const blocked = configs.slice(0, 2).map((config) => config.key);
+  const filtered = applyConfigBlacklist(configs, blocked);
+  assert.strictEqual(filtered.blacklistExpired, false);
+  assert.deepStrictEqual(
+    filtered.configs.map((config) => config.key),
+    configs.slice(2).map((config) => config.key)
+  );
+  const ordered = orderConfigsForLane(configs, configs[2]!.key, blocked);
+  assert.ok(!ordered.some((config) => blocked.includes(config.key)));
+  assert.strictEqual(ordered[ordered.length - 1]?.key, configs[2]!.key);
+
+  const exhausted = applyConfigBlacklist(
+    configs,
+    configs.map((config) => config.key)
+  );
+  assert.strictEqual(exhausted.blacklistExpired, true);
+  assert.deepStrictEqual(
+    exhausted.configs.map((config) => config.key),
+    configs.map((config) => config.key)
+  );
+}
+
+function testProbeAppliesFingerprintBeforeNavigationAndPassesToolParityInputs(): void {
+  const source = readFileSync(
+    new URL('../../providers/browser/challengeRecovery.ts', import.meta.url),
+    'utf8'
+  );
+  const probeStart = source.indexOf('export async function probeCandidateBrowser');
+  assert.ok(probeStart >= 0);
+  const probeSource = source.slice(probeStart, source.indexOf('export async function', probeStart + 1));
+  const fingerprintAt = probeSource.indexOf('applyFingerprintInjection');
+  const gotoAt = probeSource.indexOf('page.goto');
+  assert.ok(fingerprintAt >= 0, 'probe must apply fingerprint injection');
+  assert.ok(gotoAt >= 0, 'probe must navigate');
+  assert.ok(fingerprintAt < gotoAt, 'fingerprint must be applied BEFORE navigation/classify');
+  assert.match(probeSource, /networkEntries/);
+  assert.match(probeSource, /agentDomTree/);
+  assert.match(probeSource, /page\.on\(['"]response['"]/);
+  // iframe markers retained for challenge widgets (tool-parity DOM, not script/style dump)
+  assert.match(probeSource, /iframe/);
+
+  const searchStart = source.indexOf('export async function searchAndPromoteBrowserConfig');
+  const searchSource = source.slice(searchStart);
+  assert.match(searchSource, /blockedConfigKeys/);
+  assert.match(searchSource, /applyConfigBlacklist/);
+  assert.match(searchSource, /blacklist_expired/);
+  assert.match(searchSource, /fingerprintInjection/);
+}
+
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
@@ -632,6 +686,8 @@ async function main(): Promise<void> {
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
   // Learned preferred-config seeding + schemas: .part2.test.ts.
   testOrderConfigsForLane();
+  testConfigBlacklistExcludesUntilExhausted();
+  testProbeAppliesFingerprintBeforeNavigationAndPassesToolParityInputs();
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
   testSteelPreferredWhenCdnHardFilterActive();

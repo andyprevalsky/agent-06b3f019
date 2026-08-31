@@ -51,6 +51,7 @@ export async function recoverBrowserChallenge(input: {
   recoveryReason?: string | null;
   requirePaymentCdn?: boolean;
   preserveAuth?: boolean;
+  blockedConfigKeys?: string[];
 }) {
   await requireOwnedTask(input.taskId, input.userId);
   return searchAndPromoteBrowserConfig({
@@ -64,5 +65,6 @@ export async function recoverBrowserChallenge(input: {
     recoveryReason: input.recoveryReason,
     requirePaymentCdn: input.requirePaymentCdn,
     preserveAuth: input.preserveAuth,
+    blockedConfigKeys: input.blockedConfigKeys,
   });
 }

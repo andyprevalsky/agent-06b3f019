@@ -92,6 +92,12 @@ export const recoverChallengeSchema = z.object({
    * for logs; lane membership is decided by the caller via storage_lanes.
    */
   preserve_auth: z.boolean().optional(),
+  /**
+   * Cross-recovery blacklist of config keys that already failed after promote.
+   * Backend excludes them unless the blacklist covers the whole catalog (then
+   * it expires and the full catalog is retried).
+   */
+  blocked_config_keys: z.array(z.string().min(1).max(64)).max(32).optional(),
 });
 
 /**

@@ -5532,6 +5532,39 @@ async def test_resume_browser_session_rate_limited():
     out = await resume_browser_session(cfg, "t1")
     assert out["rate_limited"] is True
 
+
+def test_challenge_recovery_uses_cross_recovery_config_blacklist():
+    """Dead configs from prior promotes are passed to recover_browser_challenge and
+    cleared only when the backend reports blacklist_expired (catalog exhausted)."""
+    from pathlib import Path
+
+    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "dead_browser_config_keys" in source
+    assert "last_promoted_browser_config_key" in source
+    assert "blocked_config_keys=sorted(dead_browser_config_keys)" in source
+    assert 'result.get("blacklist_expired")' in source
+    assert "dead_browser_config_keys.clear()" in source
+    assert "dead_browser_config_keys.add(last_promoted_browser_config_key)" in source
+
+
+def test_challenge_recovery_never_live_verifies_after_atomic_promote():
+    """Post-promote live LLM verify is removed for config-search winners."""
+    from pathlib import Path
+
+    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "await verify_live_page_cleared_challenge(" not in source
+    assert "probe already verified clean" in source
+
+
+def test_recover_browser_challenge_repo_forwards_blocked_config_keys():
+    from pathlib import Path
+
+    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
+    assert "blocked_config_keys" in source
+    assert "payload[\"blocked_config_keys\"]" in source or 'payload["blocked_config_keys"]' in source
+
+
+
 async def test_recover_browser_challenge_posts_current_url_and_state():
     from domains.spawn_browser_agent_v3.repo import recover_browser_challenge
 
@@ -19107,6 +19140,12 @@ async def run_all_tests():
     )
     await r.record_async("resume_browser_session_rate_limited", test_resume_browser_session_rate_limited)
     await r.record_async(
+        "challenge_recovery_cross_recovery_config_blacklist",
+        test_challenge_recovery_uses_cross_recovery_config_blacklist,
+        "challenge_recovery_never_live_verifies_after_atomic_promote",
+        test_challenge_recovery_never_live_verifies_after_atomic_promote,
+        "recover_browser_challenge_forwards_blocked_config_keys",
+        test_recover_browser_challenge_repo_forwards_blocked_config_keys,
         "recover_browser_challenge_current_url_and_state",
         test_recover_browser_challenge_posts_current_url_and_state,
     )

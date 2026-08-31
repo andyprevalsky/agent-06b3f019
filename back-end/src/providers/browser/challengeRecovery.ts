@@ -6,6 +6,8 @@ import { createLogger } from '../logger';
 import { releaseSteelRemoteSession } from '../steel/session';
 import { createSteelRecoverySession } from '../steel/sessionRecovery';
 import { waitForProviderSolver } from './challengePageDetect';
+import { applyFingerprintInjection, type FingerprintInjectionData } from './fingerprintInjection';
+import type { NetworkSummaryEntry } from './challengeLlmClassifier';
 import type {
   ChallengeClassifierBilling,
   ChallengeClassifierLlmUsage,
@@ -52,6 +54,7 @@ export {
   targetLooksLikePaymentDocument,
 } from './paymentCdnProbe';
 import {
+  applyConfigBlacklist,
   orderConfigsForLane,
   runLaneConfigSearch,
   runParallelBrowserConfigSearch,
@@ -60,6 +63,7 @@ import {
 } from './challengeRecoveryLaneSearch';
 
 export {
+  applyConfigBlacklist,
   orderConfigsForLane,
   runLaneConfigSearch,
   runParallelBrowserConfigSearch,
@@ -228,6 +232,8 @@ export async function probeCandidateBrowser(
     requirePaymentCdn?: boolean;
     /** Test-only solver override (avoids live LLM in unit probes). */
     waitForSolver?: typeof waitForProviderSolver;
+    /** Agent fingerprint applied before navigation so classify matches live identity. */
+    fingerprintInjection?: FingerprintInjectionData | null;
   } = {},
   billing: ChallengeClassifierBilling = {},
   signal?: AbortSignal
@@ -268,6 +274,50 @@ export async function probeCandidateBrowser(
     if (signal?.aborted) {
       throw new Error('lane_aborted');
     }
+    // Identity BEFORE navigation — classify must see the same fingerprint the
+    // agent re-attaches on CDP reconnect after promote.
+    await raceProbeAbort(
+      applyFingerprintInjection(page, logContext.fingerprintInjection),
+      signal
+    );
+    // Tool-parity classifier inputs: accumulate network like BrowserNetworkRecorder
+    // / read_network_requests (status + truncated bodies), not perf timings alone.
+    const networkEntries: NetworkSummaryEntry[] = [];
+    const onResponse = async (res: import('playwright').Response) => {
+      try {
+        const req = res.request();
+        const url = req.url();
+        if (!url.startsWith('http')) return;
+        let body: string | undefined;
+        let truncated = false;
+        try {
+          const resourceType = req.resourceType();
+          if (['xhr', 'fetch', 'document', 'script'].includes(resourceType)) {
+            const raw = await res.text();
+            if (raw) {
+              body = raw.slice(0, 200);
+              truncated = raw.length > 200;
+            }
+          }
+        } catch {
+          /* opaque / binary */
+        }
+        networkEntries.push({
+          url: url.slice(0, 180),
+          status: res.status(),
+          statusText: res.statusText(),
+          ...(body !== undefined
+            ? { response_body: body, response_body_truncated: truncated }
+            : {}),
+        });
+        if (networkEntries.length > 40) networkEntries.shift();
+      } catch {
+        /* ignore listener errors */
+      }
+    };
+    if (typeof (page as { on?: unknown }).on === 'function') {
+      page.on('response', onResponse);
+    }
     const response = await raceProbeAbort(
       page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => null),
       signal
@@ -283,10 +333,37 @@ export async function probeCandidateBrowser(
         signal
       );
     }
+    // Prefer the same stripped visible text the agent DOM tool feeds the
+    // classifier (iframe titles/names kept; scripts stripped).
+    let agentDomTree: string | null = null;
+    try {
+      agentDomTree = await page.evaluate(() => {
+        const body = document.body;
+        if (!body) return '';
+        const clone = body.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll('script, style, noscript, svg').forEach((n) => n.remove());
+        // Keep iframe markers so challenge widgets are visible to the classifier.
+        clone.querySelectorAll('iframe').forEach((frame) => {
+          const marker = document.createElement('div');
+          marker.textContent = `[iframe title=${JSON.stringify(frame.title || '')} src=${JSON.stringify(frame.src || '')}]`;
+          frame.replaceWith(marker);
+        });
+        return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 12_000);
+      });
+    } catch {
+      agentDomTree = null;
+    }
     const attempt = await raceProbeAbort(
-      solve(page, response, billing, { recoveryReason }),
+      solve(page, response, billing, {
+        recoveryReason,
+        agentDomTree,
+        networkEntries: [...networkEntries],
+      }),
       signal
     );
+    if (typeof (page as { off?: unknown }).off === 'function') {
+      page.off('response', onResponse);
+    }
     if (attempt.usage) classifierLlmUsage.push(attempt.usage);
     if (!attempt.clean) {
       log.info('Challenge recovery candidate probe attempt still challenged', {
@@ -468,7 +545,7 @@ export async function probeCookieVariant(
       stablePasses: probe.stablePasses,
       attempts: probe.attempts,
       latencyMs: probe.latencyMs,
-      agent_id: billing.agentId,
+      agentId: billing.agentId,
     });
     return { clean, configKey: config.key, latencyMs: probe.latencyMs };
   } finally {
@@ -498,6 +575,10 @@ export async function searchAndPromoteBrowserConfig(
     /** @deprecated Ignored — single LLM gate only. */
     requirePaymentCdn?: boolean;
     preserveAuth?: boolean;
+    /** Cross-recovery dead configs; expired automatically when all are blocked. */
+    blockedConfigKeys?: string[];
+    /** Optional override; defaults to the task owner's stored fingerprint. */
+    fingerprintInjection?: FingerprintInjectionData | null;
   },
   dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
 ) {
@@ -525,12 +606,28 @@ export async function searchAndPromoteBrowserConfig(
       }
     : DEFAULT_GEOLOCATION;
   const sessionAvoidConfigKey = recoveryConfigKeyForSession(current.provider, current.proxyTier);
+
+  const fingerprintInjection =
+    input.fingerprintInjection !== undefined
+      ? input.fingerprintInjection
+      : billing.userId
+        ? await import('../steel/files').then((mod) => mod.getFingerprintInjectionData(billing.userId!))
+        : null;
   // Payment-CDN hard filter removed. blockedResourceUrl is evidence for the LLM gate.
   void input.requirePaymentCdn;
   const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
     requirePaymentCdn: false,
   });
   const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const blacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
+  const searchableConfigs = blacklist.configs;
+  if (blacklist.blacklistExpired) {
+    log.info('Challenge recovery config blacklist expired; retrying full catalog', {
+      taskId: input.taskId,
+      blockedConfigKeys: input.blockedConfigKeys ?? [],
+      agentId: billing.agentId,
+    });
+  }
   const lanes: RecoveryStorageLane[] =
     input.storageLanes && input.storageLanes.length > 0
       ? input.storageLanes
@@ -547,11 +644,13 @@ export async function searchAndPromoteBrowserConfig(
   log.info('Challenge recovery lane search', {
     taskId: input.taskId,
     laneKeys: lanes.map((lane) => lane.key),
-    configKeys: configs.map((config) => config.key),
+    configKeys: searchableConfigs.map((config) => config.key),
+    blockedConfigKeys: input.blockedConfigKeys ?? [],
+    blacklistExpired: blacklist.blacklistExpired,
     avoidConfigKey: sessionAvoidConfigKey ?? null,
     preserveAuth: input.preserveAuth ?? null,
     blockedResourceUrl: input.blockedResourceUrl ?? null,
-    agent_id: billing.agentId,
+    agentId: billing.agentId,
   });
 
   const searchDependencies: ConfigSearchDependencies = {
@@ -602,6 +701,7 @@ export async function searchAndPromoteBrowserConfig(
           laneKey: lane.key,
           blockedResourceUrl: input.blockedResourceUrl,
           recoveryReason: input.recoveryReason,
+          fingerprintInjection,
         },
         billing,
         signal
@@ -651,8 +751,9 @@ export async function searchAndPromoteBrowserConfig(
     },
   };
 
-  const winner = await runLaneConfigSearch(configs, lanes, searchDependencies, {
+  const winner = await runLaneConfigSearch(searchableConfigs, lanes, searchDependencies, {
     avoidConfigKey: sessionAvoidConfigKey,
+    blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
   });
   const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [
     ...(winner.probe.classifierLlmUsage ?? []),
@@ -670,6 +771,7 @@ export async function searchAndPromoteBrowserConfig(
     proxy_tier: winner.config.proxyMode,
     config_key: winner.config.key,
     storage_state_preloaded: true,
+    blacklist_expired: blacklist.blacklistExpired,
     recovery_action:
       winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
     recovery_message: `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
