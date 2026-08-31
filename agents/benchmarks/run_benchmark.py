@@ -8954,6 +8954,17 @@ def _final_completion_summaries(data: dict) -> list[dict]:
     return summaries
 
 
+
+def _task_declares_static_check(task: BenchmarkTask, check_type: str) -> bool:
+    """Return True when any declared static_check evaluator includes check_type."""
+    return any(
+        check.get("type") == check_type
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    )
+
+
 async def _hydrate_completion_sms_events(data: dict) -> None:
     """Attach durable completion-SMS provider receipts for static evaluators."""
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
@@ -8996,6 +9007,66 @@ _APPROVAL_AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
+
+
+async def _hydrate_claude_code_sessions(data: dict) -> None:
+    """Fetch Claude Code sessions (root + tree) for transcript static checks."""
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_agent_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+    benchmark_state = data.setdefault("_benchmark", {})
+    base_url = str(benchmark_state.get("api_base_url") or "").rstrip("/")
+    if not root_agent_id:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "root agent id is missing"
+        return
+    if not base_url:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "api_base_url is missing"
+        return
+
+    agent_ids = {root_agent_id}
+    try:
+        tree_agents = await get_agent_tree(base_url, root_agent_id)
+        for node in tree_agents or []:
+            if not isinstance(node, dict):
+                continue
+            aid = str(node.get("agent_id") or node.get("id") or "").strip()
+            if aid:
+                agent_ids.add(aid)
+    except Exception as tree_exc:
+        benchmark_state["claude_code_session_tree_error"] = str(tree_exc)[:200]
+
+    sessions_by_id: dict[str, dict] = {}
+    fetch_errors: list[str] = []
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=30) as client:
+            for aid in sorted(agent_ids):
+                try:
+                    resp = await client.get(
+                        f"{base_url}/api/claude-code-session/agent/{aid}",
+                        headers=headers,
+                    )
+                    if resp.status_code != 200:
+                        fetch_errors.append(f"{aid[:8]}:HTTP {resp.status_code}")
+                        continue
+                    payload = resp.json() if resp.content else {}
+                    for session in payload.get("sessions") or []:
+                        if not isinstance(session, dict):
+                            continue
+                        session_id = str(session.get("id") or "").strip()
+                        if session_id:
+                            sessions_by_id[session_id] = session
+                except Exception as fetch_exc:
+                    fetch_errors.append(f"{aid[:8]}:{fetch_exc}")
+        benchmark_state["claude_code_sessions"] = list(sessions_by_id.values())
+        if fetch_errors and not sessions_by_id:
+            benchmark_state["claude_code_session_evidence_error"] = "; ".join(fetch_errors)[:300]
+    except Exception as exc:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = str(exc)[:300]
+
+
 
 
 def _approval_user_visible_text(request: dict) -> str:
@@ -9191,7 +9262,9 @@ def _run_declared_static_check(
                 )
             continue
         if check_type == "agent_status":
-            expected_status = str(check.get("value") or "COMPLETED").upper()
+            expected_status = str(
+                check.get("value") or check.get("expected_status") or "COMPLETED"
+            ).upper()
             observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
             if observed_status != expected_status:
                 return False, f"Agent status was {observed_status}; expected {expected_status}"
@@ -9260,6 +9333,32 @@ def _run_declared_static_check(
             ):
                 return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type == "claude_code_session_output":
+            sessions = benchmark_state.get("claude_code_sessions") or []
+            min_sessions = int(check.get("min_sessions", 1))
+            min_chars = int(check.get("min_chars", 1))
+            if len(sessions) < min_sessions:
+                evidence_error = benchmark_state.get("claude_code_session_evidence_error")
+                suffix = f" ({evidence_error})" if evidence_error else ""
+                return (
+                    False,
+                    f"Claude Code session count was {len(sessions)}; "
+                    f"expected at least {min_sessions}{suffix}",
+                )
+            stored = [
+                session
+                for session in sessions
+                if isinstance(session, dict)
+                and isinstance(session.get("output"), str)
+                and len(session.get("output", "").strip()) >= min_chars
+            ]
+            if len(stored) < min_sessions:
+                return (
+                    False,
+                    f"Claude Code sessions with stored transcripts (≥{min_chars} chars): "
+                    f"{len(stored)}; expected at least {min_sessions}",
+                )
+            continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"
 
@@ -9267,6 +9366,8 @@ def _run_declared_static_check(
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
+    *,
+    static_only: bool = False,
 ) -> tuple[bool, Optional[str], list[dict]]:
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
     if not task.enforce_declared_evaluators:
@@ -9280,10 +9381,20 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    if any(
+        check.get("type") == "claude_code_session_output"
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    ):
+        await _hydrate_claude_code_sessions(data)
+
     results: list[dict] = []
     for evaluator in task.evaluators:
         evaluator_id = evaluator.get("id", "unnamed")
         method = evaluator.get("method")
+        if static_only and method != "static_check":
+            continue
         usage = None
         try:
             if method == "static_check":
@@ -9883,10 +9994,15 @@ async def run_single_task(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
-        if task.enforce_declared_evaluators and passed:
+        run_declared = task.enforce_declared_evaluators and (
+            passed or _task_declares_static_check(task, "claude_code_session_output")
+        )
+        if run_declared:
+            data.setdefault("_benchmark", {})["api_base_url"] = base_url
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,
                 data,
+                static_only=not passed,
             )
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),

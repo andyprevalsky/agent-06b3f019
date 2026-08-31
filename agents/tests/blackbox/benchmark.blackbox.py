@@ -3768,6 +3768,122 @@ def test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+
+def test_claude_code_session_output_static_check_is_fail_closed():
+    """Bench fails closed when Claude Code sessions lack stored transcripts."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
+        ],
+    }
+    good = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "_benchmark": {
+            "claude_code_sessions": [
+                {"id": "session-1", "output": "x" * 40},
+            ],
+        },
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    empty = deepcopy(good)
+    empty["_benchmark"]["claude_code_sessions"][0]["output"] = "   "
+    passed, reason = _run_declared_static_check(evaluator, empty)
+    assert passed is False
+    assert "stored transcripts" in reason.lower() or "chars" in reason.lower()
+
+    missing = deepcopy(good)
+    missing["_benchmark"]["claude_code_sessions"] = []
+    missing["_benchmark"]["claude_code_session_evidence_error"] = "api_base_url is missing"
+    passed, reason = _run_declared_static_check(evaluator, missing)
+    assert passed is False
+    assert "session count" in reason.lower()
+    assert "api_base_url is missing" in reason
+
+
+def test_cuda_kernel_catalog_enforces_claude_code_session_output():
+    """CUDA ranking bench requires durable Claude Code transcript storage."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
+
+    assert "claude_code_session_output" in RUNTIME_STATIC_CHECK_TYPES
+    task = get_task_by_name("cuda-kernel-github-top100-code-agent")
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    checks = {c["type"]: c for c in static["checks"]}
+    assert "claude_code_session_output" in checks
+    assert checks["claude_code_session_output"]["min_sessions"] == 1
+    assert checks["claude_code_session_output"]["min_chars"] >= 1
+    assert checks["agent_status"]["value"] == "COMPLETED"
+
+
+async def test_declared_evaluator_hydrates_claude_code_sessions():
+    """Transcript static checks hydrate Claude Code sessions before grading."""
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    static_evaluator = next(
+        item
+        for item in get_task_by_name("cuda-kernel-github-top100-code-agent").evaluators
+        if item["method"] == "static_check"
+    )
+    # Keep only the transcript check so hydration is exercised in isolation.
+    transcript_only = {
+        **static_evaluator,
+        "checks": [
+            c for c in static_evaluator["checks"] if c["type"] == "claude_code_session_output"
+        ],
+    }
+    task = replace(
+        get_task_by_name("cuda-kernel-github-top100-code-agent"),
+        evaluators=[transcript_only],
+    )
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "messages": [],
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+
+    fake_response = AsyncMock()
+    fake_response.status_code = 200
+    fake_response.content = b"{}"
+    fake_response.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "durable transcript " + ("y" * 40)}]
+    }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return fake_response
+
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+    ):
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+
+    assert passed is True
+    assert reason is None
+    assert results[0]["passed"] is True
+    assert data["_benchmark"]["claude_code_sessions"][0]["id"] == "session-1"
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -15806,12 +15922,24 @@ async def run_all_tests():
         test_completion_summary_and_sms_static_checks_are_fail_closed,
     )
     r.record(
+        "claude_code_session_output_static_check_fail_closed",
+        test_claude_code_session_output_static_check_is_fail_closed,
+    )
+    r.record(
         "blue_bottle_completion_delivery_contract",
         test_blue_bottle_catalog_enforces_summary_and_completion_sms,
+    )
+    r.record(
+        "cuda_kernel_catalog_enforces_claude_code_session_output",
+        test_cuda_kernel_catalog_enforces_claude_code_session_output,
     )
     await r.record_async(
         "blue_bottle_completion_sms_receipt_hydration",
         test_declared_evaluator_hydrates_completion_sms_receipt,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration",
+        test_declared_evaluator_hydrates_claude_code_sessions,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",

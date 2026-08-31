@@ -5149,12 +5149,18 @@
         "criteria": [
           "Exactly one spawn_claude_code_agent call completes the ranking work",
           "No spawn_general_purpose_agent detour is used",
-          "Final structured output contains a repos list"
+          "Final structured output contains a repos list",
+          "Each spawn_claude_code_agent session stores a non-empty terminal transcript"
         ],
         "checks": [
           {
             "type": "agent_status",
-            "expected_status": "COMPLETED"
+            "value": "COMPLETED"
+          },
+          {
+            "type": "claude_code_session_output",
+            "min_sessions": 1,
+            "min_chars": 32
           }
         ]
       },

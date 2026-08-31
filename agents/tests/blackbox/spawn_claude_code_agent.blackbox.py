@@ -2668,6 +2668,7 @@ async def run_all_tests():
     await r.record_async("repo_create_session_raises", test_repo_create_e2b_session_raises_on_error)
     await r.record_async("repo_persist_output_happy", test_repo_persist_terminal_output_happy)
     await r.record_async("repo_persist_output_swallows", test_repo_persist_terminal_output_swallows_errors)
+    r.record("build_durable_terminal_transcript", test_build_durable_terminal_transcript_prefers_display_then_events)
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
     await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
@@ -2758,6 +2759,31 @@ async def run_all_tests():
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
     teardown_mock()
     return r.all_passed
+
+
+
+def test_build_durable_terminal_transcript_prefers_display_then_events():
+    """Empty PTY display still yields a storeable transcript from SDK events."""
+    from domains.spawn_claude_code_agent.service import build_durable_terminal_transcript
+
+    assert build_durable_terminal_transcript("live pty\noutput", [{"type": "tool_use"}], ["step"]) == "live pty\noutput"
+    assert build_durable_terminal_transcript("   ", [], []) == ""
+
+    transcript = build_durable_terminal_transcript(
+        "",
+        [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "gh search"}},
+            {"type": "assistant", "content": "Found 100 repos"},
+            {"type": "result", "status": "completed"},
+        ],
+        ["Connected to Claude Code WebSocket", "Agentic loop finished"],
+    )
+    assert "[tool_use] Bash" in transcript
+    assert "gh search" in transcript
+    assert "[assistant]" in transcript
+    assert "Found 100 repos" in transcript
+    assert "## Action Summary" in transcript
+    assert "Connected to Claude Code WebSocket" in transcript
 
 
 if __name__ == "__main__":

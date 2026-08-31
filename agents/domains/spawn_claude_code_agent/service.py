@@ -154,6 +154,59 @@ def build_codex_credential_feedback(
     ]
 
 
+def build_durable_terminal_transcript(
+    display_output: str,
+    code_events: list[Dict[str, Any]] | None = None,
+    action_summary: list[str] | None = None,
+) -> str:
+    """Prefer live PTY display; fall back to SDK events + action summary.
+
+    ``ClaudeCodeSession.output`` is what the FE CompletedTranscriptSurface renders.
+    The back-end rejects empty-string POSTs, so a session that only emitted
+    structured ``code_agent_event`` frames (no PTY bytes) would otherwise store
+    null and the chip would show "Transcript unavailable". Rebuild a durable
+    text transcript from those events so storage, the FE, and bench checks all
+    see the work the code agent actually did.
+    """
+    if (display_output or "").strip():
+        return display_output
+
+    lines: list[str] = []
+    for event in code_events or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or event.get("event_type") or "event").strip() or "event"
+        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
+        status = event.get("status")
+        parts = [f"[{event_type}]"]
+        if tool_name:
+            parts.append(str(tool_name))
+        if status:
+            parts.append(f"status={status}")
+        detail = None
+        for key in ("content", "message", "result", "text", "input", "output", "error"):
+            value = event.get(key)
+            if isinstance(value, str) and value.strip():
+                detail = value.strip()
+                break
+            if isinstance(value, (dict, list)) and value:
+                detail = json.dumps(value, ensure_ascii=False, default=str)
+                break
+        if detail:
+            parts.append(detail[:800])
+        lines.append(" ".join(parts))
+
+    summary_lines = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
+    if summary_lines:
+        if lines:
+            lines.append("")
+        lines.append("## Action Summary")
+        lines.extend(summary_lines[-30:])
+
+    return "\n".join(lines).strip()
+
+
+
 def safe_time() -> float:
     """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
     try:
@@ -474,6 +527,7 @@ async def _run_agentic_loop(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     code_provider: str = "claude",
+    code_events: list[Dict[str, Any]] | None = None,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
@@ -493,7 +547,7 @@ async def _run_agentic_loop(  # noqa: C901
     interaction_count = 0
     total_input_tokens = 0
     total_output_tokens = 0
-    code_events: list[Dict[str, Any]] = []
+    code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
 
@@ -621,15 +675,22 @@ async def _run_agentic_loop(  # noqa: C901
                         # Temporal-retried activity will re-fetch the same
                         # broken token via LRU and burn another E2B sandbox).
                         try:
-                            await persist_terminal_output(
-                                task_id,
+                            durable_fatal_output = build_durable_terminal_transcript(
                                 filtered_output,
-                                agent_id,
-                                code_provider,
-                                credential_feedback=build_codex_credential_feedback(code_events)
-                                if code_provider == "codex"
-                                else None,
+                                code_events,
+                                action_summary,
                             )
+                            if durable_fatal_output:
+                                await persist_terminal_output(
+                                    task_id,
+                                    durable_fatal_output,
+                                    agent_id,
+                                    code_provider,
+                                    credential_feedback=build_codex_credential_feedback(code_events)
+                                    if code_provider == "codex"
+                                    else None,
+                                )
+                                terminal_output_persisted = True
                         except Exception as persist_err:
                             logger.warning(
                                 "[ClaudeCode] Failed to persist fatal terminal output",
@@ -1462,6 +1523,8 @@ async def spawn_claude_code_activity(  # noqa: C901
     total_input_tokens = 0
     total_output_tokens = 0
     action_summary: list[str] = []
+    code_events: list[Dict[str, Any]] = []
+    terminal_output_persisted = False
 
     if not output_schema:
         raise ValueError(
@@ -1575,22 +1638,36 @@ async def spawn_claude_code_activity(  # noqa: C901
             code_provider=code_provider,
             action_summary=action_summary,
             tool_call_id=tool_call_id,
+            code_events=code_events,
         )
         total_input_tokens += loop_input_tokens
         total_output_tokens += loop_output_tokens
 
-        # 4. Persist terminal output
+        # 4. Persist terminal output (durable fallback when PTY display is empty)
         filtered_output = terminal.get_display()
         credential_feedback = (
             build_codex_credential_feedback(code_events) if code_provider == "codex" else None
         )
-        await persist_terminal_output(
-            task_id,
+        durable_output = build_durable_terminal_transcript(
             filtered_output,
-            agent_id,
-            code_provider,
-            credential_feedback=credential_feedback,
+            code_events,
+            action_summary,
         )
+        if durable_output:
+            await persist_terminal_output(
+                task_id,
+                durable_output,
+                agent_id,
+                code_provider,
+                credential_feedback=credential_feedback,
+            )
+            terminal_output_persisted = True
+        else:
+            logger.warning(
+                "[ClaudeCode] Skipping terminal persist — display and code events were empty",
+                agent_id=agent_id,
+                task_id=task_id,
+            )
 
         # A fast CLI failure can set ``exit_code`` before the one-second silence
         # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.
@@ -1744,9 +1821,14 @@ async def spawn_claude_code_activity(  # noqa: C901
             try:
                 # Persist terminal output before closing
                 try:
-                    cancelled_output = terminal.get_display()
+                    cancelled_output = build_durable_terminal_transcript(
+                        terminal.get_display(),
+                        code_events,
+                        action_summary,
+                    )
                     if cancelled_output:
                         await persist_terminal_output(task_id, cancelled_output, agent_id, code_provider)
+                        terminal_output_persisted = True
                         logger.info(
                             "[ClaudeCode] Persisted terminal output on cancel",
                             agent_id=agent_id,
@@ -1809,6 +1891,34 @@ async def spawn_claude_code_activity(  # noqa: C901
 
         if task_id:
             try:
+                try:
+                    if not terminal_output_persisted:
+                        failed_output = build_durable_terminal_transcript(
+                            terminal.get_display(),
+                            code_events,
+                            action_summary,
+                        )
+                        if failed_output:
+                            await persist_terminal_output(
+                                task_id,
+                                failed_output,
+                                agent_id,
+                                code_provider,
+                            )
+                            terminal_output_persisted = True
+                            logger.info(
+                                "[ClaudeCode] Persisted terminal output on failure",
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                output_len=len(failed_output),
+                            )
+                except Exception as output_error:
+                    logger.warning(
+                        "[ClaudeCode] Failed to persist output on failure",
+                        agent_id=agent_id,
+                        error=str(output_error),
+                    )
+
                 await save_claude_code_message(
                     agent_id=agent_id,
                     title="Task Failed",
