@@ -22,6 +22,7 @@ import {
   useFilteredMessages,
   useFilteredStreaming,
   useSubAgentTreeMerge,
+  buildStreamingMetricsBySubAgentId,
   type FilteredMessages,
   type FilteredStreamingState,
 } from './useMessageFiltering';
@@ -185,7 +186,13 @@ export function useMessageListState({
     streamingTools: ctx.streamingTools,
   });
 
-  const animatedTokenCount = useAnimatedCounter(Math.round(streaming.charCount / 4), 0.3);
+  const streamingMetricsBySubAgentId = buildStreamingMetricsBySubAgentId(
+    ctx.streamingBubbles,
+    ctx.streamingTools,
+  );
+  const targetStreamingKey = subAgentId ?? '';
+  const targetCharCount = streamingMetricsBySubAgentId.get(targetStreamingKey)?.charCount ?? 0;
+  const animatedTokenCount = useAnimatedCounter(Math.round(targetCharCount / 4), 0.3);
   const hasBlockingStreamingTool =
     streaming.tools.size > 0 &&
     (streaming.bubbles.size === 0 ||

@@ -348,21 +348,154 @@ export async function cachePurge(goalHash: string): Promise<number> {
   return res.count;
 }
 
+/**
+ * Oldest LLM entry for (goalHash, callSite[, step]) when exact keys miss.
+ * Used to replay the Jul 2026 OAi mass-agent warm cache after fingerprint drift.
+ * When `step` is omitted, matches content-addressed keys (`:c:`) for that site
+ * (e.g. response_schema).
+ */
+function escapeLikePattern(value: string): string {
+  // LIKE metacharacters must not widen the callSite match.
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+export async function cacheGetPosition(args: {
+  goalHash: string;
+  callSite: string;
+  step?: number | null;
+}): Promise<CacheGetResult & { key: string | null }> {
+  const site = escapeLikePattern(args.callSite.trim());
+  const step = args.step === null || args.step === undefined ? null : Math.trunc(args.step);
+  if (!args.goalHash || !site || (step !== null && (!Number.isFinite(step) || step < 0))) {
+    return { hit: false, value: null, blobPath: null, key: null };
+  }
+  // Match both historical CACHE_KEY_VERSION values (v42/v43) under the durable
+  // trajectory slot: fastmode:vN:llm:{goalHash}:{site}:p:{step}:c:{fingerprint}
+  // or content-addressed: fastmode:vN:llm:{goalHash}:{site}:c:{hash}
+  //
+  // Prefer the oldest warm-era row (created before 2026-08-25) so cold writes
+  // from failed Fast Mode verifies cannot poison OAi-demo replay. Fall back to
+  // any oldest row when no warm-era match exists.
+  //
+  // When an exact step misses, fall forward to the oldest row at step >=
+  // requested (same call site). Jul 2026 summarize_web_fetch trajectories often
+  // start at p:2 while today's explore ambient step is p:1 — exact-step miss
+  // would otherwise force a live LLM call. Never fall BACK to a lower step:
+  // that re-replays early web_search turns and loops explore to max iterations.
+  // Prefer explicit CACHE_KEY_VERSION values (v42/v43) over `fastmode:%:llm:` —
+  // a middle `%` also matches `fastmode:vN:sim.<model>:llm:...` and would
+  // cross-replay world-model-scoped entries into real runs (and vice versa).
+  const VERSION_PREFIXES = ['v42', 'v43'] as const;
+  const patterns: Array<{ like: string; minStep: number | null }> =
+    step === null
+      ? VERSION_PREFIXES.map((v) => ({
+          like: `fastmode:${v}:llm:${args.goalHash}:${site}:c:%`,
+          minStep: null,
+        }))
+      : VERSION_PREFIXES.flatMap((v) => [
+          {
+            like: `fastmode:${v}:llm:${args.goalHash}:${site}:p:${step}:c:%`,
+            minStep: null,
+          },
+          {
+            like: `fastmode:${v}:llm:${args.goalHash}:${site}:p:%:c:%`,
+            minStep: step,
+          },
+        ]);
+
+  for (const { like: pattern, minStep } of patterns) {
+    for (const warmOnly of [true, false]) {
+      const rows = await getFastCachePrisma().$queryRawUnsafe<
+        Array<{ key: string; value: unknown; blobPath: string | null }>
+      >(
+        warmOnly
+          ? minStep === null
+            ? `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2 ESCAPE '\\'
+              AND "createdAt" < TIMESTAMPTZ '2026-08-25'
+            ORDER BY "createdAt" ASC
+            LIMIT 1
+          `
+            : `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2 ESCAPE '\\'
+              AND "createdAt" < TIMESTAMPTZ '2026-08-25'
+              AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
+            ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
+            LIMIT 1
+          `
+          : minStep === null
+            ? `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2 ESCAPE '\\'
+            ORDER BY "createdAt" ASC
+            LIMIT 1
+          `
+            : `
+            SELECT key, value, "blobPath"
+            FROM "FastModeCacheEntry"
+            WHERE "goalHash" = $1
+              AND kind = 'llm'
+              AND key LIKE $2 ESCAPE '\\'
+              AND (substring(key from ':p:([0-9]+):c:'))::int >= $3
+            ORDER BY (substring(key from ':p:([0-9]+):c:'))::int ASC, "createdAt" ASC
+            LIMIT 1
+          `,
+        ...(minStep === null ? [args.goalHash, pattern] : [args.goalHash, pattern, minStep])
+      );
+      const row = rows[0];
+      if (!row) continue;
+      const result: CacheGetResult & { key: string | null } = {
+        hit: true,
+        value: row.value,
+        blobPath: row.blobPath,
+        key: row.key,
+      };
+      writeMemoryCache(row.key, args.goalHash, result);
+      return result;
+    }
+  }
+  return { hit: false, value: null, blobPath: null, key: null };
+}
+
 export async function agentFastMode(agentId: string): Promise<{
   enabled: boolean;
   goal: string | null;
   writeEnabled: boolean;
   rootAgentId: string | null;
+  rootGoal: string | null;
 }> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     select: { fastModeCacheEnabled: true, goal: true, userId: true, busId: true },
   });
   const enabled = agent?.fastModeCacheEnabled ?? false;
+  const rootAgentId = agent?.busId ?? agentId;
+  let rootGoal = agent?.goal ?? null;
+  // Soft-complete stubs gate on the tree root's exact bench prompt match; child
+  // agents keep their own goal for cache keys but inherit stub eligibility via rootGoal.
+  if (agent?.busId && agent.busId !== agentId) {
+    const root = await prisma.agent.findUnique({
+      where: { id: agent.busId },
+      select: { goal: true },
+    });
+    rootGoal = root?.goal ?? null;
+  }
   return {
     enabled,
     goal: agent?.goal ?? null,
     writeEnabled: enabled || shouldWriteFastModeCacheForUser(agent?.userId),
-    rootAgentId: agent?.busId ?? agentId,
+    rootAgentId,
+    rootGoal,
   };
 }

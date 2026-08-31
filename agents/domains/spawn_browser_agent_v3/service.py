@@ -7,6 +7,7 @@ prompt construction, and usage calculation.
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -64,6 +65,57 @@ def select_auth_assistance_current_url(current_url: str, visited_urls: List[str]
     return current_url
 
 
+# Guest/anonymous CTAs that make step 7 observable. Once seen in-page, the
+# auth-assistance hard gate requires a guest attempt before step 8.
+GUEST_PAGE_COMPLETION_OPTION_RE = re.compile(
+    r"(?:"
+    r"check\s*out as guest|"
+    r"continue as guest|"
+    r"order as guest|"
+    r"guest check\s*out|"
+    r"book as guest|"
+    r"continue without (?:signing|logging|an account|creating)|"
+    r"book without (?:signing|logging|an account)|"
+    r"no account (?:needed|required)|"
+    r"skip (?:sign|log)\s*in"
+    r")",
+    re.IGNORECASE,
+)
+
+GUEST_CLICK_COMPLETION_OPTION_RE = re.compile(
+    r"(?:"
+    r"check\s*out as guest|"
+    r"continue as guest|"
+    r"order as guest|"
+    r"guest check\s*out|"
+    r"book as guest|"
+    r"continue without (?:signing|logging|an account|creating)|"
+    r"book without (?:signing|logging|an account)|"
+    r"reserve without|"
+    r"i['’]?ll\s+reserve|"
+    r"i\s+will\s+reserve|"
+    r"pay at the property|"
+    r"no account (?:needed|required)|"
+    r"skip (?:sign|log)\s*in"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def text_indicates_guest_completion_option(text: Optional[str]) -> bool:
+    """True when page copy offers a guest/anonymous completion path."""
+    if not text:
+        return False
+    return bool(GUEST_PAGE_COMPLETION_OPTION_RE.search(text))
+
+
+def clicked_text_indicates_guest_completion_option(text: Optional[str]) -> bool:
+    """True when clicked control copy offers guest/anonymous completion."""
+    if not text:
+        return False
+    return bool(GUEST_CLICK_COMPLETION_OPTION_RE.search(text))
+
+
 @dataclass
 class AuthRuntimeState:
     """Tracks auth ladder attempts that are observable inside this worker."""
@@ -76,7 +128,10 @@ class AuthRuntimeState:
     minted_attemptable: bool = False
     minted_ids: set[str] = field(default_factory=set)
     minted_attempted: bool = False
-    guest_unavailable: bool = True
+    # Guest is only a hard-gate blocker after a guest CTA has been observed on
+    # the page. Defaulting unavailable=True previously skipped step 7 entirely.
+    guest_unavailable: bool = False
+    guest_option_seen: bool = False
     guest_attempted: bool = False
 
     @classmethod
@@ -90,6 +145,8 @@ class AuthRuntimeState:
             or email_otp.get("matchForSiteAccount")
             or email_otp.get("attemptable")
         )
+        guest = auth_options.get("guest") or {}
+        guest_unavailable = bool(guest.get("unavailable")) if isinstance(guest, dict) else False
 
         state = cls(
             password_ids={
@@ -102,6 +159,7 @@ class AuthRuntimeState:
             # match, or a caller explicitly marks the OTP path attemptable.
             email_otp_available=bool(email_otp.get("available") and email_otp_match),
             minted_present=bool(minted),
+            guest_unavailable=guest_unavailable,
         )
 
         if minted:
@@ -137,6 +195,17 @@ class AuthRuntimeState:
     def mark_guest_attempted(self) -> None:
         self.guest_attempted = True
 
+    def observe_page_text(self, text: Optional[str]) -> None:
+        """Record that a guest/anonymous CTA appeared in the live page."""
+        if text_indicates_guest_completion_option(text):
+            self.guest_option_seen = True
+
+    def observe_clicked_element_text(self, text: Optional[str]) -> None:
+        """Record a guest/anonymous CTA click as exhausting step 7."""
+        if clicked_text_indicates_guest_completion_option(text):
+            self.guest_option_seen = True
+            self.guest_attempted = True
+
     def restrict_password_ids_to_attemptable(self, attemptable_ids: set[str]) -> None:
         """Only block user assistance on passwords this session can actually inject."""
         self.password_ids.intersection_update(attemptable_ids)
@@ -146,7 +215,11 @@ class AuthRuntimeState:
         password_exhausted = self.password_ids.issubset(self.passwords_attempted)
         email_exhausted = (not self.email_otp_available) or self.email_otp_attempted
         minted_exhausted = (not self.minted_present) or (self.minted_attemptable and self.minted_attempted)
-        guest_exhausted = self.guest_unavailable or self.guest_attempted
+        # Guest is N/A until a guest CTA is observed; once seen it must be
+        # attempted (or explicitly marked unavailable) before auth assistance.
+        guest_exhausted = (
+            (not self.guest_option_seen) or self.guest_unavailable or self.guest_attempted
+        )
         return {
             "password": {
                 "available": bool(self.password_ids),
@@ -168,6 +241,7 @@ class AuthRuntimeState:
             },
             "guest": {
                 "unavailable": self.guest_unavailable,
+                "option_seen": self.guest_option_seen,
                 "attempted": self.guest_attempted,
                 "exhausted_or_unavailable": guest_exhausted,
             },
@@ -792,6 +866,8 @@ def build_usage_items(
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
+    *,
+    fast_mode_cache_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
@@ -801,20 +877,33 @@ def build_usage_items(
     `cost_cents` on llm rows is informational only — the workflow recomputes
     from `model` + tokens and remains the single source of cost truth, applying
     the cache discount to the `cache_*` counters each row now carries.
+
+    When Fast Mode is on for this browser session — or every LLM decision was
+    a replay/soft-complete (`from_fast_cache`) — zero the Kernel/Steel service
+    row so OAi-demo warm paths stay ~$0. Mixed ledgers (soft + mislabeled live
+    rows) previously still billed wall-clock cents under the live-LLM check
+    alone (verify19 ~4.5¢ Kernel on child d24898d1).
     """
     browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
     service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
     cost_per_ms = KERNEL_COST_CENTS_PER_MS if browser_provider == "kernel" else STEEL_COST_CENTS_PER_MS
+    llm_items = build_browser_llm_usage_items(
+        total_input_tokens,
+        total_output_tokens,
+        model_pricing,
+        usage_by_model,
+    )
+    # Zero Kernel/Steel under Fast Mode or when there is no live LLM decision
+    # (all replay/soft-complete, or empty ledger after soft-done). Warm OAi
+    # demos otherwise pick up residual wall-clock cents.
+    has_live_llm = any(not bool(item.get("from_fast_cache")) for item in llm_items)
+    zero_service = bool(fast_mode_cache_enabled) or not has_live_llm
+    service_cost = 0.0 if zero_service else round(execution_time_ms * cost_per_ms, 4)
     return [
-        *build_browser_llm_usage_items(
-            total_input_tokens,
-            total_output_tokens,
-            model_pricing,
-            usage_by_model,
-        ),
+        *llm_items,
         {
             "type": "service",
-            "cost_cents": round(execution_time_ms * cost_per_ms, 4),
+            "cost_cents": service_cost,
             "provider": service_provider,
         },
     ]
@@ -936,6 +1025,11 @@ def build_action_titles(  # noqa: C901
     elif action_name == "screenshot":
         title_progress = "Taking screenshot..."
         title_done = "Screenshot captured"
+    elif action_name == "read_logs":
+        pattern = str(unified_action.get("params", {}).get("pattern") or unified_action.get("params", {}).get("regex") or "").strip()
+        scope = f" matching /{pattern[:40]}/" if pattern else ""
+        title_progress = f"Reading browser logs{scope}..."
+        title_done = f"Read browser logs{scope}"
     elif action_name == "read_network_requests":
         url_pattern = str(unified_action.get("params", {}).get("url_pattern") or "").strip()
         scope = f" matching '{url_pattern[:40]}'" if url_pattern else ""

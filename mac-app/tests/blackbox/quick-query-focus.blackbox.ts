@@ -2,7 +2,14 @@
  * Focus helper must never open the paperclip file picker.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+vi.mock('electron', () => ({
+  app: {
+    isReady: vi.fn(() => true),
+  },
+}));
+
 import { QUICK_QUERY_FOCUS_SCRIPT } from '../../main/app/quickQueryFocus';
 
 describe('quickQueryFocus script', () => {

@@ -1,22 +1,24 @@
-"""Auth-preserving, staged recovery for persistent anti-bot challenges.
+"""Auth-preserving recovery for persistent anti-bot challenges.
 
-The canonical browser context is never used for experiments. Cookie variants are
-passed to an injected probe (normally an isolated Playwright context), and only a
-known anti-bot cookie reduction may be committed to the live context. Cookie-name
-heuristics are useful for diagnosis but can never prove that an opaque cookie is
-not authentication state. Unknown-cookie findings therefore keep the source state
-byte-for-byte intact and move to a provider/proxy configuration search.
+After the provider solver, cookie variants are probed in one parallel wave
+(≤5) on **ephemeral** provider sessions — never via ``new_context`` on the live
+Kernel desktop (that paints stacked Chromium windows into the debug view).
+Known anti-bot cookie strips that probe clean may be committed to the live
+context; guest / anonymous goals may also commit a clean ``all_target`` strip.
+Opaque / auth-like cookies are never deleted on signed-in paths — those cases
+escalate to ephemeral provider/proxy config search (auth_kept / stripped lanes).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 StorageState = Dict[str, Any]
@@ -24,7 +26,7 @@ CookieKey = Tuple[str, str, str]
 Probe = Callable[[StorageState], Awaitable[bool]]
 Progress = Callable[[str, str], Awaitable[None]]
 CommitCookies = Callable[[Sequence[CookieKey]], Awaitable[bool]]
-ConfigSearch = Callable[[StorageState], Awaitable[Mapping[str, Any]]]
+ConfigSearch = Callable[[Sequence[Mapping[str, Any]]], Awaitable[Mapping[str, Any]]]
 WaitForSolver = Callable[[], Awaitable[None]]
 
 
@@ -59,11 +61,17 @@ _CHALLENGE_COOKIE_RE = re.compile(
 _CHALLENGE_RENDERED_TEXT_MARKERS = (
     "access denied",
     "attention required! | cloudflare",
+    # Expedia/DataDome PWA interstitial (title "Bot or Not?"). Matched against
+    # rendered title/body only — must stay out of raw HTML scans so merchant
+    # pages that discuss bots in script bundles do not false-positive.
+    "bot or not",
+    "can't tell if you're a human or a bot",
     "checking your browser",
     "enable javascript and cookies to continue",
     "just a moment",
     "performing security verification",
     "please verify you are a human",
+    "show us your human side",
     "sorry, you have been blocked",
     "this site can't be reached",
     "too many requests",
@@ -104,22 +112,38 @@ _CHALLENGE_TEXT_MARKERS = _CHALLENGE_RENDERED_TEXT_MARKERS + _PROXY_ERROR_TEXT_M
 # ticket pages embed Turnstile next to short inventory copy (~80 chars) — a
 # 600-char bar false-positived those as still challenged.
 _CLEAN_PAGE_MIN_VISIBLE_CHARS = 80
+# Soft-walls often keep navigation shells instead of a real document title while
+# body HTML is already non-empty (meta/noscript). Structure-only — never a
+# vendor or registrable-domain token.
+_BARE_HOSTNAME_TITLE_RE = re.compile(r"^(www\.)?([a-z0-9-]+\.)+[a-z]{2,}$", re.IGNORECASE)
+_LOADING_URL_TITLE_RE = re.compile(r"^loading\s+https?://", re.IGNORECASE)
+_URL_TITLE_RE = re.compile(r"^https?://", re.IGNORECASE)
+# Provider-native solvers need wall-clock room after a soft-wall starts hydrating.
+DEFAULT_SOLVER_TIMEOUT_SECONDS = 60.0
 
-_CHALLENGE_HTML_MARKERS = (
-    # Cloudflare
+# Sensor/orchestration hosts that also load on recovered pages. A match alone
+# is not proof of an interstitial — `_has_substantive_content` must also fail.
+_CHALLENGE_SENSOR_HTML_MARKERS = (
     "/cdn-cgi/challenge-platform",
-    "cf-chl-",
     "challenges.cloudflare.com/turnstile",
-    # DataDome
     "captcha-delivery.com",
-    "ddchallengebody",
-    # PerimeterX
     "perimeterx.net",
+)
+# Interstitial containers / challenge widgets that do not remain after a wall
+# clears. A match is definitive even when captcha instruction copy exceeds the
+# substantive-content bar (Expedia Bot or Not + DataDome slide copy).
+_CHALLENGE_INTERSTITIAL_HTML_MARKERS = (
+    "app-captcha-pwa",
+    "captcha__audio_",
+    "captcha__puzzle",
+    "cf-chl-",
+    "ddchallengebody",
     "px-captcha",
-    # Imperva / Incapsula
     "_incapsula_resource",
     "incapsula incident id",
 )
+# Backward-compatible union for tests/callers that iterate every HTML marker.
+_CHALLENGE_HTML_MARKERS = _CHALLENGE_SENSOR_HTML_MARKERS + _CHALLENGE_INTERSTITIAL_HTML_MARKERS
 
 
 @dataclass(frozen=True)
@@ -180,7 +204,72 @@ def storage_without_cookies(storage_state: Mapping[str, Any], removed: Iterable[
     return candidate
 
 
+def build_config_search_lanes(
+    source_state: StorageState,
+    *,
+    preserve_auth: bool,
+    proven_safe_removals: Sequence[CookieKey] = (),
+) -> List[Dict[str, Any]]:
+    """Build parallel cookie-signature lanes for browser-config search.
+
+    ``auth_kept`` strips known challenge cookies (plus any proven-safe removals)
+    while retaining auth/opaque cookies. When ``preserve_auth`` is false, also
+    include a fully ``stripped`` lane so guest recoveries can clear soft-blocks
+    without transplanting poisoned session cookies onto new exits.
+    """
+    cookies_by_key = {
+        cookie_key(cookie): cookie
+        for cookie in source_state.get("cookies") or []
+        if isinstance(cookie, Mapping)
+    }
+    challenge_keys = tuple(
+        key
+        for key, cookie in cookies_by_key.items()
+        if is_known_challenge_cookie(cookie) and not is_auth_cookie(cookie)
+    )
+    strip_keys = tuple(dict.fromkeys((*proven_safe_removals, *challenge_keys)))
+    lanes: List[Dict[str, Any]] = [
+        {
+            "key": "auth_kept",
+            "storage_state": storage_without_cookies(source_state, strip_keys),
+        }
+    ]
+    if not preserve_auth:
+        all_keys = tuple(cookies_by_key.keys())
+        lanes.append(
+            {
+                "key": "stripped",
+                "storage_state": storage_without_cookies(source_state, all_keys),
+            }
+        )
+    return lanes
+
+
+def is_usable_document_title(title: str) -> bool:
+    """True when title looks like a real document, not a navigation shell.
+
+    Soft anti-bot walls (any vendor) commonly keep empty titles, bare hostnames,
+    or Chromium "Loading https://..." titles while body text is already long.
+    Candidate probes that treated those as clean reported stablePasses=2 in a
+    few seconds, then live verify correctly failed on the promoted session.
+    """
+    trimmed = title.strip()
+    if not trimmed:
+        return False
+    if _LOADING_URL_TITLE_RE.match(trimmed) or _URL_TITLE_RE.match(trimmed):
+        return False
+    if _BARE_HOSTNAME_TITLE_RE.match(trimmed):
+        return False
+    return True
+
+
 def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
+    """Deprecated heuristic challenge detector.
+
+    Prefer ``classify_page_after_settle`` / ``challenge_llm_classifier``
+    (rose-1-mini). Retained for regression tests and historical RCA fixtures —
+    do not use for probe / live-verify / auth-guard promotion decisions.
+    """
     # 502: Kernel (and similar) proxy denials surface as Bad Gateway. Treating them
     # as challenged keeps a blacklisted Kernel exit from looking "recovered".
     if status in {403, 429, 502}:
@@ -222,14 +311,24 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     visible_markup = re.sub(r"<[^>]+>", "", stripped_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
         return True
-    if not any(marker in normalized_html for marker in _CHALLENGE_HTML_MARKERS):
+    # Interstitial containers are definitive. Expedia's DataDome PWA ships
+    # enough captcha instruction prose to clear the substantive-content bar
+    # while #app-captcha-pwa is still mounted; treating that as "clean" made
+    # recover_from_challenge report skipped_clean_page and the browser agent
+    # misroute into request_user_assistance_for_authentication.
+    if any(marker in normalized_html for marker in _CHALLENGE_INTERSTITIAL_HTML_MARKERS):
+        return True
+    # Hard gate shared with backend challengePageDetect: no usable document
+    # title ⇒ still challenged, even with long body text from meta/noscript.
+    if not is_usable_document_title(title):
+        return True
+    if not any(marker in normalized_html for marker in _CHALLENGE_SENSOR_HTML_MARKERS):
         return False
-    # A vendor marker alone is not proof: sensor scripts (perimeterx.net,
-    # captcha-delivery.com, /cdn-cgi/challenge-platform) stay loaded on the real
-    # page AFTER a challenge clears. Without this, _wait_for_clean_page could
-    # never converge on a site that keeps its sensor bundle, and recovery would
-    # report failure for a page that already works. A page that has recovered
-    # renders substantive content, so treat that as clean.
+    # A sensor-host marker alone is not proof: those scripts stay loaded on the
+    # real page AFTER a challenge clears. Without this, _wait_for_clean_page
+    # could never converge on a site that keeps its sensor bundle, and recovery
+    # would report failure for a page that already works. A page that has
+    # recovered renders substantive content, so treat that as clean.
     if _has_substantive_content(title, body_text, visible_markup):
         return False
     return True
@@ -238,52 +337,181 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
 def _has_substantive_content(title: str, body_text: str, visible_markup: str) -> bool:
     """A challenge interstitial shows almost nothing; a recovered page does not."""
     visible = body_text.strip() or visible_markup
-    return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and bool(title.strip())
+    return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and is_usable_document_title(title)
 
 
-async def _wait_for_clean_page(page: Any, response: Any, solver_timeout_seconds: float) -> bool:
-    deadline = asyncio.get_running_loop().time() + solver_timeout_seconds
-    current_response = response
-    while True:
-        await page.wait_for_timeout(2_000)
-        snapshot = await asyncio.gather(
-            page.title(),
-            page.locator("body").inner_text(timeout=2_000),
-            page.content(),
-            return_exceptions=True,
-        )
-        title = snapshot[0] if isinstance(snapshot[0], str) else ""
-        body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
-        html = snapshot[2] if isinstance(snapshot[2], str) else ""
-        status = current_response.status if current_response is not None else None
-        if not page_looks_challenged(
-            status=status,
-            title=title[:1_000],
-            body_text=body_text[:20_000],
-            html=html[:100_000],
-        ):
-            return True
-        if asyncio.get_running_loop().time() >= deadline:
-            return False
-        current_response = None
+def _response_network_entry(response: Any) -> Dict[str, Any] | None:
+    """Best-effort Playwright Response → classifier network row (status, no body)."""
+    try:
+        url = str(getattr(response, "url", "") or "")
+        status = getattr(response, "status", None)
+        status_text = str(getattr(response, "status_text", "") or "")
+        if not url and status is None:
+            return None
+        return {
+            "url": url,
+            "status": status,
+            "status_text": status_text,
+        }
+    except Exception:
+        return None
+
+
+async def _wait_for_clean_page(
+    page: Any,
+    response: Any,
+    solver_timeout_seconds: float,
+    *,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    network_entries: list | None = None,
+    recovery_reason: str | None = None,
+) -> bool:
+    """After DOM settle, ask rose-1-mini whether the page is still challenged."""
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
+
+    result = await classify_page_after_settle(
+        page,
+        response,
+        settle_timeout_ms=max(1_000.0, float(solver_timeout_seconds) * 1000.0),
+        agent_id=agent_id,
+        user_id=user_id,
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        usage_collector=usage_collector,
+        agent_dom_tree=agent_dom_tree,
+        network_recorder=network_recorder,
+        network_entries=network_entries,
+        recovery_reason=recovery_reason,
+    )
+    return bool(result.get("clean"))
+
+
+def _registrable_host(hostname: str) -> str:
+    host = (hostname or "").lower().strip(".")
+    if host.startswith("www."):
+        return host[4:]
+    return host
+
+
+def same_site_navigation_url(target_url: str, settled_url: str) -> str | None:
+    """Return settled_url when it is a same-site http(s) sibling of target_url.
+
+    Soft-block recoveries (Hotels.com) often clear on a same-host redirect away
+    from a poisoned deep link. Later stability checks must re-nav that settled
+    document — re-punching the original deep link re-triggers 429 / Bot or Not
+    even though the promoted exit is usable.
+    """
+    settled = (settled_url or "").strip()
+    if not settled.startswith(("http://", "https://")):
+        return None
+    target_host = _registrable_host(urlparse(target_url).hostname or "")
+    settled_host = _registrable_host(urlparse(settled).hostname or "")
+    if not target_host or not settled_host or target_host != settled_host:
+        return None
+    return settled
+
+
+def settled_probe_url_after_clean(target_url: str, page: Any) -> str:
+    """Pick the URL for the next probe attempt after a clean settle."""
+    try:
+        settled = str(getattr(page, "url", "") or "")
+    except Exception:
+        settled = ""
+    return same_site_navigation_url(target_url, settled) or target_url
 
 
 async def _probe_page(
     page: Any,
     target_url: str,
     *,
-    attempts: int,
+    attempts: int = 1,
     solver_timeout_seconds: float,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    recovery_reason: str | None = None,
 ) -> bool:
-    for _ in range(attempts):
-        response = None
+    """One goto + one classify by default.
+
+    ``attempts`` is retained for call-site compatibility; values >1 still loop,
+    but the hot path uses 1 (no soft-redirect re-nav / dual LLM).
+    """
+    collected: list[Dict[str, Any]] = []
+
+    def _on_response(resp: Any) -> None:
+        entry = _response_network_entry(resp)
+        if entry is not None:
+            collected.append(entry)
+
+    on_fn = getattr(page, "on", None)
+    off_fn = getattr(page, "remove_listener", None) or getattr(page, "off", None)
+    if callable(on_fn):
         try:
-            response = await page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
+            on_fn("response", _on_response)
         except Exception:
-            pass
-        if not await _wait_for_clean_page(page, response, solver_timeout_seconds):
-            return False
-    return True
+            on_fn = None
+    try:
+        navigate_url = target_url
+        for _ in range(max(1, int(attempts))):
+            response = None
+            try:
+                response = await page.goto(
+                    navigate_url, wait_until="domcontentloaded", timeout=45_000
+                )
+            except Exception:
+                pass
+            if not await _wait_for_clean_page(
+                page,
+                response,
+                solver_timeout_seconds,
+                agent_id=agent_id,
+                user_id=user_id,
+                claude_token=claude_token,
+                claude_token_source=claude_token_source,
+                claude_token_pool_id=claude_token_pool_id,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                usage_collector=usage_collector,
+                agent_dom_tree=agent_dom_tree,
+                network_recorder=network_recorder,
+                network_entries=list(collected),
+                recovery_reason=recovery_reason,
+            ):
+                return False
+            # Legacy multi-attempt path only: follow settled URL between loops.
+            navigate_url = settled_probe_url_after_clean(target_url, page)
+        return True
+    finally:
+        if callable(on_fn) and callable(off_fn):
+            with contextlib.suppress(Exception):
+                off_fn("response", _on_response)
 
 
 async def probe_storage_state(
@@ -291,10 +519,27 @@ async def probe_storage_state(
     storage_state: StorageState,
     target_url: str,
     *,
-    attempts: int = 2,
-    solver_timeout_seconds: float = 45.0,
+    attempts: int = 1,
+    solver_timeout_seconds: float = DEFAULT_SOLVER_TIMEOUT_SECONDS,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
+    recovery_reason: str | None = None,
 ) -> bool:
-    """Probe a storage variant in an isolated remote-browser context."""
+    """Probe a storage variant in an isolated Playwright context.
+
+    Do **not** call this on the live Kernel session: ``new_context``/``new_page``
+    paint extra Chromium windows onto the debug-view desktop. Cookie experiments
+    for recovery belong on ephemeral provider sessions (config-search lanes) or
+    as known-challenge strips applied on the existing live tab.
+    """
     context = await playwright_browser.new_context(storage_state=storage_state)
     try:
         page = await context.new_page()
@@ -303,6 +548,17 @@ async def probe_storage_state(
             target_url,
             attempts=attempts,
             solver_timeout_seconds=solver_timeout_seconds,
+            agent_id=agent_id,
+            user_id=user_id,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            usage_collector=usage_collector,
+            recovery_reason=recovery_reason,
         )
     finally:
         await context.close()
@@ -313,55 +569,98 @@ async def verify_live_page_cleared_challenge(
     page: Any,
     target_url: str,
     *,
-    attempts: int = 2,
-    solver_timeout_seconds: float = 45.0,
+    attempts: int = 1,
+    solver_timeout_seconds: float = DEFAULT_SOLVER_TIMEOUT_SECONDS,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    recovery_reason: str | None = None,
 ) -> bool:
-    """Require the canonical live tab to clear challenge markers after promote/restore.
+    """Require the canonical live tab to clear challenges after promote/restore.
 
-    Candidate probes can false-stable: a remote session's already-loaded probe
-    content looks clean, then a fresh same-host navigation lands on Access Denied
-    (Eventim Cloudflare). Never accept a static snapshot of preloaded content —
-    always navigation-probe the target URL on the live tab.
+    Default is a single navigation-probe + LLM classify. Preloaded config winners
+    that already classified clean on the same remote session should skip this
+    entirely at the call site.
     """
     return await _probe_page(
         page,
         target_url,
         attempts=attempts,
         solver_timeout_seconds=solver_timeout_seconds,
+        agent_id=agent_id,
+        user_id=user_id,
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        usage_collector=usage_collector,
+        agent_dom_tree=agent_dom_tree,
+        network_recorder=network_recorder,
+        recovery_reason=recovery_reason,
     )
 
 
-async def live_tab_looks_challenged(page: Any) -> bool:
-    """True when the live tab's current document still looks challenged.
+async def live_tab_looks_challenged(
+    page: Any,
+    *,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
+    agent_dom_tree: str | None = None,
+    network_recorder: Any = None,
+    recovery_reason: str | None = None,
+) -> bool:
+    """True when the live tab's current document still looks challenged (LLM).
 
-    Used to no-op LLM-requested ``recover_from_challenge`` when the page is
-    already clean — avoids burning the step budget on recovery loops that the
-    model invents from network noise. Does NOT replace provider-exit recovery:
-    callers must still run full recovery when ``provider_exit_rejected`` is set
-    (page shell can look clean while a critical third-party resource is blocked).
+    Used by the auth-assistance guard so CAPTCHA walls are not misrouted into
+    request_user_assistance_for_authentication. Does NOT replace provider-exit
+    recovery: callers must still run full recovery when ``provider_exit_rejected``
+    is set.
     """
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
+
     try:
-        snapshot = await asyncio.wait_for(
-            asyncio.gather(
-                page.title(),
-                page.locator("body").inner_text(timeout=2_000),
-                page.content(),
-                return_exceptions=True,
-            ),
-            timeout=15,
+        result = await classify_page_after_settle(
+            page,
+            None,
+            settle_timeout_ms=15_000,
+            agent_id=agent_id,
+            user_id=user_id,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            usage_collector=usage_collector,
+            agent_dom_tree=agent_dom_tree,
+            network_recorder=network_recorder,
+            recovery_reason=recovery_reason,
         )
     except Exception:
-        # Unknown page state — do not claim "clean" and skip recovery.
+        # Unknown page state — do not claim "clean".
         return True
-    title = snapshot[0] if isinstance(snapshot[0], str) else ""
-    body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
-    html = snapshot[2] if isinstance(snapshot[2], str) else ""
-    return page_looks_challenged(
-        status=None,
-        title=title[:1_000],
-        body_text=body_text[:20_000],
-        html=html[:100_000],
-    )
+    return not bool(result.get("clean"))
 
 
 def target_looks_like_payment_document(_url: str) -> bool:
@@ -482,10 +781,13 @@ async def commit_cookie_removals(
     removed_cookie_keys: Sequence[CookieKey],
     target_url: str,
     *,
-    attempts: int = 2,
+    attempts: int = 1,
     solver_timeout_seconds: float = 45.0,
+    recovery_reason: str | None = None,
+    network_recorder: Any = None,
+    agent_dom_tree: str | None = None,
 ) -> bool:
-    """Delete proven-safe keys and require the canonical tab to pass twice."""
+    """Delete proven-safe keys and require one clean live-tab navigation."""
     context = page.context
     for name, domain, path in removed_cookie_keys:
         await context.clear_cookies(name=name, domain=domain, path=path)
@@ -494,6 +796,9 @@ async def commit_cookie_removals(
         target_url,
         attempts=attempts,
         solver_timeout_seconds=solver_timeout_seconds,
+        recovery_reason=recovery_reason,
+        network_recorder=network_recorder,
+        agent_dom_tree=agent_dom_tree,
     )
 
 
@@ -520,7 +825,12 @@ async def minimize_passing_cookie_removal(
     probe: Probe,
     progress: Progress,
 ) -> Tuple[CookieKey, ...]:
-    """Parallel delta-debug a passing removal down to a 1-minimal subset."""
+    """Deprecated: multi-round cookie ddmin.
+
+    Live cookie-probe waves are retired; recovery uses live known-cookie strips
+    + ephemeral config search. Kept for call-site compatibility / offline
+    experiments; do not wire into the hot recover path.
+    """
     current = tuple(dict.fromkeys(passing_removal))
     granularity = 2
     round_number = 0
@@ -554,6 +864,53 @@ async def minimize_passing_cookie_removal(
     return current
 
 
+# Max concurrent cookie-variant probes in one recover wave (settle + LLM overlap).
+# Probes MUST run on ephemeral provider sessions — never on the live Kernel desktop.
+_COOKIE_PROBE_WAVE_CAP = 5
+
+
+def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
+    """True when the browser task explicitly prefers guest / anonymous checkout.
+
+    Guest payment-boundary tasks inject site cookies that often trip challenges;
+    a clean ``all_target`` strip is the intended recovery (logged-out page), not
+    an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
+
+    Guest needles are checked first: phrases like ``do not sign in`` contain the
+    substring ``sign in`` and must not be classified as signed-in preference.
+    """
+    text = (goal or "").lower()
+    guest_needles = (
+        "guest checkout",
+        "as guest",
+        "continue as guest",
+        "check out anonymously",
+        "checkout anonymously",
+        "anonymous checkout",
+        "anonymously",
+        "do not sign in",
+        "don't sign in",
+        "without signing in",
+        "no account needed",
+        "do not log in",
+        "don't log in",
+    )
+    if any(needle in text for needle in guest_needles):
+        return True
+    signed_in_needles = (
+        "sign in",
+        "sign-in",
+        "log in",
+        "login",
+        "saved credentials",
+        "use my account",
+        "use my credentials",
+    )
+    if any(needle in text for needle in signed_in_needles):
+        return False
+    return False
+
+
 async def recover_from_challenge(
     *,
     source_state: StorageState,
@@ -564,12 +921,15 @@ async def recover_from_challenge(
     search_configs: ConfigSearch,
     progress: Progress,
     provider_exit_rejected: bool = False,
+    allow_logged_out_cookie_commit: bool = False,
 ) -> ChallengeRecoveryResult:
-    """Run solver -> cookie isolation -> parallel provider/config recovery.
+    """Run solver → ephemeral cookie-probe wave → live commit / config search.
 
-    The config search always receives the full auth-bearing state unless the only
-    removals are from the explicit anti-bot-cookie allowlist. Auth-like and opaque
-    cookies are never removed from the canonical context or named in progress.
+    ``probe`` must hit ephemeral provider sessions (or a test double), **not**
+    ``new_context`` on the live Kernel browser — that paints stacked Chromium
+    windows into the debug view. Known anti-bot strips that probe clean may be
+    committed on the live tab; guest tasks may commit a clean ``all_target``
+    strip. Opaque cookie findings stay diagnostic and escalate to config search.
     """
     original_digest = _state_digest(source_state)
 
@@ -592,21 +952,16 @@ async def recover_from_challenge(
             raise RuntimeError("Challenge recovery refused an unproven cookie removal")
         await progress(
             "browser_config_search",
-            "Searching permission-compatible Kernel and Steel browser/IP configurations in parallel.",
+            "Searching permission-compatible Kernel and Steel browser/IP configurations "
+            "across cookie lanes (configs sequential within each lane).",
         )
-        # Never transplant IP-bound clearance cookies onto a new provider/proxy.
-        # Keep auth + opaque cookies; strip every known challenge cookie even when
-        # cookie-stage probes did not prove a live commit.
-        challenge_keys = tuple(
-            key
-            for key, cookie in cookies_by_key.items()
-            if is_known_challenge_cookie(cookie) and not is_auth_cookie(cookie)
-        )
-        config_state = storage_without_cookies(
+        preserve_auth = not allow_logged_out_cookie_commit
+        lanes = build_config_search_lanes(
             source_state,
-            tuple(dict.fromkeys((*proven_safe_removals, *challenge_keys))),
+            preserve_auth=preserve_auth,
+            proven_safe_removals=proven_safe_removals,
         )
-        config_result = await search_configs(config_state)
+        config_result = await search_configs(lanes)
         return ChallengeRecoveryResult(
             "config_selected",
             tuple(proven_safe_removals),
@@ -635,56 +990,92 @@ async def recover_from_challenge(
     known_safe = tuple(
         key for key in target_keys if is_known_challenge_cookie(cookies[key]) and not is_auth_cookie(cookies[key])
     )
-
-    if known_safe:
-        await progress(
-            "known_challenge_cookies",
-            "Testing an isolated copy without known challenge cookies; the signed-in context is unchanged.",
-        )
-        if await probe(storage_without_cookies(source_state, known_safe)):
-            minimal = await minimize_passing_cookie_removal(source_state, known_safe, probe, progress)
-            if _state_digest(source_state) != original_digest:
-                raise RuntimeError("Challenge recovery mutated its source browser state")
-            await progress(
-                "apply_cookie_fix",
-                "Applying the proven non-auth cookie fix and requiring two clean live-page probes.",
-            )
-            if await commit_cookie_removals(minimal):
-                return ChallengeRecoveryResult("cookies_sanitized", minimal)
-            return await search_with_preserved_auth_state(minimal)
-
-    await progress(
-        "all_target_cookies",
-        "Testing an isolated copy without target-site cookies to distinguish state from network reputation.",
-    )
-    all_cookie_probe_clean = await probe(storage_without_cookies(source_state, target_keys))
-
     diagnostic_keys = tuple(key for key in target_keys if not is_auth_cookie(cookies[key]))
-    if all_cookie_probe_clean and diagnostic_keys:
-        await progress(
-            "unclassified_cookies",
-            "Testing unclassified target cookies in isolation; unknown cookies remain protected auth state.",
+
+    # One parallel wave: ≤5 distinct cookie variants on ephemeral sessions.
+    wave: List[Tuple[str, Tuple[CookieKey, ...], StorageState]] = []
+    if known_safe:
+        wave.append(("known_challenge", known_safe, storage_without_cookies(source_state, known_safe)))
+    if target_keys and tuple(target_keys) != known_safe:
+        wave.append(("all_target", tuple(target_keys), storage_without_cookies(source_state, target_keys)))
+    if diagnostic_keys and diagnostic_keys != known_safe and diagnostic_keys != tuple(target_keys):
+        wave.append(
+            ("diagnostic", diagnostic_keys, storage_without_cookies(source_state, diagnostic_keys))
         )
-        if await probe(storage_without_cookies(source_state, diagnostic_keys)):
-            # This narrows the likely poison for diagnosis, but a clean logged-out
-            # page is indistinguishable from a clean authenticated page here. Do
-            # not commit or carry the removal into config search: an arbitrary
-            # name such as ``opaque_state`` may be the site's auth credential.
-            await minimize_passing_cookie_removal(
-                source_state,
-                diagnostic_keys,
-                probe,
-                progress,
-            )
-            if _state_digest(source_state) != original_digest:
-                raise RuntimeError("Challenge recovery mutated its source browser state")
-            await progress(
-                "preserve_auth_state",
-                "A cookie-specific cause was isolated, but unknown cookies are preserved; continuing with browser/IP search.",
-            )
-            return await search_with_preserved_auth_state()
+    # Fill remaining slots with coarse halves of the largest removable set so the
+    # wave stays useful under the ≤5 parallel LLM budget without ddmin rounds.
+    base_for_halves = diagnostic_keys or tuple(target_keys)
+    if len(wave) < _COOKIE_PROBE_WAVE_CAP and len(base_for_halves) >= 4:
+        mid = len(base_for_halves) // 2
+        for label, keys in (
+            ("diagnostic_half_a", base_for_halves[:mid]),
+            ("diagnostic_half_b", base_for_halves[mid:]),
+        ):
+            if len(wave) >= _COOKIE_PROBE_WAVE_CAP or not keys:
+                break
+            if any(existing == keys for _label, existing, _state in wave):
+                continue
+            wave.append((label, keys, storage_without_cookies(source_state, keys)))
+    wave = wave[:_COOKIE_PROBE_WAVE_CAP]
+
+    clean_by_label: Dict[str, bool] = {}
+    if wave:
+        await progress(
+            "cookie_probe_wave",
+            f"Probing {len(wave)} cookie variant(s) in parallel on ephemeral browser "
+            "sessions (not the live debug desktop; known challenge strips may commit, "
+            "others are diagnostic).",
+        )
+        results = await asyncio.gather(
+            *(probe(state) for _label, _keys, state in wave),
+            return_exceptions=True,
+        )
+        clean_by_label = {
+            label: False if isinstance(result, BaseException) else bool(result)
+            for (label, _keys, _state), result in zip(wave, results)
+        }
 
     if _state_digest(source_state) != original_digest:
         raise RuntimeError("Challenge recovery mutated its source browser state")
+
+    if known_safe and clean_by_label.get("known_challenge"):
+        await progress(
+            "apply_cookie_fix",
+            "Applying the proven known-challenge cookie strip on the live tab and "
+            "requiring one clean navigation.",
+        )
+        if await commit_cookie_removals(known_safe):
+            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
+        return await search_with_preserved_auth_state(known_safe)
+
+    all_target_keys = tuple(target_keys)
+    if (
+        allow_logged_out_cookie_commit
+        and all_target_keys
+        and clean_by_label.get("all_target")
+    ):
+        await progress(
+            "apply_cookie_fix",
+            "Guest path: applying the proven all-target cookie strip on the live tab "
+            "and requiring one clean navigation.",
+        )
+        if await commit_cookie_removals(all_target_keys):
+            return ChallengeRecoveryResult("cookies_sanitized", all_target_keys)
+        return await search_with_preserved_auth_state()
+
+    diagnostic_clean = any(
+        clean_by_label.get(label)
+        for label in ("all_target", "diagnostic", "diagnostic_half_a", "diagnostic_half_b")
+    )
+    if diagnostic_clean:
+        # Clean logged-out / stripped probes are diagnostic only — opaque cookies
+        # may be auth credentials, so never commit unclassified removals on
+        # signed-in / default paths.
+        await progress(
+            "preserve_auth_state",
+            "A cookie variant looked clean in isolation, but unknown cookies are preserved; "
+            "continuing with browser/IP search.",
+        )
+        return await search_with_preserved_auth_state()
 
     return await search_with_preserved_auth_state()

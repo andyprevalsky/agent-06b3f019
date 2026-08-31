@@ -9,6 +9,11 @@ export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? '';
 export const STRIPE_SUBSCRIPTION_PRICE_ID = (process.env.STRIPE_SUBSCRIPTION_PRICE_ID ?? '').trim();
 export const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
+/** Read NODE_ENV at call time so tests can flip production mode before invoking billing helpers. */
+export function isProductionRuntime(): boolean {
+  return process.env.NODE_ENV === 'production';
+}
+
 export const RETURN_URL_PRODUCTION = 'https://roselabs.ai/settings';
 export const RETURN_URL_DEVELOPMENT = 'http://localhost:5173/settings';
 

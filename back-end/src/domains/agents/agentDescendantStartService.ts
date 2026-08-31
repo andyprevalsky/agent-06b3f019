@@ -33,12 +33,16 @@ export function assertExistingDescendantRequestMatches(
     ['start_phase', body.start_phase ?? null, existing.workflowStartPhase],
     ['task_queue', body.task_queue ?? null, existing.workflowTaskQueue],
     ['max_iterations', body.max_iterations ?? null, existing.workflowMaxIterations],
-    ['price_limit_cents', body.price_limit_cents ?? 100, existing.priceLimitCents],
+    [
+      'price_limit_cents',
+      body.price_limit_cents ?? existing.priceLimitCents,
+      existing.priceLimitCents,
+    ],
     ['context_gates', body.context_gates ?? null, existing.workflowContextGates],
     ['response_schema', body.response_schema ?? null, existing.responseSchema],
     [
       'fast_mode_cache_enabled',
-      body.fast_mode_cache_enabled ?? false,
+      body.fast_mode_cache_enabled ?? existing.fastModeCacheEnabled,
       existing.fastModeCacheEnabled,
     ],
     ['world_model_mode', body.world_model_mode ?? 'real', existing.worldModelMode],
@@ -109,6 +113,9 @@ export async function resumeExistingSubAgent(
   if (body.agent_id === undefined || body.parent_agent_id === undefined) return null;
   const existing = (await repo.findExistingAgentsByIds([body.agent_id], userId))[0];
   if (existing === undefined) return null;
+  if (body.fast_mode_cache_enabled === undefined) {
+    body.fast_mode_cache_enabled = existing.fastModeCacheEnabled;
+  }
   assertExistingDescendantRequestMatches(body, existing);
   const workflowId = existing.temporalWorkflowStartPending
     ? await startSubAgentWorkflow(body, existing.id, userId, verifier, existing.priceLimitCents)

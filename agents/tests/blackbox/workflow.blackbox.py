@@ -392,6 +392,7 @@ async def mock_fetch_compute_token_activity(
     agent_id: Optional[str] = None,
     root_agent_id: Optional[str] = None,
     fast_cache_affinity_key: Optional[str] = None,
+    token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     return None
 
@@ -407,6 +408,11 @@ async def mock_mark_compute_token_rate_limited_activity(
     failure_reason: Optional[str] = None,
 ) -> None:
     return None
+
+
+@activity.defn(name="release_compute_token_lineage_activity")
+async def mock_release_compute_token_lineage_activity(lineage_key: str) -> bool:
+    return True
 
 
 @activity.defn(name="fetch_agent_config")
@@ -733,6 +739,7 @@ MOCK_ACTIVITIES = [
     mock_fetch_claude_max_token_activity,
     mock_fetch_compute_token_activity,
     mock_mark_compute_token_rate_limited_activity,
+    mock_release_compute_token_lineage_activity,
     mock_fetch_agent_config,
     mock_fetch_model_pricing,
     mock_post_agent_message,
@@ -1556,10 +1563,13 @@ def test_workflow_parent_state_query_all_false():
     assert wf.parent_state_query() == {"is_paused": False, "is_cost_limit_reached": False}
 
 
-def test_workflow_format_outputs_no_schema_returns_empty():
+def test_workflow_format_outputs_no_schema_emits_response_keys():
     wf = _bare_workflow_instance()
     wf.output_schema = None
-    assert wf._format_outputs({"x": 1}) == []
+    outputs = wf._format_outputs({"positioning_statement": "Engineer approach", "_skip": 1})
+    assert [row["key"] for row in outputs] == ["positioning_statement"]
+    assert outputs[0]["label"] == "Positioning Statement"
+    assert outputs[0]["value"] == "Engineer approach"
 
 
 def test_workflow_format_outputs_no_response_returns_empty():
@@ -1590,11 +1600,122 @@ def test_workflow_format_outputs_skips_missing_fields():
     assert outputs[0]["key"] == "present"
 
 
-def test_workflow_format_outputs_field_without_name_skipped():
+def test_workflow_format_outputs_field_without_name_falls_back_to_keys():
     wf = _bare_workflow_instance()
     wf.output_schema = {"fields": [{"description": "no name"}]}
     outputs = wf._format_outputs({"x": "y"})
-    assert outputs == []
+    assert outputs == [{"key": "x", "label": "X", "value": "y"}]
+
+
+def test_structured_response_from_schema_headings_parses_assemble_final():
+    from workflows.agent_workflow import structured_response_from_schema_headings
+
+    schema = {
+        "fields": [
+            {"name": "top_creators_analysis", "type": "list[object]"},
+            {"name": "positioning_statement", "type": "str"},
+            {"name": "ninety_day_content_calendar", "type": "list[object]"},
+        ]
+    }
+    text = (
+        "July Fast Mode assemble.\n\n"
+        "# top_creators_analysis\n\n"
+        "1. Andrew Huberman\n\n"
+        "# positioning_statement\n\n"
+        "Engineer approach to longevity.\n\n"
+        "# ninety_day_content_calendar\n\n"
+        "Week 1: sleep audit."
+    )
+    parsed = structured_response_from_schema_headings(text, schema)
+    assert "Huberman" in parsed["top_creators_analysis"]
+    assert parsed["positioning_statement"] == "Engineer approach to longevity."
+    assert "sleep audit" in parsed["ninety_day_content_calendar"]
+
+
+def test_structured_response_from_schema_headings_without_schema():
+    from workflows.agent_workflow import structured_response_from_schema_headings
+
+    parsed = structured_response_from_schema_headings(
+        "# positioning_statement\n\nEngineer approach.\n\n# weekly_engagement_target_creators\n\nHuberman.",
+        None,
+    )
+    assert parsed["positioning_statement"] == "Engineer approach."
+    assert parsed["weekly_engagement_target_creators"] == "Huberman."
+
+
+def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "positioning_statement", "description": "Positioning"},
+            {"name": "weekly_engagement_target_creators"},
+        ]
+    }
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": (
+                "# positioning_statement\n\nAman as the founder-operator.\n\n"
+                "# weekly_engagement_target_creators\n\nHuberman, Attia, Johnson."
+            ),
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    assert [row["key"] for row in outputs] == [
+        "positioning_statement",
+        "weekly_engagement_target_creators",
+    ]
+    assert outputs[0]["value"] == "Aman as the founder-operator."
+
+
+def test_workflow_coalesce_structured_response_from_metadata_payload():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "positioning_statement"},
+            {"name": "weekly_engagement_target_creators"},
+        ]
+    }
+    context = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "structured_response": {
+                    "positioning_statement": "Andy as the founder-operator.",
+                    "weekly_engagement_target_creators": ["Huberman"],
+                }
+            },
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    assert [row["key"] for row in outputs] == [
+        "positioning_statement",
+        "weekly_engagement_target_creators",
+    ]
+    assert outputs[0]["value"] == "Andy as the founder-operator."
+
+
+def test_workflow_coalesce_structured_response_without_schema_uses_headings():
+    wf = _bare_workflow_instance()
+    wf.output_schema = None
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": (
+                "# positioning_statement\n\nAman as the founder-operator.\n\n"
+                "# weekly_engagement_target_creators\n\nHuberman, Attia, Johnson."
+            ),
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    assert [row["key"] for row in outputs] == [
+        "positioning_statement",
+        "weekly_engagement_target_creators",
+    ]
 
 
 def test_workflow_extract_failure_context_empty_context():
@@ -3553,6 +3674,48 @@ async def test_workflow_handle_incomplete_max_iterations():
         _restore_workflow(original)
 
 
+async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
+    """Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.goal = "g"
+    wf.parent_workflow_id = None
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        async def mark_complete(*_args, **_kwargs):
+            events.append("complete")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
+        wf._mark_complete = mark_complete
+        result = await wf._handle_incomplete(
+            {
+                "status": "max_iterations",
+                "context": [],
+                "verifier_progress": 1.0,
+                "verifier_reasoning": (
+                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient"
+                ),
+            },
+            phase="EXECUTE",
+        )
+        assert result["status"] == "completed"
+        assert events == ["refresh", "complete"]
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_handle_incomplete_error():
     """_handle_incomplete handles error status."""
     wf = _bare_workflow_instance()
@@ -5224,11 +5387,11 @@ async def test_workflow_format_outputs_with_schema():
 
 
 async def test_workflow_format_outputs_empty_without_schema():
-    """_format_outputs handles missing schema gracefully."""
+    """_format_outputs still returns outputs when schema gen missed."""
     wf = _bare_workflow_instance()
     wf.output_schema = None
     outputs = wf._format_outputs({"answer": "anything"})
-    assert isinstance(outputs, list)
+    assert outputs == [{"key": "answer", "label": "Answer", "value": "anything"}]
 
 
 async def test_workflow_format_outputs_none_response():
@@ -5856,6 +6019,39 @@ async def test_workflow_get_model_pricing_unknown_uses_default():
         _restore_workflow(original)
 
 
+async def test_workflow_rotate_compute_token_releases_lineage_and_refetches():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-rotate"
+    wf.user_id = "user-1"
+    wf.compute_token_provider = "claude"
+    wf.claude_max_token = "stale-token"
+    wf.claude_max_token_source = "pool"
+    wf.compute_token_lineage_key = "agent:agent-rotate"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_compute_token_activity"] = {
+        "type": "gpt",
+        "accessToken": "fresh-gpt",
+        "accountId": "acct-1",
+        "source": "pool",
+        "poolTokenId": "pool-gpt-1",
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._rotate_compute_token("user-1")
+        assert wf.compute_token_provider == "gpt"
+        assert wf.gpt_code_token == "fresh-gpt"
+        activity_names = [c[0] for c in fake.activity_calls]
+        assert "release_compute_token_lineage_activity" in activity_names
+        release_call = next(
+            c for c in fake.activity_calls if c[0] == "release_compute_token_lineage_activity"
+        )
+        assert release_call[1] == ["agent:agent-rotate"]
+        fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
+        assert fetch_call[1][-1] == "gpt"
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
     """When claude_token is set but actual_model is non-claude and error=auth_error,
     _on_tokens marks the token rate-limited and clears it."""
@@ -5867,6 +6063,7 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
     wf.claude_max_token_source = "pool"
     wf.claude_max_token_pool_id = "pool-id-1"
     wf.claude_max_token_fetched_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.compute_token_lineage_key = "agent:a1"
     wf.input_cents_per_1k = 0.0
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
@@ -5889,6 +6086,9 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         assert "mark_compute_token_rate_limited_activity" in activity_names
         mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
         assert mark_call[1] == ["claude", "pool", "user-1", "pool-id-1", 5 * 60, None, "auth_error"]
+        assert "release_compute_token_lineage_activity" in activity_names
+        fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
+        assert fetch_call[1][-1] == "gpt"
     finally:
         _restore_workflow(original)
 
@@ -5968,6 +6168,7 @@ async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
     wf.gpt_code_token = "gpt-token"
     wf.gpt_code_token_source = "pool"
     wf.gpt_code_token_pool_id = "gpt-pool-1"
+    wf.compute_token_lineage_key = "agent:a1"
     wf.input_cents_per_1k = 0.0
     wf.output_cents_per_1k = 0.0
     fake = _FakeWorkflowModule()
@@ -5992,6 +6193,9 @@ async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
         assert "mark_compute_token_rate_limited_activity" in activity_names
         mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
         assert mark_call[1] == ["gpt", "pool", "user-1", "gpt-pool-1", 5 * 60, None, "auth_error"]
+        assert "release_compute_token_lineage_activity" in activity_names
+        fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
+        assert fetch_call[1][-1] == "claude"
     finally:
         _restore_workflow(original)
 
@@ -6095,11 +6299,31 @@ async def run_all_tests():
     r.record("wf_cost_limit_reached_default", test_workflow_is_cost_limit_reached_query_default)
     r.record("wf_parent_state_query", test_workflow_parent_state_query)
     r.record("wf_parent_state_all_false", test_workflow_parent_state_query_all_false)
-    r.record("wf_format_outputs_no_schema", test_workflow_format_outputs_no_schema_returns_empty)
+    r.record("wf_format_outputs_no_schema", test_workflow_format_outputs_no_schema_emits_response_keys)
     r.record("wf_format_outputs_no_response", test_workflow_format_outputs_no_response_returns_empty)
     r.record("wf_format_outputs_maps_fields", test_workflow_format_outputs_maps_fields)
     r.record("wf_format_outputs_skips_missing", test_workflow_format_outputs_skips_missing_fields)
-    r.record("wf_format_outputs_field_no_name", test_workflow_format_outputs_field_without_name_skipped)
+    r.record("wf_format_outputs_field_no_name", test_workflow_format_outputs_field_without_name_falls_back_to_keys)
+    r.record(
+        "wf_schema_headings_parse_assemble_final",
+        test_structured_response_from_schema_headings_parses_assemble_final,
+    )
+    r.record(
+        "wf_schema_headings_without_schema",
+        test_structured_response_from_schema_headings_without_schema,
+    )
+    r.record(
+        "wf_coalesce_structured_response_from_headings",
+        test_workflow_coalesce_structured_response_fills_outputs_from_headings,
+    )
+    r.record(
+        "wf_coalesce_structured_response_from_metadata_payload",
+        test_workflow_coalesce_structured_response_from_metadata_payload,
+    )
+    r.record(
+        "wf_coalesce_structured_response_without_schema",
+        test_workflow_coalesce_structured_response_without_schema_uses_headings,
+    )
     r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
     r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)
     r.record("wf_efc_skips_reasoning_meta", test_workflow_extract_failure_context_skips_reasoning_metadata)
@@ -6252,6 +6476,10 @@ async def run_all_tests():
         test_workflow_context_overflow_uses_complete_continuation_contract,
     )
     await r.record_async("wf_handle_incomplete_max_iterations", test_workflow_handle_incomplete_max_iterations)
+    await r.record_async(
+        "wf_handle_incomplete_max_iterations_fast_mode_completes",
+        test_workflow_handle_incomplete_max_iterations_fast_mode_completes,
+    )
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
     await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)
@@ -6393,6 +6621,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_get_model_pricing_default", test_workflow_get_model_pricing_unknown_uses_default)
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
+    await r.record_async(
+        "wf_rotate_compute_token_releases_lineage",
+        test_workflow_rotate_compute_token_releases_lineage_and_refetches,
+    )
     await r.record_async(
         "wf_on_tokens_transient_keeps_claude", test_workflow_on_tokens_transient_error_keeps_claude_token
     )

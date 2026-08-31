@@ -78,6 +78,98 @@ def test_load_archive_maps_benchmark_run_to_agent_detail(tmp_path):
     ]
 
 
+def test_load_archive_copies_response_schema_and_structured_output(tmp_path):
+    run_path = tmp_path / "run.json"
+    schema = {"fields": [{"name": "positioning_statement", "type": "str"}]}
+    structured = {"positioning_statement": "Engineer approach to longevity"}
+    run_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-07T23:00:00+00:00",
+                "tasks": [
+                    {
+                        "name": "chat-mode",
+                        "passed": True,
+                        "agent_id": "agent-1",
+                        "duration_seconds": 12.5,
+                        "logs": {
+                            "messages": [{"role": "USER", "message": "hello", "created_at": "t0"}],
+                            "tree": {
+                                "agent-1": {
+                                    "parent_agent_id": None,
+                                    "goal": "hello",
+                                    "status": "COMPLETED",
+                                    "response_schema": schema,
+                                    "structured_output": structured,
+                                    "tokens_out": 29515,
+                                    "context_size": 185193,
+                                    "messages": [{"role": "USER", "message": "hello", "created_at": "t0"}],
+                                }
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    entry = load_archive(run_path)["agent-1"]
+    assert entry.agent["response_schema"] == schema
+    assert entry.agent["structured_output"] == structured
+    assert entry.agent["tokens_out"] == 29515
+    assert entry.agent["context_size"] == 185193
+
+
+def test_load_archive_derives_response_schema_from_final_outputs(tmp_path):
+    run_path = tmp_path / "run.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-07T23:00:00+00:00",
+                "tasks": [
+                    {
+                        "name": "chat-mode",
+                        "passed": True,
+                        "agent_id": "agent-1",
+                        "logs": {
+                            "messages": [
+                                {
+                                    "role": "TOOL",
+                                    "message": "",
+                                    "created_at": "t1",
+                                    "metadata": {
+                                        "isFinalSummary": True,
+                                        "completionSummary": {
+                                            "summary": "Completed a 50-creator competitive analysis.",
+                                            "outputs": [
+                                                {
+                                                    "key": "positioning_statement",
+                                                    "label": "Positioning Statement",
+                                                    "value": "Engineer approach",
+                                                }
+                                            ],
+                                        },
+                                    },
+                                }
+                            ],
+                            "tree": {
+                                "agent-1": {
+                                    "parent_agent_id": None,
+                                    "goal": "hello",
+                                    "status": "COMPLETED",
+                                    "messages": [],
+                                }
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    entry = load_archive(run_path)["agent-1"]
+    assert entry.agent["response_schema"]["fields"][0]["name"] == "positioning_statement"
+    assert entry.agent["structured_output"]["positioning_statement"] == "Engineer approach"
+
+
 def test_load_archive_safe_tolerates_missing_and_broken(tmp_path):
     assert load_archive_safe(None) == {}
     assert load_archive_safe(tmp_path / "nope.json") == {}
@@ -378,6 +470,47 @@ def test_tree_endpoint_returns_full_fanout(tmp_path):
     finally:
         archive.shutdown()
         configure_archive_handler(None)
+
+
+def test_load_archive_ignores_tool_usage_shaped_tree(tmp_path):
+    """`/api/tool-usage/tree` rollups must not become empty child chips."""
+    run_path = tmp_path / "run.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "t",
+                "tasks": [
+                    {
+                        "name": "test-mass-agent-run-0",
+                        "passed": True,
+                        "agent_id": "root-1",
+                        "logs": {
+                            "messages": [{"role": "USER", "message": "fan out", "created_at": "t0"}],
+                            "tree": {
+                                "root_agent_id": "root-1",
+                                "agent_count": 54,
+                                "tool_usage_count": 9,
+                                "llm_call_count": 4,
+                                "tokens_in": 1,
+                                "tokens_out": 1,
+                                "total_cost_cents": 0,
+                                "child-a": {
+                                    "parent_agent_id": "root-1",
+                                    "goal": "research A",
+                                    "status": "COMPLETED",
+                                    "messages": [{"role": "ASSISTANT", "message": "A done", "created_at": "t1"}],
+                                },
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    archive = load_archive(run_path)
+    assert set(archive.keys()) == {"root-1", "child-a"}
+    assert archive["child-a"].agent["message_count"] == 1
+    assert archive["child-a"].messages[0]["text"] == "A done"
 
 
 def test_tree_endpoint_backward_compat_root_only(tmp_path):

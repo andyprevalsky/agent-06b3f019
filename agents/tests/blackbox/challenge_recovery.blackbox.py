@@ -14,7 +14,9 @@ from domains.spawn_browser_agent_v3.challenge_recovery import (
     blocked_resource_urls_for_verify,
     commit_cookie_removals,
     cookie_key,
+    goal_allows_logged_out_cookie_commit,
     is_auth_cookie,
+    is_usable_document_title,
     page_looks_challenged,
     recover_from_challenge,
     target_looks_like_payment_document,
@@ -40,7 +42,7 @@ def _state(*cookies):
     }
 
 
-async def _run(source, probe, *, live_commit_clean=True):
+async def _run(source, probe, *, live_commit_clean=True, allow_logged_out_cookie_commit=False):
     events = []
     committed = []
     config_inputs = []
@@ -63,8 +65,8 @@ async def _run(source, probe, *, live_commit_clean=True):
         committed.extend(keys)
         return live_commit_clean
 
-    async def search_configs(state):
-        config_inputs.append(state)
+    async def search_configs(lanes):
+        config_inputs.append(lanes)
         return {"provider": "steel", "proxy_mode": "fixed", "ws_url": "wss://winner"}
 
     result = await recover_from_challenge(
@@ -75,6 +77,7 @@ async def _run(source, probe, *, live_commit_clean=True):
         commit_cookie_removals=commit,
         search_configs=search_configs,
         progress=progress,
+        allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
     )
     return result, events, committed, config_inputs
 
@@ -92,7 +95,7 @@ async def test_known_challenge_cookie_is_removed_without_touching_auth():
     assert config_inputs == []
     assert source == before, "experimental probes must not mutate canonical state"
     assert {event[0] for event in events} == {"call-recovery-1"}
-    assert [event[1] for event in events][:2] == ["captcha_solver", "known_challenge_cookies"]
+    assert [event[1] for event in events][:2] == ["captcha_solver", "cookie_probe_wave"]
     assert all("authState" not in event[2] for event in events)
 
 
@@ -113,8 +116,8 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
     async def forbidden_commit(_keys):
         raise AssertionError("an explicitly rejected IP must not mutate live cookies")
 
-    async def search_configs(state):
-        config_inputs.append(copy.deepcopy(state))
+    async def search_configs(lanes):
+        config_inputs.append(copy.deepcopy(lanes))
         return {"provider": "kernel", "proxy_mode": "isp_city", "ws_url": "wss://winner"}
 
     async def progress(stage, message):
@@ -133,25 +136,30 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
 
     assert solver_calls == 1, "provider-native CAPTCHA solving must remain first"
     assert [stage for stage, _ in events] == ["captcha_solver", "browser_config_search"]
-    assert config_inputs == [
-        _state(_cookie("authState"), _cookie("opaque_state"))
-    ], "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
+    assert len(config_inputs) == 1 and len(config_inputs[0]) == 1
+    assert config_inputs[0][0]["key"] == "auth_kept"
+    assert config_inputs[0][0]["storage_state"] == _state(
+        _cookie("authState"), _cookie("opaque_state")
+    ), "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
     assert source == before
     assert result.recovery == "config_selected"
     assert result.removed_cookie_keys == ()
 
 
-async def test_unknown_cookie_isolated_with_parallel_delta_debugging():
+async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
+    """One settle-window wave: parallel variants, no multi-round cookie ddmin."""
     source = _state(*(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"]))
     before = copy.deepcopy(source)
     active = 0
     max_active = 0
+    probe_calls = 0
 
     async def probe(candidate):
-        nonlocal active, max_active
+        nonlocal active, max_active, probe_calls
+        probe_calls += 1
         active += 1
         max_active = max(max_active, active)
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
         clean = "poison" not in {cookie["name"] for cookie in candidate["cookies"]}
         active -= 1
         return clean
@@ -159,13 +167,48 @@ async def test_unknown_cookie_isolated_with_parallel_delta_debugging():
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == [], "unclassified cookies are diagnostic-only and never deleted"
-    assert config_inputs == [before], "config search must retain every opaque cookie"
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]], "config search must retain every opaque cookie"
     assert source == before
-    assert max_active >= 2, "delta-debug rounds must probe cookie groups concurrently"
-    assert "all_target_cookies" in [event[1] for event in events]
-    assert "unclassified_cookies" in [event[1] for event in events]
-    assert "cookie_isolation" in [event[1] for event in events]
+    assert max_active >= 2, "cookie variants must probe concurrently in one wave"
+    assert probe_calls <= 5, "cookie wave must stay within the parallel LLM budget"
+    assert "cookie_isolation" not in [event[1] for event in events], "ddmin rounds are retired"
+    assert "cookie_probe_wave" in [event[1] for event in events]
     assert "preserve_auth_state" in [event[1] for event in events]
+
+
+async def test_guest_path_commits_clean_all_target_strip():
+    """Guest checkout: a clean all_target probe is committed, not discarded for auth."""
+    source = _state(
+        *(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"])
+    )
+    before = copy.deepcopy(source)
+
+    async def probe(candidate):
+        return "poison" not in {cookie["name"] for cookie in candidate["cookies"]}
+
+    result, events, committed, config_inputs = await _run(
+        source, probe, allow_logged_out_cookie_commit=True
+    )
+    assert result.recovery == "cookies_sanitized"
+    assert set(committed) == {cookie_key(cookie) for cookie in before["cookies"]}
+    assert config_inputs == [], "successful guest commit must not escalate to config search"
+    assert source == before
+    assert "apply_cookie_fix" in [event[1] for event in events]
+    assert "preserve_auth_state" not in [event[1] for event in events]
+    assert any("Guest path" in event[2] for event in events)
+
+
+def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
+    assert goal_allows_logged_out_cookie_commit(
+        "Book Hotel Kabuki on hotels.com. Use guest checkout — do not sign in."
+    )
+    assert goal_allows_logged_out_cookie_commit("Continue as guest without an account.")
+    assert goal_allows_logged_out_cookie_commit(
+        "Buy the item and check out anonymously without creating an account."
+    )
+    assert not goal_allows_logged_out_cookie_commit("Sign in with my Expedia account and book.")
+    assert not goal_allows_logged_out_cookie_commit("")
+    assert not goal_allows_logged_out_cookie_commit(None)
 
 
 async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
@@ -183,7 +226,7 @@ async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
     assert result.recovery == "config_selected"
     assert committed == []
     assert result.removed_cookie_keys == ()
-    assert config_inputs == [before]
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]]
     assert source == before
     assert "preserve_auth_state" in [event[1] for event in events]
     assert all("opaque_state" not in event[2] for event in events)
@@ -199,7 +242,7 @@ async def test_auth_smelling_poison_is_preserved_and_silently_escalated():
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == []
-    assert config_inputs == [before], "config search must receive the complete auth-bearing state"
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": before}]], "config search must receive the complete auth-bearing state"
     assert source == before
     assert all("authState" not in event[2] for event in events), "auth suspects are not surfaced"
     assert [event[1] for event in events][-1] == "browser_config_search"
@@ -214,9 +257,9 @@ async def test_cookie_independent_challenge_goes_directly_to_config_search():
     result, events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == []
-    assert config_inputs == [source]
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": source}]]
     stages = [event[1] for event in events]
-    assert stages == ["captcha_solver", "all_target_cookies", "browser_config_search"]
+    assert stages == ["captcha_solver", "cookie_probe_wave", "browser_config_search"]
 
 
 async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail():
@@ -235,9 +278,15 @@ async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fa
     assert result.recovery == "config_selected"
     assert committed == []
     assert result.removed_cookie_keys == ()
-    assert config_inputs == [_state(_cookie("authState"), _cookie("cart"))]
-    assert "cf_clearance" not in {c["name"] for c in config_inputs[0]["cookies"]}
-    assert "__cf_bm" not in {c["name"] for c in config_inputs[0]["cookies"]}
+    assert config_inputs == [
+        [{"key": "auth_kept", "storage_state": _state(_cookie("authState"), _cookie("cart"))}]
+    ]
+    assert "cf_clearance" not in {
+        c["name"] for c in config_inputs[0][0]["storage_state"]["cookies"]
+    }
+    assert "__cf_bm" not in {
+        c["name"] for c in config_inputs[0][0]["storage_state"]["cookies"]
+    }
     assert [event[1] for event in events][-1] == "browser_config_search"
 
 
@@ -256,7 +305,7 @@ async def test_isolated_cookie_pass_must_still_pass_in_the_live_context():
     assert result.recovery == "config_selected"
     assert committed == [cookie_key(_cookie("cf_clearance"))]
     assert config_inputs == [
-        _state(_cookie("authState"), _cookie("cart"))
+        [{"key": "auth_kept", "storage_state": _state(_cookie("authState"), _cookie("cart"))}]
     ], "an unstable live fix must retain auth while keeping proven challenge poison filtered"
     assert result.removed_cookie_keys == (cookie_key(_cookie("cf_clearance")),)
     assert [event[1] for event in events][-1] == "browser_config_search"
@@ -273,7 +322,7 @@ async def test_other_site_cookies_are_never_candidates():
     result, _events, committed, config_inputs = await _run(source, probe)
     assert result.recovery == "config_selected"
     assert committed == []
-    assert config_inputs == [source]
+    assert config_inputs == [[{"key": "auth_kept", "storage_state": source}]]
 
 
 def test_auth_classifier_is_conservative():
@@ -281,6 +330,49 @@ def test_auth_classifier_is_conservative():
         assert is_auth_cookie(_cookie(name)), name
     for name in ["cf_clearance", "cart", "theme"]:
         assert not is_auth_cookie(_cookie(name)), name
+
+
+def test_challenge_page_classifier_rejects_navigation_shell_titles():
+    """Soft-wall shells must not win candidate probes without a real title.
+
+    RCA (browser-hotel-booking 101e508c): backend probes marked stablePasses=2 on
+    titles "", "www.<host>", and "Loading https://..." while the live tab was
+    still challenged. Gate is structural (empty / bare-hostname / Loading-URL /
+    raw-URL titles) — not a vendor or registrable-domain token list.
+    """
+    long_body = (
+        "Boutique hotel description that already appears in meta/noscript while "
+        "the anti-bot soft-wall has not yet produced a real document title. "
+        "This text alone must not clear the probe."
+    )
+    assert not is_usable_document_title("")
+    assert not is_usable_document_title("www.example.com")
+    assert not is_usable_document_title("example.com")
+    assert not is_usable_document_title("Loading https://www.example.com/rooms")
+    assert not is_usable_document_title("https://www.example.com/rooms")
+    assert is_usable_document_title("Boutique Hotel Near Downtown")
+
+    assert page_looks_challenged(
+        status=None, title="", body_text=long_body, html="<main>shell</main>"
+    ), "empty title + long body must stay challenged"
+    assert page_looks_challenged(
+        status=None,
+        title="www.example.com",
+        body_text=long_body,
+        html="<main>shell</main>",
+    ), "bare-hostname title must stay challenged"
+    assert page_looks_challenged(
+        status=None,
+        title="Loading https://www.example.com/path",
+        body_text=long_body,
+        html="<main>shell</main>",
+    ), "Chromium Loading-URL title must stay challenged"
+    assert not page_looks_challenged(
+        status=200,
+        title="Boutique Hotel Near Downtown",
+        body_text=long_body,
+        html="<main>Real inventory copy for rooms and rates.</main>",
+    ), "usable title + substance must read clean"
 
 
 def test_challenge_page_classifier_rejects_blank_and_known_walls():
@@ -346,6 +438,8 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
 
 
 async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
+    from unittest.mock import AsyncMock, patch
+
     class FakeBody:
         def __init__(self, page):
             self.page = page
@@ -360,6 +454,8 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
             self.body_text = body_text
             self._html = html
             self.goto_count = 0
+            self.goto_urls: list[str] = []
+            self.url = ""
             self.flip_to_denied_on_goto = flip_to_denied_on_goto
 
         async def title(self):
@@ -372,8 +468,10 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
         async def content(self):
             return self._html
 
-        async def goto(self, *_args, **_kwargs):
+        async def goto(self, url, *_args, **_kwargs):
             self.goto_count += 1
+            self.goto_urls.append(url)
+            self.url = url
             if self.flip_to_denied_on_goto:
                 self._title = "Access Denied"
                 self.body_text = "Access Denied"
@@ -383,33 +481,154 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
         async def wait_for_timeout(self, _milliseconds):
             return None
 
-    clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
-    assert await verify_live_page_cleared_challenge(
-        clean, "https://wl.eventim.us/event/lyny/1", attempts=2, solver_timeout_seconds=0
-    )
-    # Must navigation-probe — static preloaded content is not enough.
-    assert clean.goto_count == 2
+    async def classify_from_page(page, response=None, **_kwargs):
+        title = await page.title()
+        body = page.body_text
+        html = await page.content()
+        challenged = page_looks_challenged(status=None, title=title, body_text=body, html=html)
+        return {"clean": not challenged, "reason": "test-mock", "title": title, "usage": {}}
 
-    denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
-    assert not await verify_live_page_cleared_challenge(
-        denied, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
-    )
-    assert denied.goto_count == 1
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(side_effect=classify_from_page),
+    ):
+        clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
+        assert await verify_live_page_cleared_challenge(
+            clean, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
+        )
+        # Must navigation-probe — static preloaded content is not enough.
+        assert clean.goto_count == 1
 
-    # Eventim false-stable: already-loaded probe page looks clean, fresh goto denies.
-    false_stable = FakePage(
-        "LYNY",
-        "General Admission Tier 2",
-        "<main>tickets</main>",
-        flip_to_denied_on_goto=True,
+        denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
+        assert not await verify_live_page_cleared_challenge(
+            denied, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
+        )
+        assert denied.goto_count == 1
+
+        # Eventim false-stable: already-loaded probe page looks clean, fresh goto denies.
+        false_stable = FakePage(
+            "LYNY",
+            "General Admission Tier 2",
+            "<main>tickets</main>",
+            flip_to_denied_on_goto=True,
+        )
+        assert not await verify_live_page_cleared_challenge(
+            false_stable,
+            "https://wl.eventim.us/event/lyny/1",
+            attempts=1,
+            solver_timeout_seconds=0,
+        )
+        assert false_stable.goto_count == 1
+
+
+async def test_live_tab_verify_follows_same_site_soft_redirect():
+    """Hotels.com: clean soft-redirect must not re-punch the poisoned deep link.
+
+    Repro of agent 3a1423a0: stripped+residential probes settled on city search
+    (200), then live verify attempt-2 re-hit Hotel Kabuki URL → 429 Bot or Not.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_browser_agent_v3.challenge_recovery import same_site_navigation_url
+
+    kabuki = (
+        "https://www.hotels.com/Hotel-Search?destination=Hotel%20Kabuki%2C%20San%20Francisco"
+        "&flexibility=0_DAY&d1=2026-08-22&startDate=2026-08-22&d2=2026-08-23&endDate=2026-08-23"
+        "&adults=1&rooms=1&typeaheadCollationId=b2c18f3d-bd0d-4ed8-a9e3-049b903ce7b6"
     )
-    assert not await verify_live_page_cleared_challenge(
-        false_stable,
-        "https://wl.eventim.us/event/lyny/1",
-        attempts=1,
-        solver_timeout_seconds=0,
+    city = (
+        "https://www.hotels.com/Hotel-Search?destination=San%20Francisco%2C%20California"
+        "%2C%20United%20States%20of%20America&flexibility=0_DAY&d1=2026-08-22"
+        "&startDate=2026-08-22&d2=2026-08-23&endDate=2026-08-23&adults=1&rooms=1"
     )
-    assert false_stable.goto_count == 1
+    assert same_site_navigation_url(kabuki, city) == city
+    assert same_site_navigation_url(kabuki, "https://evil.example/x") is None
+
+    class SoftRedirectPage:
+        def __init__(self):
+            self.goto_urls: list[str] = []
+            self.url = ""
+            self._title = "Bot or Not?"
+            self.body_text = "Show us your human side"
+            self._html = "<h1>Bot or Not?</h1>"
+            self.kabuki_hits = 0
+
+        async def title(self):
+            return self._title
+
+        async def content(self):
+            return self._html
+
+        async def goto(self, url, *_args, **_kwargs):
+            self.goto_urls.append(url)
+            if "Hotel%20Kabuki" in url or "Hotel Kabuki" in url:
+                self.kabuki_hits += 1
+                if self.kabuki_hits == 1:
+                    # Soft-redirect to usable city search (probe/live attempt 1).
+                    self.url = city
+                    self._title = "San Francisco, California, United States of America Hotel Search Results"
+                    self.body_text = "300+ properties filters listings pricing interactive search"
+                    self._html = "<main>hotel search results</main>"
+                else:
+                    # Re-punching the poisoned deep link re-triggers soft-block.
+                    self.url = url
+                    self._title = "Bot or Not?"
+                    self.body_text = "Show us your human side"
+                    self._html = "<h1>Bot or Not?</h1>"
+            else:
+                self.url = url
+                self._title = "San Francisco, California, United States of America Hotel Search Results"
+                self.body_text = "300+ properties filters listings pricing interactive search"
+                self._html = "<main>hotel search results</main>"
+            return None
+
+    async def classify_from_page(page, response=None, **_kwargs):
+        title = await page.title()
+        challenged = title == "Bot or Not?"
+        return {
+            "clean": not challenged,
+            "reason": "bot" if challenged else "search-ui",
+            "title": title,
+            "usage": {},
+        }
+
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(side_effect=classify_from_page),
+    ):
+        page = SoftRedirectPage()
+        assert await verify_live_page_cleared_challenge(
+            page, kabuki, attempts=2, solver_timeout_seconds=0
+        )
+        assert page.goto_urls == [kabuki, city]
+        assert page.kabuki_hits == 1
+
+        # Without settled-URL follow-up, a second Kabuki hit would fail closed.
+        poisoned = SoftRedirectPage()
+
+        async def always_kabuki(page_obj, target, **kwargs):
+            # Simulate pre-fix behavior: always navigate target_url.
+            from domains.spawn_browser_agent_v3 import challenge_recovery as cr
+
+            for _ in range(kwargs.get("attempts", 2)):
+                await page_obj.goto(target)
+                if not await cr._wait_for_clean_page(
+                    page_obj, None, kwargs.get("solver_timeout_seconds", 0)
+                ):
+                    return False
+            return True
+
+        # Document the failure mode the fix closes (2× Kabuki → Bot or Not).
+        assert not await always_kabuki(poisoned, kabuki, attempts=2, solver_timeout_seconds=0)
+        assert poisoned.kabuki_hits == 2
+
+        # Preloaded promote path: one live navigation after 2/2 candidate probes.
+        once = SoftRedirectPage()
+        assert await verify_live_page_cleared_challenge(
+            once, kabuki, attempts=1, solver_timeout_seconds=0
+        )
+        assert once.kabuki_hits == 1
+        assert once.goto_urls == [kabuki]
 
 
 def test_payment_document_url_detection():
@@ -533,6 +752,53 @@ def test_challenge_page_classifier_detects_non_cloudflare_vendors():
     )
 
 
+def test_challenge_page_classifier_detects_expedia_bot_or_not():
+    """Expedia DataDome 'Bot or Not?' must classify as challenged.
+
+    browser-hotel-booking (agent fead82a5-791a-43b8-b807-5e71226da866) landed on
+    title "Bot or Not?" with #app-captcha-pwa. `live_tab_looks_challenged` returned
+    False, so recover_from_challenge emitted skipped_clean_page and the model
+    called request_user_assistance_for_authentication — evaluator then saw
+    auth_assistance instead of write_lock.
+
+    Three shapes from that dump must all read challenged:
+    1. title + captcha instruction body with no vendor host in HTML
+    2. #app-captcha-pwa shell without captcha-delivery.com
+    3. captcha-delivery.com present but captcha prose clears the old 80-char
+       substantive-content hatch (false-clean under the prior unified marker list)
+    """
+    title = "Bot or Not?"
+    body = (
+        "Show us your human side...\n"
+        "We can't tell if you're a human or a bot.\n"
+        "Slide right to secure your access. Press and hold the button.\n"
+    )
+    html_shell = (
+        '<html><head><title>Bot or Not?</title></head><body>'
+        '<div id="app-captcha-pwa">'
+        '<iframe title="Verification"></iframe>'
+        '<button id="captcha__audio_"></button>'
+        '<button id="captcha__puzzle__button"></button>'
+        f"{body}"
+        "</div></body></html>"
+    )
+    html_with_vendor = html_shell.replace(
+        '<iframe title="Verification"></iframe>',
+        '<iframe title="Verification" '
+        'src="https://geo.captcha-delivery.com/captcha/?cid=x"></iframe>',
+    )
+
+    assert page_looks_challenged(
+        status=None, title=title, body_text=body, html="<html></html>"
+    ), "title+body alone must match rendered text markers"
+    assert page_looks_challenged(
+        status=None, title=title, body_text=body, html=html_shell
+    ), "#app-captcha-pwa interstitial container must be definitive"
+    assert page_looks_challenged(
+        status=None, title=title, body_text=body, html=html_with_vendor
+    ), "captcha instruction prose must not clear an interstitial via substantive hatch"
+
+
 def test_recovered_page_keeping_vendor_sensor_markup_reads_clean():
     """A vendor sensor bundle stays loaded AFTER a challenge clears.
 
@@ -626,7 +892,9 @@ def test_challenge_page_classifier_ignores_incidental_captcha_prose():
     )
 
 
-async def test_live_cookie_commit_requires_two_clean_loads():
+async def test_live_cookie_commit_requires_one_clean_load():
+    from unittest.mock import AsyncMock, patch
+
     class FakeContext:
         def __init__(self):
             self.cleared = []
@@ -668,27 +936,39 @@ async def test_live_cookie_commit_requires_two_clean_loads():
         async def content(self):
             return f"<main>{self.body_text}</main>"
 
-    key = cookie_key(_cookie("cf_clearance"))
-    clean_page = FakePage("Order drinks and pastries")
-    assert await commit_cookie_removals(
-        clean_page,
-        [key],
-        "https://order.online/store/blue-bottle",
-        solver_timeout_seconds=0,
-    )
-    assert clean_page.goto_count == 2
-    assert clean_page.context.cleared == [
-        {"name": "cf_clearance", "domain": ".order.online", "path": "/"}
-    ]
+    async def classify_from_page(page, response=None, **_kwargs):
+        title = await page.title()
+        body = page.body_text
+        html = await page.content()
+        status = getattr(response, "status", None) if response is not None else None
+        challenged = page_looks_challenged(status=status, title=title, body_text=body, html=html)
+        return {"clean": not challenged, "reason": "test-mock", "title": title, "usage": {}}
 
-    challenged_page = FakePage("Verify you are human")
-    assert not await commit_cookie_removals(
-        challenged_page,
-        [key],
-        "https://order.online/store/blue-bottle",
-        solver_timeout_seconds=0,
-    )
-    assert challenged_page.goto_count == 1
+    key = cookie_key(_cookie("cf_clearance"))
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(side_effect=classify_from_page),
+    ):
+        clean_page = FakePage("Order drinks and pastries")
+        assert await commit_cookie_removals(
+            clean_page,
+            [key],
+            "https://order.online/store/blue-bottle",
+            solver_timeout_seconds=0,
+        )
+        assert clean_page.goto_count == 1
+        assert clean_page.context.cleared == [
+            {"name": "cf_clearance", "domain": ".order.online", "path": "/"}
+        ]
+
+        challenged_page = FakePage("Verify you are human")
+        assert not await commit_cookie_removals(
+            challenged_page,
+            [key],
+            "https://order.online/store/blue-bottle",
+            solver_timeout_seconds=0,
+        )
+        assert challenged_page.goto_count == 1
 
 
 async def run_all_tests():
@@ -700,7 +980,15 @@ async def run_all_tests():
         test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solver,
     )
     await result.record_async(
-        "unknown_cookie_parallel_ddmin", test_unknown_cookie_isolated_with_parallel_delta_debugging
+        "unknown_cookie_parallel_wave", test_unknown_cookie_wave_probes_in_parallel_without_ddmin,
+    )
+    await result.record_async(
+        "guest_path_commits_clean_all_target",
+        test_guest_path_commits_clean_all_target_strip,
+    )
+    result.record(
+        "goal_allows_logged_out_cookie_commit",
+        test_goal_allows_logged_out_cookie_commit_for_guest_prompts,
     )
     await result.record_async(
         "opaque_auth_cookie_preserved",
@@ -720,6 +1008,10 @@ async def run_all_tests():
     )
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
+    result.record(
+        "challenge_page_classifier_navigation_shell_titles",
+        test_challenge_page_classifier_rejects_navigation_shell_titles,
+    )
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
     result.record(
         "challenge_page_classifier_kernel_blacklist",
@@ -728,6 +1020,10 @@ async def run_all_tests():
     result.record(
         "challenge_page_classifier_vendors",
         test_challenge_page_classifier_detects_non_cloudflare_vendors,
+    )
+    result.record(
+        "challenge_page_classifier_expedia_bot_or_not",
+        test_challenge_page_classifier_detects_expedia_bot_or_not,
     )
     result.record(
         "recovered_page_with_vendor_markup_reads_clean",
@@ -745,6 +1041,10 @@ async def run_all_tests():
         "live_tab_verify_access_denied",
         test_live_tab_verify_accepts_clean_and_rejects_access_denied,
     )
+    await result.record_async(
+        "live_tab_verify_same_site_soft_redirect",
+        test_live_tab_verify_follows_same_site_soft_redirect,
+    )
     result.record("payment_document_url_detection", test_payment_document_url_detection)
     result.record(
         "blocked_resource_requires_payment_cdn",
@@ -759,8 +1059,8 @@ async def run_all_tests():
         test_live_blocked_resource_verify_is_failure_driven,
     )
     await result.record_async(
-        "live_cookie_commit_two_passes",
-        test_live_cookie_commit_requires_two_clean_loads,
+        "live_cookie_commit_one_pass",
+        test_live_cookie_commit_requires_one_clean_load,
     )
     return result.all_passed
 

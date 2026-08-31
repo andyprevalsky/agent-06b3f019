@@ -68,6 +68,7 @@ export {
   fetchTestPromptCatalog,
   fetchTestPaymentPublicUrl,
   submitFeedback,
+  reportAgentBug,
   downloadAttachmentAsBlob,
   downloadAttachmentAsText,
 } from './api';

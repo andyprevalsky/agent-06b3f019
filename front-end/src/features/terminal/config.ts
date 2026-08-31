@@ -72,8 +72,10 @@ export const BROWSER_REVIEW_TEST_PHONE = '+15555550123';
 
 // ── Default price limit ───────────────────────────────────────────────────
 
-/** Default price limit in cents for new agents ($1.00). */
-export const DEFAULT_PRICE_LIMIT_CENTS = 100;
+export {
+  DEFAULT_TASK_PRICE_LIMIT_CENTS,
+  DEFAULT_TASK_PRICE_LIMIT_CENTS as DEFAULT_PRICE_LIMIT_CENTS,
+} from '@/lib/priceLimitDefaults';
 
 // ── Context window fallback ───────────────────────────────────────────────
 

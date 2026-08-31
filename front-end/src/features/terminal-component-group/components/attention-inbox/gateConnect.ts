@@ -12,10 +12,13 @@
  *     app's system browser when embedded, else same-tab so the redirect returns.
  *   - Mac-only src   → deep-link `roselabs://connect-source?...` so the Mac app
  *     opens its native connect modal (iMessage / WhatsApp / Telegram).
- *   - subscription / kyc / other → open the carried URL (Stripe Checkout / KYC
- *     hosted links are minted fresh at raise-time and stay valid).
+ *   - subscription / kyc / other → mint a FRESH hosted link on click when possible
+ *     (subscription checkout carries a stale return URL if opened from the gate
+ *     action minted at raise-time). Stripe Checkout / KYC hosted links otherwise
+ *     open the carried URL.
  */
 
+import { startSubscriptionCheckoutApi } from '@/features/billing/api';
 import { startGmailOAuthApi } from '@/features/integrations/api';
 import { getMacAppBridge } from './macAppBridge';
 import type { GateMetadata } from './types';
@@ -105,6 +108,17 @@ export async function runGateConnectAction(
     }
   }
 
-  // subscription / kyc / other web sources: the carried URL is fresh + stable.
+  if (gate.type === 'subscription') {
+    try {
+      const returnUrl = getMacAppBridge() ? undefined : window.location.href;
+      const { url } = await startSubscriptionCheckoutApi(returnUrl);
+      openExternalLink(url);
+    } catch {
+      openExternalLink(gate.action.url);
+    }
+    return;
+  }
+
+  // kyc / other web sources: the carried URL is fresh + stable.
   openExternalLink(gate.action.url);
 }
