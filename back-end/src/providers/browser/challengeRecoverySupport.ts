@@ -111,6 +111,17 @@ export function recoveryConfigKeyForSession(
   return undefined;
 }
 
+/** Close the Playwright validation CDP client without failing remote release. */
+export async function closeValidationBrowser(session: {
+  validationBrowser?: { close?: () => Promise<unknown> | unknown } | null;
+}): Promise<void> {
+  try {
+    await session.validationBrowser?.close?.();
+  } catch {
+    // Closing the CDP client must never block remote session release.
+  }
+}
+
 /** Reject promptly when a sibling lane claims the winner mid-probe. */
 export async function raceProbeAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return work;

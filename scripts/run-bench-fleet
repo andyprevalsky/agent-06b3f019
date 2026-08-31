@@ -3344,6 +3344,16 @@ command -v npx >/dev/null 2>&1 || {
     echo "   Install Node.js or ensure nvm's bin dir is on PATH before run-bench-fleet." >&2
     exit 1
 }
+# Prefer the repo-local tsx. Concurrent `npx --yes tsx` mutates the shared npm
+# cache (ENOTEMPTY / `tsx: not found`) when coverage and fleet controllers share
+# a host. Fall back to npx only when the workspace binary is missing.
+_SEED_TSX=""
+for _tsx in "$ROOT_DIR/node_modules/.bin/tsx" "$ROOT_DIR/back-end/node_modules/.bin/tsx"; do
+    if [ -x "$_tsx" ]; then
+        _SEED_TSX="$_tsx"
+        break
+    fi
+done
 # Retry transient npx/tsx install races (ENOENT spawn sh under concurrent
 # controllers / npm cache contention) before failing closed on a missing dump.
 _SEED_GUEST_OK=0
@@ -3351,7 +3361,11 @@ for _seed_try in 1 2 3 4 5; do
     rm -f "$_SEED_GUEST_PROBE"
     if (
             cd "$ROOT_DIR/back-end" &&
-                npx --yes tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
+                if [ -n "$_SEED_TSX" ]; then
+                    "$_SEED_TSX" scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
+                else
+                    npx --yes tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
+                fi
         ) && [ -s "$_SEED_GUEST_PROBE" ]; then
         _SEED_GUEST_OK=1
         break

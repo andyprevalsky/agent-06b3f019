@@ -55,6 +55,7 @@ import {
 } from './challengeRecoveryLaneSearch';
 import {
   buildPreferredBrowserConfig,
+  closeValidationBrowser,
   raceProbeAbort,
   recoveryConfigKeyForSession,
   sameSiteNavigationUrl,
@@ -88,11 +89,6 @@ export interface RecoveryCandidateSession {
   profileId: string | null;
   profileSource: string;
   validationBrowser: Browser;
-}
-
-/** Close the Playwright validation CDP client without failing remote release. */
-async function closeValidationBrowser(session: RecoveryCandidateSession): Promise<void> {
-  await session.validationBrowser.close().catch(() => {});
 }
 
 export interface CandidateProbeResult {
