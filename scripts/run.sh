@@ -1416,9 +1416,15 @@ PY
         --domain "$domain" \
         --description "Conductor workspace $CONDUCTOR_WORKSPACE_NAME public frontend" 2>&1) || {
         echo "$create_output"
-        echo "❌ Could not reserve $domain. Confirm the ngrok account is on Pay-as-you-go and the domain is available."
+        # Reservation is advisory. ERR_NGROK_415 (account at the 100 reserved-
+        # domain cap) and other create rejections must not tear down the stack —
+        # the agent bind (or ephemeral/cloudflare/localtunnel fallback) is the
+        # authoritative path. Soft callers still see return 1 so they can skip
+        # a reserved-domain bind that was never created.
+        echo "⚠️  Could not reserve $domain. Continuing — tunnel start / fallback is authoritative."
+        echo "   (Pay-as-you-go + domain headroom: https://dashboard.ngrok.com/billing/choose-a-plan)"
         [ "$failure_mode" = "soft" ] && return 1
-        exit 1
+        return 0
     }
 }
 
@@ -1828,10 +1834,20 @@ start_ngrok_public_tunnel() {
     if [ "$NGROK_RESERVE_DOMAIN" = "1" ]; then
         WORKTREE_DOMAIN="$configured_domain"
         export WORKTREE_DOMAIN
-        export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
-        export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
-        export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
-        ensure_ngrok_domain_reserved
+        # Soft: a full reserved-domain roster (ERR_NGROK_415) or any create
+        # rejection must not bind --domain to a hostname we never reserved, or
+        # ngrok exits and the default fatal path kills the whole stack. Fall
+        # back to a provider-assigned endpoint; publish_reported_environment
+        # rewrites PUBLIC_BASE_URL once the agent is up.
+        if ensure_ngrok_domain_reserved "$WORKTREE_DOMAIN" soft; then
+            export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
+            export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
+            export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+        else
+            echo "⚠️  Reserved domain $WORKTREE_DOMAIN unavailable; using ephemeral ngrok endpoint."
+            ngrok_configure_endpoint_mode 1
+            unset PUBLIC_BASE_URL WORKTREE_DOMAIN VITE_ALLOWED_HOSTS 2>/dev/null || true
+        fi
     fi
 
     mkdir -p "$RUN_CONTEXT_DIR"
