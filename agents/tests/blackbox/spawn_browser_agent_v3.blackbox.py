@@ -18585,7 +18585,9 @@ def test_compact_browser_turn_messages_strips_embedded_screenshots():
     blob = str(compact)
     assert "data:image/png;base64," not in blob
     assert "AAAA" not in blob
+    assert '"type": "image_url"' not in blob and "'type': 'image_url'" not in blob
     assert any(message.get("role") == "user" for message in compact)
+    assert "[image omitted from Temporal resume]" in blob
 
 
 def test_final_screenshot_fetch_isolated_from_verifier_errors():

@@ -925,6 +925,16 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "do not proceed anonymously",
         "don't proceed anonymously",
         "not anonymously",
+        "do not check out without logging in",
+        "don't check out without logging in",
+        "do not checkout without logging in",
+        "don't checkout without logging in",
+        "do not check out without signing in",
+        "don't check out without signing in",
+        "do not checkout without signing in",
+        "don't checkout without signing in",
+        "not without logging in",
+        "not without signing in",
     )
     guest_scan_text = text
     for needle in negated_guest_needles:

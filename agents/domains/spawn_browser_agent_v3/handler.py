@@ -645,6 +645,25 @@ def _append_bounded_verifier_checkpoint(
 
 
 
+def _replace_resume_image_blocks(value: Any) -> Any:
+    """Replace multimodal image blocks with a text placeholder for resume.
+
+    ``_compact_simulated_resume_value`` strips nested ``image_url`` keys and can
+    leave ``{"type": "image_url"}`` shells that fail provider schema validation
+    on the next resumed LLM call. Replace the whole block first.
+    """
+    if isinstance(value, dict):
+        if value.get("type") == "image_url" or "image_url" in value:
+            return {
+                "type": "text",
+                "text": "[image omitted from Temporal resume]",
+            }
+        return {key: _replace_resume_image_blocks(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_replace_resume_image_blocks(item) for item in value]
+    return value
+
+
 def _compact_browser_turn_messages_for_resume(
     browser_turn_messages: Optional[List[Dict[str, Any]]],
     *,
@@ -659,7 +678,7 @@ def _compact_browser_turn_messages_for_resume(
     stay under the payload limit across write-lock / payment resumes.
     """
     compact_turns = [
-        _compact_simulated_resume_value(message)
+        _compact_simulated_resume_value(_replace_resume_image_blocks(message))
         for message in list(browser_turn_messages or [])[-limit:]
     ]
     while compact_turns and compact_turns[0].get("role") == "tool":
