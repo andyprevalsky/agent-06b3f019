@@ -2165,7 +2165,7 @@ session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
 python3 scripts/record_factory_event.py deploy production-start semantic
 SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh workflow run chat-lifecycle-ratchet.yml --ref main \
-  -f frontend_url=https://roselabs.ai \
+  -f frontend_url=https://www.roselabs.ai \
   -f backend_url=https://navi-j9a9.onrender.com
 
 SEMANTIC_RUN_ID=""
