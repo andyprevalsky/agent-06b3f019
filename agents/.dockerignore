@@ -28,10 +28,14 @@ venv.bak/
 .git/
 .gitignore
 
-# Testing
+# Testing — never needed in the Temporal worker image. Leaving these in the
+# Fly build context previously uploaded ~130MB (mostly benchmarks/history
+# ledgers) and repeatedly timed out Depot builders on deploy-agents.yml.
 .pytest_cache/
 .coverage
 htmlcov/
+tests/
+benchmarks/
 
 # Documentation
 README.md
@@ -42,6 +46,7 @@ CREDENTIALS.md
 scripts/
 deploy.sh
 
-# Logs
+# Logs / local scratch
 *.log
+.context/
 
