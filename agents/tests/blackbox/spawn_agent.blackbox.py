@@ -1590,6 +1590,77 @@ async def test_handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbi
         restore()
 
 
+async def test_handler_fast_mode_drain_posts_wrapup_from_timeout_heartbeat():
+    """Heartbeat timeout after research must still land the chip wrap-up.
+
+    Local mass-agent d5743a6a / explore 44c81111 replayed 84 research tools,
+    then spawn_explore_agent_activity hit Activity task timed out. Drain
+    logged Fast Mode parallel explore failed and posted nothing, so T3 saw
+    Research started. (0 chars). Heartbeat details already held the compiled
+    evidence — the parent chip must use that, not stay empty.
+    """
+    from domains.spawn_agent.handler import SpawnAgentManager, drain_fast_mode_explores
+
+    wrap_up = (
+        "Peter Attia MD public-content activity report — focus window "
+        "April 4 to July 3 2026. The Drive remains weekly (eps 391-398), "
+        "Instagram @peterattiamd posts several times per week, and YouTube "
+        "clips of AMA 86 / colorectal screening are the high-engagement "
+        "pieces with citations from peterattiamd.com and Apple Podcasts."
+    )
+    assert len(wrap_up) >= 200
+
+    class _TimeoutAfterResearch(Exception):
+        def __init__(self):
+            self.last_heartbeat_details = (
+                {
+                    "result": wrap_up,
+                    "tool_call_results": [
+                        "[web_search] **Result:** Peter Attia Drive weekly cadence 2026"
+                    ],
+                },
+            )
+
+    handle = _Activity(exception=_TimeoutAfterResearch(), done=False)
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "You are analyzing ONE creator for Andy Prevalsky. "
+            "Research the creator's public activity in the last 90 days "
+            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
+        ),
+    )
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_local_data_summary": "local"},
+        start_activity_result=handle,
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "explore",
+                    "goal": "Do 3 quick web searches about Peter Attia MD",
+                },
+                tool_call_id="tc-oai-timeout-44c81111",
+            )
+        )
+        await drain_fast_mode_explores(wf)
+        posted = [
+            event.message
+            for event, tcid, name in wf.handled_events
+            if name == "spawn_agent" and tcid == "tc-oai-timeout-44c81111"
+        ]
+        assert any(len(str(message or "")) >= 200 for message in posted), posted
+        assert any("Peter Attia MD public-content" in str(message) for message in posted)
+        assert not any("Research started." == str(message) for message in posted)
+        assert not any("Fast Mode" in str(message) for message in posted)
+    finally:
+        restore()
+
+
 async def test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot():
     """Parent must not block on the inflight cap; Temporal queues the extras."""
     from domains.spawn_agent.config import FM_EXPLORE_INFLIGHT_CAP
@@ -2756,6 +2827,63 @@ async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_ev
     assert "Raw tool results" not in result["result"]
 
 
+async def test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancelled():
+    """Heartbeat/cancel after research must still return a user-facing wrap-up.
+
+    Explore 44c81111 had tool_call_results in-memory when Temporal cancelled
+    the activity. CancelledError is BaseException, so synthesis after
+    run_agent never ran and the parent chip stayed at Research started.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    evidence = (
+        "Peter Attia Drive weekly cadence April-July 2026 with episode 398 "
+        "AMA 86 GLP-1 muscle loss, Instagram @peterattiamd posting several "
+        "times per week, and YouTube clips of colorectal screening as the "
+        "high-engagement pieces cited from peterattiamd.com."
+    )
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": evidence})
+    save_calls: list = []
+
+    async def fake_save(**kwargs):
+        save_calls.append(kwargs)
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Peter Attia Drive 2026"}, "tc-attia")
+        raise asyncio.CancelledError()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        patch("domains.spawn_agent.service.save_explore_message", new=fake_save),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a-attia",
+            user_id="u-7",
+            goal="Do 3 quick web searches about Peter Attia MD",
+            model="rose-1-lite",
+            task_id="44c81111-1238-43f0-8b06-a1a20cc902b7",
+            init_tool_call_id="tc-oai-timeout-44c81111",
+        )
+
+    assert result["status"] == "completed"
+    assert len(result["result"]) >= 200
+    assert "AMA 86" in result["result"]
+    assert "Fast Mode" not in result["result"]
+    wrap_posts = [
+        call
+        for call in save_calls
+        if call.get("tool_call_id") == "tc-oai-timeout-44c81111"
+        and call.get("tool_name") == "spawn_agent"
+    ]
+    assert wrap_posts, save_calls
+    assert any(len(str(call.get("message") or "")) >= 200 for call in wrap_posts)
+
+
 async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds():
     """Completion stays visible but is rejected until an evidence tool succeeds."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -3793,6 +3921,10 @@ async def run_all_tests():
         test_handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbing,
     )
     await r.record_async(
+        "handler_fast_mode_drain_posts_wrapup_from_timeout_heartbeat",
+        test_handler_fast_mode_drain_posts_wrapup_from_timeout_heartbeat,
+    )
+    await r.record_async(
         "handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot",
         test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot,
     )
@@ -3864,6 +3996,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_replaces_fast_mode_stub",
         test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence,
+    )
+    await r.record_async(
+        "explore_activity_returns_wrapup_when_run_agent_cancelled",
+        test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancelled,
     )
     await r.record_async(
         "explore_activity_rejects_completion_until_evidence_succeeds",

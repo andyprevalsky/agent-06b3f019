@@ -189,6 +189,7 @@ require_text "$ROOT_DIR/agents/benchmarks/run_benchmark.py" 'resolve_hub_upload_
 require_text "$ROOT_DIR/agents/benchmarks/hub_upload.py" 'def resolve_hub_upload_url(' "hub_upload must expose localhost-aware Hub URL resolution"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_COMPUTE_TOKEN_TYPE=claude' "local predeploy smoke must pin one provider for repeatable cache measurement"
 require_text "$RUN_PREDEPLOY_LOCAL" 'unset FAST_MODE_CACHE_DATABASE_URL' "local predeploy smoke must reject an inherited remote fast-cache database"
+require_text "$RUN_PREDEPLOY_LOCAL" 'grep -E '\''^DATABASE_URL='\''' "local predeploy must derive the shared July cache from prod DATABASE_URL when FAST_MODE_CACHE_DATABASE_URL is missing"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_USE_LOCAL=1 \' "local predeploy smoke must isolate fast-cache schema startup from the production pooler"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1' "local predeploy must disable Andy write-through when the July cache is shared"
 require_text "$RUN_PREDEPLOY_LOCAL" 'run_smoke_batch shared' "local predeploy must isolate fast_cache:on smoke onto the shared July cache batch"

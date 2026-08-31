@@ -35,6 +35,7 @@ from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
+    compile_explore_wrap_up,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
@@ -67,6 +68,32 @@ def user_facing_explore_result(text: Any) -> str:
     if any(marker in lowered for marker in _FAST_MODE_USER_COPY) and len(raw) < 400:
         return ""
     return raw
+
+
+def wrap_up_payload_from_failure(exc: BaseException) -> Dict[str, Any]:
+    """Recover compiled explore evidence from a timed-out activity heartbeat."""
+    cur: Any = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        details = getattr(cur, "last_heartbeat_details", None)
+        if details:
+            payload = details[0] if isinstance(details, tuple) and details else details
+            if isinstance(payload, dict):
+                return payload
+            if isinstance(payload, str) and payload.strip():
+                return {"result": payload}
+        cur = getattr(cur, "cause", None) or getattr(cur, "__cause__", None)
+    return {}
+
+
+def _explore_chip_text(result: Dict[str, Any]) -> str:
+    return user_facing_explore_result(
+        compile_explore_wrap_up(
+            result.get("result") or result.get("final_response") or result.get("summary") or "",
+            result.get("tool_call_results") or [],
+        )
+    )
 
 logger = structlog.get_logger()
 
@@ -140,11 +167,13 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
         if handle is None:
             continue
         result: Dict[str, Any] = {}
+        recovered: Dict[str, Any] = {}
         try:
             raw_result = await handle
             if isinstance(raw_result, dict):
                 result = raw_result
         except (asyncio.CancelledError, ActivityError) as exc:
+            recovered = wrap_up_payload_from_failure(exc)
             if isinstance(exc, ActivityError) and not isinstance(
                 exc.cause, (asyncio.CancelledError, TemporalCancelledError)
             ):
@@ -154,6 +183,7 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
                     error=str(exc)[:200],
                 )
         except Exception as exc:
+            recovered = wrap_up_payload_from_failure(exc)
             logger.error(
                 "Fast Mode parallel explore failed",
                 task_id=item.get("task_id"),
@@ -161,16 +191,9 @@ async def drain_fast_mode_explores(workflow_instance) -> None:
             )
         if not callable(post_event):
             continue
-        explore_result = user_facing_explore_result(
-            result.get("result") or result.get("final_response") or result.get("summary")
-        )
-        if not explore_result:
-            raw_tools = result.get("tool_call_results") or []
-            if raw_tools:
-                joined = "\n\n".join(str(item) for item in raw_tools if str(item).strip())
-                if len(joined) > 12_000:
-                    joined = joined[:12_000] + "\n\n[truncated]"
-                explore_result = user_facing_explore_result(joined)
+        explore_result = _explore_chip_text(result)
+        if not explore_result and recovered:
+            explore_result = _explore_chip_text(recovered)
         if not explore_result:
             continue
         ui_goal = str(item.get("ui_goal") or "")

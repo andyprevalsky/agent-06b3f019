@@ -243,8 +243,19 @@ PY
 done < <(printf '%s\n' "${SCHEDULED_TASKS[@]}")
 
 shared_fast_mode_cache_url() {
-    grep -E '^FAST_MODE_CACHE_DATABASE_URL=' "$ROOT_DIR/back-end/.env" 2>/dev/null \
-        | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"
+    # Prefer the explicit key. Remounts often drop it while leaving prod
+    # DATABASE_URL — same derivation scripts/run.sh uses for the July cache.
+    local url
+    url="$(grep -E '^FAST_MODE_CACHE_DATABASE_URL=' "$ROOT_DIR/back-end/.env" 2>/dev/null \
+        | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+    if [ -z "$url" ]; then
+        url="$(grep -E '^DATABASE_URL=' "$ROOT_DIR/back-end/.env" 2>/dev/null \
+            | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+        case "$url" in
+            *localhost*|*127.0.0.1*) url="" ;;
+        esac
+    fi
+    printf '%s' "$url"
 }
 
 run_smoke_batch() {
