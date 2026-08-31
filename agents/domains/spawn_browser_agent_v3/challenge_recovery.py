@@ -1034,12 +1034,20 @@ async def recover_from_challenge(
     if diagnostic_clean:
         # Clean logged-out / stripped probes are diagnostic only — opaque cookies
         # may be auth credentials, so never commit unclassified removals on
-        # signed-in / default paths.
-        await progress(
-            "preserve_auth_state",
-            "A cookie variant looked clean in isolation, but unknown cookies are preserved; "
-            "continuing with browser/IP search.",
-        )
+        # signed-in / default paths. Fresh-cookie recoveries still escalate to
+        # config search, but must not claim auth is being preserved.
+        if allow_logged_out_cookie_commit:
+            await progress(
+                "fresh_cookie_config_search",
+                "A cookie variant looked clean in isolation but is not a safe live commit; "
+                "searching configs with a fresh cookie lane.",
+            )
+        else:
+            await progress(
+                "preserve_auth_state",
+                "A cookie variant looked clean in isolation, but unknown cookies are preserved; "
+                "continuing with browser/IP search.",
+            )
         return await search_with_preserved_auth_state()
 
     return await search_with_preserved_auth_state()

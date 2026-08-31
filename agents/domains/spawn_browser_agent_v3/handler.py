@@ -7777,6 +7777,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "cookie_probe_wave": "Probing cookie variants",
                     "apply_cookie_fix": "Applying safe cookie recovery",
                     "preserve_auth_state": "Preserving auth; searching configs",
+                    "fresh_cookie_config_search": "Fresh-cookie config search",
                     "browser_config_search": "Searching browser configurations",
                     "live_verify": "Verifying live tab cleared challenge",
                 }
