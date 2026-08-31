@@ -9009,8 +9009,27 @@ _APPROVAL_AMOUNT_RE = re.compile(
 _APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
 
 
+def _claude_code_sessions_with_transcripts(
+    sessions: list[dict], *, min_chars: int = 1
+) -> list[dict]:
+    """Return sessions whose stored terminal output meets ``min_chars``."""
+    return [
+        session
+        for session in sessions
+        if isinstance(session, dict)
+        and isinstance(session.get("output"), str)
+        and len(session.get("output", "").strip()) >= min_chars
+    ]
+
+
 async def _hydrate_claude_code_sessions(data: dict) -> None:
-    """Fetch Claude Code sessions (root + tree) for transcript static checks."""
+    """Fetch Claude Code sessions (root + tree) for transcript static checks.
+
+    On timeout/early-fail the harness pauses the agent before evaluators run, but
+    ``spawn_claude_code_agent`` persists terminal output asynchronously on cancel.
+    Retry briefly when sessions exist yet still have empty ``output`` so the
+    static check does not race the cancel-persist path.
+    """
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
     root_agent_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
     benchmark_state = data.setdefault("_benchmark", {})
@@ -9036,29 +9055,45 @@ async def _hydrate_claude_code_sessions(data: dict) -> None:
     except Exception as tree_exc:
         benchmark_state["claude_code_session_tree_error"] = str(tree_exc)[:200]
 
+    # Pause → cancel → persist can lag the evaluator by a few seconds. Poll until
+    # at least one session has a non-empty transcript (or we exhaust the budget).
+    retry_deadline = time.monotonic() + 45.0
     sessions_by_id: dict[str, dict] = {}
     fetch_errors: list[str] = []
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient(timeout=30) as client:
-            for aid in sorted(agent_ids):
-                try:
-                    resp = await client.get(
-                        f"{base_url}/api/claude-code-session/agent/{aid}",
-                        headers=headers,
-                    )
-                    if resp.status_code != 200:
-                        fetch_errors.append(f"{aid[:8]}:HTTP {resp.status_code}")
-                        continue
-                    payload = resp.json() if resp.content else {}
-                    for session in payload.get("sessions") or []:
-                        if not isinstance(session, dict):
+            while True:
+                sessions_by_id = {}
+                fetch_errors = []
+                for aid in sorted(agent_ids):
+                    try:
+                        resp = await client.get(
+                            f"{base_url}/api/claude-code-session/agent/{aid}",
+                            headers=headers,
+                        )
+                        if resp.status_code != 200:
+                            fetch_errors.append(f"{aid[:8]}:HTTP {resp.status_code}")
                             continue
-                        session_id = str(session.get("id") or "").strip()
-                        if session_id:
-                            sessions_by_id[session_id] = session
-                except Exception as fetch_exc:
-                    fetch_errors.append(f"{aid[:8]}:{fetch_exc}")
+                        payload = resp.json() if resp.content else {}
+                        for session in payload.get("sessions") or []:
+                            if not isinstance(session, dict):
+                                continue
+                            session_id = str(session.get("id") or "").strip()
+                            if session_id:
+                                sessions_by_id[session_id] = session
+                    except Exception as fetch_exc:
+                        fetch_errors.append(f"{aid[:8]}:{fetch_exc}")
+
+                sessions = list(sessions_by_id.values())
+                if not sessions:
+                    break
+                if _claude_code_sessions_with_transcripts(sessions):
+                    break
+                if time.monotonic() >= retry_deadline:
+                    break
+                await asyncio.sleep(2.0)
+
         benchmark_state["claude_code_sessions"] = list(sessions_by_id.values())
         if fetch_errors and not sessions_by_id:
             benchmark_state["claude_code_session_evidence_error"] = "; ".join(fetch_errors)[:300]

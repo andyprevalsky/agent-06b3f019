@@ -3884,6 +3884,63 @@ async def test_declared_evaluator_hydrates_claude_code_sessions():
     assert data["_benchmark"]["claude_code_sessions"][0]["id"] == "session-1"
 
 
+async def test_hydrate_claude_code_sessions_retries_until_transcript_persists():
+    """Cancel-persist can lag pause; hydrate retries while output is still empty."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    empty = AsyncMock()
+    empty.status_code = 200
+    empty.content = b"{}"
+    empty.json = lambda: {"sessions": [{"id": "session-1", "output": ""}]}
+
+    filled = AsyncMock()
+    filled.status_code = 200
+    filled.content = b"{}"
+    filled.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "[Claude] Session started\n" + ("z" * 40)}]
+    }
+
+    responses = [empty, filled]
+    sleeps: list[float] = []
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return responses.pop(0)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "ACTIVE"},
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+        patch.object(bench.asyncio, "sleep", _fake_sleep),
+    ):
+        await bench._hydrate_claude_code_sessions(data)
+
+    sessions = data["_benchmark"]["claude_code_sessions"]
+    assert len(sessions) == 1
+    assert len(sessions[0]["output"].strip()) >= 32
+    assert sleeps == [2.0]
+    assert responses == []
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -15940,6 +15997,10 @@ async def run_all_tests():
     await r.record_async(
         "claude_code_session_output_hydration",
         test_declared_evaluator_hydrates_claude_code_sessions,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration_retries_empty",
+        test_hydrate_claude_code_sessions_retries_until_transcript_persists,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
