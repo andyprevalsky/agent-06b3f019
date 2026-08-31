@@ -508,16 +508,15 @@ function RecordingWithLiveTrajectory({
       const el = anchorRef.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
-      const spaceRight = window.innerWidth - r.right - GAP;
-      // Prefer hanging off the right; if there is not enough room, overlay the
-      // right edge of the recording instead of shoving page layout.
-      const left =
-        spaceRight >= PANEL_W ? r.right + GAP : Math.max(GAP, r.right - PANEL_W);
+      // Always hang OUTSIDE the recording (never overlay it). Fixed positioning
+      // means this cannot shift conversation layout or scroll width; if the
+      // viewport is tight the panel may clip off-screen rather than cover video.
+      const left = r.right + GAP;
       setPanelStyle({
         position: 'fixed',
         top: Math.max(GAP, r.top),
         left,
-        height: Math.max(120, r.height),
+        height: Math.max(120, Math.min(r.height, window.innerHeight - Math.max(GAP, r.top) - GAP)),
         width: PANEL_W,
         zIndex: 9999,
       });
