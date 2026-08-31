@@ -387,6 +387,10 @@ async function testProbeCandidateBrowserSettlesOnAbort(): Promise<void> {
     } as unknown as Browser,
   };
 
+  let solverEntered!: () => void;
+  const solverStarted = new Promise<void>((resolve) => {
+    solverEntered = resolve;
+  });
   const probePromise = probeCandidateBrowser(
     session,
     'https://example.com/',
@@ -394,6 +398,7 @@ async function testProbeCandidateBrowserSettlesOnAbort(): Promise<void> {
     {
       waitForSolver: async () => {
         solveStarted = true;
+        solverEntered();
         await solveGate;
         return {
           clean: true,
@@ -407,9 +412,7 @@ async function testProbeCandidateBrowserSettlesOnAbort(): Promise<void> {
     abort.signal
   );
 
-  for (let i = 0; i < 40 && !solveStarted; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  await solverStarted;
   assert.ok(solveStarted, 'solver must start before abort');
   const started = Date.now();
   abort.abort();
