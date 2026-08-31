@@ -66,3 +66,7 @@ to keep the assertion untouched instead of widening the 15s budget.
 Every request inside a bounded poll loop needs its own timeout — a "budget
 exceeded" failure with a healthy server usually means one unbounded await ate the
 whole budget, so bound the request instead of raising the budget.
+
+## Recurrence (2026-08-31)
+
+Commit `28b995268` (2026-08-03) tightened `PER_REQUEST_TIMEOUT_MS` from `2_500` to `500` and cemented that value in `scripts/tests/semantic-deploy-gate.test.sh`, citing the 5s lifecycle SLA. Production Semantic Frontend Gate then failed `agent_plan`/`agent_execute` with `last=fetch-error The operation was aborted due to timeout` while the agents already had `temporal_workflow_id` persisted (verified via GET after the run). Restored `2_500` and updated the structural gate to forbid another down-ratchet; the 5s `FULL_LIFECYCLE_RATCHET_MS` assertion is unchanged.

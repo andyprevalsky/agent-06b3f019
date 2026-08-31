@@ -81,7 +81,12 @@ require_text "$LIFECYCLE_SPEC" "const FULL_LIFECYCLE_RATCHET_MS = 5_000;" "lifec
 require_text "$LIFECYCLE_SPEC" "mode: 'parallel'" "chat paths must run concurrently"
 require_text "$LIFECYCLE_SPEC" "test.use({ trace: 'off', video: 'off' });" "latency measurements must exclude Playwright recording overhead"
 require_text "$ROOT_DIR/front-end/tests-e2e/helpers.ts" "waitForTemporalWorkflow" "agent lifecycle ratchet must expose an authoritative Temporal-start helper"
-require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 500;" "one stalled lifecycle poll must not consume half of the five-second ratchet"
+# Per-request poll bound must cover documented prod edge stalls (~2.5s) so a
+# saturated GH Actions→Render path can still observe an already-persisted
+# temporal_workflow_id. Do NOT ratchet this down toward the 5s lifecycle SLA —
+# that assertion lives on FULL_LIFECYCLE_RATCHET_MS; starving the poll recreates
+# the July 18 false-negative (RCA 2026-07-18, recurred 2026-08-31 after 500ms).
+require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 2_500;" "temporal-workflow poll per-request timeout must stay at 2500ms to cover prod edge stalls"
 require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle terminal must wait for persisted Temporal startup"
 
 # CI runs UI semantics and the latency ratchet as concurrent jobs. The ratchet

@@ -158,3 +158,27 @@ echo "PASS: run.sh reserved-domain listing uses env key and fails closed on bad 
 echo "PASS: run.sh reserved-domain listing tolerates ngrok CLI HTTP status prefixes"
 echo "PASS: run.sh reserved-domain pagination cursor survives bash single-quoting"
 
+# Create rejection (e.g. ERR_NGROK_415 at the 100-domain cap) must warn and
+# return — never bare-exit — or every stack on a full ngrok account dies before
+# ephemeral/cloudflare/localtunnel fallback can run.
+ensure_fn=$(sed -n '/^ensure_ngrok_domain_reserved()/,/^}$/p' "$RUN_SH")
+echo "$ensure_fn" | grep -q 'tunnel start / fallback is authoritative' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved must continue after create rejection" >&2; exit 1; }
+# The create-failure branch must not exit 1 in the default (non-soft) path.
+create_fail_branch=$(echo "$ensure_fn" | awk '/Reserving ngrok domain/,/^}$/')
+if echo "$create_fail_branch" | grep -vE 'failure_mode.*soft' | grep -qE '^\s*exit 1\s*$'; then
+  echo "FAIL: ensure_ngrok_domain_reserved still exits 1 on create rejection" >&2
+  exit 1
+fi
+echo "$create_fail_branch" | grep -q 'return 0' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved default path must return 0 after create rejection" >&2; exit 1; }
+# Primary reserved-domain start must soft-reserve and fall back to ephemeral
+# when reservation fails (otherwise --domain binds a hostname that was never
+# created and ngrok_public_tunnel_fail tears the stack down).
+awk '/^start_ngrok_public_tunnel\(\) \{/,/^}$/' "$RUN_SH" > "$TMP/start_ngrok_public.sh"
+grep -q "ensure_ngrok_domain_reserved \"\$WORKTREE_DOMAIN\" soft" "$TMP/start_ngrok_public.sh" \
+  || { echo "FAIL: start_ngrok_public_tunnel must soft-reserve before binding --domain" >&2; exit 1; }
+grep -q 'ngrok_configure_endpoint_mode 1' "$TMP/start_ngrok_public.sh" \
+  || { echo "FAIL: start_ngrok_public_tunnel must fall back to ephemeral when reserve fails" >&2; exit 1; }
+echo "PASS: run.sh reserved-domain create rejection is advisory + ephemeral fallback"
+

@@ -1079,3 +1079,66 @@ def test_timed_out_seed_kills_its_process_group_and_preserves_partial_output(
     assert started.exists()
     time.sleep(3.2)
     assert not (tmp_path / "orphan-finished").exists()
+
+
+def test_require_compute_tokens_env_defaults_off():
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_REQUIRE_COMPUTE_TOKENS", None)
+        assert rb._require_compute_tokens_enabled() is False
+    with patch.dict(os.environ, {"BENCHMARK_REQUIRE_COMPUTE_TOKENS": "1"}):
+        assert rb._require_compute_tokens_enabled() is True
+    with patch.dict(os.environ, {"BENCHMARK_REQUIRE_COMPUTE_TOKENS": "true"}):
+        assert rb._require_compute_tokens_enabled() is True
+
+
+def test_usable_direct_compute_token_query_rejects_rate_limited_only_pool():
+    """DB reports no usable direct compute when the only CONNECTED token is rate-limited."""
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_run_local_victoria_sql", return_value="f"),
+    ):
+        assert rb._local_db_has_usable_direct_compute_token() is False
+
+
+def test_usable_direct_compute_token_query_accepts_non_rate_limited():
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_run_local_victoria_sql", return_value="t"),
+    ):
+        assert rb._local_db_has_usable_direct_compute_token() is True
+
+
+def test_require_compute_tokens_preflight_fails_closed_when_only_rate_limited():
+    """BENCHMARK_REQUIRE_COMPUTE_TOKENS=1 must abort before waterfall when pool is rate-limited."""
+    with (
+        patch.dict(os.environ, {"BENCHMARK_REQUIRE_COMPUTE_TOKENS": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(rb, "_sync_compute_tokens", return_value=True),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=True),
+        patch.object(rb, "_local_db_has_usable_direct_compute_token", return_value=False),
+    ):
+        with pytest.raises(RuntimeError, match="BENCHMARK_REQUIRE_COMPUTE_TOKENS"):
+            asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
+
+
+def test_require_compute_tokens_preflight_passes_when_usable_token_present():
+    with (
+        patch.dict(os.environ, {"BENCHMARK_REQUIRE_COMPUTE_TOKENS": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(rb, "_sync_compute_tokens", return_value=True),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=True),
+        patch.object(rb, "_local_db_has_usable_direct_compute_token", return_value=True),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))

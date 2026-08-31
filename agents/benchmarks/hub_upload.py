@@ -24,9 +24,12 @@ from urllib.parse import quote
 import urllib.error
 import urllib.request
 
-# `python agents/benchmarks/hub_upload.py` puts this file's directory on
-# sys.path, not `agents/`. Cloudbench copies run the script that way.
-_AGENTS_ROOT = Path(__file__).resolve().parent.parent
+# Script-mode (`python agents/benchmarks/hub_upload.py`) puts this file's
+# directory on sys.path, not `agents/`. Cloudbench copies run that way.
+# Put `agents/` on sys.path so `from benchmarks.logs` works when a sibling
+# `logs.py` is absent; `_load_tree_helpers` still prefers the sibling file
+# so a colliding `benchmarks` package cannot win.
+_AGENTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_AGENTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_AGENTS_ROOT))
 
