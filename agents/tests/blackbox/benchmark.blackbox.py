@@ -5576,13 +5576,20 @@ def test_hotel_double_spawn_run_artifact_fails_exact_tool_count():
 
 
 def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
-    """Replay e6a95458: completion-oriented spawn goal ends on phone write_lock, not payment_approval."""
+    """Replay e6a95458: historical completion-oriented spawn ends on phone write_lock.
+
+    The live harness goal now injects the payment-boundary operational suffix
+    (steer toward request_payment_card, never submit payment). The fixture spawn
+    goal still reflects the pre-suffix completion schema that stalled on
+    write_lock / payment_approval without ever calling request_payment_card.
+    """
     import json
     from pathlib import Path
 
     import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import evaluate_task
+    from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
 
     run_path = (
         Path(__file__).resolve().parents[1]
@@ -5598,7 +5605,8 @@ def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
     task = get_task_by_name("browser-hotel-booking")
     harness_goal = bench._benchmark_goal_for_task(task, "http://localhost:3201")
     assert "Complete the purchase" not in harness_goal
-    assert "request_payment_card" not in harness_goal.lower()
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in harness_goal
+    assert "request_payment_card" in harness_goal.lower()
 
     spawn_goal = None
     spawn_schema_fields: list[str] = []
