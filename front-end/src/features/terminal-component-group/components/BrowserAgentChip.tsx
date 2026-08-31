@@ -17,15 +17,34 @@
  *                                                                  \--err-> [ERROR]
  *   (neither present => [UNAVAILABLE])
  *
+ * RECORDING PLAYHEAD → LIVE TRAJECTORY (while RECORDING tab READY + <video>):
+ *   video.timeupdate|seeked
+ *        │
+ *        ▼
+ *   playheadSec = sum(priorSegmentDurations) + currentTime
+ *        │
+ *        ▼
+ *   activeStep = last traj step with offsetSec <= playheadSec
+ *        │
+ *        ▼
+ *   side panel highlight + scrollIntoView
+ *
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
 import { ChevronDown, Clapperboard, ListOrdered, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
 import { useAgentContext } from '../hooks';
 import type { FilePointer, Message, OutputSchema } from '@/lib/api';
 import { SchemaChip } from './SchemaChip';
+import {
+  buildTrajectorySteps,
+  findActiveStepIndex,
+  playheadFromSegments,
+  resolveRecordingStartMs,
+  type TrajectoryStep,
+} from './browser-agent-chip/recordingTrajectorySync';
 
 type Tab = 'result' | 'trajectory' | 'recording';
 
@@ -49,6 +68,10 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   // The segments auto-advance into one continuous recording (baseline -> each
   // rotation), so this is the playhead, not a manual tab selection.
   const [segmentIndex, setSegmentIndex] = useState(0);
+  // Wall-clock-aligned playhead (seconds from recording start). Driven by the
+  // video element so scrubbing / playback updates the live trajectory side panel.
+  const [playheadSec, setPlayheadSec] = useState(0);
+  const segmentDurationsRef = useRef<number[]>([]);
 
   const toolCallId = message.metadata?.toolCallId as string | undefined;
 
@@ -187,22 +210,57 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     setRecordingState('idle');
     setRecordingUrl(null);
     setSegmentIndex(0);
+    setPlayheadSec(0);
+    segmentDurationsRef.current = [];
   }, [recordingKey]);
 
-  const trajectory = useMemo(
+  const recordingStartMs = useMemo(
     () =>
-      taskMessages
-        .map((m) => ({
-          action: (m.metadata?.action_type as string) || m.metadata?.toolStatus || 'step',
-          title: m.metadata?.title || (m.text ? m.text.slice(0, 80) : ''),
-          status: m.metadata?.toolStatus as string | undefined,
-          ts: m.timestamp,
-        }))
-        .filter((s) => s.action !== 'recording' && s.action !== 'network_recording'),
+      resolveRecordingStartMs(
+        taskMessages.map((m) => ({
+          timestamp: m.timestamp,
+          text: m.text,
+          metadata: (m.metadata as Record<string, unknown> | undefined) ?? null,
+        })),
+      ),
     [taskMessages],
   );
 
+  const trajectory = useMemo(
+    () =>
+      buildTrajectorySteps(
+        taskMessages.map((m) => ({
+          timestamp: m.timestamp,
+          text: m.text,
+          metadata: (m.metadata as Record<string, unknown> | undefined) ?? null,
+        })),
+        recordingStartMs,
+      ),
+    [taskMessages, recordingStartMs],
+  );
+
+  const activeStepIndex = useMemo(
+    () => findActiveStepIndex(trajectory, playheadSec),
+    [trajectory, playheadSec],
+  );
+
   const failed = isFailure(resultText);
+
+  function syncPlayheadFromVideo(video: HTMLVideoElement, segIdx: number) {
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      const next = segmentDurationsRef.current.slice();
+      next[segIdx] = video.duration;
+      segmentDurationsRef.current = next;
+    }
+    setPlayheadSec(playheadFromSegments(segmentDurationsRef.current, segIdx, video.currentTime));
+  }
+
+  function handleVideoTimeSync(
+    event: SyntheticEvent<HTMLVideoElement>,
+    segIdx: number = 0,
+  ) {
+    syncPlayheadFromVideo(event.currentTarget, segIdx);
+  }
 
   async function openRecording() {
     setTab('recording');
@@ -212,6 +270,8 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     // (see the <video> playlist below) — no fetch, no manual tab switching.
     if (recordingSource.kind === 'view') {
       setSegmentIndex(0);
+      setPlayheadSec(0);
+      segmentDurationsRef.current = [];
       setRecordingState('ready');
       return;
     }
@@ -239,6 +299,8 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
         return;
       }
       setRecordingUrl(blobUrl);
+      setPlayheadSec(0);
+      segmentDurationsRef.current = [];
       setRecordingState('ready');
     } catch {
       if (loadGeneration === recordingLoadGeneration.current) {
@@ -312,23 +374,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
               </pre>
             )}
 
-            {tab === 'trajectory' && (
-              <ol className="max-h-80 space-y-1 overflow-auto text-xs">
-                {trajectory.map((s, i) => (
-                  <li key={i} className="flex items-start gap-2">
-                    <span className="w-5 shrink-0 text-right text-muted-foreground">{i + 1}</span>
-                    <span
-                      className={`shrink-0 font-mono ${
-                        s.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground'
-                      }`}
-                    >
-                      {s.action}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                  </li>
-                ))}
-              </ol>
-            )}
+            {tab === 'trajectory' && <TrajectoryList steps={trajectory} activeIndex={-1} />}
 
             {tab === 'recording' && (
               <div>
@@ -346,62 +392,83 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                 {/* Stitched replay: rotate_ip's per-session segments were
                     concatenated server-side into ONE continuous MP4, so the whole
                     run (baseline -> each rotation, IP changing) plays in a single
-                    video player. */}
+                    video player. Live trajectory sits beside the video and tracks
+                    the playhead as the user scrubs. */}
                 {hasRecording &&
                   recordingState === 'ready' &&
                   recordingSource?.kind === 'video' &&
                   recordingUrl && (
-                    <video
-                      title="Browser recording"
-                      src={recordingUrl}
-                      controls
-                      autoPlay
-                      muted
-                      playsInline
-                      className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
-                    />
+                    <RecordingWithLiveTrajectory
+                      steps={trajectory}
+                      activeIndex={activeStepIndex}
+                      playheadSec={playheadSec}
+                    >
+                      <video
+                        title="Browser recording"
+                        src={recordingUrl}
+                        controls
+                        autoPlay
+                        muted
+                        playsInline
+                        onTimeUpdate={handleVideoTimeSync}
+                        onSeeked={handleVideoTimeSync}
+                        onLoadedMetadata={handleVideoTimeSync}
+                        className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
+                      />
+                    </RecordingWithLiveTrajectory>
                   )}
                 {/* Fallback (stitch unavailable): play the raw per-rotation segment
                     URLs back-to-back. On each segment end we advance the playhead so
                     baseline -> rotation 1 -> ... still streams without manual
                     switching. A slim marker strip shows where each rotation begins. */}
                 {hasRecording && recordingState === 'ready' && recordingSource?.kind === 'view' && (
-                  <div>
-                    {recordingSource.urls.length > 1 && (
-                      <div data-testid="recording-segments" className="mb-2">
-                        <p className="mb-1 text-xs text-muted-foreground">
-                          Continuous replay — now showing{' '}
-                          <span className="font-medium text-foreground">
-                            {segmentIndex === 0 ? 'baseline IP' : `rotation ${segmentIndex}`}
-                          </span>{' '}
-                          ({segmentIndex + 1} of {recordingSource.urls.length} IPs)
-                        </p>
-                        <div className="flex h-1 w-full gap-0.5 overflow-hidden rounded">
-                          {recordingSource.urls.map((url, i) => (
-                            <div
-                              key={url}
-                              className={`h-full flex-1 rounded-full ${
-                                i <= segmentIndex ? 'bg-foreground/70' : 'bg-muted'
-                              }`}
-                            />
-                          ))}
+                  <RecordingWithLiveTrajectory
+                    steps={trajectory}
+                    activeIndex={activeStepIndex}
+                    playheadSec={playheadSec}
+                  >
+                    <div>
+                      {recordingSource.urls.length > 1 && (
+                        <div data-testid="recording-segments" className="mb-2">
+                          <p className="mb-1 text-xs text-muted-foreground">
+                            Continuous replay — now showing{' '}
+                            <span className="font-medium text-foreground">
+                              {segmentIndex === 0 ? 'baseline IP' : `rotation ${segmentIndex}`}
+                            </span>{' '}
+                            ({segmentIndex + 1} of {recordingSource.urls.length} IPs)
+                          </p>
+                          <div className="flex h-1 w-full gap-0.5 overflow-hidden rounded">
+                            {recordingSource.urls.map((url, i) => (
+                              <div
+                                key={url}
+                                className={`h-full flex-1 rounded-full ${
+                                  i <= segmentIndex ? 'bg-foreground/70' : 'bg-muted'
+                                }`}
+                              />
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
-                    <video
-                      key={recordingSource.urls[segmentIndex]}
-                      title="Browser recording"
-                      src={recordingSource.urls[segmentIndex]}
-                      controls
-                      autoPlay
-                      muted
-                      playsInline
-                      onEnded={() => {
-                        setSegmentIndex((i) => (i + 1 < recordingSource.urls.length ? i + 1 : i));
-                      }}
-                      className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
-                    />
-                  </div>
+                      )}
+                      <video
+                        key={recordingSource.urls[segmentIndex]}
+                        title="Browser recording"
+                        src={recordingSource.urls[segmentIndex]}
+                        controls
+                        autoPlay
+                        muted
+                        playsInline
+                        onTimeUpdate={(e) => handleVideoTimeSync(e, segmentIndex)}
+                        onSeeked={(e) => handleVideoTimeSync(e, segmentIndex)}
+                        onLoadedMetadata={(e) => handleVideoTimeSync(e, segmentIndex)}
+                        onEnded={() => {
+                          setSegmentIndex((i) =>
+                            i + 1 < recordingSource.urls.length ? i + 1 : i,
+                          );
+                        }}
+                        className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
+                      />
+                    </div>
+                  </RecordingWithLiveTrajectory>
                 )}
                 {hasRecording &&
                   recordingState === 'ready' &&
@@ -419,6 +486,96 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
         </div>
       )}
     </div>
+  );
+}
+
+function RecordingWithLiveTrajectory({
+  steps,
+  activeIndex,
+  playheadSec,
+  children,
+}: {
+  steps: TrajectoryStep[];
+  activeIndex: number;
+  playheadSec: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      data-testid="recording-with-live-trajectory"
+      className="flex flex-col gap-3 lg:flex-row lg:items-stretch"
+    >
+      <div className="min-w-0 flex-1">{children}</div>
+      <div className="flex w-full shrink-0 flex-col lg:w-80">
+        <div className="mb-1 flex items-baseline justify-between gap-2">
+          <p className="text-xs font-medium text-foreground">Live trajectory</p>
+          <p
+            data-testid="recording-playhead"
+            className="font-mono text-[10px] text-muted-foreground"
+          >
+            t={playheadSec.toFixed(1)}s
+          </p>
+        </div>
+        <TrajectoryList steps={steps} activeIndex={activeIndex} live />
+      </div>
+    </div>
+  );
+}
+
+function TrajectoryList({
+  steps,
+  activeIndex,
+  live = false,
+}: {
+  steps: TrajectoryStep[];
+  activeIndex: number;
+  live?: boolean;
+}) {
+  const activeRef = useRef<HTMLLIElement | null>(null);
+
+  useEffect(() => {
+    if (!live || activeIndex < 0) return;
+    // jsdom does not implement scrollIntoView; guard so scrub-sync tests can run.
+    activeRef.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  }, [live, activeIndex]);
+
+  return (
+    <ol
+      data-testid={live ? 'recording-live-trajectory' : 'trajectory-list'}
+      className={`${live ? 'max-h-[min(75vh,32rem)]' : 'max-h-80'} space-y-1 overflow-auto text-xs`}
+    >
+      {steps.map((s, i) => {
+        const isActive = i === activeIndex;
+        const isPast = activeIndex >= 0 && i < activeIndex;
+        return (
+          <li
+            key={i}
+            ref={isActive ? activeRef : undefined}
+            data-testid={isActive ? 'recording-active-step' : undefined}
+            data-step-index={i}
+            className={`flex items-start gap-2 rounded px-1.5 py-1 ${
+              isActive
+                ? 'bg-foreground/10 ring-1 ring-foreground/20'
+                : isPast
+                  ? 'opacity-70'
+                  : live
+                    ? 'opacity-40'
+                    : ''
+            }`}
+          >
+            <span className="w-5 shrink-0 text-right text-muted-foreground">{i + 1}</span>
+            <span
+              className={`shrink-0 font-mono ${
+                s.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground'
+              }`}
+            >
+              {s.action}
+            </span>
+            <span className="min-w-0 flex-1 truncate">{s.title}</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

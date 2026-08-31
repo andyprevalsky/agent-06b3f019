@@ -288,4 +288,125 @@ describe('BrowserAgentChip recording', () => {
     expect(await screen.findByText('Recording unavailable for this run.')).toBeInTheDocument();
     expect(screen.queryByTitle('Browser recording')).not.toBeInTheDocument();
   });
+
+
+  it('shows a live trajectory side panel beside the recording', async () => {
+    const t0 = '2026-07-16T00:00:00.000Z';
+    const messages = [
+      {
+        ...anchorMsg,
+        message_id: 'complete-live',
+        timestamp: '2026-07-16T00:02:00.000Z',
+      },
+      recordingMsg({
+        recording_view_url: KERNEL_VIEW_URL,
+        // recording row timestamp is the scrub origin
+      }),
+      {
+        message_id: 'step-goto',
+        timestamp: '2026-07-16T00:00:05.000Z',
+        role: 'TOOL' as const,
+        text: '',
+        metadata: {
+          task_id: TASK,
+          toolName: 'spawn_browser_agent',
+          action_type: 'goto',
+          toolStatus: 'FINISHED',
+          title: 'Open menu',
+        },
+      },
+      {
+        message_id: 'step-click',
+        timestamp: '2026-07-16T00:00:40.000Z',
+        role: 'TOOL' as const,
+        text: '',
+        metadata: {
+          task_id: TASK,
+          toolName: 'spawn_browser_agent',
+          action_type: 'click',
+          toolStatus: 'FINISHED',
+          title: 'Pick Almond Oat Latte',
+        },
+      },
+    ];
+    // Force the recording message timestamp to t0 so offsets are deterministic.
+    messages[1] = { ...messages[1], timestamp: t0 };
+    renderChip(messages, messages[0]);
+
+    await openRecordingTab();
+
+    expect(await screen.findByTestId('recording-with-live-trajectory')).toBeInTheDocument();
+    expect(screen.getByTestId('recording-live-trajectory')).toBeInTheDocument();
+    expect(screen.getByText('Open menu')).toBeInTheDocument();
+    expect(screen.getByText('Pick Almond Oat Latte')).toBeInTheDocument();
+  });
+
+  it('updates the live trajectory highlight when the recording is scrubbed', async () => {
+    const t0 = '2026-07-16T00:00:00.000Z';
+    const anchor = {
+      ...anchorMsg,
+      message_id: 'complete-scrub',
+      timestamp: '2026-07-16T00:02:00.000Z',
+    };
+    const messages = [
+      anchor,
+      { ...recordingMsg({ recording_view_url: KERNEL_VIEW_URL }), timestamp: t0 },
+      {
+        message_id: 'step-goto',
+        timestamp: '2026-07-16T00:00:05.000Z',
+        role: 'TOOL' as const,
+        text: '',
+        metadata: {
+          task_id: TASK,
+          toolName: 'spawn_browser_agent',
+          action_type: 'goto',
+          toolStatus: 'FINISHED',
+          title: 'Open menu',
+        },
+      },
+      {
+        message_id: 'step-click',
+        timestamp: '2026-07-16T00:00:40.000Z',
+        role: 'TOOL' as const,
+        text: '',
+        metadata: {
+          task_id: TASK,
+          toolName: 'spawn_browser_agent',
+          action_type: 'click',
+          toolStatus: 'FINISHED',
+          title: 'Pick Almond Oat Latte',
+        },
+      },
+    ];
+    renderChip(messages, anchor);
+
+    await openRecordingTab();
+
+    const video = (await screen.findByTitle('Browser recording')) as HTMLVideoElement;
+    // Before the first step: no active highlight.
+    Object.defineProperty(video, 'currentTime', { configurable: true, value: 1 });
+    Object.defineProperty(video, 'duration', { configurable: true, value: 120 });
+    fireEvent.timeUpdate(video);
+    expect(screen.queryByTestId('recording-active-step')).not.toBeInTheDocument();
+
+    // Scrub into the goto step window.
+    Object.defineProperty(video, 'currentTime', { configurable: true, value: 10 });
+    fireEvent.seeked(video);
+    await waitFor(() => {
+      const active = screen.getByTestId('recording-active-step');
+      expect(active).toHaveAttribute('data-step-index', '0');
+      expect(active).toHaveTextContent('Open menu');
+    });
+
+    // Scrub further to the click step.
+    Object.defineProperty(video, 'currentTime', { configurable: true, value: 45 });
+    fireEvent.timeUpdate(video);
+    await waitFor(() => {
+      const active = screen.getByTestId('recording-active-step');
+      expect(active).toHaveAttribute('data-step-index', '1');
+      expect(active).toHaveTextContent('Pick Almond Oat Latte');
+    });
+    expect(screen.getByTestId('recording-playhead')).toHaveTextContent('t=45.0s');
+  });
+
 });
