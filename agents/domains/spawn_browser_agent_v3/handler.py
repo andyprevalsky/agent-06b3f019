@@ -6112,13 +6112,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
         async def _create_download_persister():
             # Kernel CDP downloads_path alone does not always yield listFiles entries;
-            # materialize Content-Disposition attachments under /tmp/downloads.
+            # listen for Chrome Browser.download* events and materialize only those.
+            # Pass the per-session provider (not BROWSER_PROVIDER env) so Steel
+            # sessions get /files + omit-directory upload semantics.
             return await BrowserDownloadPersister.create(
                 browser_session=dom_service.session,
                 session_id=session_id,
                 config=config,
                 agent_id=agent_id,
                 task_id=task_id or "",
+                provider=browser_session_metadata.get("provider"),
             )
 
         download_persister_task = asyncio.create_task(_create_download_persister())
