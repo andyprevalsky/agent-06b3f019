@@ -8884,10 +8884,17 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
                 # Reuse the just-fetched write-lock state (no browser action since).
-                checkpoint_state = write_lock_browser_state or await asyncio.wait_for(
-                    dom_service.get_browser_state(include_screenshot=False),
-                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-                )
+                # If that fetch failed, try once more for a checkpoint — but never
+                # let a frozen CDP wipe the already-ready approval return.
+                checkpoint_state = write_lock_browser_state
+                if not checkpoint_state:
+                    try:
+                        checkpoint_state = await asyncio.wait_for(
+                            dom_service.get_browser_state(include_screenshot=False),
+                            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        checkpoint_state = {}
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
@@ -9011,10 +9018,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
 
                 # Reuse payment notification state when available (no action since).
-                checkpoint_state = payment_notification_state or await asyncio.wait_for(
-                    dom_service.get_browser_state(include_screenshot=False),
-                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-                )
+                checkpoint_state = payment_notification_state
+                if not checkpoint_state:
+                    try:
+                        checkpoint_state = await asyncio.wait_for(
+                            dom_service.get_browser_state(include_screenshot=False),
+                            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                        )
+                    except Exception:
+                        checkpoint_state = {}
                 checkpoint = _browser_ground_truth_checkpoint(checkpoint_state, current_url)
                 _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 

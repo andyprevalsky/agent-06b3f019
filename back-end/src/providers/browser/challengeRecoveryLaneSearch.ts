@@ -153,8 +153,9 @@ export async function runLaneConfigSearch(
           }
           return { config, session, probe };
         }
-        activeSessions.delete(tracked);
-        await dependencies.release(config, session).catch(() => {});
+        if (activeSessions.delete(tracked)) {
+          await dependencies.release(config, session).catch(() => {});
+        }
       } catch (error) {
         // abort listener may already have cleared+released this session when a
         // sibling won; only release locally when we still own the track entry.
