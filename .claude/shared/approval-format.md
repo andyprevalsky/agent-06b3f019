@@ -56,6 +56,7 @@ localhost, ngrok, trycloudflare, or ephemeral hub URL that dies when the stack
 tears down. Check it immediately before presenting the
 approval and report `verified rendered`, `verified reachable` (when only an HTTP
 and agent-data probe is available), or `expired/unreachable` honestly.
+FE link validation also requires every `spawn_browser_agent` task on that agent to be terminated (`action_type=task_complete`) with a correctly attached recording (`recording_view_url` or `recording_file_pointer` on a FINISHED recording message) — `publish_evidence_links.py` fails closed when either is missing.
 Never omit the FE link, substitute a run JSON path, or imply that a dead localhost
 viewer works. Do not link undeployed `/open-agent` paths that render the SPA
 NotFound copy (`Oops! Page not found`) while HTTP stays 200 — use
