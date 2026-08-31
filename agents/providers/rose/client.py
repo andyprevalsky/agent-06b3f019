@@ -40,7 +40,11 @@ from providers.rose.browser_use import (
     normalize_browser_use_response,
     normalize_browser_use_tool_call,
 )
-from providers.rose.claude_auth import anthropic_api_key_complete, claude_auth_complete
+from providers.rose.claude_auth import (
+    DEFAULT_REASONING_EFFORT,
+    anthropic_api_key_complete,
+    claude_auth_complete,
+)
 from providers.rose.errors import (
     RoseAuthError,
     RoseDeadlineError,
@@ -423,9 +427,7 @@ def _browser_use_dump_config(
     effective_model = _dump_display_model(actual_model)
     # complete_browser_use omits effort → body builders stamp DEFAULT (xhigh).
     # Record the effective wire value so dumps match what was actually sent.
-    from providers.rose.claude_auth import DEFAULT_REASONING_EFFORT as _EFFORT_DEFAULT
-
-    effective_effort = _EFFORT_DEFAULT
+    effective_effort = DEFAULT_REASONING_EFFORT
     if mode == "gpt":
         effective_params = {
             "model": pool_spec.gpt_auth_model,
@@ -707,11 +709,9 @@ class RoseClient:
                         },
                         # Effective wire effort: callers may omit; body builders
                         # always stamp DEFAULT_REASONING_EFFORT (xhigh).
-                        "reasoning_effort": effort
-                        if effort is not None
-                        else __import__(
-                            "providers.rose.claude_auth", fromlist=["DEFAULT_REASONING_EFFORT"]
-                        ).DEFAULT_REASONING_EFFORT,
+                        "reasoning_effort": (
+                            effort if effort is not None else DEFAULT_REASONING_EFFORT
+                        ),
                         "response_model": response_model.__name__ if response_model else None,
                         "direct_auth": {
                             "claude": claude_auth is not None,
