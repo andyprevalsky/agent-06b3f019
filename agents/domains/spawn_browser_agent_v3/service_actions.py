@@ -695,6 +695,7 @@ class _ActionContext:
     browser_network_recorder: Optional[Any]
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
+    prefetched_browser_state: Optional[Dict[str, Any]] = None
 
 
 async def _refuse_navigation(
@@ -863,7 +864,12 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
 async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]:
     from providers.rose.browser_use import format_browser_state_for_tool
 
-    state = await context.dom_service.get_browser_state(include_screenshot=False)
+    # Reuse the loop's just-fetched observe_page_state when present — no browser
+    # action ran between that fetch and this tool, so a second full DOM walk is
+    # pure duplicate cost.
+    state = context.prefetched_browser_state
+    if not isinstance(state, dict) or not state:
+        state = await context.dom_service.get_browser_state(include_screenshot=False)
     formatted_state = format_browser_state_for_tool(state)
     result = {
         "success": True,
@@ -1548,6 +1554,7 @@ async def execute_action(
     prepare_credentials_for_url: Optional[
         Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
     ] = None,
+    prefetched_browser_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1613,6 +1620,7 @@ async def execute_action(
             browser_network_recorder=browser_network_recorder,
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
+            prefetched_browser_state=prefetched_browser_state,
         )
         if action_name in _INTERACTION_ACTIONS:
             return await _execute_interaction_action(context)

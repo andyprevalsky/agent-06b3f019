@@ -879,7 +879,13 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     Guest needles are checked first: phrases like ``do not sign in`` contain the
     substring ``sign in`` and must not be classified as signed-in preference.
     """
-    text = (goal or "").lower()
+    text = (
+        (goal or "")
+        .lower()
+        .replace("\u2019", "'")
+        .replace("\u2018", "'")
+        .replace("\u02bc", "'")
+    )
     # Negated guest phrasing must not flip preserve_auth off (e.g. "do not
     # continue as guest; sign in with my account" still contains "as guest").
     negated_guest_needles = (
@@ -900,8 +906,10 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "do not use guest",
         "don't use guest",
         "avoid guest",
+        "not guest checkout",
         "do not use anonymous checkout",
         "don't use anonymous checkout",
+        "not anonymous checkout",
         "do not check out anonymously",
         "don't check out anonymously",
         "do not checkout anonymously",
@@ -910,6 +918,7 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "don't continue anonymously",
         "do not proceed anonymously",
         "don't proceed anonymously",
+        "not anonymously",
     )
     if any(needle in text for needle in negated_guest_needles):
         # Fall through to signed-in / default preserve-auth handling.

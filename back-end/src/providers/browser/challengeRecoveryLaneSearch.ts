@@ -147,7 +147,10 @@ export async function runLaneConfigSearch(
           latencyMs: probe.latencyMs,
         });
         if (probe.stablePasses === probe.attempts && probe.attempts > 0) {
-          activeSessions.delete(tracked);
+          const ownsSession = activeSessions.delete(tracked);
+          if (!ownsSession) {
+            throw new Error('lane_aborted');
+          }
           return { config, session, probe };
         }
         activeSessions.delete(tracked);

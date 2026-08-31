@@ -6613,6 +6613,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             )
             return True
 
+        observe_page_state: Dict[str, Any] = {}
         while iteration < MAX_ITERATIONS:
             iteration += 1
             activity.heartbeat(f"Step {iteration}")
@@ -8654,6 +8655,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_network_recorder=browser_network_recorder,
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
+                        prefetched_browser_state=observe_page_state,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -9154,7 +9156,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
                     current_url = final_browser_state.get("url", current_url) or current_url
                 except Exception:
-                    final_browser_state = {}
+                    # Last-known loop observation — prefer a stale-but-real page
+                    # over skipping synthesis entirely when the refresh freezes.
+                    final_browser_state = (
+                        observe_page_state if isinstance(observe_page_state, dict) else {}
+                    )
                 if not final_browser_state:
                     raise RuntimeError("no browser_state available for final verifier pass")
                 final_verifier_context = await build_browser_verifier_context(
