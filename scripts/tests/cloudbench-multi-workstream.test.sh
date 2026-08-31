@@ -118,6 +118,13 @@ console.error("usage: seed-dump-cache.ts <get|put> <token> <file>");
 process.exit(2);
 SEEDSTUB
 printf '{}\n' > "$SANDBOX/package.json"
+mkdir -p "$SANDBOX/node_modules/.bin"
+cat > "$SANDBOX/node_modules/.bin/tsx" <<'TSXSHIM'
+#!/bin/bash
+# Hermetic worktrees have no npm cache. Node 22 can load the stub .ts directly.
+exec node --experimental-strip-types "$@"
+TSXSHIM
+chmod +x "$SANDBOX/node_modules/.bin/tsx"
 printf '{}\n' > "$SANDBOX/back-end/package.json"
 printf '{}\n' > "$SANDBOX/front-end/package.json"
 printf '{}\n' > "$SANDBOX/back-end/package-lock.json"
