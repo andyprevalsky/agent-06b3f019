@@ -457,7 +457,7 @@ export async function searchAndPromoteBrowserConfig(
               specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
             });
         if (signal.aborted) {
-          await closeValidationBrowser({ provider: 'kernel', ...session });
+          await closeValidationBrowser(session);
           await dependencies.releaseKernel(session.sessionId).catch(() => {});
           throw new Error('lane_aborted');
         }
@@ -469,7 +469,7 @@ export async function searchAndPromoteBrowserConfig(
         userAgent: input.userAgent,
       });
       if (signal.aborted) {
-        await closeValidationBrowser({ provider: 'steel', ...session });
+        await closeValidationBrowser(session);
         await dependencies.releaseSteel(session.sessionId).catch(() => {});
         throw new Error('lane_aborted');
       }
