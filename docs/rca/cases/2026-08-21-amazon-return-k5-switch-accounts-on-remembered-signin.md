@@ -2,7 +2,7 @@
 id: 2026-08-21-amazon-return-k5-switch-accounts-on-remembered-signin
 date: 2026-08-21
 title: Amazon return k=5 agents clicked Switch accounts on remembered-password interstitial and never reached write_lock
-surface: browser-agent
+surface: agents
 component: amazon-auth-interstitial
 classification: our-bug
 problem_class: other
@@ -15,13 +15,13 @@ symptoms:
 tags:
   - browser-agent
   - amazon-return
-  - auth_assistance
+  - auth-assistance
   - switch-accounts
   - concurrency
 sources:
   - agent 4789b9f3-f674-4bda-b979-f833747f0761
   - agent fbc36706-4093-4bb4-a457-d4a8f486e62b
-  - 'agents/benchmarks/runs/20260821_225850_browser-amazon-return,browser-amazon-return,browser-amazon-return,browser-amazon-return,browser-amazon-return.json'
+  - memory:agents/benchmarks/runs/20260821_225850_browser-amazon-return.json
 repro: pending — owning-boundary prompt/policy repro not yet cemented
 status: open
 ---
@@ -36,7 +36,7 @@ write_lock attention request (to ignore) but none was triggered`
 
 (`approvals_triggered=0`).
 
-## Diagnosis (evidence-backed; causal fix pending)
+## Diagnosis
 
 All five agents initially hit Amazon `ap/signin` with `max_auth_age=0` en route
 to order history. Passers completed `POST /ap/signin/start` → `your-orders`.
