@@ -29,6 +29,14 @@ USE_SYSTEM_PG=false
 if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
     USE_SYSTEM_PG=true
 fi
+# Cloud VMs often have a Docker daemon that cannot overlay-mount images.
+# Fall back to the same system Postgres path setup-db.sh / run.sh already use.
+if ! $USE_SYSTEM_PG; then
+    if ! docker run --rm --entrypoint true postgres:16-alpine >/dev/null 2>&1; then
+        echo "⚠️  Docker Postgres unavailable — falling back to system Postgres (set ROSE_USE_SYSTEM_PG=true to skip Docker)."
+        USE_SYSTEM_PG=true
+    fi
+fi
 SRC_DB="victoria_seedmem_src_$$"
 TARGET_DB="victoria_seedmem_tgt_$$"
 # Newest cached prod dump. Restored into a LOCAL source db so the measurement
