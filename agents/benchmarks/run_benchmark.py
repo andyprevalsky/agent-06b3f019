@@ -6089,8 +6089,14 @@ def _local_db_has_usable_direct_compute_token() -> bool:
     """True when the isolated DB holds a non-rate-limited direct compute credential.
 
     Mirrors the selection filters used by compute-token fetch: CONNECTED + active +
-    encrypted credentials present + ``rateLimitedUntil`` null/past, for either
-    ``claude_code`` or ``gpt_code`` (user-owned or pooling-enabled).
+    encrypted credentials present + ``rateLimitedUntil`` null/past + empty
+    ``failureReason``, for either ``claude_code`` or ``gpt_code`` (user-owned or
+    pooling-enabled).
+
+    ``failureReason='auth_error'`` must NOT count as usable: those rows are still
+    ``CONNECTED`` in the DB after a failed refresh, and treating them as healthy
+    lets ``BENCHMARK_REQUIRE_COMPUTE_TOKENS=1`` pass then fall through to the
+    paid OpenRouter waterfall (descend-daily e2-preflight 2026-08-31).
     """
     if not _local_victoria_database_url():
         return False
@@ -6104,6 +6110,7 @@ def _local_db_has_usable_direct_compute_token() -> bool:
             AND "isActive" = TRUE
             AND COALESCE(config->>'encryptedCredentials', '') <> ''
             AND ("rateLimitedUntil" IS NULL OR "rateLimitedUntil" < NOW())
+            AND COALESCE("failureReason", '') = ''
             AND (
               "poolingEnabled" = TRUE
               OR "userId" = {user}
