@@ -10017,6 +10017,16 @@ async def run_single_task(
         logs = await collect_logs(agent_id, data, start_time)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
+        # Keep hydrated Claude Code transcripts in the run JSON so durable FE
+        # publish can dual-write them after the ephemeral bench DB is dropped.
+        claude_code_sessions = (data.get("_benchmark") or {}).get("claude_code_sessions")
+        if isinstance(claude_code_sessions, list) and claude_code_sessions:
+            logs["claude_code_sessions"] = claude_code_sessions
+        session_evidence_error = (data.get("_benchmark") or {}).get(
+            "claude_code_session_evidence_error"
+        )
+        if session_evidence_error:
+            logs["claude_code_session_evidence_error"] = session_evidence_error
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only

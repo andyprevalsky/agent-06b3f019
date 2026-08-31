@@ -5154,13 +5154,13 @@
         ],
         "checks": [
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "claude_code_session_output",
             "min_sessions": 1,
             "min_chars": 32
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
           }
         ]
       },
