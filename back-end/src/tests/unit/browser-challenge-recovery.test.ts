@@ -407,9 +407,14 @@ async function testProbeCandidateBrowserSettlesOnAbort(): Promise<void> {
     abort.signal
   );
 
-  for (let i = 0; i < 40 && !solveStarted; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  // Recursive poll (not a retry-on-error loop) — eslint bans for/while+setTimeout.
+  const waitUntilSolverStarted = async (remaining: number): Promise<void> => {
+    if (solveStarted) return;
+    if (remaining <= 0) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await waitUntilSolverStarted(remaining - 1);
+  };
+  await waitUntilSolverStarted(40);
   assert.ok(solveStarted, 'solver must start before abort');
   const started = Date.now();
   abort.abort();
