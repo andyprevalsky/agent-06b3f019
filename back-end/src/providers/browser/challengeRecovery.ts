@@ -94,7 +94,12 @@ export interface RecoveryCandidateSession {
 
 /** Close the Playwright validation CDP client without failing remote release. */
 async function closeValidationBrowser(session: RecoveryCandidateSession): Promise<void> {
-  await session.validationBrowser.close().catch(() => {});
+  // Optional-chain: test doubles may omit `close`. Calling a missing method throws
+  // synchronously before `.catch()` attaches, which previously swallowed the error
+  // in release() and skipped releaseKernel/releaseSteel for partial-clear losers.
+  const close = session.validationBrowser.close?.bind(session.validationBrowser);
+  if (close === undefined) return;
+  await close().catch(() => {});
 }
 
 export interface CandidateProbeResult {
@@ -256,7 +261,7 @@ export async function probeCandidateBrowser(
   } finally {
     // Closing this CDP client leaves the remote default context (including any
     // solver-refreshed challenge cookies) alive for atomic promotion.
-    await session.validationBrowser.close().catch(() => {});
+    await closeValidationBrowser(session);
   }
   if (signal?.aborted) {
     throw new Error('lane_aborted');
