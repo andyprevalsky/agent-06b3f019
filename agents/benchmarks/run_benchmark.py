@@ -65,6 +65,8 @@ from benchmarks.benchmark_tasks import (
 )
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
+    AMAN_FOOD_PLAN_COOKIE_DOMAINS,
+    AMAN_FOOD_PLAN_USER_ID,
     LIVE_FIXTURE_NAMES,
     TAMY_IDENTITY_COOKIE_DOMAINS,
     TAMY_IDENTITY_USER_ID,
@@ -144,6 +146,8 @@ MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
+DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
+_DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 # Tasks whose fixtures destructively mutate shared benchmark DB state. The
 # parallel scheduler runs these serially before starting any ordinary task so a
 # retained failed agent tree cannot mutate their fixtures. Each fixture must
@@ -153,6 +157,7 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     AMAZON_PASSKEY_TASK_NAME,
     AMAZON_MX_TAMY_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
+    DOORDASH_FOOD_PLAN_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
@@ -1920,11 +1925,152 @@ def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
     return f"navi-agent-tasks-{workspace}"
 
 
+def _doordash_food_plan_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for DoorDash food-plan fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = AMAN_FOOD_PLAN_USER_ID
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
+    if source_database_url:
+        env["BENCHMARK_DOORDASH_SOURCE_DATABASE_URL"] = source_database_url
+    return env
+
+
+def _run_doordash_food_plan_fixture(action: str) -> dict:
+    if action == "apply" and action in _DOORDASH_FOOD_PLAN_FIXTURE_CACHE:
+        return dict(_DOORDASH_FOOD_PLAN_FIXTURE_CACHE[action])
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/doordash-food-plan-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_doordash_food_plan_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=240 if action in ("apply", "freeze") else 60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"DoorDash food-plan benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
+        )
+    manifest = _parse_last_json_line(result.stdout)
+    if action == "apply":
+        _DOORDASH_FOOD_PLAN_FIXTURE_CACHE[action] = dict(manifest)
+    elif action == "cleanup":
+        _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+    return manifest
+
+
+def _doordash_food_plan_frozen_fixture() -> dict | None:
+    manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
+    if manifest and manifest.get("benchmark_goal"):
+        return {
+            "execute_prompt": manifest["benchmark_goal"],
+            "checkout_manifest": "",
+        }
+    frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
+    if not frozen_path.is_file():
+        return None
+    data = json.loads(frozen_path.read_text())
+    execute_prompt = data.get("execute_prompt")
+    if not isinstance(execute_prompt, str) or not execute_prompt.strip():
+        return None
+    checkout_manifest = data.get("checkout_manifest")
+    return {
+        "execute_prompt": execute_prompt.strip(),
+        "checkout_manifest": checkout_manifest.strip() if isinstance(checkout_manifest, str) else "",
+    }
+
+
+def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        return None
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return None
+    return frozen["execute_prompt"]
+
+
+def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
+    override = _doordash_food_plan_prompt_override(task)
+    return override if override else task.prompt
+
+
+def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        return ""
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return ""
+    sections: list[str] = []
+    if frozen.get("checkout_manifest"):
+        sections.append(
+            "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "
+            "99 Ranch line must be satisfied or manifest-allowed omitted/substituted):\n"
+            + frozen["checkout_manifest"]
+        )
+    sections.append(
+        "Authoritative execute manifest text (same source the agent received):\n"
+        + frozen["execute_prompt"]
+    )
+    return "\n\n".join(sections)
+
+
+def _doordash_food_plan_supplemental_cart_evidence(data: dict) -> str:
+    """Collect full cart itemization from write-lock and browser evaluate dumps.
+
+    DoorDash write-lock approvals often summarize only the first handful of SKUs while
+    reporting a larger cart count. For manifest-exact judging, surface every grounded
+    cart dump the trajectory captured.
+    """
+    snippets: list[str] = []
+    benchmark_state = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    for req in benchmark_state.get("attention_requests_seen") or []:
+        if not isinstance(req, dict):
+            continue
+        question = str(req.get("question") or req.get("message") or "").strip()
+        if len(question) < 80:
+            continue
+        kind = req.get("kind") or "attention"
+        snippets.append(f"Attention request ({kind}):\n{question[:20000]}")
+
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        text = str(message.get("message") or message.get("text") or "").strip()
+        if not text:
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = metadata.get("toolName")
+        action_type = metadata.get("action_type")
+        if tool_name == "request_user_approval":
+            snippets.append(f"Approval tool message:\n{text[:20000]}")
+            continue
+        if action_type != "evaluate":
+            continue
+        lowered = text.lower()
+        if "result:" not in text:
+            continue
+        if (
+            "×" in text
+            or "in cart" in lowered
+            or "ground beef" in lowered
+            or "safeway" in lowered
+        ):
+            snippets.append(f"Browser cart evaluate dump:\n{text[:20000]}")
+
+    if not snippets:
+        return ""
+    return "\n\n---\n\n".join(snippets)
+
+
+
+
 def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     """Resolve the root-agent goal sent to POST /api/agents for a benchmark task."""
     from utils.payment_boundary_goal import payment_boundary_operational_suffix
 
-    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
+    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _doordash_food_plan_prompt_override(task) or _prod_user_data_prompt_override(task) or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     if (
@@ -6509,9 +6655,30 @@ def _apply_live_tamy_identity_fixture(ctx: LiveFixtureContext) -> dict:
     }
 
 
+def _apply_live_aman_food_plan_identity_fixture(ctx: LiveFixtureContext) -> dict:
+    """Apply the complete live overlay for Aman's DoorDash food-plan repro identity."""
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — skipping the Aman food-plan identity overlay")
+        return {"fixture": "live-aman-food-plan-identity", "skipped": True, "reason": "simulate"}
+    manifest = _apply_live_fixture(
+        replace(
+            ctx,
+            user_id=AMAN_FOOD_PLAN_USER_ID,
+            cookie_domains=AMAN_FOOD_PLAN_COOKIE_DOMAINS,
+        )
+    )
+    print(f"    🛒 Seeded Aman's production identity {AMAN_FOOD_PLAN_USER_ID} into the isolated DB")
+    return {
+        **manifest,
+        "fixture": "live-aman-food-plan-identity",
+        "user_id": AMAN_FOOD_PLAN_USER_ID,
+    }
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
     "live-tamy-identity": _apply_live_tamy_identity_fixture,
+    "live-aman-food-plan-identity": _apply_live_aman_food_plan_identity_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
@@ -9438,6 +9605,12 @@ async def run_single_task(
         doc_count = user_data_manifest.get("document_count", "?")
         provider_count = user_data_manifest.get("provider_count", "?")
         print(f"    📄 Seeded frozen user-data fixture: {doc_count} documents across {provider_count} providers")
+    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        doordash_manifest = _run_doordash_food_plan_fixture("apply")
+        prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
+        print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
