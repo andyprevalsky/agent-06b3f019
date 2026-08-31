@@ -886,60 +886,17 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         .replace("\u2018", "'")
         .replace("\u02bc", "'")
     )
-    # Negated guest phrasing must not flip preserve_auth off (e.g. "do not
-    # continue as guest; sign in with my account" still contains "as guest").
-    # Strip matched negations before scoring positive guest needles so
-    # "Use guest checkout, not anonymous checkout" still selects guest.
-    negated_guest_needles = (
-        "do not continue as a guest",
-        "don't continue as a guest",
-        "do not continue as guest",
-        "don't continue as guest",
-        "do not proceed as a guest",
-        "don't proceed as a guest",
-        "do not proceed as guest",
-        "don't proceed as guest",
-        "do not checkout as a guest",
-        "don't checkout as a guest",
-        "do not checkout as guest",
-        "don't checkout as guest",
-        "do not check out as a guest",
-        "don't check out as a guest",
-        "do not check out as guest",
-        "don't check out as guest",
-        "not as a guest",
-        "not as guest",
-        "do not use guest",
-        "don't use guest",
-        "avoid guest",
-        "not guest checkout",
-        "do not use anonymous checkout",
-        "don't use anonymous checkout",
-        "not anonymous checkout",
-        "do not check out anonymously",
-        "don't check out anonymously",
-        "do not checkout anonymously",
-        "don't checkout anonymously",
-        "do not continue anonymously",
-        "don't continue anonymously",
-        "do not proceed anonymously",
-        "don't proceed anonymously",
-        "not anonymously",
-        "do not check out without logging in",
-        "don't check out without logging in",
-        "do not checkout without logging in",
-        "don't checkout without logging in",
-        "do not check out without signing in",
-        "don't check out without signing in",
-        "do not checkout without signing in",
-        "don't checkout without signing in",
-        "not without logging in",
-        "not without signing in",
+    # Bounded negation window: "do not/don't/never/avoid/not" + up to a few
+    # words before a guest/anonymous target. Strips spans so positive needles
+    # do not fire on negated alternatives ("guest checkout, not anonymous").
+    guest_target = (
+        r"(?:as an? guest|as a guest|as guest|guest checkout|anonymous checkout|"
+        r"anonymously|without (?:logging|signing) in)"
     )
-    guest_scan_text = text
-    for needle in negated_guest_needles:
-        if needle in guest_scan_text:
-            guest_scan_text = guest_scan_text.replace(needle, " ")
+    negated_guest = re.compile(
+        rf"(?:do not|don't|never|avoid|not)\s+(?:\w+[\s,;-]+){{0,4}}{guest_target}"
+    )
+    guest_scan_text = negated_guest.sub(" ", text)
     # Guest needles before signed-in — "do not sign in" contains "sign in"
     # and must not be classified as a signed-in preference.
     guest_needles = (

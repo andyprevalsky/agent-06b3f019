@@ -92,6 +92,11 @@ export interface RecoveryCandidateSession {
   validationBrowser: Browser;
 }
 
+/** Close the Playwright validation CDP client without failing remote release. */
+async function closeValidationBrowser(session: RecoveryCandidateSession): Promise<void> {
+  await session.validationBrowser.close().catch(() => {});
+}
+
 export interface CandidateProbeResult {
   stablePasses: number;
   attempts: number;
@@ -245,10 +250,10 @@ export async function probeCandidateBrowser(
   void logContext.requirePaymentCdn;
   const solve = logContext.waitForSolver ?? waitForProviderSolver;
   let settledUrl: string | undefined;
-  if (signal?.aborted) {
-    throw new Error('lane_aborted');
-  }
   try {
+    if (signal?.aborted) {
+      throw new Error('lane_aborted');
+    }
     const context = session.validationBrowser.contexts()[0];
     if (context === undefined) {
       throw new Error(`Recovery candidate ${session.sessionId} has no default browser context`);
@@ -564,6 +569,7 @@ export async function searchAndPromoteBrowserConfig(
               specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
             });
         if (signal.aborted) {
+          await closeValidationBrowser({ provider: 'kernel', ...session });
           await dependencies.releaseKernel(session.sessionId).catch(() => {});
           throw new Error('lane_aborted');
         }
@@ -575,6 +581,7 @@ export async function searchAndPromoteBrowserConfig(
         userAgent: input.userAgent,
       });
       if (signal.aborted) {
+        await closeValidationBrowser({ provider: 'steel', ...session });
         await dependencies.releaseSteel(session.sessionId).catch(() => {});
         throw new Error('lane_aborted');
       }
@@ -638,6 +645,7 @@ export async function searchAndPromoteBrowserConfig(
       }
     },
     release: async (_config, session) => {
+      await closeValidationBrowser(session);
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },
