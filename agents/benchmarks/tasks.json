@@ -5064,7 +5064,7 @@
   {
     "name": "cuda-kernel-github-top100-code-agent",
     "title": "CUDA Kernel GitHub Top 100 (Code Agent Ranking)",
-    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\n\nExecution requirements:\n- Use spawn_claude_code_agent exactly once to programmatically discover, deduplicate, and rank repositories via the GitHub API or an equivalent scripted metadata fetch. Do NOT fan out parallel explore agents or independent reasoning/verifier steps to synthesize the final ranked list.\n- You may use at most 2 explore agents only for optional category scoping before the coding agent runs; all ranking, deduplication, cutoff verification, and final formatting must happen inside the coding agent.\n- Rank by current GitHub stars descending at observation time. Return exactly 100 unique public non-fork repos with evidence-backed CUDA kernel engineering work.\n- Each repo entry must include rank, repo_name (owner/name), repo_url, stars, and description.",
+    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -5127,7 +5127,7 @@
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
-    "description": "Regression from agent b775556c: top-100 CUDA-kernel GitHub ranking must use one coding agent for API/scripted ranking, not parallel explore verifiers.",
+    "description": "Regression from agent b775556c: top-100 CUDA-kernel GitHub ranking must use one coding agent for API/scripted ranking, not parallel explore verifiers. Prompt matches the natural prod user goal; routing is judged by harness tool counts, not prompt instructions.",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -5140,7 +5140,7 @@
       "live_targets": [
         "https://api.github.com"
       ],
-      "context_notes": "Live GitHub metadata fetch. The regression is planner/tool routing: fanning out explore agents plus reasoning verifiers to rank 100 repos costs ~10x more than one spawn_claude_code_agent that queries GitHub programmatically."
+      "context_notes": "Live GitHub metadata fetch. Prompt is the natural user ask (no tool-routing instructions). Harness expected_tool_counts/forbidden_tools judge whether the planner energy invariant routes ranking to spawn_claude_code_agent instead of explore/reasoning fan-out."
     },
     "evaluators": [
       {

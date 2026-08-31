@@ -62,8 +62,10 @@ table — not the explore agents themselves.
    reasoning is not for rank/dedup work a coding agent can run.
 2. Main agent system prompt: align with spawn_agent cost order; warn that explore
    fan-out for large list aggregation is high energy vs one coding agent.
-3. Benchmark `cuda-kernel-github-top100-code-agent` in `tasks.json` with
-   `spawn_claude_code_agent` tool contract and evaluators.
+3. Benchmark `cuda-kernel-github-top100-code-agent` in `tasks.json` with the
+   natural prod user prompt (no tool-routing instructions in the goal text —
+   that would be reward hacking) and harness-side `expected_tool_counts` /
+   `forbidden_tools` / evaluators for `spawn_claude_code_agent`.
 4. Regression test
    `test_planner_routes_programmatic_public_api_ranking_to_code_agent`.
 
@@ -74,7 +76,9 @@ vs O(categories) explore trees; no cross-agent verifier fan-in on the root DAG.
 
 User asked to turn agent b775556c into a benchmark and RCA why the harness did not
 use the more energy-efficient coding-agent path for the final ranking instead of
-spreading independent verifiers.
+spreading independent verifiers. Later rejected stuffing "use spawn_claude_code_agent
+exactly once / at most 2 explores" into the task prompt as reward hacking — routing
+must come from planner invariants, judged by harness tool-count checks.
 
 ## Reusable lesson
 
