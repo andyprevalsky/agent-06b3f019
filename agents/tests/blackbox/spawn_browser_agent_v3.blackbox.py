@@ -2174,7 +2174,90 @@ async def test_browser_cleanup_scheduler_does_not_block_on_recording_finalizatio
         assert cleanup_task not in _background_browser_cleanup_tasks
         assert recorder.cleanup_called is True
         upload_mock.assert_awaited_once()
-        save_mock.assert_awaited_once()
+        # recording finalize + task_complete terminal (FE chip close safety net)
+        assert save_mock.await_count >= 2
+        action_types = [
+            call.kwargs.get("action_type")
+            for call in save_mock.await_args_list
+            if call.kwargs.get("action_type")
+        ]
+        assert "recording" in action_types
+        assert "task_complete" in action_types
+
+
+async def test_browser_cleanup_emits_task_complete_terminal_for_fe_chip():
+    """Cleanup must post task_complete so FE live browser chips close.
+
+    Prod hotel k=5 hub archives (2026-08-31) finalized Kernel recordings but left
+    action_type=browser IN_PROGRESS with no terminal — computeActiveBrowserPanels
+    kept every FE link on an active chip. Recording alone is non-terminal.
+    """
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _schedule_browser_cleanup
+
+    class ImmediateRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+
+        async def close(self, *, include_steel_media=True, archive_artifacts=True):
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline replay</html>"
+
+        def cleanup_local_artifacts(self, *, persisted=False):
+            return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = ImmediateRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={"id": "file-pointer-1"},
+            ),
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            cleanup_task = _schedule_browser_cleanup(
+                agent_id="agent-1",
+                task_id="task-hotel-1",
+                user_id="user-1",
+                browser_url="https://debug",
+                browser_session_metadata={"provider": "kernel"},
+                input_page=None,
+                start_url="",
+                cursor_streamer=None,
+                interaction_layer_task=None,
+                humanizer=None,
+                browser_network_recorder=None,
+                network_recorder_task=None,
+                browser_recorder=recorder,
+                dom_service=None,
+                playwright_browser=None,
+                playwright_instance=None,
+                playwright_driver_pid=None,
+                tool_call_id="tool-call-1",
+                emit_task_terminal=True,
+            )
+            await cleanup_task
+
+    terminal_calls = [
+        call
+        for call in save_mock.await_args_list
+        if call.kwargs.get("action_type") == "task_complete"
+    ]
+    assert len(terminal_calls) == 1
+    assert terminal_calls[0].kwargs["task_id"] == "task-hotel-1"
+    assert terminal_calls[0].kwargs["tool_call_id"] == "tool-call-1"
+    assert terminal_calls[0].kwargs["is_completion_message"] is True
+
 
 async def test_drain_background_browser_cleanups_waits_then_times_out():
     import contextlib

@@ -3752,6 +3752,40 @@ async def _finalize_browser_diagnostics_for_fe(
     return metadata
 
 
+async def _emit_browser_task_terminal_for_fe(
+    *,
+    agent_id: str,
+    task_id: Optional[str],
+    tool_call_id: Optional[str],
+    browser_url: Optional[str],
+    title: str = "Browser Session Closed",
+    message: str = "Browser session closed",
+) -> None:
+    """Close the FE live browser chip after recording/session teardown.
+
+    ``computeActiveBrowserPanels`` keeps a panel open until it sees an explicit
+    terminal ``action_type`` (``task_complete`` / ``session_paused`` /
+    ``write_lock_rejected``). Finalizing a ``recording`` message alone does
+    **not** close the chip — timeout/cancel paths historically left hub
+    transcripts with FINISHED recordings and an IN_PROGRESS ``browser`` row,
+    so every FE link kept showing an active browser panel.
+    """
+    if not task_id:
+        return
+    with contextlib.suppress(Exception):
+        await save_browser_action_message(
+            agent_id=agent_id,
+            title=title,
+            task_id=task_id,
+            message=message,
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url or "",
+            action_type="task_complete",
+            tool_call_id=tool_call_id or str(uuid_module.uuid4()),
+            is_completion_message=True,
+        )
+
+
 def _schedule_browser_cleanup(
     *,
     agent_id: str,
@@ -3771,6 +3805,8 @@ def _schedule_browser_cleanup(
     playwright_browser: Optional[Any],
     playwright_instance: Optional[Any],
     playwright_driver_pid: Optional[int],
+    tool_call_id: Optional[str] = None,
+    emit_task_terminal: bool = True,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
@@ -3830,6 +3866,18 @@ def _schedule_browser_cleanup(
                     browser_url=browser_url,
                     browser_session_metadata=browser_session_metadata,
                 )
+            # Recording finalize alone does not close the FE live chip. Emit a
+            # task_complete terminal so timeout/cancel cleanup cannot leave the
+            # panel stuck on an IN_PROGRESS browser row (hotel k=5 hub chips).
+            if emit_task_terminal:
+                await _emit_browser_task_terminal_for_fe(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    browser_url=browser_url,
+                    title="Browser Session Closed",
+                    message="Browser session closed after teardown",
+                )
             if dom_service:
                 with contextlib.suppress(Exception):
                     await dom_service.disconnect()
@@ -3846,6 +3894,15 @@ def _schedule_browser_cleanup(
                 task_id=task_id,
                 error=extract_error_message(exc),
             )
+            if emit_task_terminal:
+                await _emit_browser_task_terminal_for_fe(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    browser_url=browser_url,
+                    title="Browser Session Closed",
+                    message="Browser session closed after teardown error",
+                )
         finally:
             _clear_browser_activity_memory_buffers(
                 browser_recorder=browser_recorder,
@@ -9582,6 +9639,11 @@ Based on this feedback, I need to continue working on the task and address the i
             playwright_browser=playwright_browser,
             playwright_instance=playwright_instance,
             playwright_driver_pid=playwright_driver_pid,
+            tool_call_id=tool_call_id,
+            # Happy-path / error handlers already post task_complete before
+            # finally. CancelledError also posts one, but force-cancel and
+            # hub-archive races still need cleanup as the terminal safety net.
+            emit_task_terminal=True,
         )
         playwright_browser = None
         playwright_instance = None
@@ -9779,6 +9841,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
                     was_cancelled = False
+                    # Prefer resume-state task_id when ActivityError wipes the
+                    # activity return value on cancel — otherwise session_paused
+                    # is posted without task_id and hub archives keep an open chip.
+                    known_task_id = (
+                        write_lock_resume_state.get("task_id")
+                        if isinstance(write_lock_resume_state, dict)
+                        else None
+                    )
                     await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
                     if workflow_instance.is_paused and not activity_handle.done():
                         logger.info("\U0001f534 Cancelling browser agent due to pause")
@@ -9797,6 +9867,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "status": "cancelled",
                             "message": "Browser agent cancelled by user",
                         }
+                        if known_task_id:
+                            result["task_id"] = known_task_id
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")
@@ -9807,6 +9879,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     if result:
                         if result.get("task_id"):
                             pause_metadata["task_id"] = result["task_id"]
+                        elif known_task_id:
+                            pause_metadata["task_id"] = known_task_id
                         if result.get("browser_url"):
                             pause_metadata["browser_url"] = result["browser_url"]
                         if result.get("session_id"):
