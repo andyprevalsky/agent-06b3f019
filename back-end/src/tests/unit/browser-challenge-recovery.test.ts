@@ -352,6 +352,77 @@ async function testAbortedProbeDoesNotDoubleRelease(): Promise<void> {
   );
 }
 
+async function testProbeCandidateBrowserSettlesOnAbort(): Promise<void> {
+  /** Default probe must observe AbortSignal and settle promptly mid-solver. */
+  const { probeCandidateBrowser } = await import('../../providers/browser/challengeRecovery');
+  const abort = new AbortController();
+  let solveStarted = false;
+  let releaseSolve: (() => void) | undefined;
+  const solveGate = new Promise<void>((resolve) => {
+    releaseSolve = resolve;
+  });
+  const closed: string[] = [];
+  const session: RecoveryCandidateSession = {
+    ...fakeSession(browserRecoveryCandidates({ country: 'US' })[0]!),
+    validationBrowser: {
+      contexts: () => [
+        {
+          addCookies: async () => undefined,
+          addInitScript: async () => undefined,
+          pages: () => [
+            {
+              goto: async () => null,
+              url: () => 'https://example.com/',
+              evaluate: async () => undefined,
+            },
+          ],
+          newPage: async () => {
+            throw new Error('newPage should not be needed');
+          },
+        },
+      ],
+      close: async () => {
+        closed.push('closed');
+      },
+    } as unknown as Browser,
+  };
+
+  const probePromise = probeCandidateBrowser(
+    session,
+    'https://example.com/',
+    {},
+    {
+      waitForSolver: async () => {
+        solveStarted = true;
+        await solveGate;
+        return {
+          clean: true,
+          reason: 'ok',
+          title: 'Example',
+          usage: null,
+        };
+      },
+    },
+    {},
+    abort.signal
+  );
+
+  for (let i = 0; i < 40 && !solveStarted; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(solveStarted, 'solver must start before abort');
+  const started = Date.now();
+  abort.abort();
+  await assert.rejects(probePromise, (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.strictEqual(error.message, 'lane_aborted');
+    return true;
+  });
+  assert.ok(Date.now() - started < 500, 'aborted probe must settle promptly');
+  assert.deepStrictEqual(closed, ['closed']);
+  releaseSolve?.();
+}
+
 function testOrderConfigsForLane(): void {
   const configs = browserRecoveryCandidates({ country: 'US', state: 'CA', city: 'SAN FRANCISCO' });
   const ordered = orderConfigsForLane(configs, 'kernel_residential_city');
@@ -555,6 +626,7 @@ async function main(): Promise<void> {
   await testPartialStableCandidateIsNeverPromoted();
   await testLateCreateAfterAbortIsReleased();
   await testAbortedProbeDoesNotDoubleRelease();
+  await testProbeCandidateBrowserSettlesOnAbort();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.

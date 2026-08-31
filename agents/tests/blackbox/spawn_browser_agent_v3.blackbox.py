@@ -18493,6 +18493,86 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
+def test_compact_browser_turn_messages_drops_leading_orphan_tool():
+    """Resume compaction must not start on a tool row (OpenAI pairing)."""
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_resume_continuity_state,
+        _compact_browser_turn_messages_for_resume,
+    )
+
+    class _History:
+        def get_entries(self):
+            return []
+
+    long_turns = []
+    for i in range(45):
+        long_turns.append(
+            {
+                "role": "assistant",
+                "content": f"think-{i}",
+                "tool_calls": [
+                    {
+                        "id": f"call-{i}",
+                        "type": "function",
+                        "function": {"name": "click", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        long_turns.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{i}",
+                "name": "click",
+                "content": "{}",
+            }
+        )
+        if i % 5 == 0:
+            long_turns.append({"role": "user", "content": f"nudge-{i}"})
+
+    compact = _compact_browser_turn_messages_for_resume(long_turns, limit=40)
+    assert compact, "expected non-empty compact transcript"
+    assert compact[0].get("role") != "tool"
+    assert len(compact) <= 40
+
+    state = _browser_resume_continuity_state(
+        action_history=_History(),
+        visited_urls=[],
+        verifier_checkpoints=[],
+        browser_turn_messages=long_turns,
+    )
+    assert state["browser_turn_messages"][0].get("role") != "tool"
+
+
+def test_final_screenshot_fetch_isolated_from_verifier_errors():
+    """Confirmed completion must survive a final-screenshot capture failure."""
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    marker = "Failed to capture final screenshot"
+    assert marker in source
+    # The capture sits in its own try/except before upload / completed return.
+    idx = source.index(marker)
+    window = source[max(0, idx - 500) : idx + 400]
+    assert "except Exception as screenshot_error" in window
+    assert "last_screenshot_b64 = None" in window
+
+
+def test_handoff_autofill_invalidates_observe_page_state_prefetch():
+    """Payment auto-fill must drop observe_page_state before later prefetch reuse."""
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "observe_page_state = {}" in source
+    autofill = source.index("Auto-filling payment fields on handoff page")
+    invalidate = source.index(
+        "observe_page_state = {}",
+        autofill,
+    )
+    prefetch = source.index("prefetched_browser_state=observe_page_state", autofill)
+    assert invalidate < prefetch
+
+
 def test_browser_tool_events_declare_action_type():
     """Every workflow-scope spawn_browser_agent event must declare action_type.
 
@@ -20267,6 +20347,18 @@ async def run_all_tests():
     await r.record_async(
         "goto_action_returns_current_url_for_recovery_fallback",
         test_goto_action_returns_current_url_for_recovery_fallback,
+    )
+    r.record(
+        "compact_browser_turn_messages_drops_leading_orphan_tool",
+        test_compact_browser_turn_messages_drops_leading_orphan_tool,
+    )
+    r.record(
+        "final_screenshot_fetch_isolated_from_verifier_errors",
+        test_final_screenshot_fetch_isolated_from_verifier_errors,
+    )
+    r.record(
+        "handoff_autofill_invalidates_observe_page_state_prefetch",
+        test_handoff_autofill_invalidates_observe_page_state_prefetch,
     )
     r.record(
         "browser_tool_events_declare_action_type",

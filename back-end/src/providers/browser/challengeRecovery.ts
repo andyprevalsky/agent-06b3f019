@@ -186,6 +186,26 @@ export function recoveryConfigKeyForSession(
   return undefined;
 }
 
+/** Reject promptly when a sibling lane claims the winner mid-probe. */
+async function raceProbeAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) throw new Error('lane_aborted');
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error('lane_aborted'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
 export async function probeCandidateBrowser(
   session: RecoveryCandidateSession,
   targetUrl: string,
@@ -204,7 +224,8 @@ export async function probeCandidateBrowser(
     /** Test-only solver override (avoids live LLM in unit probes). */
     waitForSolver?: typeof waitForProviderSolver;
   } = {},
-  billing: ChallengeClassifierBilling = {}
+  billing: ChallengeClassifierBilling = {},
+  signal?: AbortSignal
 ): Promise<CandidateProbeResult> {
   const started = Date.now();
   let stablePasses = 0;
@@ -224,30 +245,43 @@ export async function probeCandidateBrowser(
   void logContext.requirePaymentCdn;
   const solve = logContext.waitForSolver ?? waitForProviderSolver;
   let settledUrl: string | undefined;
+  if (signal?.aborted) {
+    throw new Error('lane_aborted');
+  }
   try {
     const context = session.validationBrowser.contexts()[0];
     if (context === undefined) {
       throw new Error(`Recovery candidate ${session.sessionId} has no default browser context`);
     }
     const cookies = Array.isArray(storageState.cookies) ? (storageState.cookies as Cookie[]) : [];
-    if (cookies.length > 0) await context.addCookies(cookies);
+    if (cookies.length > 0) await raceProbeAbort(context.addCookies(cookies), signal);
     const origins = Array.isArray(storageState.origins) ? storageState.origins : [];
     if (origins.length > 0) {
-      await context.addInitScript(recoveryOriginStorageScript(storageState));
+      await raceProbeAbort(context.addInitScript(recoveryOriginStorageScript(storageState)), signal);
     }
-    const page = context.pages()[0] ?? (await context.newPage());
-    const response = await page
-      .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-      .catch(() => null);
+    const page = context.pages()[0] ?? (await raceProbeAbort(context.newPage(), signal));
+    if (signal?.aborted) {
+      throw new Error('lane_aborted');
+    }
+    const response = await raceProbeAbort(
+      page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => null),
+      signal
+    );
     if (origins.length > 0) {
-      await page.evaluate(async () => {
-        const recoveryGlobal = globalThis as typeof globalThis & {
-          __naviRestoreRecoveryStorage?: () => Promise<void>;
-        };
-        await recoveryGlobal.__naviRestoreRecoveryStorage?.();
-      });
+      await raceProbeAbort(
+        page.evaluate(async () => {
+          const recoveryGlobal = globalThis as typeof globalThis & {
+            __naviRestoreRecoveryStorage?: () => Promise<void>;
+          };
+          await recoveryGlobal.__naviRestoreRecoveryStorage?.();
+        }),
+        signal
+      );
     }
-    const attempt = await solve(page, response, billing, { recoveryReason });
+    const attempt = await raceProbeAbort(
+      solve(page, response, billing, { recoveryReason }),
+      signal
+    );
     if (attempt.usage) classifierLlmUsage.push(attempt.usage);
     if (!attempt.clean) {
       log.info('Challenge recovery candidate probe attempt still challenged', {
@@ -279,6 +313,9 @@ export async function probeCandidateBrowser(
     // Closing this CDP client leaves the remote default context (including any
     // solver-refreshed challenge cookies) alive for atomic promotion.
     await session.validationBrowser.close().catch(() => {});
+  }
+  if (signal?.aborted) {
+    throw new Error('lane_aborted');
   }
   return {
     stablePasses,
@@ -559,7 +596,8 @@ export async function searchAndPromoteBrowserConfig(
           blockedResourceUrl: input.blockedResourceUrl,
           recoveryReason: input.recoveryReason,
         },
-        billing
+        billing,
+        signal
       );
     },
     promote: async ({ config, session }) => {

@@ -645,6 +645,23 @@ def _append_bounded_verifier_checkpoint(
 
 
 
+def _compact_browser_turn_messages_for_resume(
+    browser_turn_messages: Optional[List[Dict[str, Any]]],
+    *,
+    limit: int = 40,
+) -> List[Dict[str, Any]]:
+    """Bound resume transcript size without leaving a leading orphan tool row.
+
+    Standalone user nudges between assistant/tool pairs mean a naive ``[-N:]``
+    slice can start on a ``tool`` message. OpenAI-compatible providers reject
+    that orphan because it has no preceding assistant ``tool_calls`` entry.
+    """
+    compact_turns = list(browser_turn_messages or [])[-limit:]
+    while compact_turns and compact_turns[0].get("role") == "tool":
+        compact_turns.pop(0)
+    return compact_turns
+
+
 def _browser_resume_continuity_state(
     *,
     action_history: Any,
@@ -655,7 +672,7 @@ def _browser_resume_continuity_state(
     """Serialize compact, browser-sourced continuity for a resumed activity."""
     # Bound the transcript so Temporal resume payloads stay small; keep enough
     # recent tool results (incl. read_browser_state) for the next LLM turn.
-    compact_turns = list(browser_turn_messages or [])[-40:]
+    compact_turns = _compact_browser_turn_messages_for_resume(browser_turn_messages)
     return {
         "action_history": action_history.get_entries()[-30:],
         "visited_urls": list(visited_urls[-30:]),
@@ -6928,6 +6945,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     iteration=iteration,
                                     attempt=handoff_payment_fill_attempts,
                                 )
+                            # Auto-fill is a real browser action — drop the
+                            # pre-action observe snapshot so a later
+                            # read_browser_state in this iteration re-fetches.
+                            observe_page_state = {}
                             filled_refs = auto_fill_result.get("payment_refs_filled") or []
                             if auto_fill_result.get("success") and filled_refs:
                                 handoff_payment_fill_succeeded = True
@@ -8393,11 +8414,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             session_id, user_id, config, exclude_paths=uploaded_paths
                         )
 
-                        final_screenshot_state = await asyncio.wait_for(
-                            dom_service.get_browser_state(include_screenshot=True),
-                            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-                        )
-                        last_screenshot_b64 = final_screenshot_state.get("screenshot")
+                        try:
+                            final_screenshot_state = await asyncio.wait_for(
+                                dom_service.get_browser_state(include_screenshot=True),
+                                timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                            )
+                            last_screenshot_b64 = final_screenshot_state.get("screenshot")
+                        except Exception as screenshot_error:
+                            logger.warning(
+                                "[BrowserAgent] Failed to capture final screenshot",
+                                agent_id=agent_id,
+                                error=extract_error_message(screenshot_error),
+                            )
+                            last_screenshot_b64 = None
                         if last_screenshot_b64:
                             if browser_recorder:
                                 await browser_recorder.write_final_screenshot(last_screenshot_b64)

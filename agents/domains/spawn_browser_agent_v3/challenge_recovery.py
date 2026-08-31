@@ -888,6 +888,8 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
     )
     # Negated guest phrasing must not flip preserve_auth off (e.g. "do not
     # continue as guest; sign in with my account" still contains "as guest").
+    # Strip matched negations before scoring positive guest needles so
+    # "Use guest checkout, not anonymous checkout" still selects guest.
     negated_guest_needles = (
         "do not continue as a guest",
         "don't continue as a guest",
@@ -920,32 +922,32 @@ def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
         "don't proceed anonymously",
         "not anonymously",
     )
-    if any(needle in text for needle in negated_guest_needles):
-        # Fall through to signed-in / default preserve-auth handling.
-        pass
-    else:
-        # Guest needles before signed-in — "do not sign in" contains "sign in"
-        # and must not be classified as a signed-in preference.
-        guest_needles = (
-            "guest checkout",
-            "anonymous checkout",
-            "as a guest",
-            "as guest",
-            "continue as a guest",
-            "continue as guest",
-            "check out anonymously",
-            "checkout anonymously",
-            "anonymously",
-            "do not sign in",
-            "don't sign in",
-            "without signing in",
-            "without logging in",
-            "no account needed",
-            "do not log in",
-            "don't log in",
-        )
-        if any(needle in text for needle in guest_needles):
-            return True
+    guest_scan_text = text
+    for needle in negated_guest_needles:
+        if needle in guest_scan_text:
+            guest_scan_text = guest_scan_text.replace(needle, " ")
+    # Guest needles before signed-in — "do not sign in" contains "sign in"
+    # and must not be classified as a signed-in preference.
+    guest_needles = (
+        "guest checkout",
+        "anonymous checkout",
+        "as a guest",
+        "as guest",
+        "continue as a guest",
+        "continue as guest",
+        "check out anonymously",
+        "checkout anonymously",
+        "anonymously",
+        "do not sign in",
+        "don't sign in",
+        "without signing in",
+        "without logging in",
+        "no account needed",
+        "do not log in",
+        "don't log in",
+    )
+    if any(needle in guest_scan_text for needle in guest_needles):
+        return True
     signed_in_needles = (
         "sign in",
         "sign-in",
