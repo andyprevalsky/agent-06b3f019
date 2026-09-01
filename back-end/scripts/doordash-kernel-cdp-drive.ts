@@ -124,8 +124,12 @@ async function searchStore(page: Page, query: string) {
 }
 
 async function openCartDrawer(page: Page): Promise<string | null> {
-  await page.locator('button').filter({ hasText: /items in cart/i }).first().click({ timeout: 15_000 });
-  await page.waitForTimeout(10_000);
+  await dismissOverlays(page);
+  await page
+    .locator('[data-testid="OrderCartIconButton"], button[aria-label*="open Order Cart" i]')
+    .first()
+    .click({ timeout: 15_000, force: true });
+  await page.waitForTimeout(5000);
   return 'cart badge button';
 }
 
@@ -147,17 +151,42 @@ async function gotoCheckout(page: Page) {
   return { url: page.url(), detail: 'no checkout path' };
 }
 
+async function dismissOverlays(page: Page) {
+  await page.keyboard.press('Escape').catch(() => null);
+  await page.waitForTimeout(500);
+  await page
+    .locator('button[aria-label*="Close" i], button[aria-label*="Dismiss" i]')
+    .first()
+    .click({ timeout: 2000, force: true })
+    .catch(() => null);
+}
+
 async function clearCartToZero(page: Page): Promise<{ removed: number; detail: string }> {
   let removed = 0;
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await dismissOverlays(page);
     const count = await cartCount(page);
-    if (count === 0 || count === null) {
-      return { removed, detail: count === 0 ? 'cart_empty' : 'cart_count_unknown' };
-    }
-    await openCartDrawer(page).catch(() => null);
-    await page.waitForTimeout(2000);
+    if (count === 0) return { removed, detail: 'cart_empty' };
+    if (count === null) return { removed, detail: 'cart_count_unknown' };
+
+    await page
+      .locator('[data-testid="OrderCartIconButton"], button[aria-label*="open Order Cart" i]')
+      .first()
+      .click({ timeout: 10_000, force: true })
+      .catch(() => null);
+    await page.waitForTimeout(1500);
+    await dismissOverlays(page);
+
     const clicked = await page
       .evaluate(() => {
+        const emptyAll = Array.from(document.querySelectorAll('button, a')).find((el) => {
+          const t = (el.textContent || '').trim().toLowerCase();
+          return t.includes('empty cart') || t.includes('remove all') || t.includes('clear cart');
+        });
+        if (emptyAll instanceof HTMLElement) {
+          emptyAll.click();
+          return 'empty_all';
+        }
         const decSelectors = [
           'button[aria-label*="Decrease" i]',
           'button[aria-label*="Remove" i]',
@@ -186,9 +215,8 @@ async function clearCartToZero(page: Page): Promise<{ removed: number; detail: s
       return { removed, detail: `stuck_with_${count}_items_no_decrement_button` };
     }
     removed += 1;
-    await page.waitForTimeout(1500);
-    await page.keyboard.press('Escape').catch(() => null);
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(1200);
+    await dismissOverlays(page);
   }
   return { removed, detail: 'max_attempts' };
 }
@@ -226,23 +254,33 @@ async function main() {
   const addResults: Array<{ query: string; added: boolean; detail: string }> = [];
   const blockers: string[] = [];
 
+  await page.goto('https://www.doordash.com/home', { waitUntil: 'domcontentloaded', timeout: 90_000 });
+  await page.waitForTimeout(8000);
   steps.push(await snap(page, 'home', { cartCount: await cartCount(page) }));
-  const homeText = steps[0]?.snippet ?? '';
-  const loggedIn = /deliver to|account|orders|profile|welcome back/i.test(homeText);
-  const loggedOut = /sign in|sign up|log in/i.test(homeText);
-  if (loggedOut && !loggedIn) blockers.push('logged_out_after_production_injection');
 
-  const initialCart = await cartCount(page);
   let cartClear = { removed: 0, detail: 'not_needed' };
+  let initialCart = await cartCount(page);
   if (initialCart !== null && initialCart > 0) {
     cartClear = await clearCartToZero(page);
-    steps.push(await snap(page, 'cart_cleared', { initialCart, cartClear, cartCount: await cartCount(page) }));
-    log(`cleared injected cart: ${JSON.stringify(cartClear)}`);
+    steps.push(await snap(page, 'cart_cleared_home', { initialCart, cartClear, cartCount: await cartCount(page) }));
+    log(`cleared injected cart at home: ${JSON.stringify(cartClear)}`);
   }
 
   await page.goto(SAFEWAY, { waitUntil: 'domcontentloaded', timeout: 90_000 });
   await page.waitForTimeout(10_000);
   steps.push(await snap(page, 'safeway', { cartCount: await cartCount(page) }));
+
+  initialCart = await cartCount(page);
+  if (initialCart !== null && initialCart > 0) {
+    cartClear = await clearCartToZero(page);
+    steps.push(await snap(page, 'cart_cleared_safeway', { initialCart, cartClear, cartCount: await cartCount(page) }));
+    log(`cleared cart at safeway: ${JSON.stringify(cartClear)}`);
+  }
+
+  const homeText = steps.find((s) => s.step === 'home')?.snippet ?? '';
+  const loggedIn = /deliver to|account|orders|profile|welcome back/i.test(homeText);
+  const loggedOut = /sign in|sign up|log in/i.test(homeText);
+  if (loggedOut && !loggedIn) blockers.push('logged_out_after_production_injection');
 
   let itemsAdded = 0;
   const skipAdds = process.env.SKIP_ADDS === '1';
@@ -262,7 +300,10 @@ async function main() {
 
   steps.push(await snap(page, 'after_adds', { cartCount: await cartCount(page), itemsAdded }));
 
-  const cartOpen = await openCartDrawer(page);
+  const cartOpen = await openCartDrawer(page).catch((err) => {
+    blockers.push(`cart_drawer_failed:${String(err).slice(0, 120)}`);
+    return null;
+  });
   steps.push(await snap(page, 'cart_drawer', { cartOpen, cartCount: await cartCount(page) }));
 
   const checkout = await gotoCheckout(page);
