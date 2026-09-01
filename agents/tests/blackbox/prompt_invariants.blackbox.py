@@ -1644,7 +1644,10 @@ def test_planner_routes_retrieval_before_stateful_execution():
     from utils.prompts import build_planner_system_prompt
 
     prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
-    assert "Choose the lowest-total-energy retrieval path" in prompt
+    assert (
+        "Plan information retrieval and discovery in spawn_explore_agent before dependent execution."
+        in prompt
+    )
     assert "spawn_browser_agent may read pages only while executing a known stateful trajectory" in prompt
     assert (
         "Step 0 spawn_explore_agent retrieves the public target or route; "
@@ -1654,17 +1657,6 @@ def test_planner_routes_retrieval_before_stateful_execution():
     assert "explore: The agent for information retrieval and discovery." in prompt
     assert "Public research, target discovery, and route discovery belong in explore first." in prompt
     assert "entry_point_source" not in prompt
-
-
-def test_planner_routes_programmatic_public_api_ranking_to_code_agent():
-    """Lowest-total-energy retrieval routes known API/script work to spawn_code_agent."""
-    from tools.prompts.spawn_agent import PROMPT as SPAWN_AGENT_PROMPT
-    from utils.prompts import build_planner_system_prompt
-
-    prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
-    assert "Choose the lowest-total-energy retrieval path" in prompt
-    assert "spawn_code_agent when a known structured API or script can fetch/rank/dedupe/format" in prompt
-    assert "Plan information retrieval and discovery in spawn_explore_agent before dependent execution." not in prompt
 
 
 # ============================================================================
@@ -1999,10 +1991,6 @@ async def run_all_tests():
     r.record(
         "planner_routes_retrieval_before_stateful_execution",
         test_planner_routes_retrieval_before_stateful_execution,
-    )
-    r.record(
-        "planner_routes_programmatic_public_api_ranking_to_code_agent",
-        test_planner_routes_programmatic_public_api_ranking_to_code_agent,
     )
 
     # 19. Tool prompt length stays within budget
