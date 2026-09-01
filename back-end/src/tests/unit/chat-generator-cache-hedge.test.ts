@@ -29,9 +29,14 @@ async function main(): Promise<void> {
     'generator startup must stay on the shared cache-stream helper'
   );
   assert.match(
+    generatorSource,
+    /awaitCacheFirst:\s*isOaiDemoGoal\(fastMode\.goal\)/,
+    'only the OAi demo Fast Mode read waits for cache before Cerebras'
+  );
+  assert.match(
     hedgeSource,
-    /awaitCacheFirst:\s*true/,
-    'Fast Mode read must wait for cache before starting Cerebras'
+    /awaitCacheFirst:\s*options\.awaitCacheFirst === true/,
+    'the shared hedge must honor the caller demo gate'
   );
   assert.match(
     hedgeSource,

@@ -204,10 +204,35 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert MAX_ACTIVITY_ATTEMPTS == 1
 
     execute_source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
-    assert "ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE" in execute_source
-    assert "ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES" in execute_source
+    assert "browser_start_to_close_timeout_minutes" in execute_source
     assert "timedelta(minutes=browser_timeout_minutes)" in execute_source
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
+
+
+def test_browser_fast_mode_timeout_is_demo_only():
+    """Live Fast Mode purchases keep 30m; only the OAi demo gets the 3m ceiling."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
+        browser_start_to_close_timeout_minutes,
+        skip_browser_network_recording,
+    )
+
+    live_goal = "Order a Vanilla Bean Shakerato and waffle from Blue Bottle"
+    demo_goal = f"{OAI_DEMO_ROOT_GOAL_PREFIX} [x]"
+    assert browser_start_to_close_timeout_minutes(fast_mode=True, goal=live_goal) == (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+    )
+    assert browser_start_to_close_timeout_minutes(fast_mode=True, goal=demo_goal) == (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
+    )
+    assert browser_start_to_close_timeout_minutes(fast_mode=False, goal=demo_goal) == (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+    )
+    assert skip_browser_network_recording(fast_mode=True, goal=live_goal) is False
+    assert skip_browser_network_recording(fast_mode=True, goal=demo_goal) is True
+    assert skip_browser_network_recording(fast_mode=False, goal=demo_goal) is False
 
 def test_transient_session_init_failure_classification():
     """RCA (agent 53feac08): the first two browser spawns died on Kernel's
@@ -17452,8 +17477,66 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
     assert events[-1].status.name == "FINISHED"
     activity_args = start_calls[0][1]["args"]
     assert activity_args[-1] is True
-    # Fast Mode uses the short activity ceiling so Kernel navigate stalls
-    # cannot burn the full 30m budget (verify19).
+    # Live Fast Mode (Buy socks) keeps the 30m Kernel checkout budget.
+    from datetime import timedelta
+
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+    )
+
+    assert start_calls[0][1]["start_to_close_timeout"] == timedelta(
+        minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+    )
+
+
+async def test_manager_uses_three_minute_ceiling_only_for_demo_fast_mode():
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    class _FakeActivityHandle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("done activity should not be cancelled")
+
+        def __await__(self):
+            async def _result():
+                return {"success": True, "message": "done"}
+
+            return _result().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        fast_mode_cache_enabled=True,
+        goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+    )
+    manager = SpawnBrowserAgentManagerV3()
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return _FakeActivityHandle()
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=fake_start_activity,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        async for _event in manager.execute_tool(
+            workflow_instance, {"goal": "Watch Huberman YouTube"}, "tool-1"
+        ):
+            pass
+
     from datetime import timedelta
 
     from domains.spawn_browser_agent_v3.config import (
@@ -18983,6 +19066,10 @@ async def run_all_tests():
         "stateful_browser_activity_one_thirty_minute_attempt",
         test_stateful_browser_activity_has_one_thirty_minute_attempt,
     )
+    r.record(
+        "browser_fast_mode_timeout_is_demo_only",
+        test_browser_fast_mode_timeout_is_demo_only,
+    )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
     r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
@@ -20509,6 +20596,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_passes_fast_mode_cache",
         test_manager_passes_fast_mode_cache_for_browser_activity,
+    )
+    await r.record_async(
+        "manager_three_minute_ceiling_demo_only",
+        test_manager_uses_three_minute_ceiling_only_for_demo_fast_mode,
     )
     await r.record_async(
         "fast_mode_soft_completes_browser_without_kernel",

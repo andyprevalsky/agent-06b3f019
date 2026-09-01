@@ -12,6 +12,7 @@ interface GeneratorCacheStreamOptions {
   createLive: (abortSignal: AbortSignal) => Promise<AsyncIterable<CompletionChunk>>;
   createCached: (json: string) => AsyncIterable<CompletionChunk>;
   onWinner: (winner: 'cache' | 'live') => void;
+  awaitCacheFirst?: boolean;
 }
 
 /**
@@ -46,7 +47,7 @@ export function createGeneratorCacheStream(
       const delta = chunk.choices[0]?.delta;
       return Boolean(delta?.content?.length || delta?.reasoning?.length);
     },
-    awaitCacheFirst: true,
+    awaitCacheFirst: options.awaitCacheFirst === true,
     hangTimeoutMs: GENERATOR_CACHE_HANG_MS,
     onCacheError: (error) =>
       log.warn('fast_cache.chat_generator_read_failed', {

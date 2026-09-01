@@ -30,6 +30,7 @@ import {
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { createGeneratorCacheStream } from './generatorCacheStream';
+import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 
 const log = createLogger('GeneratorLLM');
@@ -528,6 +529,7 @@ async function callGeneratorLlmCore(
       cacheKey,
       createLive: (abortSignal) => createLiveStream(abortSignal),
       createCached: syntheticChatStream,
+      awaitCacheFirst: isOaiDemoGoal(fastMode.goal),
       onWinner: (winner) => {
         fcCacheWon = winner === 'cache';
       },

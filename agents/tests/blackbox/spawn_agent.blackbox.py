@@ -94,6 +94,16 @@ def test_is_oai_demo_mass_agent_task_only_matches_catalog_task():
     assert not is_oai_demo_mass_agent_task(_Goal("Order me 1 rocky fish sandwich"))
 
 
+def test_is_oai_demo_goal_rejects_live_purchase_prompts():
+    from domains.spawn_agent.config import is_oai_demo_goal
+
+    assert is_oai_demo_goal(
+        "I'm building a personal brand for health, longevity, technology, founder journey [x]"  # pragma: allowlist secret
+    )
+    assert not is_oai_demo_goal("Order a Vanilla Bean Shakerato and waffle from Blue Bottle")
+    assert not is_oai_demo_goal("Buy socks")
+
+
 def test_validate_spawn_missing_type():
     """Missing type raises."""
     from domains.spawn_agent.service import validate_spawn_params
@@ -2921,7 +2931,47 @@ async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_su
 
 
 async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completion():
-    """A Fast Mode completion stub must not reject-loop the explore chip."""
+    """A demo Fast Mode completion stub must not reject-loop the explore chip."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    completion_results = []
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        completion_results.append(
+            await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1")
+        )
+        completion_results.append(
+            await execute_tool("attempt_completion_with_result", {"result": "again"}, "tc2")
+        )
+        return {
+            "status": "completed",
+            "final_response": "ended without evidence",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman",
+            model="m",
+        )
+
+    assert completion_results[0]["error"] is True
+    assert "no evidence tool has succeeded" in completion_results[0]["message"]
+    assert completion_results[1]["success"] is True
+
+
+async def test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_demo():
+    """Live explores must not accept a second evidence-free completion."""
     from unittest.mock import patch
 
     from domains.spawn_agent.service import spawn_explore_agent_activity
@@ -2947,11 +2997,16 @@ async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completio
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
     ):
-        await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research X", model="m")
+        await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Order a Vanilla Bean Shakerato from Blue Bottle",
+            model="m",
+        )
 
     assert completion_results[0]["error"] is True
-    assert "no evidence tool has succeeded" in completion_results[0]["message"]
-    assert completion_results[1]["success"] is True
+    assert completion_results[1]["error"] is True
+    assert "no evidence tool has succeeded" in completion_results[1]["message"]
 
 
 async def test_spawn_explore_agent_activity_error_status_returned():
@@ -3827,6 +3882,7 @@ async def run_all_tests():
     r.record("validate_explore_happy", test_validate_spawn_explore_happy)
     # resolve_start_phase
     r.record("is_oai_demo_mass_agent_task_scoped", test_is_oai_demo_mass_agent_task_only_matches_catalog_task)
+    r.record("is_oai_demo_goal_rejects_live_purchase", test_is_oai_demo_goal_rejects_live_purchase_prompts)
     r.record("resolve_phase_default", test_resolve_start_phase_default)
     r.record("resolve_phase_execute", test_resolve_start_phase_execute)
     r.record("resolve_phase_invalid", test_resolve_start_phase_invalid_defaults_plan)
@@ -4008,6 +4064,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_accepts_second_no_evidence_completion",
         test_spawn_explore_agent_activity_accepts_second_no_evidence_completion,
+    )
+    await r.record_async(
+        "explore_activity_keeps_rejecting_no_evidence_outside_demo",
+        test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_demo,
     )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
     await r.record_async(

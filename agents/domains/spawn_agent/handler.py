@@ -656,6 +656,7 @@ class SpawnAgentManager(ToolManager):
             fast_mode_cache_enabled=bool(
                 getattr(workflow_instance, "fast_mode_cache_enabled", False)
             ),
+            oai_demo=is_oai_demo_mass_agent_task(workflow_instance),
         )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 

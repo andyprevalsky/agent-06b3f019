@@ -31,6 +31,7 @@ import {
   type ClosedRouterAction,
 } from './routerJsonStream';
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
+import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
@@ -424,7 +425,7 @@ export async function callRouterLlm(params: {
         const delta = chunk.choices[0]?.delta;
         return Boolean(delta?.content?.length || delta?.reasoning?.length);
       },
-      awaitCacheFirst: true,
+      awaitCacheFirst: isOaiDemoGoal(fastMode.goal),
       hangTimeoutMs: ROUTER_CACHE_HANG_MS,
       onCacheError: (error) =>
         log.warn('fast_cache.chat_router_read_failed', {
