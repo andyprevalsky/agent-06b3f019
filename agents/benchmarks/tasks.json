@@ -5256,7 +5256,8 @@
     "expected_tool_counts": {},
     "forbidden_tools": [
       "spawn_general_purpose_agent",
-      "spawn_general_purpose_agent_for_each"
+      "spawn_general_purpose_agent_for_each",
+      "spawn_claude_code_agent"
     ],
     "tool_count_scope": "tree",
     "response_schema": {
