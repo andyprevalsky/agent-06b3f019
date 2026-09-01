@@ -35,7 +35,8 @@ import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 import {
-  armDeadlineOnLive, chatRouterCompletionTimeoutMs, createRouterCompletionDeadline,
+  chatRouterCompletionTimeoutMs,
+  createRouterCompletionDeadline,
   streamBeforeRouterCompletionDeadline,
 } from './routerCompletionDeadline';
 import {
@@ -372,8 +373,8 @@ export async function callRouterLlm(params: {
   }
 
   const completionTimeoutMs = chatRouterCompletionTimeoutMs();
-  const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs, { deferred: true });
-  const createLiveStream = armDeadlineOnLive(completionDeadline, (abortSignal) =>
+  const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs);
+  const createLiveStream = (abortSignal?: AbortSignal) =>
     createStreamingCompletion(
       buildRouterCompletionOptions({
         model: params.model,
@@ -384,8 +385,7 @@ export async function callRouterLlm(params: {
           ? AbortSignal.any([abortSignal, completionDeadline.signal])
           : completionDeadline.signal,
       })
-    )
-  );
+    );
 
   let stream: AsyncIterable<CompletionChunk>;
   if (fcKey && fastModeRead) {

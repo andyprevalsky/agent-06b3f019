@@ -79,7 +79,6 @@ function testRouterAndLifecycleWireTheFallback(): void {
     lifecycle.includes('Chat handler retry after empty structured output'),
     'retry must be logged'
   );
-  assert.ok(router.includes('deferred: true'), '4.5s deadline must start after cache miss');
   assert.ok(
     router.includes('tryParseCompleteRouterDecision(accumulatedJson)'),
     'router must leave the stream only after a complete JSON decision'
