@@ -18533,9 +18533,13 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     assert 'if not bool(config_result.get("storage_state_preloaded")):' in recovery_branch
     assert "await _restore_rotation_storage_state(" in recovery_branch
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
-    assert "pop_provider_exit_rejection()" in activity_source
-    assert '"provider_exit_rejected": True' in activity_source
-    # Assignment form (main): provider_exit_rejected = bool(unified_action...)
+    assert "_feed_provider_exit_detected_back" in activity_source
+    assert "pending_provider_exit_recovery" in activity_source
+    assert "Replacing browser action with provider-exit recovery" not in activity_source
+    assert '"provider_exit_rejected": True' not in activity_source.split(
+        'if action_name == "recover_from_challenge":', 1
+    )[0]
+    # Assignment form (main): provider_exit_rejected = bool(recovery_params...)
     assert "provider_exit_rejected = bool(" in recovery_branch
     assert 'await browser_stream.finish_tools(status="ERROR")' in activity_source
 

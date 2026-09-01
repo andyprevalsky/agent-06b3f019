@@ -149,9 +149,8 @@ async function probeOne(input: {
         provider: input.config.provider,
         proxyMode: input.config.proxyMode,
         laneKey: input.lane,
-        blockedResourceUrl: BLOCKED_RESOURCE,
         recoveryReason:
-          'DoorDash food-plan probe: critical third-party resource blocked (https://js.stripe.com/v3). Page must be usable grocery home/store without challenge iframe.',
+          'DoorDash food-plan probe: js.stripe.com/v3 blocked (https://js.stripe.com/v3). Page must be usable grocery home/store without challenge iframe.',
         fingerprintInjection: input.fingerprintInjection,
       },
       { agentId: 'doordash-config-sweep', userId: USER_ID }

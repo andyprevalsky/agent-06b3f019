@@ -8,9 +8,10 @@ import { createSteelRecoverySession } from '../steel/sessionRecovery';
 import { waitForProviderSolver } from './challengePageDetect';
 import { applyFingerprintInjection, type FingerprintInjectionData } from './fingerprintInjection';
 import type { NetworkSummaryEntry } from './challengeLlmClassifier';
-import type {
-  ChallengeClassifierBilling,
-  ChallengeClassifierLlmUsage,
+import {
+  selectNetworkEntriesForClassifier,
+  type ChallengeClassifierBilling,
+  type ChallengeClassifierLlmUsage,
 } from './challengeLlmClassifier';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
@@ -162,16 +163,10 @@ export async function probeCandidateBrowser(
   // One nav + one classify. Soft-redirect re-nav / dual stablePasses were scar
   // tissue; resume at whatever URL the single settle lands on.
   const attempts = 1;
-  const blockedResourceUrl = (logContext.blockedResourceUrl || '').trim();
-  const recoveryReasonParts = [
-    (logContext.recoveryReason || '').trim(),
-    blockedResourceUrl
-      ? `Blocked third-party resource that must become reachable/usable: ${blockedResourceUrl}`
-      : '',
-  ].filter(Boolean);
-  const recoveryReason = recoveryReasonParts.join('\n') || null;
-  // requirePaymentCdn ignored — kept on the type for older callers.
+  const recoveryReason = (logContext.recoveryReason || '').trim() || null;
+  // requirePaymentCdn / blockedResourceUrl ignored — LLM reason is sole classifier constraint.
   void logContext.requirePaymentCdn;
+  void logContext.blockedResourceUrl;
   const solve = logContext.waitForSolver ?? waitForProviderSolver;
   let settledUrl: string | undefined;
   try {
@@ -204,36 +199,44 @@ export async function probeCandidateBrowser(
     // Tool-parity classifier inputs: accumulate network like BrowserNetworkRecorder
     // / read_network_requests (status + truncated bodies), not perf timings alone.
     const networkEntries: NetworkSummaryEntry[] = [];
+    const pendingResponses = new Set<Promise<void>>();
     const onResponse = async (res: import('playwright').Response) => {
-      try {
-        const req = res.request();
-        const url = req.url();
-        if (!url.startsWith('http')) return;
-        let body: string | undefined;
-        let truncated = false;
+      const task = (async () => {
         try {
-          const resourceType = req.resourceType();
-          if (['xhr', 'fetch', 'document', 'script'].includes(resourceType)) {
-            const raw = await res.text();
-            if (raw) {
-              body = raw.slice(0, 200);
-              truncated = raw.length > 200;
+          const req = res.request();
+          const url = req.url();
+          if (!url.startsWith('http')) return;
+          let body: string | undefined;
+          let truncated = false;
+          try {
+            const resourceType = req.resourceType();
+            if (['xhr', 'fetch', 'document', 'script'].includes(resourceType)) {
+              const raw = await res.text();
+              if (raw) {
+                body = raw.slice(0, 200);
+                truncated = raw.length > 200;
+              }
             }
+          } catch {
+            /* opaque / binary */
           }
+          networkEntries.push({
+            url: url.slice(0, 180),
+            status: res.status(),
+            statusText: res.statusText(),
+            ...(body !== undefined
+              ? { response_body: body, response_body_truncated: truncated }
+              : {}),
+          });
         } catch {
-          /* opaque / binary */
+          /* ignore listener errors */
         }
-        networkEntries.push({
-          url: url.slice(0, 180),
-          status: res.status(),
-          statusText: res.statusText(),
-          ...(body !== undefined
-            ? { response_body: body, response_body_truncated: truncated }
-            : {}),
-        });
-        if (networkEntries.length > 40) networkEntries.shift();
-      } catch {
-        /* ignore listener errors */
+      })();
+      pendingResponses.add(task);
+      try {
+        await task;
+      } finally {
+        pendingResponses.delete(task);
       }
     };
     if (typeof (page as { on?: unknown }).on === 'function') {
@@ -274,11 +277,17 @@ export async function probeCandidateBrowser(
     } catch {
       agentDomTree = null;
     }
+    if (pendingResponses.size > 0) {
+      await raceProbeAbort(Promise.allSettled([...pendingResponses]), signal);
+    }
+    const classifierNetworkEntries = selectNetworkEntriesForClassifier(networkEntries, {
+      recoveryReason,
+    });
     const attempt = await raceProbeAbort(
       solve(page, response, billing, {
         recoveryReason,
         agentDomTree,
-        networkEntries: [...networkEntries],
+        networkEntries: classifierNetworkEntries,
       }),
       signal
     );

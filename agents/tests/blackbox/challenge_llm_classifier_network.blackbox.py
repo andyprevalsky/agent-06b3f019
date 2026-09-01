@@ -199,6 +199,24 @@ async def test_network_entries_override_prefers_explicit_status_rows():
     assert "Provisioned request rate" in summary
 
 
+def test_select_network_entries_pins_cited_hosts():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        select_network_entries_for_classifier,
+    )
+
+    entries = [
+        {"url": f"https://www.doordash.com/api/{idx}", "status": 200}
+        for idx in range(90)
+    ] + [{"url": "https://js.stripe.com/v3/", "status": 0, "failed": True}]
+    selected = select_network_entries_for_classifier(
+        entries,
+        recovery_reason="Stripe checkout script blocked: https://js.stripe.com/v3/",
+        cap=80,
+    )
+    assert any("js.stripe.com" in str(row.get("url") or "") for row in selected)
+    assert selected[0]["url"].startswith("https://js.stripe.com")
+
+
 async def run_all_tests() -> bool:
     print("challenge-llm-classifier-network blackbox tests:")
     result = BlackboxResult()
@@ -225,6 +243,10 @@ async def run_all_tests() -> bool:
     result.record(
         "classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource",
         test_classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource,
+    )
+    result.record(
+        "select_network_entries_pins_cited_hosts",
+        test_select_network_entries_pins_cited_hosts,
     )
     await result.record_async(
         "network_entries_override_prefers_explicit_status_rows",

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlparse
 
 import structlog
 from pydantic import BaseModel, Field
@@ -28,7 +29,7 @@ CHALLENGE_LLM_MODEL = "rose-labs/rose-1-mini"
 CHALLENGE_LLM_SETTLE_MS = 60_000
 CHALLENGE_LLM_CALL_SITE = "challenge_llm_classifier"
 _DOM_CHAR_CAP = 12_000
-_NETWORK_ENTRY_CAP = 40
+_NETWORK_ENTRY_CAP = 80
 _NETWORK_BODY_CHAR_CAP = 200
 _NETWORK_SUMMARY_CHAR_CAP = 4_000
 
@@ -137,6 +138,66 @@ def _truncate_body(text: str, cap: int = _NETWORK_BODY_CHAR_CAP) -> tuple[str, b
     return raw[:cap], True
 
 
+from domains.spawn_browser_agent_v3.challenge_recovery import urls_cited_in_recovery_reason
+
+
+def cited_network_hosts(recovery_reason: str | None) -> tuple[str, ...]:
+    hosts: List[str] = []
+    seen: set[str] = set()
+    for url in urls_cited_in_recovery_reason(recovery_reason):
+        host = (urlparse(url).hostname or "").lower()
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        hosts.append(host)
+    return tuple(hosts)
+
+
+def _entry_matches_cited(
+    entry: Dict[str, Any],
+    cited_urls: Sequence[str],
+    cited_hosts: Sequence[str],
+) -> bool:
+    url = str(entry.get("url") or entry.get("name") or "").lower()
+    if not url:
+        return False
+    for host in cited_hosts:
+        if host in url:
+            return True
+    for cited in cited_urls:
+        needle = str(cited).lower()
+        if needle in url or url in needle:
+            return True
+    return False
+
+
+def select_network_entries_for_classifier(
+    entries: Sequence[Dict[str, Any]],
+    *,
+    recovery_reason: str | None = None,
+    cap: int = _NETWORK_ENTRY_CAP,
+) -> List[Dict[str, Any]]:
+    if not entries:
+        return []
+    cited_urls = urls_cited_in_recovery_reason(recovery_reason)
+    cited_host_list = cited_network_hosts(recovery_reason)
+    pinned: List[Dict[str, Any]] = []
+    rest: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("url") or entry.get("name") or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if _entry_matches_cited(entry, cited_urls, cited_host_list):
+            pinned.append(entry)
+        else:
+            rest.append(entry)
+    return (pinned + rest)[: max(1, int(cap))]
+
+
 def format_network_summary_lines(entries: Sequence[Dict[str, Any]]) -> str:
     """Format network rows with HTTP status and clearly-marked truncated bodies."""
     lines: List[str] = []
@@ -195,25 +256,55 @@ def network_entries_from_recorder(
     *,
     limit: int = _NETWORK_ENTRY_CAP,
     max_body_chars: int = _NETWORK_BODY_CHAR_CAP,
+    recovery_reason: str | None = None,
 ) -> List[Dict[str, Any]]:
-    """Pull recent CDP recorder rows (status + truncated bodies) when available."""
+    """Pull CDP recorder rows (status + truncated bodies), pinning cited recovery hosts."""
     if network_recorder is None:
         return []
     query = getattr(network_recorder, "query_requests", None)
     if not callable(query):
         return []
+    rows: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    def _append_rows(batch: Sequence[Any]) -> None:
+        for row in batch or ():
+            if not isinstance(row, dict):
+                continue
+            url = str(row.get("url") or "").lower()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            rows.append(row)
+
+    for host in cited_network_hosts(recovery_reason):
+        try:
+            host_rows = query(
+                limit=limit,
+                include_bodies=True,
+                max_body_chars=max_body_chars,
+                url_pattern=host,
+            )
+            _append_rows(host_rows if isinstance(host_rows, list) else [])
+        except Exception as exc:
+            logger.warning(
+                "Challenge classifier cited-host network query failed",
+                host=host,
+                error=str(exc),
+            )
+
     try:
-        rows = query(
-            limit=limit,
+        recent_rows = query(
+            limit=max(limit * 2, limit),
             include_bodies=True,
             max_body_chars=max_body_chars,
         )
+        _append_rows(recent_rows if isinstance(recent_rows, list) else [])
     except Exception as exc:
         logger.warning("Challenge classifier network recorder query failed", error=str(exc))
         return []
-    if not isinstance(rows, list):
-        return []
-    return [row for row in rows if isinstance(row, dict)]
+
+    return select_network_entries_for_classifier(rows, recovery_reason=recovery_reason, cap=limit)
 
 
 async def capture_network_summary(
@@ -221,6 +312,7 @@ async def capture_network_summary(
     *,
     network_recorder: Any = None,
     network_entries: Sequence[Dict[str, Any]] | None = None,
+    recovery_reason: str | None = None,
 ) -> str:
     """Build classifier network summary with HTTP status when available.
 
@@ -230,9 +322,17 @@ async def capture_network_summary(
     3. Performance Resource Timing fallback (may omit status — probes without CDP)
     """
     if network_entries:
-        return format_network_summary_lines(list(network_entries)[-_NETWORK_ENTRY_CAP:])
+        return format_network_summary_lines(
+            select_network_entries_for_classifier(
+                list(network_entries),
+                recovery_reason=recovery_reason,
+            )
+        )
 
-    recorder_rows = network_entries_from_recorder(network_recorder)
+    recorder_rows = network_entries_from_recorder(
+        network_recorder,
+        recovery_reason=recovery_reason,
+    )
     if recorder_rows:
         return format_network_summary_lines(recorder_rows)
 
@@ -339,6 +439,7 @@ async def capture_challenge_classifier_context(
         page,
         network_recorder=network_recorder,
         network_entries=network_entries,
+        recovery_reason=recovery_reason,
     )
     title, cleaned_dom, network_summary = await asyncio.gather(
         title_task, cleaned_task, network_task, return_exceptions=True

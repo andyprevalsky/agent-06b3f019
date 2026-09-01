@@ -59,6 +59,7 @@ from utils.prompts import build_verifier_prompt
 
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
+    blocked_resource_url_from_recovery_reason,
     commit_cookie_removals,
     live_tab_looks_challenged,
     page_looks_challenged,
@@ -98,7 +99,6 @@ from .recording import (
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
     blocked_resource_requires_payment_cdn,
-    blocked_resource_url_for_recovery,
     browser_recording_output_dir,
     normalize_simulated_browser_frame,
 )
@@ -2234,6 +2234,72 @@ async def _feed_browser_tool_validation_error_back(
         tool_call_id=tool_call_id_action,
         steps_taken=iteration,
         total_steps=MAX_ITERATIONS,
+    )
+
+
+async def _feed_provider_exit_detected_back(
+    *,
+    provider_exit_rejection: Dict[str, Any],
+    unified_action: Dict[str, Any],
+    llm_result: Dict[str, Any],
+    action_history: Any,
+    browser_turn_messages: List[Dict[str, Any]],
+    dom_service: Any,
+    browser_stream: Any,
+    agent_id: str,
+    task_id: str,
+    browser_url: str,
+    iteration: int,
+) -> None:
+    """Surface provider/IP rejection to the planning LLM instead of synthetic recovery."""
+    rejected_action = str(unified_action.get("action") or "unknown")
+    tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
+    rejection_reason = str(
+        (provider_exit_rejection or {}).get("reason")
+        or "The current provider IP was explicitly rejected."
+    )
+    rejection_url = str((provider_exit_rejection or {}).get("url") or "").strip()
+    feedback = (
+        f"Browser network monitor detected that the current provider/IP was rejected "
+        f"before your `{rejected_action}` action could run.\n"
+        f"Rejection signal: {rejection_reason}"
+        + (f"\nRelated request URL: {rejection_url}" if rejection_url else "")
+        + "\nCall `recover_from_challenge` with a reason describing this failure "
+        "(include any blocked third-party script URLs you need cleared). "
+        "Preserve auth cookies unless you intentionally want a fresh-cookie search."
+    )
+    result = {
+        "success": False,
+        "error": feedback,
+        "provider_exit_detected": True,
+        "rejection": provider_exit_rejection,
+    }
+    await browser_stream.finish_tools(status="ERROR")
+    await action_history.record_action(
+        dom_service=dom_service,
+        action=rejected_action,
+        thinking=unified_action.get("thinking") or "",
+        params=unified_action.get("params") or {},
+        result=result,
+    )
+    _append_browser_turn_messages(
+        browser_turn_messages,
+        unified_action=unified_action,
+        result=result,
+        tool_call_id=tool_call_id_action,
+    )
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title="Provider/IP rejected — call recover_from_challenge",
+        task_id=task_id,
+        message=feedback,
+        status=MessageStatus.FINISHED,
+        browser_url=browser_url,
+        action_type=rejected_action,
+        tool_call_id=tool_call_id_action,
+        steps_taken=iteration,
+        total_steps=MAX_ITERATIONS,
+        extra_metadata={"providerExitDetected": True},
     )
 
 
@@ -5473,6 +5539,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # recovery on this task, later recoveries still re-verify that URL.
     require_payment_cdn = False
     payment_cdn_verify_url = ""
+    pending_provider_exit_recovery = False
     # Payment auto-fill on cross-origin handoff (live host ≠ session origin).
     # Do NOT pin/refuse navigation — that trapped merchant → third-party order
     # flows (e.g. bluebottlecoffee.com → order.online) after challenge recovery.
@@ -7367,45 +7434,26 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 browser_network_recorder.pop_provider_exit_rejection() if browser_network_recorder is not None else None
             )
             if provider_exit_rejection is not None:
-                # The streamed model action was superseded before execution;
-                # close it accurately instead of stitching its tool id onto the
-                # independently generated recovery lifecycle below.
-                await browser_stream.finish_tools(status="ERROR")
-                rejected_action = unified_action.get("action", "")
-                recovery_tool_call_id = f"provider-exit-recovery-{uuid_module.uuid4()}"
-                rejection_reason = str(
-                    (provider_exit_rejection or {}).get("reason")
-                    or "The current provider IP was explicitly rejected."
+                pending_provider_exit_recovery = True
+                await _feed_provider_exit_detected_back(
+                    provider_exit_rejection=provider_exit_rejection,
+                    unified_action=unified_action,
+                    llm_result=llm_result,
+                    action_history=action_history,
+                    browser_turn_messages=browser_turn_messages,
+                    dom_service=dom_service,
+                    browser_stream=browser_stream,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    browser_url=browser_url,
+                    iteration=iteration,
                 )
-                blocked_resource_url = blocked_resource_url_for_recovery(
-                    provider_exit_rejection
-                )
-                unified_action = {
-                    "action": "recover_from_challenge",
-                    "thinking": "",
-                    "params": {
-                        "reason": rejection_reason,
-                        "provider_exit_rejected": True,
-                        # Failure-driven re-verify for critical third-party blocks
-                        # only (not same-origin API-challenge URLs).
-                        **(
-                            {"blocked_resource_url": blocked_resource_url}
-                            if blocked_resource_url
-                            else {}
-                        ),
-                    },
-                }
-                llm_result = {
-                    **llm_result,
-                    "action": unified_action,
-                    "tool_call_id": recovery_tool_call_id,
-                }
                 logger.warning(
-                    "Replacing browser action with provider-exit recovery",
-                    rejected_action=rejected_action,
+                    "Provider exit detected before browser action execution",
+                    rejected_action=unified_action.get("action", ""),
                     rejection=provider_exit_rejection,
-                    tool_call_id=recovery_tool_call_id,
                 )
+                continue
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
@@ -7930,6 +7978,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
 
                 provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
+                if pending_provider_exit_recovery:
+                    provider_exit_rejected = True
+                    pending_provider_exit_recovery = False
                 # If the live tab is already clean and this was not a hard
                 # provider-exit rejection, skip — avoids recovery loops the model
                 # invents from third-party network noise on an otherwise fine page.
@@ -8016,6 +8067,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     blocked_resource_url = str(
                         unified_action.get("params", {}).get("blocked_resource_url") or ""
                     ).strip()
+                    if not blocked_resource_url:
+                        blocked_resource_url = blocked_resource_url_from_recovery_reason(
+                            str(recovery_reason or "")
+                        )
                     if blocked_resource_requires_payment_cdn(blocked_resource_url):
                         # Sticky URL is still useful as LLM evidence; hard CDN filter is gone.
                         require_payment_cdn = True
@@ -8067,9 +8122,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         emit_recovery_progress,
                     )
 
-                    provider_exit_rejected = bool(
-                        unified_action.get("params", {}).get("provider_exit_rejected")
-                    )
                     escalate_after_cookie_false_stable = (
                         not provider_exit_rejected and cookie_recovery_successes >= 1
                     )
@@ -8094,6 +8146,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         blocked_resource_url = str(
                             unified_action.get("params", {}).get("blocked_resource_url") or ""
                         ).strip()
+                        if not blocked_resource_url:
+                            blocked_resource_url = blocked_resource_url_from_recovery_reason(
+                                str(recovery_reason or "")
+                            )
                         return await probe_cookie_variant_ephemeral(
                             config,
                             task_id,
@@ -8265,6 +8321,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         blocked_resource_url = str(
                             unified_action.get("params", {}).get("blocked_resource_url") or ""
                         ).strip()
+                        if not blocked_resource_url:
+                            blocked_resource_url = blocked_resource_url_from_recovery_reason(
+                                str(recovery_reason or "")
+                            )
                         # Prefer preloaded atomic-promote wording when the probe
                         # classified the same remote session; otherwise live verify.
                         verified_phrase = (

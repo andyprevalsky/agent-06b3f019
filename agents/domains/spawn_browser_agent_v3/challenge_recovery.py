@@ -672,6 +672,24 @@ def target_looks_like_payment_document(_url: str) -> bool:
     return False
 
 
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s)\]\"'<>]+", re.IGNORECASE)
+
+
+def urls_cited_in_recovery_reason(recovery_reason: str | None) -> Tuple[str, ...]:
+    """Extract normalized http(s) URLs embedded in the agent recovery reason."""
+    text = (recovery_reason or "").strip()
+    if not text:
+        return ()
+    raw_urls = [match.group(0).rstrip(".,;") for match in _URL_IN_TEXT_RE.finditer(text)]
+    return blocked_resource_urls_for_verify(raw_urls)
+
+
+def blocked_resource_url_from_recovery_reason(recovery_reason: str | None) -> str:
+    """First cited absolute URL to re-verify after promote, if any."""
+    urls = urls_cited_in_recovery_reason(recovery_reason)
+    return urls[0] if urls else ""
+
+
 def blocked_resource_urls_for_verify(urls: Sequence[str] | None) -> Tuple[str, ...]:
     """Deduped absolute http(s) URLs from the failures that triggered recovery."""
     cleaned: List[str] = []
