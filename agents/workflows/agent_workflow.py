@@ -1376,17 +1376,21 @@ class AgentWorkflow:
                 f"Fetched output_schema: {response_schema is not None}, write_lock_enabled: {self.write_lock_enabled}"
             )
 
-        # Schema generation is itself an LLM call (~5s p50). Do not block the
-        # first reasoning turn — start the activity and apply after first LLM
-        # via _await_deferred_startup().
+        # If no schema was provided at create time, generate one synchronously NOW.
+        # The schema appears in the initial main/verifier system prompts. Awaiting
+        # startup generation keeps that initial cache prefix stable; later user
+        # feedback revisions take the non-blocking context-message path below.
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
-        self._deferred_startup_schema_handle = None
         if response_schema is None and self.goal and not is_sub_agent:
             try:
-                self._deferred_startup_schema_handle = workflow.start_activity(
+                generated = await workflow.execute_activity(
                     set_response_schema_activity,
                     args=[
                         agent_id,
+                        # Persisted-row goal: schema generation is content-keyed on
+                        # this text, so the stable goal keeps it cacheable (and
+                        # matches the TS-side setResponseSchema, which reads the
+                        # Agent row).
                         [self.fast_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
@@ -1395,13 +1399,21 @@ class AgentWorkflow:
                     start_to_close_timeout=timedelta(seconds=90),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
-                workflow.logger.info("Started response_schema generation (deferred await)")
+                if isinstance(generated, dict) and generated.get("schema"):
+                    self.output_schema = generated["schema"]
+                    response_schema = self.output_schema
+                    workflow.logger.info(
+                        f"Generated output_schema synchronously with "
+                        f"{len(self.output_schema.get('fields', []))} field(s)"
+                    )
             except Exception as e:
-                workflow.logger.warning(f"Failed to start response_schema generation at startup: {e}")
+                workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
         elif response_schema is None and is_sub_agent:
             workflow.logger.info("Skipping response_schema generation for sub-agent")
 
-        # Freeze whatever schema we have for the first system prompt.
+        # Freeze the schema used in the main-agent system prompt. Any later
+        # feedback-driven revision is appended at the conversation tail so the
+        # provider can reuse the existing system/message cache prefix.
         self._system_prompt_output_schema = self.output_schema
         self._response_schema_initialized = True
         self._start_response_schema_refresh()
@@ -1845,8 +1857,7 @@ class AgentWorkflow:
     def _make_verifier_prompt_generator(self):
         """Create a generator function that builds the verifier prompt at verification time.
 
-        Main-agent reasoning never waits for schema generation, but completion
-        verification must use the latest accepted revision.
+        Completion verification must use the latest accepted schema revision.
         """
 
         async def generate() -> str:
@@ -2420,17 +2431,14 @@ class AgentWorkflow:
         return None
 
     async def _await_deferred_startup(self) -> None:
-        """Await SMS + schema activities kicked off during startup (off critical path).
+        """Await SMS activity kicked off during startup (off critical path).
 
-        Schema generation is itself an LLM call (~5s p50) and SMS notify is ~2–4s.
-        Both are started during init and applied here after the first reasoning turn
-        begins (or at end-of-run for short/smoke paths that never emit tokens).
-        Idempotent — safe to call multiple times.
+        SMS notify is ~2–4s on prod traces. Started during init and awaited after
+        the first reasoning turn begins (or at end-of-run for short/smoke paths
+        that never emit tokens). Idempotent — safe to call multiple times.
         """
         sms_handle = getattr(self, "_deferred_startup_sms_handle", None)
-        schema_handle = getattr(self, "_deferred_startup_schema_handle", None)
         self._deferred_startup_sms_handle = None
-        self._deferred_startup_schema_handle = None
 
         if sms_handle is not None:
             try:
@@ -2438,20 +2446,6 @@ class AgentWorkflow:
                 workflow.logger.info("Completed deferred agent_started SMS notification")
             except Exception as e:
                 workflow.logger.warning(f"Deferred agent_started SMS notification failed: {e}")
-
-        if schema_handle is not None:
-            try:
-                generated = await schema_handle
-                if isinstance(generated, dict) and generated.get("schema"):
-                    self.output_schema = generated["schema"]
-                    workflow.logger.info(
-                        "Applied deferred response_schema with "
-                        f"{len(self.output_schema.get('fields', []))} field(s)"
-                    )
-                else:
-                    workflow.logger.warning("Deferred response_schema generation returned no schema")
-            except Exception as e:
-                workflow.logger.warning(f"Deferred response_schema generation failed: {e}")
 
     async def _advance_cloud_agent_lifecycle(self, title: str, tool_status: str) -> None:
         """Advance the chat-mode cloud-agent chip without exposing it to LLM context."""
