@@ -253,6 +253,17 @@ export async function putRun(
     tasks: storedSummary.tasks.length,
   });
   await slotHubAncestorSkeletonsFromBundle(bundle);
+  if (childIdToRun !== null) {
+    const tasks = Array.isArray(bundle.tasks) ? bundle.tasks : [];
+    for (const task of tasks) {
+      const logs = (task as { logs?: { tree?: unknown } }).logs;
+      const tree = canonicalAgentTree(logs?.tree);
+      for (const id of Object.keys(tree)) {
+        if (!childIdToRun.has(id)) childIdToRun.set(id, runId);
+        agentRunMissCache.delete(id);
+      }
+    }
+  }
   return storedSummary;
 }
 
@@ -624,15 +635,73 @@ export async function deleteRun(runId: string): Promise<boolean> {
 // agentId → run_id resolution cache (bundles are immutable once final; a live
 // re-upload keeps the same run_id, so cached mappings never go stale).
 const agentRunCache = new Map<string, string>();
+const agentRunMissCache = new Set<string>();
+let childIdToRun: Map<string, string> | null = null;
+let childIdIndexPromise: Promise<Map<string, string>> | null = null;
 
 /**
- * Resolve a benchmark agent (root OR sub-agent) across every stored run —
- * newest first — and return its adapted view. Roots resolve from the index
- * alone; sub-agents require scanning bundles (cached thereafter). This powers
- * the normal agent-API fallback so benchmark agents open in the main panel.
+ * One background walk of hub bundles builds the child-id index. Official 4w
+ * (and any in-flight create) issues GET /agents/:new-uuid before the row
+ * exists; a per-request Pass-2 scan of every bundle is O(hub) on that hot
+ * path and starves Prisma. Unknown IDs must miss without reading bundles.
+ */
+async function buildChildIdIndex(): Promise<Map<string, string>> {
+  const index = await listRuns();
+  const map = new Map<string, string>();
+  for (const run of index) {
+    const bundle = await getRunBundle(run.run_id);
+    if (bundle === null) continue;
+    const tasks = Array.isArray(bundle.tasks) ? bundle.tasks : [];
+    for (const task of tasks) {
+      const logs = (task as { logs?: { tree?: unknown } }).logs;
+      const tree = canonicalAgentTree(logs?.tree);
+      for (const id of Object.keys(tree)) {
+        if (!map.has(id)) map.set(id, run.run_id);
+      }
+    }
+  }
+  childIdToRun = map;
+  return map;
+}
+
+function scheduleChildIdIndex(): void {
+  if (childIdIndexPromise !== null || childIdToRun !== null) return;
+  childIdIndexPromise = buildChildIdIndex().catch((error: unknown) => {
+    childIdIndexPromise = null;
+    throw error;
+  });
+}
+
+function rememberHubRun(agentId: string, runId: string): void {
+  agentRunCache.set(agentId, runId);
+  agentRunMissCache.delete(agentId);
+}
+
+/** Index-only lookup: roots from listRuns, children from the built id map. */
+export function resolveHubRunIdFromIndexes(
+  agentId: string,
+  runs: HubRunSummary[],
+  childIndex: Map<string, string> | null
+): { kind: 'hit'; runId: string } | { kind: 'miss' } | { kind: 'pending' } {
+  for (const run of runs) {
+    if (run.tasks.some((task) => task.agent_id === agentId)) {
+      return { kind: 'hit', runId: run.run_id };
+    }
+  }
+  if (childIndex === null) return { kind: 'pending' };
+  const runId = childIndex.get(agentId);
+  return runId === undefined ? { kind: 'miss' } : { kind: 'hit', runId };
+}
+
+/**
+ * Resolve a benchmark agent (root OR sub-agent) across stored runs.
+ * Roots resolve from the index alone. Child IDs use a once-built map so an
+ * unknown in-flight UUID is O(1) after the map exists and never scans every
+ * bundle on the request path (Pass 2 used to).
  */
 export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView | null> {
   if (!agentId) return null;
+  if (agentRunMissCache.has(agentId)) return null;
   const cachedRunId = agentRunCache.get(agentId);
   if (cachedRunId !== undefined) {
     const view = await getRunAgent(cachedRunId, agentId);
@@ -640,24 +709,19 @@ export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView
     agentRunCache.delete(agentId);
   }
   const index = await listRuns();
-  // Pass 1: roots straight from the index (no bundle reads).
-  for (const run of index) {
-    if (run.tasks.some((t) => t.agent_id === agentId)) {
-      const view = await getRunAgent(run.run_id, agentId);
-      if (view !== null) {
-        agentRunCache.set(agentId, run.run_id);
-        return view;
-      }
-    }
-  }
-  // Pass 2: sub-agents — scan bundles (bounded by index size).
-  for (const run of index) {
-    const view = await getRunAgent(run.run_id, agentId);
+  const resolved = resolveHubRunIdFromIndexes(agentId, index, childIdToRun);
+  if (resolved.kind === 'hit') {
+    const view = await getRunAgent(resolved.runId, agentId);
     if (view !== null) {
-      agentRunCache.set(agentId, run.run_id);
+      rememberHubRun(agentId, resolved.runId);
       return view;
     }
   }
+  if (resolved.kind === 'pending') {
+    scheduleChildIdIndex();
+    return null;
+  }
+  agentRunMissCache.add(agentId);
   return null;
 }
 
@@ -720,4 +784,7 @@ export async function findTreeAcrossRuns(
 export function _resetForTests(): void {
   s3Client = null;
   agentRunCache.clear();
+  agentRunMissCache.clear();
+  childIdToRun = null;
+  childIdIndexPromise = null;
 }
