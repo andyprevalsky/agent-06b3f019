@@ -41,12 +41,12 @@ function testCandidateMatrix(): void {
   assert.deepStrictEqual(
     candidates.map((candidate) => candidate.key),
     [
+      'steel_fixed',
+      'kernel_mobile',
       'kernel_residential_city',
       'kernel_residential_state',
-      'kernel_mobile',
-      'kernel_isp',
       'steel_managed',
-      'steel_fixed',
+      'kernel_isp',
     ]
   );
   assert.deepStrictEqual(kernelCaptchaTelemetryConfig(), {
@@ -617,7 +617,7 @@ function testSteelPreferredWhenCdnHardFilterActive(): void {
   );
   assert.deepStrictEqual(
     preferred.map((candidate) => candidate.key),
-    ['steel_managed', 'steel_fixed']
+    ['steel_fixed', 'steel_managed']
   );
   assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }

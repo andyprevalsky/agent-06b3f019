@@ -169,7 +169,7 @@ async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
   assert.notStrictEqual(winner.config.key, 'steel_managed');
   assert.deepStrictEqual(promoted, [winner.config.key]);
   // Sequential lane order: first non-avoided full clear wins (not lowest latency).
-  assert.strictEqual(winner.config.key, 'kernel_residential_city');
+  assert.strictEqual(winner.config.key, 'steel_fixed');
 }
 
 async function testHardPaymentCdnFilterKeepsOnlyWorkingConfig(): Promise<void> {
