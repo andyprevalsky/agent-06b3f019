@@ -2,6 +2,7 @@ from benchmarks.llm_usage import (
     aggregate_usage_items,
     classify_model,
     classify_usage_item,
+    live_output_tokens,
     merge_usage_breakdowns,
 )
 
@@ -128,3 +129,25 @@ def test_aggregates_calls_tokens_cost_by_provider_and_submodel() -> None:
         "models": {},
     }
     assert "perplexity" not in merged
+
+
+def test_live_output_tokens_ignores_fast_mode_models() -> None:
+    assert (
+        live_output_tokens(
+            {
+                "claude_oauth_token": {
+                    "output_tokens": 80,
+                    "models": {"claude-fable-5": {"output_tokens": 80}},
+                },
+                "unclassified": {
+                    "output_tokens": 12,
+                    "models": {
+                        "fast-cache": {"output_tokens": 4},
+                        "fast-mode-soft-complete": {"output_tokens": 8},
+                    },
+                },
+            }
+        )
+        == 80
+    )
+    assert live_output_tokens({}) == 0

@@ -25,6 +25,7 @@
 import { ChevronRight, Lightbulb } from 'lucide-react';
 import { useCallback, useState, type ReactNode } from 'react';
 import { cn } from '@/lib/utils';
+import { userFacingMessageText } from '@/lib/userFacingMessage';
 import type { ExploreStep, WaitForCheck } from '../../types';
 import { getExploreStepIcon, isThinkingStep } from './helpers';
 import { MarkdownText } from '../MarkdownText';
@@ -42,7 +43,7 @@ interface InlineExploreChipProps {
 }
 
 function ThinkingStepRow({ step, index }: { step: ExploreStep; index: number }) {
-  const thinkingText = step.message?.trim();
+  const thinkingText = userFacingMessageText(step.message || '').trim();
   return (
     <div
       key={`${step.timestamp}-${index}`}
@@ -65,7 +66,8 @@ function ToolStepRow({
   isExpanded: boolean;
   onToggle: (i: number, e: React.MouseEvent) => void;
 }) {
-  const hasContent = !!step.message?.trim();
+  const visibleMessage = userFacingMessageText(step.message || '');
+  const hasContent = !!visibleMessage.trim();
   const StepIcon = getExploreStepIcon(step.toolName);
 
   return (
@@ -91,7 +93,7 @@ function ToolStepRow({
 
       {isExpanded && hasContent && (
         <div className="ml-4 mt-0.5 mb-1 text-[10px] text-muted-foreground/50 whitespace-pre-wrap break-words max-h-[120px] overflow-y-auto overflow-x-hidden border-l border-border/30 pl-2">
-          {step.message}
+          {visibleMessage}
         </div>
       )}
     </div>
@@ -127,12 +129,13 @@ function ExploreStepsList({
 }
 
 function TerminalResult({ message }: { message: string }) {
-  if (!message.trim()) return null;
+  const visible = userFacingMessageText(message);
+  if (!visible.trim()) return null;
 
   return (
     <div className="border-t border-border/30 px-3 py-2">
       <div className="text-[10px] text-foreground/60 whitespace-pre-wrap break-words max-h-[120px] overflow-y-auto overflow-x-hidden">
-        <MarkdownText text={message} className="tool-message-markdown text-[10px]" />
+        <MarkdownText text={visible} className="tool-message-markdown text-[10px]" />
       </div>
     </div>
   );

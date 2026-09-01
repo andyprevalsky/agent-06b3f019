@@ -459,8 +459,9 @@ their assertions or test counts:
 `bash scripts/tests/run-isolated-cloud-kill.test.sh`,
 `bash scripts/tests/run-seed-exit-code.test.sh`,
 `bash scripts/tests/run-public-tunnel-routing.test.sh`,
-`bash scripts/tests/setup-db-concurrency.test.sh`, and
-`bash scripts/tests/run-port-collision.test.sh`.
+`bash scripts/tests/setup-db-concurrency.test.sh`,
+`bash scripts/tests/run-port-collision.test.sh`, and
+`bash scripts/tests/run-cloud-benchmark-workers.test.sh`.
 
 This list is deliberately explicit, not a registry pointer: several of these
 suites assert that their own command still appears here, which is how a gate

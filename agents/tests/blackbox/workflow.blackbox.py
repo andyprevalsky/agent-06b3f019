@@ -65,6 +65,7 @@ def test_usage_model_falls_back_when_cache_provenance_is_unknown():
     assert _resolve_usage_model("", requested) == requested
     assert _resolve_usage_model(None, requested) == requested
     assert _resolve_usage_model("gpt-5.6-sol-gpt", requested) == "gpt-5.6-sol-gpt"
+    assert _resolve_usage_model("fast-cache", requested) == "fast-cache"
 
 
 def test_task_dag_sequential():
@@ -438,7 +439,11 @@ async def mock_post_agent_message(
 
 
 @activity.defn(name="poll_new_messages")
-async def mock_poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
+async def mock_poll_new_messages(
+    agent_id: str,
+    last_checked: datetime,
+    include_internal_subagent: bool = False,
+) -> List[Dict[str, Any]]:
     _record_workflow_env_activity(agent_id, "poll_new_messages")
     return []
 
@@ -1723,6 +1728,93 @@ def test_workflow_coalesce_structured_response_without_schema_uses_headings():
         "positioning_statement",
         "weekly_engagement_target_creators",
     ]
+
+
+def test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore():
+    """Fast Mode GPs often lack verifier JSON; row item + explore report still fill the card."""
+    from workflows.agent_workflow import card_summary_from_evidence, is_ablated_completion_summary
+
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name"},
+            {"name": "rank_from_initial_list"},
+            {"name": "hook_formulas"},
+            {"name": "core_content_pillars"},
+        ]
+    }
+    explore = (
+        "# Casey Winters creator-brand competitive analysis\n\n"
+        "Deeply researched product and growth advice for founders, with a large newsletter "
+        "and a weekly interview show that stays tactical rather than motivational.\n\n"
+        "## Hook formulas / title patterns\n\n"
+        "Credential plus concrete playbook: 'How X grew from 0 to Y'.\n\n"
+        "## Content pillars and formats across platforms\n\n"
+        "Product leadership, growth loops, and career advice for builders."
+    )
+    context = [
+        {
+            "role": "USER",
+            "text": (
+                "You are analyzing ONE creator for Andy Prevalsky.\n"
+                "Row item:\n"
+                '{"name": "Casey Winters", "rank": 22}'
+            ),
+        },
+        {
+            "role": "TOOL",
+            "text": explore,
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    by_key = {row["key"]: row["value"] for row in outputs}
+    assert by_key["creator_name"] == "Casey Winters"
+    assert by_key["rank_from_initial_list"] == 22
+    assert "playbook" in str(by_key["hook_formulas"])
+    assert "Product leadership" in str(by_key["core_content_pillars"])
+    summary = card_summary_from_evidence(context, merged)
+    assert not is_ablated_completion_summary(summary)
+    assert "Casey" in summary or "founders" in summary
+    assert "Fast Mode" not in summary
+    assert len(summary) >= 200
+
+
+def test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name():
+    """Name-only schema plus **Params Passed:** fetch bodies must still yield a real card."""
+    from workflows.agent_workflow import card_summary_from_evidence, is_ablated_completion_summary
+
+    fetch_body = (
+        "**Params Passed:**\n\n- **url**: https://www.youtube.com/@beerbiceps\n\n"
+        "**Result:**\n\n"
+        "BeerBiceps / Ranveer Allahbadia posts long-form interviews on health, "
+        "business, and spirituality. Recent 90-day cadence is about three YouTube "
+        "uploads a week with hook formulas that pair a celebrity guest and a "
+        "concrete life question. Audience promise is Indian-English self-improvement "
+        "for founders and students. Monetization mentions include Superhuman and "
+        "course launches. Gaps include quantified founder-health protocols and "
+        "week-in-the-life operating cadence."
+    )
+    assert "**params passed:**" in fetch_body.lower()
+    context = [
+        {
+            "role": "TOOL",
+            "text": fetch_body,
+            "metadata": {"toolName": "web_fetch", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "Fast Mode cache trajectory ended; prior tool evidence is sufficient.",
+            "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED"},
+        },
+    ]
+    structured = {"creator_name": "Ranveer Allahbadia", "rank_from_initial_list": 50}
+    summary = card_summary_from_evidence(context, structured)
+    assert not is_ablated_completion_summary(summary)
+    assert "Fast Mode" not in summary
+    assert "Ranveer" in summary or "BeerBiceps" in summary or "founders" in summary
+    assert len(summary) >= 200
 
 
 def test_workflow_extract_failure_context_empty_context():
@@ -5346,6 +5438,247 @@ async def test_workflow_mark_complete_survives_summary_generation_failure():
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary():
+    """Fast Mode traj-end completion_summary must not land on the Task Complete card."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-huberman-summary"
+    wf.user_id = "u-mc"
+    wf.goal = "You are analyzing ONE creator for Andy Prevalsky."
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name", "type": "str"},
+            {"name": "posting_cadence_by_platform", "type": "str"},
+        ]
+    }
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": (
+            "Fast Mode cache trajectory ended; the task completed successfully "
+            "based on prior tool evidence."
+        ),
+        "tool_counts": {"spawn_agent": 3},
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "from_fast_cache": True,
+            "actual_model": "fast-mode-soft-complete",
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[
+                {"role": "USER", "text": "analyze Huberman"},
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "# creator_name\nAndrew Huberman\n\n"
+                        "# posting_cadence_by_platform\n"
+                        "YouTube ~2 episodes/week; Instagram ~3 posts/week.\n\n"
+                        "Huberman Lab 90-day cadence pairs lab-guest interviews with "
+                        "protocol recaps. Hooks name a hormone or sleep lever plus a "
+                        "concrete action. Audience is founder-operators who want "
+                        "operating systems, not wellness slogans. Monetization is "
+                        "sponsorships and a premium newsletter. Gaps include weekly "
+                        "founder-recovery operating cadence Andy can own."
+                    ),
+                    "metadata": {
+                        "toolName": "attempt_completion",
+                        "toolStatus": "FINISHED",
+                    },
+                },
+            ],
+            structured_response=None,
+        )
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        card = (finished or {}).get("completionSummary") or {}
+        summary = str(card.get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "cached trajectory" not in summary.lower()
+        assert "Huberman" in summary
+        outputs = card.get("outputs") or []
+        assert outputs, "Task Complete must show schema outputs"
+        keys = {item.get("key") for item in outputs}
+        assert "creator_name" in keys
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll():
+    """Explore chips are subAgentId-tagged; Task Complete still needs their bodies."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-wes-roth-summary"
+    wf.user_id = "u-mc"
+    wf.goal = "You are analyzing ONE creator for Andy Prevalsky."
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name", "type": "str"},
+            {"name": "rank_from_initial_list", "type": "int"},
+        ]
+    }
+    fetch_body = (
+        "**Params Passed:**\n\n- **url**: https://www.youtube.com/@WesRoth\n\n"
+        "**Result:**\n\n"
+        "Wes Roth covers AI research papers and product launches in long-form "
+        "YouTube explainers. Last-90-day cadence is several videos a week with "
+        "hooks that pair a lab name and a concrete capability claim. Audience "
+        "promise is stay-current AI for builders. Monetization is sponsorships "
+        "and course mentions. Gaps include founder-health operating cadence."
+    )
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "The task completed successfully; verified results are included below.",
+        "tool_counts": {"spawn_agent": 2},
+        "usage": {"from_fast_cache": True, "actual_model": "fast-mode-soft-complete"},
+    }
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "TOOL",
+            "message": "Research the YouTube creator Wes Roth",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Exploring",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": fetch_body,
+            "metadata": {
+                "toolName": "web_fetch",
+                "toolStatus": "FINISHED",
+                "title": "Fetched https://www.youtube.com/@WesRoth",
+                "subAgentId": "explore-wes",
+                "taskId": "explore-wes",
+            },
+        },
+    ]
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[{"role": "USER", "text": "analyze Wes Roth"}],
+            structured_response={"creator_name": "Wes Roth", "rank_from_initial_list": 49},
+        )
+        poll_calls = [args for name, args in fake.activity_calls if name == "poll_new_messages"]
+        assert poll_calls and len(poll_calls[0] or []) >= 3 and poll_calls[0][2] is True
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        summary = str(((finished or {}).get("completionSummary") or {}).get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "verified results are included below" not in summary.lower()
+        assert len(summary) >= 200
+        assert "Wes Roth" in summary or "AI" in summary or "YouTube" in summary
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_polls_assemble_for_schema_outputs():
+    """Root DAG assemble is posted after execute_context snapshot; poll it onto the card."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-oai-assemble"
+    wf.user_id = "u-mc"
+    wf.goal = "Analyze the top 50 creators for Andy Prevalsky."
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "top_creators_analysis", "type": "str"},
+            {"name": "positioning_statement", "type": "str"},
+            {"name": "ninety_day_content_calendar", "type": "str"},
+        ]
+    }
+    assemble = (
+        "July cache assemble of Andy Prevalsky's creator brief.\n\n"
+        "# top_creators_analysis\n\n"
+        "1. Andrew Huberman — Huberman Lab cadence, hooks, and coverage gaps.\n\n"
+        "# positioning_statement\n\n"
+        "Andy as the founder-operator who translates longevity science into operating systems.\n\n"
+        "# ninety_day_content_calendar\n\n"
+        "Week 1: sleep audit. Week 2: training block. Week 3: founder recovery."
+    )
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "ASSISTANT",
+            "message": assemble,
+            "metadata": {"plannedToolName": "reasoning", "dagTaskIndex": 6},
+        }
+    ]
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": (
+            "Completed a 50-creator competitive analysis across health, longevity, "
+            "technology, and founder-journey niches, then synthesized Andy's "
+            "differentiated positioning, a 90-day multi-platform content calendar, "
+            "and a weekly engagement list of creators to get on his radar."
+        ),
+        "tool_counts": {"spawn_agent": 50},
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "from_fast_cache": True,
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response=None)
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        card = (finished or {}).get("completionSummary") or {}
+        summary = str(card.get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "50-creator" in summary
+        outputs = card.get("outputs") or []
+        keys = {item.get("key") for item in outputs}
+        assert keys == {
+            "top_creators_analysis",
+            "positioning_statement",
+            "ninety_day_content_calendar",
+        }
+        values = " ".join(str(item.get("value") or "") for item in outputs)
+        assert "Huberman" in values
+        assert "90-day" in values or "Week 1" in values
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_check_cost_limit_skipped_after_finished():
     """The cost limit authorizes future spend; it must not re-open a finished agent.
 
@@ -5882,6 +6215,59 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
         assert "gpt_token" in captured_kwargs
     finally:
         workflow_module.TOOL_EXECUTORS["web_fetch"] = original_executor
+        _restore_workflow(original)
+
+
+async def test_workflow_attempt_completion_drains_fast_mode_explores():
+    """attempt_completion must await fire-and-track OAi-demo explores first."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.fast_mode_cache_enabled = True
+    wf.current_phase = "EXECUTE"
+
+    class _Pending:
+        def __init__(self):
+            self.awaited = False
+            self._done = False
+
+        def done(self):
+            return self._done
+
+        def __await__(self):
+            async def _inner():
+                self.awaited = True
+                self._done = True
+                return {"result": "explore done"}
+
+            return _inner().__await__()
+
+    pending = _Pending()
+    wf._fm_explore_handles = [
+        {"handle": pending, "task_id": "t1", "tool_call_id": "tc", "ui_goal": "g"}
+    ]
+
+    async def fake_complete(**_kwargs):
+        return {"result": "done"}
+
+    async def fake_tree():
+        return None
+
+    wf._update_tree_state = fake_tree
+
+    import workflows.agent_workflow as workflow_module
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    original_executor = workflow_module.TOOL_EXECUTORS["attempt_completion"]
+    workflow_module.TOOL_EXECUTORS["attempt_completion"] = fake_complete
+    try:
+        result = await wf._execute_tool("attempt_completion", {}, "tc-complete")
+        assert result.get("success") is True
+        assert pending.awaited is True
+        assert not wf._fm_explore_handles
+    finally:
+        workflow_module.TOOL_EXECUTORS["attempt_completion"] = original_executor
         _restore_workflow(original)
 
 
@@ -6461,6 +6847,107 @@ async def test_workflow_query_parent_state_exception_returns_empty():
         _restore_workflow(original)
 
 
+async def test_workflow_query_parent_state_throttles_repeat_queries():
+    """Children must not query the parent on every loop tick under fan-out."""
+    from datetime import timedelta
+
+    from workflows.agent_workflow import _PARENT_STATE_QUERY_MIN_INTERVAL, _QUERY_PARENT_STATE_TIMEOUT
+
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["query_parent_state_activity"] = {"is_paused": False, "is_cost_limit_reached": False}
+    original = _patch_workflow(fake)
+    try:
+        first = await wf._query_parent_state()
+        second = await wf._query_parent_state()
+        assert first == {"is_paused": False, "is_cost_limit_reached": False}
+        assert second == first
+        assert [c[0] for c in fake.activity_calls] == ["query_parent_state_activity"]
+        fake.now_value = fake.now_value + _PARENT_STATE_QUERY_MIN_INTERVAL
+        third = await wf._query_parent_state()
+        assert third == first
+        assert [c[0] for c in fake.activity_calls] == [
+            "query_parent_state_activity",
+            "query_parent_state_activity",
+        ]
+        assert _QUERY_PARENT_STATE_TIMEOUT >= timedelta(seconds=60)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_query_parent_state_skips_throttle_when_paused_by_parent():
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf._paused_by_parent = True
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["query_parent_state_activity"] = {"is_paused": True, "is_cost_limit_reached": False}
+    original = _patch_workflow(fake)
+    try:
+        await wf._query_parent_state()
+        await wf._query_parent_state()
+        assert [c[0] for c in fake.activity_calls] == [
+            "query_parent_state_activity",
+            "query_parent_state_activity",
+        ]
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_fast_mode_post_message_does_not_block_loop():
+    """Fast Mode replay must not await each post_message activity."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "fm-child"
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeWorkflowModule()
+    blocker = asyncio.Event()
+    fake.activity_blockers["post_agent_message"] = blocker
+    original = _patch_workflow(fake)
+    try:
+        await wf._post_message("one", "ASSISTANT", {})
+        await wf._post_message("two", "TOOL", {"toolCallId": "tc-1"})
+        assert wf.message_count == 2
+        await asyncio.sleep(0)
+        posts = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
+        assert len(posts) == 2, posts
+        assert not blocker.is_set()
+        blocker.set()
+        await wf._flush_pending_messages()
+        assert wf._pending_message_handles == []
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_post_message_throttles_tree_updates():
+    """Per-message tree broadcasts under 50-way fan-out must coalesce."""
+    from datetime import timedelta
+
+    from workflows.agent_workflow import _TREE_STATE_EMIT_MIN_INTERVAL
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-1"
+    wf.bus_id = "bus-1"
+    wf.parent_agent_id = "root-1"
+    wf.goal = "analyze"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._post_message("first", "ASSISTANT", {"toolCallId": "tc-1"})
+        await wf._post_message("second", "TOOL", {"toolCallId": "tc-1"})
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 1
+        fake.now_value = fake.now_value + _TREE_STATE_EMIT_MIN_INTERVAL
+        await wf._post_message("third", "ASSISTANT", {})
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 2
+        await wf._update_tree_state(status="COMPLETED")
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 3
+        assert _TREE_STATE_EMIT_MIN_INTERVAL == timedelta(seconds=3)
+    finally:
+        _restore_workflow(original)
+
+
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
@@ -6530,6 +7017,14 @@ async def run_all_tests():
     r.record(
         "wf_coalesce_structured_response_without_schema",
         test_workflow_coalesce_structured_response_without_schema_uses_headings,
+    )
+    r.record(
+        "wf_coalesce_gp_outputs_from_explore_evidence",
+        test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore,
+    )
+    r.record(
+        "wf_card_summary_uses_long_web_fetch_not_creator_name",
+        test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name,
     )
     r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
     r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)
@@ -6780,6 +7275,18 @@ async def run_all_tests():
         test_workflow_mark_complete_survives_summary_generation_failure,
     )
     await r.record_async(
+        "wf_mark_complete_replaces_fast_mode_ablation",
+        test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary,
+    )
+    await r.record_async(
+        "wf_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll",
+        test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll,
+    )
+    await r.record_async(
+        "wf_mark_complete_polls_assemble_for_schema_outputs",
+        test_workflow_mark_complete_polls_assemble_for_schema_outputs,
+    )
+    await r.record_async(
         "wf_mark_complete_summary_cost_no_cost_limit",
         test_workflow_mark_complete_summary_cost_does_not_cost_limit_root,
     )
@@ -6818,6 +7325,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_web_fetch_fast_mode_kwargs",
         test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs,
+    )
+    await r.record_async(
+        "wf_attempt_completion_drains_fast_mode_explores",
+        test_workflow_attempt_completion_drains_fast_mode_explores,
     )
     await r.record_async(
         "wf_approval_text_repopulates_same_tool",
@@ -6863,6 +7374,16 @@ async def run_all_tests():
     await r.record_async("wf_on_tokens_transient_keeps_gpt", test_workflow_on_tokens_transient_error_keeps_gpt_token)
     await r.record_async("wf_check_parent_state_no_parent", test_workflow_check_parent_state_no_parent_returns_early)
     await r.record_async("wf_query_parent_state_exception", test_workflow_query_parent_state_exception_returns_empty)
+    await r.record_async("wf_query_parent_state_throttles", test_workflow_query_parent_state_throttles_repeat_queries)
+    await r.record_async(
+        "wf_query_parent_state_skips_throttle_when_paused",
+        test_workflow_query_parent_state_skips_throttle_when_paused_by_parent,
+    )
+    await r.record_async("wf_post_message_throttles_tree", test_workflow_post_message_throttles_tree_updates)
+    await r.record_async(
+        "wf_fast_mode_post_message_nonblocking",
+        test_workflow_fast_mode_post_message_does_not_block_loop,
+    )
 
     # Temporal workflow tests (all run inside one shared environment)
     wf_results = await _run_all_workflow_tests()

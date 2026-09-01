@@ -8,6 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from benchmarks.hub_upload import (
     DEFAULT_HUB_URL,
     HubVisibilityError,
+    _fallback_canonicalize_agent_tree,
+    _fallback_tree_child_transcript_count,
     durable_open_agent_url,
     hub_upload_enabled,
     is_ephemeral_hub_url,
@@ -228,11 +230,109 @@ def test_required_upload_rejects_empty_fanout_transcripts():
         raise AssertionError("expected HubVisibilityError for empty fan-out chips")
 
 
+def test_fallback_tree_helpers_drop_tool_usage_rollup():
+    raw = {
+        "root_agent_id": "root-1",
+        "agent_count": 2,
+        "root-1": {"parent_agent_id": None, "goal": "g", "status": "ok", "messages": []},
+        "child-1": {
+            "parent_agent_id": "root-1",
+            "goal": "explore",
+            "status": "ok",
+            "messages": [{"role": "ASSISTANT", "message": "wrap-up"}],
+        },
+    }
+    tree = _fallback_canonicalize_agent_tree(raw)
+    assert "root_agent_id" not in tree
+    assert "agent_count" not in tree
+    assert set(tree) == {"root-1", "child-1"}
+    assert _fallback_tree_child_transcript_count(raw, "root-1") == 1
+
+
 def test_missing_key_skips(monkeypatch):
     monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", "http://127.0.0.1:1")
     monkeypatch.delenv("BENCHMARK_HUB_API_KEY", raising=False)
     monkeypatch.delenv("BACKEND_API_KEY", raising=False)
     assert upload_run_bundle({"run_id": "r"}) is False
+
+
+def _run_hub_upload_script(script, bundle, *, cwd, extra_env=None):
+    import os
+    import subprocess
+    import sys
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONPATH", "BENCHMARK_HUB_UPLOAD_URL", "BENCHMARK_HUB_API_KEY", "BACKEND_API_KEY"}
+    }
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [sys.executable, str(script), "--upload-final", str(bundle)],
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_hub_upload_script_resolves_benchmarks_without_pythonpath(tmp_path):
+    """Cloudbench runs `python agents/benchmarks/hub_upload.py` with empty PYTHONPATH."""
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    script = repo / "agents/benchmarks/hub_upload.py"
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text('{"run_id": "script-path", "tasks": []}')
+    proc = _run_hub_upload_script(script, bundle, cwd=repo)
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    assert "No module named 'benchmarks'" not in combined, combined
+    assert "ModuleNotFoundError" not in combined, combined
+
+
+def test_hub_upload_script_survives_colliding_benchmarks_package(tmp_path):
+    """Cloudbench copies can put a different `benchmarks` package first on sys.path."""
+    from pathlib import Path
+
+    colliding = tmp_path / "collide"
+    (colliding / "benchmarks").mkdir(parents=True)
+    (colliding / "benchmarks" / "__init__.py").write_text("PACKAGE = 'collider'\n")
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text('{"run_id": "collide", "tasks": []}')
+    repo = tmp_path / "repo"
+    bench = repo / "agents" / "benchmarks"
+    bench.mkdir(parents=True)
+    src = Path(__file__).resolve().parent
+    (bench / "hub_upload.py").write_text((src / "hub_upload.py").read_text())
+    proc = _run_hub_upload_script(
+        bench / "hub_upload.py",
+        bundle,
+        cwd=repo,
+        extra_env={"PYTHONPATH": str(colliding)},
+    )
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    assert "No module named 'benchmarks.logs'" not in combined, combined
+    assert "ModuleNotFoundError" not in combined, combined
+
+
+def test_hub_upload_copied_script_works_without_sibling_logs(tmp_path):
+    """cloudbench-multi-workstream historically copied only hub_upload.py."""
+    from pathlib import Path
+
+    repo = tmp_path / "repo"
+    bench = repo / "agents" / "benchmarks"
+    bench.mkdir(parents=True)
+    src = Path(__file__).resolve().parent
+    (bench / "hub_upload.py").write_text((src / "hub_upload.py").read_text())
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text(
+        '{"run_id": "copied-only", "tasks": [{"name": "t", "logs": {"tree": {"root_agent_id": "x"}}}]}'
+    )
+    proc = _run_hub_upload_script(bench / "hub_upload.py", bundle, cwd=repo)
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    assert "ModuleNotFoundError" not in combined, combined
 
 
 if __name__ == "__main__":

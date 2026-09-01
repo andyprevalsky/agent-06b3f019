@@ -78,9 +78,10 @@ mkdir -p "$SANDBOX/back-end/scripts" "$SANDBOX/back-end/prisma" \
   "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
 printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
-# hub_upload.prepare_run_bundle_for_upload imports benchmarks.logs. Keep the
-# synthetic worktree hermetic: only the two pure helpers it needs (not the
-# full httpx/asyncio logs module).
+# Sibling of hub_upload.py: script-mode upload loads this via file path
+# (`_load_tree_helpers`), not `from benchmarks.logs` (a colliding
+# `benchmarks` package wins on sys.path). Keep the synthetic worktree
+# hermetic: only the two pure helpers, not the full httpx/asyncio logs module.
 cat > "$SANDBOX/agents/benchmarks/logs.py" <<'LOGSSTUB'
 """Minimal stubs for hub_upload tree canonicalization in fleet fixtures."""
 
@@ -117,6 +118,13 @@ console.error("usage: seed-dump-cache.ts <get|put> <token> <file>");
 process.exit(2);
 SEEDSTUB
 printf '{}\n' > "$SANDBOX/package.json"
+mkdir -p "$SANDBOX/node_modules/.bin"
+cat > "$SANDBOX/node_modules/.bin/tsx" <<'TSXSHIM'
+#!/bin/bash
+# Hermetic worktrees have no npm cache. Node 22 can load the stub .ts directly.
+exec node --experimental-strip-types "$@"
+TSXSHIM
+chmod +x "$SANDBOX/node_modules/.bin/tsx"
 printf '{}\n' > "$SANDBOX/back-end/package.json"
 printf '{}\n' > "$SANDBOX/front-end/package.json"
 printf '{}\n' > "$SANDBOX/back-end/package-lock.json"

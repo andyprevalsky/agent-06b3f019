@@ -11,7 +11,8 @@
     "tags": [
       "mass-agent",
       "load-test",
-      "research"
+      "research",
+      "smoke"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": false,
@@ -20,9 +21,209 @@
     "approval_handling": null,
     "start_phase": null,
     "min_agent_count": 50,
+    "min_tool_counts": {
+      "spawn_general_purpose_agent_for_each": 1,
+      "web_search": 50
+    },
+    "expected_tool_counts": {
+      "spawn_general_purpose_agent_for_each": 1
+    },
+    "status": "ready",
+    "runner": "agent",
     "bench": "rose-bench",
-    "group": "rose-bench",
-    "fast_cache": "on"
+    "group": "pre-deploy",
+    "fast_cache": "on",
+    "enforce_declared_evaluators": true,
+    "description": "July OAi mass-agent Fast Mode recreation. T1–T10 are named static_check + single_turn_llm_judge rows (not one collapsed judge). R1–R5 are the other pre-deploy smokes (spawn-sub-agents and siblings), not new evaluator types.",
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [
+        "FAST_MODE_CACHE_DATABASE_URL"
+      ],
+      "live_targets": [],
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content/T9 are static_check. T1/T3–T6 and T7-schema are single_turn_llm_judge. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+    },
+    "evaluators": [
+      {
+        "id": "t8-root-completed",
+        "method": "static_check",
+        "criteria": [
+          "T8: The root agent reaches COMPLETED"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "t10-no-tool-failures",
+        "method": "static_check",
+        "criteria": [
+          "T10: No tool call fails"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          }
+        ]
+      },
+      {
+        "id": "t3-gp-explore-research-tools",
+        "method": "static_check",
+        "criteria": [
+          "T3: GP explore chips replay research tools, end with the real explore summary, and must not loop attempt_completion_with_result rejected"
+        ],
+        "checks": [
+          {
+            "type": "explore_research_not_reject_loop",
+            "min_rejects": 2
+          },
+          {
+            "type": "explore_completion_summary",
+            "min_chars": 200
+          }
+        ]
+      },
+      {
+        "id": "t7-completion-summary-length",
+        "method": "static_check",
+        "criteria": [
+          "T7: Task Complete cards show the real summary and schema outputs, not a Fast Mode ablation stub"
+        ],
+        "checks": [
+          {
+            "type": "completion_summary_length",
+            "min_chars": 200,
+            "forbidden_substrings": [
+              "Fast Mode",
+              "cached trajectory",
+              "based on prior tool evidence",
+              "verified results are included below"
+            ],
+            "require_outputs": true,
+            "include_first_level_gps": true
+          }
+        ]
+      },
+      {
+        "id": "t1-andy-only",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "T1: Andy Prevalsky is the principal user (not Aman Gottumukkala). July cache field names like opportunities_for_aman do not fail."
+        ],
+        "judge_prompt": "This is a Fast Mode mass-agent research tree, not an ecommerce purchase. Score 1.0 if the root goal, first-level GP goals, and completion card are for Andy Prevalsky / Andy's and Aman Gottumukkala is not the principal user/owner. July replay may keep historical schema keys such as opportunities_for_aman or opportunities_for_aman in cached GP output_schema — that is not Aman-as-principal and must not fail T1. FAIL only if the root goal or completion card presents Aman as the user. Use benchmark_state.tree mentions_andy/mentions_aman plus the completion card. Unsupported assistant claims are not proof."
+      },
+      {
+        "id": "t2-fifty-first-level-gps",
+        "method": "static_check",
+        "criteria": [
+          "T2: Root spawned 50 first-level general-purpose children with real transcripts"
+        ],
+        "checks": [
+          {
+            "type": "first_level_gp_count",
+            "min": 50
+          }
+        ]
+      },
+      {
+        "id": "t3-full-explore-trajectories",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "T3: Every explore child plays a full multi-turn research trajectory and ends with the real explore summary, not Thinking... or Research started."
+        ],
+        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. Compact evidence omits messages[] arrays — use typed tool_counts / explore_spawn_count / research_tool_count / first_level_gps. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL if first-level GPs have no explore spawns and no research tools. FAIL stub-only traj-end/cold nodes (has_traj_end_stub true). FAIL explore chips that replay research tools but never post a user-facing spawn_agent FINISHED summary (Research started. / Thinking... only). Unsupported assistant claims are not proof."
+      },
+      {
+        "id": "t4-full-july-gp-trajectories",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "T4: Every first-level GP plays a full July-class trajectory"
+        ],
+        "judge_prompt": "Score 1.0 only if every first-level general-purpose child replays a full July-class creator-analysis trajectory. Compact evidence omits messages[] arrays — use typed first_level_gps / message_count / tool_counts / research_tool_count / explore_spawn_count. PASS a GP when message_count >= 12 or research_tool_count >= 3 or explore_spawn_count >= 1. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL a GP with no research tools, no explore spawn, and message_count <= 12. FAIL traj-end/cold stubs as the only work (has_traj_end_stub true). Unsupported assistant claims are not proof."
+      },
+      {
+        "id": "t5-zero-live-spend",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "T5: $0 spent and 0 tokens streamed from non-fast-cache"
+        ],
+        "judge_prompt": "Score 1.0 only when typed benchmark_state.usage proves honest Fast Mode replay: cost_cents is 0, cache_creation_input_tokens is 0, and live_output_tokens is 0 (tokens streamed from non-fast-cache). cache_read_input_tokens > 0 with those zeros is Fast Mode replay evidence — do not require a from_fast_cache field on each GP. FAIL if any first-level GP is stub-only (has_traj_end_stub true). Do not trust assistant claims of $0."
+      },
+      {
+        "id": "t6-no-nested-gps",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "T6: No nested general-purpose children"
+        ],
+        "judge_prompt": "Score 1.0 only if no general-purpose child has a parent that is itself a general-purpose, for_each, or explore agent. Explore/browser leaves under first-level GPs are allowed. FAIL any nested general-purpose agent. Use benchmark_state.tree, not assistant claims."
+      },
+      {
+        "id": "t7-real-deliverable",
+        "method": "static_check",
+        "criteria": [
+          "T7: Real deliverable: positioning, 90-day calendar, 30 hooks, 20 engagement targets"
+        ],
+        "checks": [
+          {
+            "type": "root_deliverable_markers",
+            "min_chars": 4000,
+            "required_strings": [
+              "positioning",
+              "90-day",
+              "hook"
+            ],
+            "creator_names": [
+              "Huberman",
+              "Attia",
+              "Rhonda",
+              "DeLauer",
+              "Sinclair",
+              "Bryan Johnson",
+              "Lex Fridman",
+              "Sahil",
+              "Brecka",
+              "Hyman",
+              "Asprey",
+              "Galpin",
+              "Norton",
+              "Topol",
+              "Isenberg"
+            ],
+            "min_creator_names": 10
+          }
+        ]
+      },
+      {
+        "id": "t7-schema-task-complete",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "T7: Schema / Task Complete / assemble-final outputs are populated"
+        ],
+        "judge_prompt": "Score 1.0 only if Task Complete cards display the real summary and schema outputs like prod. FAIL if any completionSummary.summary contains Fast Mode / cache trajectory ended / prior tool evidence ablation. FAIL if root or first-level GP completion cards have empty outputs when response_schema.fields is populated. response_schema.fields plus assemble_deliverable is not enough when the visible Task Complete card is ablated. Use typed agent/tree completion_summary / completion_outputs_count / completion_is_ablated fields, not assistant claims."
+      },
+      {
+        "id": "t9-no-leftover-children",
+        "method": "static_check",
+        "criteria": [
+          "T9: No leftover ACTIVE or ERROR children"
+        ],
+        "checks": [
+          {
+            "type": "tree_agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "oai-demo:july-mass-agent-0"
+    ]
   },
   {
     "name": "single-creator-arm",

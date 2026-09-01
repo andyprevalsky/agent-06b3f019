@@ -25,7 +25,10 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/general_purpose/explore
+    from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
+        drain_fast_mode_explores,
+        spawn_agent,
+    )
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
@@ -102,6 +105,14 @@ logger = structlog.get_logger()
 # is unreachable in a way that can't be classified as terminal. With the loop's 1s
 # floor sleep this is ~30s+ of continuous unreachability before giving up.
 _ORPHAN_TRANSIENT_FAILURE_LIMIT = 30
+# 50-way Fast Mode fan-out was flooding the parent workflow and the backend
+# with per-message tree broadcasts + per-iteration parent queries. Those
+# activities timed out (10s parent query, 10s tree update) and left children
+# ACTIVE when the 900s harness cap hit. Coalesce to one emit/query per
+# interval so cost stays O(1) per agent per window, not O(messages).
+_TREE_STATE_EMIT_MIN_INTERVAL = timedelta(seconds=3)
+_PARENT_STATE_QUERY_MIN_INTERVAL = timedelta(seconds=15)
+_QUERY_PARENT_STATE_TIMEOUT = timedelta(seconds=60)
 
 CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 CREATING_CLOUD_AGENT_TITLE = "Creating Cloud Agent"
@@ -201,6 +212,317 @@ def structured_response_from_schema_headings(text: str, schema: Optional[Dict[st
     return out
 
 
+_FAST_MODE_SUMMARY_MARKERS = (
+    "fast mode",
+    "cached trajectory",
+    "from_fast_cache",
+    "based on prior tool evidence",
+    "the task completed successfully; verified results are included below",
+)
+_PLUMBING_TOOL_MARKERS = (
+    "research started.",
+    "agent initializing",
+    "agent initialization complete",
+    "running verifier to check completion",
+    "explore agent thinking",
+    "**params passed:**",
+)
+_ROW_ITEM_TO_SCHEMA = {
+    "name": "creator_name",
+    "creator_name": "creator_name",
+    "rank": "rank_from_initial_list",
+    "rank_from_initial_list": "rank_from_initial_list",
+}
+_SCHEMA_FIELD_SECTION_ALIASES = {
+    "creator_name": ("creator name", "assigned creator"),
+    "platform_handles_and_urls": (
+        "handles",
+        "platform",
+        "youtube",
+        "instagram",
+        "tiktok",
+        "substack",
+        "account stats",
+    ),
+    "posting_cadence_by_platform": ("cadence", "posting frequency", "updated weekly"),
+    "hook_formulas": ("hook", "title pattern", "headline formula"),
+    "top_5_performing_pieces_last_90_days": (
+        "top 5",
+        "performing",
+        "last ~90",
+        "last 90",
+        "recent long-form",
+        "recent newsletter",
+    ),
+    "core_content_pillars": ("pillar", "formats across"),
+    "audience_persona": ("audience", "persona", "promise"),
+    "monetization_funnels": ("monetiz", "sponsorship", "paid/free", "pricing"),
+    "content_gaps": ("gap", "underserved"),
+    "opportunities_for_aman": ("takeaway", "opportunit", "whitespace", "competitive"),
+    "engagement_approach": ("engagement", "collab"),
+    "citations_sources": ("citation", "source note"),
+    "confidence_level": ("confidence",),
+}
+_EVIDENCE_TOOLS = {
+    "attempt_completion",
+    "attempt_completion_with_result",
+    "spawn_agent",
+    "send_message_to_user",
+    "web_fetch",
+    "web_search",
+    "grep",
+    "people_search",
+}
+_FLEX_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", flags=re.MULTILINE)
+
+
+def is_ablated_completion_summary(text: Any) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    lowered = raw.lower()
+    return any(marker in lowered for marker in _FAST_MODE_SUMMARY_MARKERS)
+
+
+def _message_body(message: Dict[str, Any]) -> str:
+    if not isinstance(message, dict):
+        return ""
+    text = str(message.get("text") or message.get("message") or "").strip()
+    if text:
+        return text
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    return str(
+        metadata.get("result") or metadata.get("content") or metadata.get("message") or ""
+    ).strip()
+
+
+def _is_plumbing_tool_text(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    # web_search / web_fetch bodies start with **Params Passed:** then the
+    # actual result. A long result is evidence, not chip plumbing.
+    if len(lowered) >= 200:
+        return False
+    return any(marker in lowered for marker in _PLUMBING_TOOL_MARKERS)
+
+
+def last_real_completion_text(
+    context: List[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Best user-facing Task Complete body from already-replayed trajectory evidence."""
+    for message in reversed(context or []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        status = str(metadata.get("toolStatus") or "").upper()
+        text = _message_body(message)
+        if is_ablated_completion_summary(text) or _is_plumbing_tool_text(text):
+            continue
+        if tool_name in {"attempt_completion", "attempt_completion_with_result"} and status in {
+            "FINISHED",
+            "",
+        }:
+            return text
+        if tool_name in _EVIDENCE_TOOLS and status in {"FINISHED", ""} and len(text) >= 200:
+            return text
+        if (
+            str(message.get("role") or "").upper() == "ASSISTANT"
+            and len(text) >= 200
+            and (
+                metadata.get("plannedToolName") == "reasoning"
+                or metadata.get("dagTaskIndex") is not None
+            )
+        ):
+            return text
+    if isinstance(structured_response, dict):
+        for value in structured_response.values():
+            if (
+                isinstance(value, str)
+                and len(value.strip()) >= 200
+                and not is_ablated_completion_summary(value)
+            ):
+                return value.strip()
+    return ""
+
+
+def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800) -> str:
+    """Collapse a long replayed report into a Task Complete card body."""
+    kept: List[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if is_ablated_completion_summary(line) or _is_plumbing_tool_text(line):
+            continue
+        kept.append(line)
+    blob = " ".join(kept).strip()
+    if not blob:
+        return ""
+    if len(blob) <= max_chars:
+        return blob
+    clipped = blob[:max_chars]
+    for separator in (". ", "! ", "? "):
+        idx = clipped.rfind(separator)
+        if idx >= min_chars:
+            return clipped[: idx + 1].strip()
+    return clipped.strip()
+
+
+def _completion_message_identity(message: Dict[str, Any]) -> str:
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    tool_call_id = str(metadata.get("toolCallId") or "").strip()
+    if tool_call_id:
+        return f"tc:{tool_call_id}"
+    return f"{message.get('role')}|{_message_body(message)[:80]}"
+
+
+def _merge_completion_transcripts(
+    polled: Optional[List[Dict[str, Any]]],
+    context: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep both in-memory context and posted rows; prefer the longer body."""
+    merged: List[Dict[str, Any]] = []
+    seen: Dict[str, int] = {}
+    for source in (context or [], polled or []):
+        if not isinstance(source, list):
+            continue
+        for message in source:
+            if not isinstance(message, dict):
+                continue
+            key = _completion_message_identity(message)
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = len(merged)
+                merged.append(message)
+                continue
+            if len(_message_body(message)) > len(_message_body(merged[existing])):
+                merged[existing] = message
+    return merged
+
+
+def card_summary_from_evidence(
+    context: List[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]] = None,
+    *,
+    min_chars: int = 200,
+) -> str:
+    """1-2 sentence Task Complete summary from replayed evidence, never Fast Mode copy."""
+    candidate = last_real_completion_text(context, structured_response)
+    brief = brief_card_summary(candidate, min_chars=min_chars)
+    if brief and not is_ablated_completion_summary(brief) and len(brief) >= min_chars:
+        return brief
+    if isinstance(structured_response, dict):
+        parts = [
+            str(value).strip()
+            for value in structured_response.values()
+            if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value)
+        ]
+        brief = brief_card_summary(" ".join(parts), min_chars=min_chars)
+        if brief and len(brief) >= min_chars:
+            return brief
+    return ""
+
+
+def _json_objects_in_text(text: str) -> List[Dict[str, Any]]:
+    raw = str(text or "")
+    if "{" not in raw:
+        return []
+    decoder = _json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    index = 0
+    while True:
+        start = raw.find("{", index)
+        if start < 0:
+            break
+        try:
+            obj, consumed = decoder.raw_decode(raw[start:])
+        except _json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        index = start + max(int(consumed), 1)
+    return found
+
+
+def _markdown_sections(text: str) -> List[Tuple[str, str]]:
+    matches = list(_FLEX_HEADING.finditer(text or ""))
+    if not matches:
+        return []
+    sections: List[Tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end() : end].strip()
+        if body:
+            sections.append((match.group(1).strip(), body))
+    return sections
+
+
+def _section_matches_field(title: str, field_name: str) -> bool:
+    lowered = title.lower()
+    human = field_name.replace("_", " ")
+    if human in lowered or field_name.lower() in lowered:
+        return True
+    for alias in _SCHEMA_FIELD_SECTION_ALIASES.get(field_name, ()):
+        if alias in lowered:
+            return True
+    return False
+
+
+def _fill_from_row_and_sections(
+    merged: Dict[str, Any],
+    names: List[str],
+    context: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    empty = (None, "", [], {})
+
+    def missing() -> List[str]:
+        return [name for name in names if name not in merged or merged[name] in empty]
+
+    for message in context or []:
+        if not isinstance(message, dict):
+            continue
+        for obj in _json_objects_in_text(_message_body(message)):
+            for raw_key, value in obj.items():
+                target = _ROW_ITEM_TO_SCHEMA.get(str(raw_key))
+                if target and target in names and merged.get(target) in empty + (None,):
+                    if value not in empty:
+                        merged[target] = value
+            for name in names:
+                if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
+                    merged[name] = obj[name]
+        if not missing():
+            return merged
+
+    used_titles: Set[str] = set()
+    for message in reversed(context or []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        role = str(message.get("role") or "").upper()
+        if role == "USER" and tool_name not in _EVIDENCE_TOOLS:
+            continue
+        text = _message_body(message)
+        if len(text) < 200 or _is_plumbing_tool_text(text):
+            continue
+        for title, body in _markdown_sections(text):
+            if title in used_titles:
+                continue
+            for name in missing():
+                if not _section_matches_field(title, name):
+                    continue
+                merged[name] = body
+                used_titles.add(title)
+                break
+        if not missing():
+            break
+    return merged
+
+
 def coalesce_structured_response(
     context: List[Dict[str, Any]],
     schema: Optional[Dict[str, Any]],
@@ -215,7 +537,7 @@ def coalesce_structured_response(
     ]
     if not names:
         for message in reversed(context or []):
-            text = str(message.get("text") or message.get("message") or "")
+            text = _message_body(message)
             extracted = structured_response_from_schema_headings(text, None)
             if not extracted:
                 continue
@@ -231,15 +553,8 @@ def coalesce_structured_response(
     if not _missing(merged):
         return merged
     for message in reversed(context or []):
-        text = str(message.get("text") or message.get("message") or "")
+        text = _message_body(message)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        if not text:
-            text = str(
-                metadata.get("result")
-                or metadata.get("content")
-                or metadata.get("message")
-                or ""
-            )
         extracted = structured_response_from_schema_headings(text, schema)
         if not extracted:
             extracted = _structured_from_payload(message, names)
@@ -252,6 +567,24 @@ def coalesce_structured_response(
                 merged[key] = value
         if not _missing(merged):
             break
+    return merged or structured_response
+
+
+def structured_response_from_evidence(
+    context: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Fill schema outputs from replayed assemble / explore / row-item evidence."""
+    merged = coalesce_structured_response(context, schema, structured_response)
+    merged = dict(merged) if isinstance(merged, dict) else {}
+    names = [
+        str(field.get("name"))
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    ]
+    if names:
+        merged = _fill_from_row_and_sections(merged, names, context)
     return merged or structured_response
 
 
@@ -379,6 +712,11 @@ class AgentWorkflow:
         # Coalesce bursts to at most one emit per _TREE_COST_EMIT_MIN_INTERVAL;
         # terminal/cost-limit transitions force-flush so the final value lands.
         self._last_tree_cost_emit_at: Optional[datetime] = None
+        self._last_tree_state_emit_at: Optional[datetime] = None
+        self._last_parent_state_query_at: Optional[datetime] = None
+        self._last_parent_state: Dict = {}
+        self._pending_message_handles: List[Any] = []
+        self._cached_local_data_summary: Optional[str] = None
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
         # Tree token tracking (hierarchical relay: child → parent → root)
@@ -587,6 +925,10 @@ class AgentWorkflow:
         if runtime_start_time is not None:
             self.start_time = runtime_start_time
         self._last_tree_cost_emit_at = self._restored_datetime(runtime.get("last_tree_cost_emit_at"))
+        self._last_tree_state_emit_at = self._restored_datetime(runtime.get("last_tree_state_emit_at"))
+        self._last_parent_state_query_at = self._restored_datetime(runtime.get("last_parent_state_query_at"))
+        last_parent_state = runtime.get("last_parent_state")
+        self._last_parent_state = dict(last_parent_state) if isinstance(last_parent_state, dict) else {}
         for field_name in (
             "compute_token_lineage_key",
             "compute_token_fast_cache_affinity_key",
@@ -706,6 +1048,9 @@ class AgentWorkflow:
                 "output_schema": self.output_schema,
                 "start_time": self._serialized_datetime(self.start_time),
                 "last_tree_cost_emit_at": self._serialized_datetime(self._last_tree_cost_emit_at),
+                "last_tree_state_emit_at": self._serialized_datetime(self._last_tree_state_emit_at),
+                "last_parent_state_query_at": self._serialized_datetime(self._last_parent_state_query_at),
+                "last_parent_state": dict(self._last_parent_state),
                 "compute_token_lineage_key": self.compute_token_lineage_key,
                 "compute_token_fast_cache_affinity_key": (self.compute_token_fast_cache_affinity_key),
                 "input_cents_per_1k": self.input_cents_per_1k,
@@ -1136,6 +1481,7 @@ class AgentWorkflow:
                 # workflow timers or activities until a valid signal unpauses us.
                 handoff_queue = await self._wait_for_unpause_or_handoff()
                 await self._wait_for_response_schema_refresh()
+                await self._flush_pending_messages()
                 if handoff_queue:
                     workflow.continue_as_new(
                         args=self._continuation_args(context),
@@ -1635,6 +1981,7 @@ class AgentWorkflow:
                     # attempt as an LLM-initiated finish.
                     if dag_result["status"] == "completed":
                         workflow.logger.info("[DAG] Tasks completed, attempting completion")
+                        await self._flush_pending_messages()
                         post_dag_result = await self._attempt_post_dag_completion(
                             agent_id=agent_id,
                             user_id=user_id,
@@ -2135,6 +2482,8 @@ class AgentWorkflow:
 
         # The canonical continuation contract also carries mutable counters,
         # credentials, and signal state so compaction cannot reset billing/limits.
+        await self._drain_fast_mode_explores()
+        await self._flush_pending_messages()
         workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
     async def _check_paused(self) -> bool:
@@ -2398,6 +2747,22 @@ class AgentWorkflow:
         """Compatibility wrapper for older tests/callers."""
         await self._refresh_compute_token(user_id)
 
+    async def _flush_pending_messages(self) -> None:
+        """Await Fast Mode message writes started off the critical path."""
+        handles = self._pending_message_handles
+        self._pending_message_handles = []
+        for handle in handles:
+            try:
+                await handle
+            except Exception as e:
+                workflow.logger.error(f"Failed to post message: {e}")
+
+    async def _drain_fast_mode_explores(self) -> None:
+        """Wait for fire-and-track OAi-demo explores before terminal status."""
+        if not getattr(self, "fast_mode_cache_enabled", False):
+            return
+        await drain_fast_mode_explores(self)
+
     async def _post_message(
         self,
         text: str,
@@ -2408,6 +2773,25 @@ class AgentWorkflow:
     ) -> None:
         """Post message to database."""
         try:
+            # Fast Mode replay is CPU/DB local. Awaiting every post_message
+            # activity under 50-way fan-out was the 900s leftover-ACTIVE
+            # bottleneck: each July GP step blocked on a 30s write. Start the
+            # write and keep looping; flush before terminal status so the
+            # transcript is durable when COMPLETED lands.
+            if self.fast_mode_cache_enabled and not self._is_finished:
+                handle = workflow.start_activity(
+                    post_agent_message,
+                    args=[self.agent_id, text, role, metadata],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                self._pending_message_handles.append(handle)
+                self.message_count += 1
+                if len(self._pending_message_handles) >= 20:
+                    await self._flush_pending_messages()
+                if update_tree:
+                    await self._update_tree_state()
+                return
             await workflow.execute_activity(
                 post_agent_message,
                 args=[self.agent_id, text, role, metadata],
@@ -2624,6 +3008,10 @@ class AgentWorkflow:
         role_alternation and causes the LLM to re-emit the same tool_calls
         (regression: smoke task `parallel-tool-calls`).
         """
+        if tool_name == "attempt_completion":
+            # OAi-demo Fast Mode fire-and-track explores must finish before
+            # this agent claims completion (T3 full trajs, T9 no leftovers).
+            await self._drain_fast_mode_explores()
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
             await self._handle_tool_event(
@@ -3342,16 +3730,29 @@ class AgentWorkflow:
         """
         if not self.parent_workflow_id:
             return {}
+        now = workflow.now()
+        if (
+            not self._paused_by_parent
+            and self._last_parent_state_query_at is not None
+            and (now - self._last_parent_state_query_at) < _PARENT_STATE_QUERY_MIN_INTERVAL
+        ):
+            return dict(self._last_parent_state)
         try:
-            return await workflow.execute_activity(
+            state = await workflow.execute_activity(
                 query_parent_state_activity,
                 args=[self.parent_workflow_id],
-                start_to_close_timeout=timedelta(seconds=10),
+                start_to_close_timeout=_QUERY_PARENT_STATE_TIMEOUT,
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to query parent state: {e}")
-            return {}
+            self._last_parent_state_query_at = now
+            return dict(self._last_parent_state)
+        self._last_parent_state_query_at = now
+        if isinstance(state, dict):
+            self._last_parent_state = dict(state)
+            return state
+        return dict(self._last_parent_state)
 
     async def _check_parent_state(self) -> None:
         """Pull-based parent state check. Mirrors parent's pause/cost-limit state.
@@ -3905,6 +4306,20 @@ class AgentWorkflow:
         if not self.bus_id:
             return
 
+        # Per-message broadcasts from 50 parallel children melt the 10s tree
+        # activity. Keep status transitions and the first message (so FE can
+        # leave "spinning up...") immediate; coalesce the rest.
+        explicit_status = status is not None
+        now = workflow.now()
+        if (
+            not explicit_status
+            and self.message_count != 1
+            and self._last_tree_state_emit_at is not None
+            and (now - self._last_tree_state_emit_at) < _TREE_STATE_EMIT_MIN_INTERVAL
+        ):
+            return
+        self._last_tree_state_emit_at = now
+
         tools_list = list(self.tools_in_use)
 
         # Build broadcast payload
@@ -3965,6 +4380,8 @@ class AgentWorkflow:
             # resets this workflow instance's revision counters.
             await self._wait_for_response_schema_refresh()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
+            await self._drain_fast_mode_explores()
+            await self._flush_pending_messages()
             if handoff_queue:
                 workflow.continue_as_new(
                     args=self._continuation_args(result.get("context")),
@@ -3982,6 +4399,8 @@ class AgentWorkflow:
                 workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")
                 return result
             await self._wait_for_response_schema_refresh()
+            await self._drain_fast_mode_explores()
+            await self._flush_pending_messages()
             workflow.logger.info(
                 f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
             )
@@ -4165,9 +4584,13 @@ class AgentWorkflow:
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
+        # Drain fire-and-track explores before latching so leftover ACTIVE
+        # children cannot survive a FAILED parent (T9).
+        await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
+        await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
         # stale) value is corrected to the exact terminal cost. Recalc first; do
@@ -4288,6 +4711,23 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
 
+    async def _completion_transcript(self, context: List[Dict]) -> List[Dict]:
+        """Durable posted transcript, including assemble/explore rows posted after context snapshot."""
+        try:
+            polled = await workflow.execute_activity(
+                poll_new_messages,
+                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc), True],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception as exc:
+            workflow.logger.warning(f"completion transcript poll failed: {exc}")
+            polled = None
+        return _merge_completion_transcripts(
+            polled if isinstance(polled, list) else None,
+            list(context or []),
+        )
+
     def _coalesce_structured_response(
         self, context: List[Dict], structured_response: Optional[Dict]
     ) -> Optional[Dict]:
@@ -4298,7 +4738,7 @@ class AgentWorkflow:
         verifier `output` dict stays empty because schema gen missed. Without this
         merge, Task Complete has a summary but no Output section.
         """
-        return coalesce_structured_response(context, self.output_schema, structured_response)
+        return structured_response_from_evidence(context, self.output_schema, structured_response)
 
     def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
         """Convert structured_response → CompletionSummaryCard outputs format."""
@@ -4348,10 +4788,14 @@ class AgentWorkflow:
         """
         await self._await_deferred_startup()
         workflow.logger.info("✓ Marking task complete")
+        # Drain fire-and-track explores before latching COMPLETED so T9 sees
+        # no leftover ACTIVE children under a finished GP.
+        await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST so any late child_cost_update signal
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
+        await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
         # stale) value is corrected to the exact terminal cost. Recalc first, then
@@ -4452,6 +4896,16 @@ class AgentWorkflow:
                 workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
 
             summary = summary_result.get("summary", "")
+            transcript = await self._completion_transcript(context)
+            structured_response = self._coalesce_structured_response(transcript, structured_response)
+            if is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200:
+                recovered = card_summary_from_evidence(transcript, structured_response)
+                if (
+                    recovered
+                    and not is_ablated_completion_summary(recovered)
+                    and len(recovered) >= 200
+                ):
+                    summary = recovered
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":
                 # the root completion SMS is gated on `summary` being truthy,
@@ -4494,7 +4948,6 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
-            structured_response = self._coalesce_structured_response(context, structured_response)
             formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",

@@ -44,10 +44,15 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "browser_agent_session_count",
     "completion_sms_event",
     "completion_summary_length",
+    "first_level_gp_count",
+    "root_deliverable_markers",
+    "tree_agent_status",
     "expected_gate",
     "expected_payment_receipt",
     "no_browser_agent_failures",
     "no_tool_failures",
+    "explore_research_not_reject_loop",
+    "explore_completion_summary",
     # runner="sms" — trajectory checks over the literal outbound text thread.
     # Implemented in benchmarks/sms_runner.py:run_sms_static_check.
     "sms_no_forbidden_phrases",

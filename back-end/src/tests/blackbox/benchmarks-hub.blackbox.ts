@@ -376,10 +376,18 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
       headers: internalHeaders,
     });
     assertStatus(subView.status, 200, subView.data);
-    const subData = subView.data as { messages: Array<{ text: string }> };
+    const subData = subView.data as {
+      messages: Array<{ text: string }>;
+      agent: { parent_agent_id: string | null; parent_goal: string | null };
+    };
     assert(
       subData.messages.length === 1 && subData.messages[0].text === 'sub result',
       'sub-agent transcript wrong'
+    );
+    assert(subData.agent.parent_agent_id === ROOT_AGENT, 'hub sub-agent parent_agent_id missing');
+    assert(
+      subData.agent.parent_goal === 'hub blackbox goal',
+      `hub sub-agent parent_goal ${String(subData.agent.parent_goal)} != hub blackbox goal`
     );
 
     // unknown agent → 404

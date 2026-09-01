@@ -1,0 +1,104 @@
+/**
+ * Hub-archived GPs have parent_agent_id but GET /ancestors is empty (live CTE
+ * misses torn-down bench rows). GET /tree and GET /agents/:parent already work
+ * on prod — the trail must come from those, like live runs: parent > current.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { renderHook, waitFor } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
+import { server } from './msw/server';
+import { mockTerminalHookSession } from './terminal-hooks.fixtures';
+import { useAncestors } from '@/features/terminal/hooks/useAncestors';
+import { API_BASE_WITH_PATH } from '@/lib/api/client';
+
+const API_BASE = API_BASE_WITH_PATH;
+const GP = 'gp-creator-1';
+const ROOT = 'root-creator-1';
+const PARENT_GOAL = "I'm building a creator-brand for health";
+
+describe('useAncestors (hub / archived sub-agents)', () => {
+  beforeEach(() => {
+    mockTerminalHookSession();
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId/ancestors`, () => HttpResponse.json({ ancestors: [] })),
+    );
+  });
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('walks GET /tree when ancestors is empty so parent > current is clickable', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/tree`, ({ request }) => {
+        const busId = new URL(request.url).searchParams.get('busId');
+        expect(busId).toBe(ROOT);
+        return HttpResponse.json({
+          agents: [
+            {
+              agent_id: ROOT,
+              parent_agent_id: null,
+              goal: PARENT_GOAL,
+              status: 'COMPLETED',
+              progress: 100,
+              tools_in_use: [],
+              message_count: 2,
+              tree_cost_cents: 0,
+            },
+            {
+              agent_id: GP,
+              parent_agent_id: ROOT,
+              goal: 'You are analyzing ONE creator',
+              status: 'COMPLETED',
+              progress: 100,
+              tools_in_use: [],
+              message_count: 4,
+              tree_cost_cents: 0,
+            },
+          ],
+        });
+      }),
+    );
+
+    const { result, unmount } = renderHook(() => useAncestors(GP, ROOT, null));
+    await waitFor(() => expect(result.current.length).toBe(1));
+    expect(result.current[0]).toEqual({
+      id: ROOT,
+      goal: PARENT_GOAL,
+    });
+    unmount();
+  });
+
+  it('falls back to GET parent agent when tree is empty too', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/tree`, () => HttpResponse.json({ agents: [] })),
+      http.get(`${API_BASE}/agents/${ROOT}`, () =>
+        HttpResponse.json({
+          agent: {
+            agent_id: ROOT,
+            goal: PARENT_GOAL,
+            parent_agent_id: null,
+          },
+          messages: [],
+        }),
+      ),
+    );
+
+    const { result, unmount } = renderHook(() => useAncestors(GP, ROOT, null));
+    await waitFor(() => expect(result.current.length).toBe(1));
+    expect(result.current[0].id).toBe(ROOT);
+    expect(result.current[0].goal).toContain('creator-brand');
+    unmount();
+  });
+
+  it('uses parent_goal without another fetch when the API already has it', async () => {
+    const { result, unmount } = renderHook(() =>
+      useAncestors(GP, ROOT, PARENT_GOAL),
+    );
+    await waitFor(() => expect(result.current.length).toBe(1));
+    expect(result.current[0]).toEqual({
+      id: ROOT,
+      goal: PARENT_GOAL,
+    });
+    unmount();
+  });
+});

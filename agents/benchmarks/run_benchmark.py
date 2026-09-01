@@ -70,7 +70,11 @@ from benchmarks.live_fixtures import (
     TAMY_IDENTITY_USER_ID,
     resolve_live_fixtures,
 )
-from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
+from benchmarks.llm_usage import (
+    aggregate_repeatable_cache_usage,
+    aggregate_usage_items,
+    live_output_tokens,
+)
 from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
     canonicalize_agent_tree,
@@ -8339,11 +8343,363 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
-def _declared_evaluator_evidence(data: dict) -> list[dict]:
-    """Build a bounded evidence-only context for a declared LLM judge."""
-    from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence
+_JUDGE_STUB_MARKERS = (
+    "fm_cold_namespace_passthrough",
+    "fm_trajectory_end_passthrough",
+    "Fast Mode cache trajectory ended",
+)
+_JUDGE_RESEARCH_TOOLS = {"web_search", "web_fetch", "grep"}
 
-    return build_single_turn_evidence(data)
+
+def _message_text_for_judge(message: dict) -> str:
+    text_value = message.get("text", message.get("message", message.get("content", "")))
+    if not isinstance(text_value, str):
+        text_value = json.dumps(text_value, default=str)
+    return text_value
+
+
+def _compact_messages_for_judge(messages: list, *, limit: int = 80, text_chars: int = 400) -> list[dict]:
+    """Keep tool/status chips, not 12k-char web_search bodies (smoke10 413'd at 35MB)."""
+    compacted: list[dict] = []
+    for message in messages[-limit:]:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").upper()
+        if role in {"USER", "SYSTEM"}:
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence_metadata = {
+            key: metadata[key]
+            for key in (
+                "action_type",
+                "toolName",
+                "toolStatus",
+                "agentType",
+                "title",
+                "url",
+                "requestUserApproval",
+                "toolCallId",
+                "subAgentId",
+                "task_id",
+                "browser_url",
+                "browser_session_metadata",
+            )
+            if key in metadata
+        }
+        compacted.append(
+            {
+                "role": role or "UNKNOWN",
+                "text": _message_text_for_judge(message)[:text_chars],
+                "metadata": evidence_metadata,
+            }
+        )
+    return compacted
+
+
+def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
+    messages = node.get("messages") if isinstance(node.get("messages"), list) else []
+    collected_count = len(messages)
+    tool_counts: dict[str, int] = {}
+    error_tool_count = 0
+    research_tool_count = 0
+    explore_spawn_count = 0
+    has_traj_end_marker = False
+    blob_parts = [str(node.get("goal") or ""), str(node.get("title") or "")]
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        text_value = _message_text_for_judge(message)
+        blob_parts.append(text_value[:400])
+        if any(marker in text_value for marker in _JUDGE_STUB_MARKERS):
+            has_traj_end_marker = True
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        tool_status = str(metadata.get("toolStatus") or "").upper()
+        if tool_name and tool_status == "FINISHED":
+            tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+        if tool_name and tool_status == "ERROR":
+            error_tool_count += 1
+        if tool_name in _JUDGE_RESEARCH_TOOLS:
+            research_tool_count += 1
+        if tool_name == "spawn_agent" and metadata.get("agentType") == "explore":
+            explore_spawn_count += 1
+    blob = " ".join(blob_parts).lower()
+    mentions_andy = "andy prevalsky" in blob or "andy's" in blob
+    mentions_aman = "aman gottumukkala" in blob or "aman's" in blob
+    goal = str(node.get("goal") or "")
+    agent_type = "general_purpose" if goal.startswith("You are analyzing ONE creator") else node.get("agent_type")
+    has_real_work = (
+        collected_count >= 2
+        or research_tool_count >= 1
+        or explore_spawn_count >= 1
+        or sum(tool_counts.values()) >= 1
+    )
+    completion_cards = _completion_cards_from_messages(messages)
+    completion_card = completion_cards[-1] if completion_cards else {}
+    return {
+        "agent_id": agent_id,
+        "parent_agent_id": node.get("parent_agent_id"),
+        "status": node.get("status"),
+        "agent_type": agent_type,
+        "goal": goal[:240],
+        "title": str(node.get("title") or "")[:120],
+        "message_count": collected_count if collected_count else int(node.get("message_count") or 0),
+        "tool_counts": tool_counts,
+        "error_tool_count": error_tool_count,
+        "research_tool_count": research_tool_count,
+        "explore_spawn_count": explore_spawn_count,
+        "has_real_transcript": has_real_work,
+        "has_traj_end_stub": has_traj_end_marker and not has_real_work,
+        "mentions_andy": mentions_andy,
+        "mentions_aman": mentions_aman,
+        "response_schema": node.get("response_schema") or node.get("output_schema"),
+        "structured_output_present": bool(node.get("structured_output") or node.get("structured_response")),
+        "completion_summary": str((completion_card or {}).get("summary") or "")[:240],
+        "completion_outputs_count": len((completion_card or {}).get("outputs") or [])
+        if isinstance((completion_card or {}).get("outputs"), list)
+        else 0,
+        "completion_is_ablated": any(
+            marker.lower() in str((completion_card or {}).get("summary") or "").lower()
+            for marker in _JUDGE_STUB_MARKERS
+        ),
+    }
+
+
+def _child_tool_counts_from_root_messages(messages: list) -> dict[str, dict[str, int]]:
+    """Parent spawn chips carry childToolCounts when Agent.messageCount is stale."""
+    out: dict[str, dict[str, int]] = {}
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        sub_id = metadata.get("subAgentId") or metadata.get("sub_agent_id")
+        counts = metadata.get("childToolCounts") or metadata.get("child_tool_counts")
+        if not sub_id or not isinstance(counts, dict):
+            continue
+        normalized = {
+            str(name): int(count or 0)
+            for name, count in counts.items()
+            if int(count or 0) > 0
+        }
+        if normalized:
+            out[str(sub_id)] = normalized
+    return out
+
+
+def _is_explore_tree_node(node: dict) -> bool:
+    if node.get("agent_type") == "explore":
+        return True
+    goal = str(node.get("goal") or "")
+    title = str(node.get("title") or "")
+    return goal.startswith("Explore ") or "explore agent" in title.lower()
+
+
+def _tree_root_id(tree: dict, data: dict) -> Optional[str]:
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    hinted = agent.get("agent_id") or agent.get("id")
+    if hinted and str(hinted) in tree:
+        return str(hinted)
+    for agent_id, node in tree.items():
+        if isinstance(node, dict) and not node.get("parent_agent_id"):
+            return str(agent_id)
+    return None
+
+
+def _has_real_gp_transcript(node: dict) -> bool:
+    if node.get("has_real_transcript"):
+        return True
+    if int(node.get("message_count") or 0) >= 2:
+        return True
+    if int(node.get("research_tool_count") or 0) >= 1:
+        return True
+    if int(node.get("explore_spawn_count") or 0) >= 1:
+        return True
+    tools = node.get("tool_counts") if isinstance(node.get("tool_counts"), dict) else {}
+    return sum(int(count or 0) for count in tools.values()) >= 1
+
+
+def _apply_parent_child_tool_counts(compact_tree: dict, data: dict) -> None:
+    """Fill empty GP nodes from parent spawn childToolCounts (smoke13 stale count=1)."""
+    raw_tree = (data.get("_benchmark") or {}).get("tree") if isinstance(data.get("_benchmark"), dict) else {}
+    raw_tree = raw_tree if isinstance(raw_tree, dict) else {}
+    logs_tree = (data.get("logs") or {}).get("tree") if isinstance(data.get("logs"), dict) else {}
+    logs_tree = logs_tree if isinstance(logs_tree, dict) else {}
+    root_id = _tree_root_id(compact_tree, data)
+    root_messages: list = []
+    if root_id:
+        for source in (raw_tree.get(root_id), logs_tree.get(root_id)):
+            if isinstance(source, dict) and isinstance(source.get("messages"), list):
+                root_messages = source["messages"]
+                break
+    if not root_messages:
+        root_messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    child_tools = _child_tool_counts_from_root_messages(root_messages)
+    for agent_id, node in compact_tree.items():
+        counts = child_tools.get(str(agent_id))
+        if not counts or _has_real_gp_transcript(node):
+            continue
+        merged = {**counts, **(node.get("tool_counts") or {})}
+        node["tool_counts"] = merged
+        node["research_tool_count"] = int(node.get("research_tool_count") or 0) + sum(
+            int(counts.get(name) or 0) for name in _JUDGE_RESEARCH_TOOLS
+        )
+        node["explore_spawn_count"] = int(node.get("explore_spawn_count") or 0) + int(counts.get("spawn_agent") or 0)
+        node["has_real_transcript"] = True
+        if int(node.get("message_count") or 0) < 2:
+            node["message_count"] = max(int(node.get("message_count") or 0), sum(counts.values()))
+
+
+def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[dict]:
+    root_id = _tree_root_id(compact_tree, data)
+    if not root_id:
+        return []
+    gps: list[dict] = []
+    for agent_id, node in compact_tree.items():
+        if str(node.get("parent_agent_id") or "") != str(root_id):
+            continue
+        if _is_explore_tree_node(node):
+            continue
+        gps.append(
+            {
+                "agent_id": agent_id,
+                "status": node.get("status"),
+                "agent_type": node.get("agent_type"),
+                "message_count": int(node.get("message_count") or 0),
+                "research_tool_count": int(node.get("research_tool_count") or 0),
+                "explore_spawn_count": int(node.get("explore_spawn_count") or 0),
+                "has_real_transcript": _has_real_gp_transcript(node),
+                "has_traj_end_stub": bool(node.get("has_traj_end_stub")),
+                "completion_summary": str(node.get("completion_summary") or "")[:240],
+                "completion_outputs_count": int(node.get("completion_outputs_count") or 0),
+                "completion_is_ablated": bool(node.get("completion_is_ablated")),
+            }
+        )
+    return gps
+
+
+def _first_level_gps_from_data(data: dict) -> list[dict]:
+    return list(_compact_benchmark_state_for_judge(data).get("first_level_gps") or [])
+
+
+def _judge_source_tree(data: dict) -> dict:
+    """Prefer collected transcripts; fall back to logs.tree when `_benchmark.tree` is metadata-only."""
+    raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    trees: list[dict] = []
+    for candidate in (raw.get("tree"), (data.get("logs") or {}).get("tree") if isinstance(data.get("logs"), dict) else None):
+        if isinstance(candidate, dict) and candidate:
+            trees.append(candidate)
+    if not trees:
+        return {}
+    if len(trees) == 1:
+        return trees[0]
+    merged: dict[str, dict] = {}
+    for tree in trees:
+        for agent_id, node in tree.items():
+            if not isinstance(node, dict):
+                continue
+            key = str(agent_id)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = node
+                continue
+            existing_msgs = existing.get("messages") if isinstance(existing.get("messages"), list) else []
+            node_msgs = node.get("messages") if isinstance(node.get("messages"), list) else []
+            if len(node_msgs) > len(existing_msgs):
+                merged[key] = node
+    return merged
+
+
+def _compact_benchmark_state_for_judge(data: dict) -> dict:
+    """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
+    raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    compact = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"tree", "all_agents", "first_level_gps"}
+    }
+    tree = _judge_source_tree(data)
+    compact_tree: dict[str, dict] = {}
+    if tree:
+        compact_tree = {
+            str(agent_id): _compact_tree_node_for_judge(str(agent_id), node)
+            for agent_id, node in tree.items()
+            if isinstance(node, dict)
+        }
+        _apply_parent_child_tool_counts(compact_tree, data)
+        compact["tree"] = compact_tree
+    collected_counts = {agent_id: int(node.get("message_count") or 0) for agent_id, node in compact_tree.items()}
+    agents = raw.get("all_agents")
+    if isinstance(agents, list):
+        compact["all_agents"] = [
+            {
+                "agent_id": agent.get("agent_id") or agent.get("id"),
+                "parent_agent_id": agent.get("parent_agent_id"),
+                "status": agent.get("status"),
+                "goal": str(agent.get("goal") or "")[:240],
+                "message_count": collected_counts.get(str(agent.get("agent_id") or agent.get("id") or ""))
+                or agent.get("message_count")
+                or 0,
+                "depth": agent.get("depth"),
+            }
+            for agent in agents
+            if isinstance(agent, dict)
+        ]
+    compact["first_level_gps"] = _first_level_gps_from_compact_tree(compact_tree, data)
+    compact["usage"] = {
+        "cost_cents": data.get("cost_cents") or raw.get("cost_cents") or 0,
+        "tokens_out": data.get("tokens_out") or raw.get("tree_tokens_out") or 0,
+        "cache_creation_input_tokens": data.get("cache_creation_input_tokens")
+        or raw.get("cache_creation_input_tokens")
+        or 0,
+        "live_output_tokens": data.get("live_output_tokens") or raw.get("live_output_tokens") or 0,
+        "cache_read_input_tokens": data.get("cache_read_input_tokens") or raw.get("cache_read_input_tokens") or 0,
+    }
+    return compact
+
+
+def _apply_compact_benchmark_state(evidence: list[dict], compact_state: dict) -> list[dict]:
+    for row in evidence:
+        if isinstance(row, dict) and "benchmark_state" in row:
+            row["benchmark_state"] = compact_state
+            break
+    else:
+        evidence.append({"benchmark_state": compact_state})
+    return evidence
+
+
+def _declared_evaluator_evidence(data: dict) -> list[dict]:
+    """Build a bounded evidence-only context for a declared LLM judge.
+
+    Payment-approval metadata and root transcripts come from the tree-aware
+    single-turn builder. ``benchmark_state`` is the compact T-row view so
+    mass-agent trees cannot 413 the judge with 35MB child bodies. When the
+    hydrated child transcripts still blow the single-turn budget, drop them.
+    When the remaining root tail (120 × 12k GP rows) is still over budget,
+    keep only the completion card + compact typed state — T-row judges are
+    written for that compact view, not the agentic Codex fallback.
+    """
+    from benchmarks.semantic_evaluator_evidence import (
+        SINGLE_TURN_TEXT_CAP,
+        _append_completion_card,
+        build_single_turn_evidence,
+        single_turn_evidence_exceeds_budget,
+    )
+
+    compact_state = _compact_benchmark_state_for_judge(data)
+    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
+    if not single_turn_evidence_exceeds_budget(evidence):
+        return evidence
+    slim = dict(data)
+    slim["_semantic_evaluator_tree"] = None
+    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
+    if not single_turn_evidence_exceeds_budget(evidence):
+        return evidence
+    compact_only: list[dict] = []
+    _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
+    evidence = _apply_compact_benchmark_state(compact_only, compact_state)
+    if not single_turn_evidence_exceeds_budget(evidence):
+        return evidence
+    return [{"benchmark_state": compact_state}]
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -9118,6 +9474,120 @@ def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[di
     )
 
 
+_EXPLORE_RESEARCH_TOOLS = frozenset({"web_search", "web_fetch", "grep", "people_search"})
+
+
+def _message_tool_meta(message: dict) -> dict:
+    metadata = message.get("metadata") if isinstance(message, dict) else None
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _explore_reject_loop_failures(data: dict, *, min_rejects: int = 2) -> list[str]:
+    """GP explore chips that only reject completion (no search/fetch) are broken."""
+    failures: list[str] = []
+
+    def consider(messages: list, label: str) -> None:
+        by_task: dict[str, dict[str, int]] = {}
+        for message in messages or []:
+            if not isinstance(message, dict):
+                continue
+            metadata = _message_tool_meta(message)
+            tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+            title = str(metadata.get("title") or "")
+            task_id = str(
+                metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or ""
+            )
+            if not task_id:
+                continue
+            stats = by_task.setdefault(task_id, {"rejects": 0, "research": 0})
+            if "attempt_completion_with_result rejected" in title:
+                stats["rejects"] += 1
+            if tool_name in _EXPLORE_RESEARCH_TOOLS:
+                stats["research"] += 1
+        for task_id, stats in by_task.items():
+            if stats["rejects"] >= min_rejects and stats["research"] == 0:
+                failures.append(
+                    f"{label} explore {task_id[:8]} had {stats['rejects']} "
+                    "attempt_completion_with_result rejects and 0 research tools"
+                )
+
+    consider(data.get("messages") or [], "root")
+    tree = _judge_source_tree(data)
+    for agent_id, node in tree.items():
+        if not isinstance(node, dict):
+            continue
+        consider(node.get("messages") or [], f"gp {str(agent_id)[:8]}")
+    return failures
+
+
+_EXPLORE_SUMMARY_STUBS = frozenset({"research started.", "research started"})
+_EXPLORE_SUMMARY_FORBIDDEN = (
+    "fast mode",
+    "cached trajectory",
+    "verified results are included below",
+    "without a final summary",
+    "raw tool results below",
+)
+
+
+def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[str]:
+    """GP explore chips that research but never post a user-facing wrap-up."""
+    failures: list[str] = []
+
+    def consider(messages: list, label: str) -> None:
+        by_task: dict[str, dict[str, int]] = {}
+        for message in messages or []:
+            if not isinstance(message, dict):
+                continue
+            metadata = _message_tool_meta(message)
+            if str(metadata.get("agentType") or "") != "explore":
+                continue
+            task_id = str(
+                metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or ""
+            )
+            if not task_id:
+                continue
+            stats = by_task.setdefault(task_id, {"research": 0, "best": 0})
+            tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+            if tool_name in _EXPLORE_RESEARCH_TOOLS:
+                stats["research"] += 1
+            title = str(metadata.get("title") or "")
+            if title == "Explore agent thinking":
+                continue
+            if tool_name != "spawn_agent":
+                continue
+            if str(metadata.get("toolStatus") or "").upper() != "FINISHED":
+                continue
+            body = str(message.get("message") or message.get("text") or "").strip()
+            if not body or body.lower() in _EXPLORE_SUMMARY_STUBS:
+                continue
+            lowered = body.lower()
+            if any(marker in lowered for marker in _EXPLORE_SUMMARY_FORBIDDEN):
+                continue
+            stats["best"] = max(stats["best"], len(body))
+        for task_id, stats in by_task.items():
+            if stats["research"] == 0:
+                continue
+            if stats["best"] < min_chars:
+                failures.append(
+                    f"{label} explore {task_id[:8]} replayed {stats['research']} research tools "
+                    f"but the chip summary is {stats['best']} chars (need >= {min_chars})"
+                )
+
+    consider(data.get("messages") or [], "root")
+    tree = _judge_source_tree(data)
+    for agent_id, node in tree.items():
+        if not isinstance(node, dict):
+            continue
+        consider(node.get("messages") or [], f"gp {str(agent_id)[:8]}")
+    return failures
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -9165,10 +9635,44 @@ def _tool_runtime_failures(data: dict) -> list[str]:
     return failures
 
 
+def _root_assemble_deliverables(data: dict) -> list[dict]:
+    """July Fast Mode lands the real deliverable in DAG reasoning ASSISTANT chips."""
+    deliverables: list[dict] = []
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").upper() != "ASSISTANT":
+            continue
+        text = _message_text_for_judge(message)
+        if len(text) < 1000:
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        is_assemble = (
+            metadata.get("plannedToolName") == "reasoning"
+            or metadata.get("dagTaskIndex") is not None
+            or str(metadata.get("streamId") or "").startswith("dag-")
+        )
+        if not is_assemble:
+            continue
+        deliverables.append({"text": text, "chars": len(text)})
+    deliverables.sort(key=lambda item: item["chars"], reverse=True)
+    return deliverables[:4]
+
+
+def _root_deliverable_blob(data: dict) -> str:
+    parts = [str(summary.get("summary") or "") for summary in _final_completion_summaries(data)]
+    parts.extend(item["text"] for item in _root_assemble_deliverables(data))
+    return "\n".join(part for part in parts if part)
+
+
 def _final_completion_summaries(data: dict) -> list[dict]:
     """Return durable root completion cards in transcript order."""
+    return _completion_cards_from_messages(data.get("messages", []) or [])
+
+
+def _completion_cards_from_messages(messages: list) -> list[dict]:
     summaries: list[dict] = []
-    for message in data.get("messages", []) or []:
+    for message in messages or []:
         if not isinstance(message, dict):
             continue
         metadata = message.get("metadata")
@@ -9182,6 +9686,41 @@ def _final_completion_summaries(data: dict) -> list[dict]:
         ):
             summaries.append(completion)
     return summaries
+
+
+def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: bool) -> list[dict]:
+    """Root Task Complete cards, plus first-level GP cards when requested."""
+    cards: list[dict] = []
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "root")
+    for summary in _final_completion_summaries(data):
+        cards.append(
+            {
+                "agent_id": root_id,
+                "summary": summary.get("summary"),
+                "outputs": summary.get("outputs"),
+            }
+        )
+    if not include_first_level_gps:
+        return cards
+    compact = _compact_benchmark_state_for_judge(data)
+    tree = _judge_source_tree(data)
+    for gp in compact.get("first_level_gps") or []:
+        agent_id = str(gp.get("agent_id") or "")
+        node = tree.get(agent_id) if isinstance(tree.get(agent_id), dict) else {}
+        gp_cards = _completion_cards_from_messages(node.get("messages") or [])
+        if not gp_cards:
+            cards.append({"agent_id": agent_id or "gp", "summary": "", "outputs": []})
+            continue
+        last = gp_cards[-1]
+        cards.append(
+            {
+                "agent_id": agent_id or "gp",
+                "summary": last.get("summary"),
+                "outputs": last.get("outputs"),
+            }
+        )
+    return cards
 
 
 async def _hydrate_completion_sms_events(data: dict) -> None:
@@ -9333,17 +9872,47 @@ def _run_declared_static_check(
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
             continue
+        if check_type == "explore_research_not_reject_loop":
+            loops = _explore_reject_loop_failures(
+                data, min_rejects=int(check.get("min_rejects", 3))
+            )
+            if loops:
+                return False, loops[0]
+            continue
+        if check_type == "explore_completion_summary":
+            missing = _explore_chip_summary_failures(
+                data, min_chars=int(check.get("min_chars", 200))
+            )
+            if missing:
+                return False, missing[0]
+            continue
         if check_type == "completion_summary_length":
-            summaries = _final_completion_summaries(data)
-            if not summaries:
+            cards = _completion_cards_for_static_check(
+                data,
+                include_first_level_gps=bool(check.get("include_first_level_gps")),
+            )
+            if not cards:
                 return False, "No finished completion summary was observed"
             minimum = int(check.get("min_chars", 1))
-            summary = str(summaries[-1].get("summary") or "").strip()
-            if len(summary) < minimum:
-                return (
-                    False,
-                    f"Completion summary was {len(summary)} characters; expected at least {minimum}",
-                )
+            forbidden = [str(item) for item in (check.get("forbidden_substrings") or []) if str(item).strip()]
+            require_outputs = bool(check.get("require_outputs"))
+            for card in cards:
+                summary = str(card.get("summary") or "").strip()
+                label = str(card.get("agent_id") or "root")[:8]
+                if any(marker.lower() in summary.lower() for marker in forbidden):
+                    return (
+                        False,
+                        f"T7: {label} Task Complete summary is Fast Mode-ablated",
+                    )
+                if len(summary) < minimum:
+                    return (
+                        False,
+                        f"T7: {label} completion summary was {len(summary)} characters; "
+                        f"expected at least {minimum}",
+                    )
+                outputs = card.get("outputs")
+                if require_outputs and (not isinstance(outputs, list) or not outputs):
+                    return False, f"T7: {label} Task Complete has no schema outputs"
             continue
         if check_type == "completion_sms_event":
             events = benchmark_state.get("completion_sms_events") or []
@@ -9458,6 +10027,56 @@ def _run_declared_static_check(
                 ):
                     return False, f"{kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type == "tree_agent_status":
+            expected = str(check.get("value") or "COMPLETED").upper()
+            compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
+            leftovers = []
+            for agent_id, node in compact_tree.items():
+                status = str(node.get("status") or "UNKNOWN").upper()
+                if status != expected:
+                    leftovers.append(f"{agent_id[:8]}={status}")
+            if leftovers:
+                return False, f"T9: leftover children {', '.join(leftovers[:8])}"
+            if not compact_tree:
+                return False, "T9: typed tree was empty"
+            continue
+        if check_type == "root_deliverable_markers":
+            blob = _root_deliverable_blob(data)
+            minimum = int(check.get("min_chars", 4000))
+            if len(blob) < minimum:
+                return (
+                    False,
+                    f"T7: deliverable blob was {len(blob)} characters; expected at least {minimum}",
+                )
+            lowered = blob.lower()
+            missing = [
+                marker
+                for marker in (check.get("required_strings") or [])
+                if str(marker).lower() not in lowered
+            ]
+            if missing:
+                return False, f"T7: deliverable missing required marker {missing[0]!r}"
+            creator_names = [str(name) for name in (check.get("creator_names") or []) if str(name).strip()]
+            min_creators = int(check.get("min_creator_names") or 0)
+            if creator_names and min_creators:
+                found = [name for name in creator_names if name.lower() in lowered]
+                if len(found) < min_creators:
+                    return (
+                        False,
+                        f"T7: deliverable named {len(found)} July creators; expected >= {min_creators}",
+                    )
+            continue
+        if check_type == "first_level_gp_count":
+            gps = _first_level_gps_from_data(data)
+            minimum = int(check.get("min", 50))
+            real = [gp for gp in gps if gp.get("has_real_transcript")]
+            if len(real) < minimum:
+                return (
+                    False,
+                    f"T2: {len(real)} first-level GPs with real transcripts "
+                    f"(of {len(gps)} first-level GPs); expected >= {minimum}",
+                )
+            continue
         if check_type == "approval_request_details_for_seen_kind":
             observed_kind = benchmark_state.get("attention_request_kind_seen")
             details_by_kind = check.get("details_by_kind") or {}
@@ -9530,11 +10149,10 @@ async def _run_declared_evaluators(
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
                 from benchmarks.semantic_evaluator_evidence import (
-                    build_single_turn_evidence,
                     single_turn_evidence_exceeds_budget,
                 )
 
-                evidence = build_single_turn_evidence(data)
+                evidence = _declared_evaluator_evidence(data)
                 if single_turn_evidence_exceeds_budget(evidence):
                     judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
                     evidence_mode = "agentic_llm_judge"
@@ -10034,6 +10652,14 @@ async def run_single_task(
             **data.get("_benchmark", {}),
             "agent_class_step_counts": agent_class_step_counts,
             "min_steps": dict(task.min_steps),
+            "usage": {
+                "cost_cents": float(cost_cents or 0),
+                "cache_read_input_tokens": int(cache_read_input_tokens or 0),
+                "cache_creation_input_tokens": int(cache_creation_input_tokens or 0),
+                "tokens_in": int(tokens_in or 0),
+                "tokens_out": int(tokens_out or 0),
+                "live_output_tokens": live_output_tokens(llm_usage_by_provider),
+            },
         }
         expected_gate_terminal = (
             task.expected_gate
@@ -10161,6 +10787,34 @@ async def run_single_task(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
+        if task.enforce_declared_evaluators and passed:
+            try:
+                tree_agents = await get_agent_tree(base_url, agent_id)
+                tree = canonicalize_agent_tree(
+                    await collect_tree_messages(agent_id, tree_agents, lambda a: get_agent(base_url, a))
+                )
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "tree": tree,
+                    "all_agents": tree_agents,
+                    "cost_cents": cost_cents,
+                    "cache_creation_input_tokens": cache_creation_input_tokens,
+                    "cache_read_input_tokens": cache_read_input_tokens,
+                    "live_output_tokens": tokens_out,
+                    "tree_tokens_out": tree_tokens_out,
+                }
+            except Exception as tree_err:
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "tree": data.get("_benchmark", {}).get("tree") or {},
+                    "all_agents": tree_stats.get("all_agents", []),
+                    "tree_capture_error": str(tree_err),
+                    "cost_cents": cost_cents,
+                    "cache_creation_input_tokens": cache_creation_input_tokens,
+                    "cache_read_input_tokens": cache_read_input_tokens,
+                    "live_output_tokens": tokens_out,
+                    "tree_tokens_out": tree_tokens_out,
+                }
         if task.enforce_declared_evaluators and passed:
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,

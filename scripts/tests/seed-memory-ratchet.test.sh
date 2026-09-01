@@ -50,6 +50,9 @@ require_text "$MEASUREMENT" \
     'ROSE_USE_SYSTEM_PG' \
     "measurement must support system Postgres when Docker overlay mounts fail"
 require_text "$MEASUREMENT" \
+    'Docker Postgres unavailable — falling back to system Postgres' \
+    "measurement must fall back to system Postgres when Docker overlay mounts fail"
+require_text "$MEASUREMENT" \
     'victoria_seedmem_src_' \
     "system Postgres path must isolate source databases per measurement PID"
 require_text "$MEASUREMENT" \

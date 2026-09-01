@@ -101,6 +101,10 @@ GATES = (
         "run-port-collision",
         ("bash", "scripts/tests/run-port-collision.test.sh"),
     ),
+    Gate(
+        "run-cloud-benchmark-workers",
+        ("bash", "scripts/tests/run-cloud-benchmark-workers.test.sh"),
+    ),
 )
 
 

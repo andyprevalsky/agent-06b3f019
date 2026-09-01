@@ -136,6 +136,7 @@ SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     "claude-code-agent": 300,
     "browser-smoke": 300,
     "browser-biometrics-webdecoy": 420,
+    "test-mass-agent-run-0": 600,
 }
 
 

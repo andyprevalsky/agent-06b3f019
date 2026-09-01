@@ -377,9 +377,21 @@ default_benchmark_worker_processes() {
     fi
 }
 
+# Benchmark mode must set WORKER_PROCESSES on Cloud too. `.cloud-env` machines
+# used to skip this entire block, so run_local_worker.sh fell back to 1 process
+# while the ports line / services.json still printed the `:-8` echo default.
+# One event loop + 51 mass-agent children saturates a core (loop lag, 600s
+# timeout) even when wrap-up is correct. /deploy Step 5 already pins 8; isolated
+# `run-bench --local` on Cloud must get the same default.
+if $BENCHMARK_MODE; then
+    if $IS_CLOUD; then
+        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-8}}"
+    else
+        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-$(default_benchmark_worker_processes)}}"
+    fi
+fi
 if ! $IS_CLOUD; then
     if $BENCHMARK_MODE; then
-        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-$(default_benchmark_worker_processes)}}"
         export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-16}"
         export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-16}"
         export MAX_CONCURRENT_WORKFLOWS="${MAX_CONCURRENT_WORKFLOWS:-32}"

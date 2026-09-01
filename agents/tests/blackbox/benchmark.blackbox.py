@@ -2942,6 +2942,420 @@ def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
     )
 
 
+def test_declared_evaluator_evidence_compacts_mass_agent_tree():
+    """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+    from benchmarks.semantic_evaluator_evidence import (
+        SINGLE_TURN_CHAR_BUDGET,
+        single_turn_evidence_exceeds_budget,
+    )
+
+    huge = "Fast Mode cache replay body " + ("x" * 40000)
+    tree = {
+        "root": {
+            "parent_agent_id": None,
+            "status": "COMPLETED",
+            "goal": "Analyze the top 50 creators for Andy Prevalsky",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": huge,
+                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                }
+            ],
+        }
+    }
+    all_agents = [{"agent_id": "root", "status": "COMPLETED", "goal": "Analyze", "message_count": 1}]
+    for index in range(50):
+        agent_id = f"gp-{index}"
+        tree[agent_id] = {
+            "parent_agent_id": "root",
+            "status": "COMPLETED",
+            "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": huge,
+                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                },
+                {
+                    "role": "TOOL",
+                    "message": "Explore agent thinking",
+                    "metadata": {
+                        "toolName": "spawn_agent",
+                        "agentType": "explore",
+                        "toolStatus": "FINISHED",
+                        "subAgentId": f"explore-{index}",
+                    },
+                },
+            ],
+        }
+        all_agents.append(
+            {
+                "agent_id": agent_id,
+                "parent_agent_id": "root",
+                "status": "COMPLETED",
+                "goal": "ONE creator",
+                "message_count": 1,
+            }
+        )
+    fat_root_messages = [
+        {
+            "role": "TOOL",
+            "text": huge,
+            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED", "title": f"GP-{index}"},
+        }
+        for index in range(130)
+    ]
+    evidence = _declared_evaluator_evidence(
+        {
+            "agent": {"agent_id": "root", "status": "COMPLETED"},
+            "messages": fat_root_messages,
+            "cost_cents": 0,
+            "tokens_out": 0,
+            "cache_creation_input_tokens": 0,
+            "live_output_tokens": 0,
+            "_semantic_evaluator_tree": tree,
+            "_benchmark": {
+                "tree": tree,
+                "all_agents": all_agents,
+            },
+        }
+    )
+    dumped = json.dumps(evidence)
+    assert len(dumped) < 200_000
+    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
+    assert not single_turn_evidence_exceeds_budget(evidence)
+    assert huge not in dumped
+    state = next(item["benchmark_state"] for item in evidence if "benchmark_state" in item)
+    assert state["tree"]["gp-0"]["research_tool_count"] >= 1
+    assert state["tree"]["gp-0"]["explore_spawn_count"] >= 1
+    assert state["tree"]["gp-0"]["message_count"] == 2
+    assert state["tree"]["gp-0"]["has_real_transcript"] is True
+    assert state["tree"]["gp-0"]["mentions_andy"] is True
+    assert state["tree"]["gp-0"]["mentions_aman"] is False
+    assert state["tree"]["gp-0"]["has_traj_end_stub"] is False
+    assert state["all_agents"][1]["message_count"] == 2
+    assert state["first_level_gps"][0]["agent_id"] == "gp-0"
+    assert state["first_level_gps"][0]["has_real_transcript"] is True
+    assert len(state["first_level_gps"]) == 50
+    assert state["usage"]["live_output_tokens"] == 0
+    assert state["usage"]["cost_cents"] == 0
+
+
+async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
+    """Hydrated 50-GP trees must stay on single_turn — agentic Codex token fetch is a fail-closed flake."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import BenchmarkTask
+
+    huge = "Fast Mode cache replay body " + ("x" * 40000)
+    tree = {}
+    all_agents = []
+    for index in range(50):
+        agent_id = f"gp-{index}"
+        tree[agent_id] = {
+            "parent_agent_id": "root",
+            "status": "COMPLETED",
+            "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": huge,
+                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                }
+            ],
+        }
+        all_agents.append(
+            {"agent_id": agent_id, "parent_agent_id": "root", "status": "COMPLETED", "goal": "ONE creator"}
+        )
+    tree["root"] = {
+        "parent_agent_id": None,
+        "status": "COMPLETED",
+        "goal": "Analyze the top 50 creators for Andy Prevalsky",
+        "messages": [],
+    }
+    task = BenchmarkTask(
+        name="test-mass-agent-run-0",
+        title="Test Mass Agent Run - 0",
+        prompt="Analyze creators for Andy",
+        timeout_seconds=600,
+        is_chat_mode=False,
+        expected_tools=["spawn_general_purpose_agent_for_each"],
+        tags=["mass-agent", "smoke"],
+        price_limit_cents=200,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling=None,
+        start_phase=None,
+        enforce_declared_evaluators=True,
+        evaluators=[
+            {
+                "id": "t1-andy-only",
+                "method": "single_turn_llm_judge",
+                "criteria": ["Andy is the principal user"],
+                "judge_prompt": "Score 1.0 if mentions_andy",
+                "pass_threshold": 1.0,
+            }
+        ],
+    )
+    data = {
+        "agent": {"agent_id": "root", "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": huge,
+                "metadata": {"toolName": "web_search", "toolStatus": "FINISHED", "title": f"GP-{index}"},
+            }
+            for index in range(130)
+        ]
+        + [
+            {
+                "role": "TOOL",
+                "text": "Task Complete",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": "Andy Prevalsky positioning", "outputs": []},
+                },
+            }
+        ],
+        "cost_cents": 0,
+        "tokens_out": 0,
+        "cache_creation_input_tokens": 0,
+        "live_output_tokens": 0,
+        "_semantic_evaluator_tree": tree,
+        "_benchmark": {"tree": tree, "all_agents": all_agents},
+    }
+    agentic_calls = []
+    single_calls = []
+
+    async def fake_single(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
+        single_calls.append(evaluator_arg["id"])
+        assert evidence is not None
+        from benchmarks.semantic_evaluator_evidence import single_turn_evidence_exceeds_budget
+
+        assert not single_turn_evidence_exceeds_budget(evidence)
+        return {"score": 1.0, "reasoning": "Andy is the principal user"}
+
+    async def fake_agentic(task_arg, evaluator_arg, data_arg, **_kwargs):
+        agentic_calls.append(evaluator_arg["id"])
+        raise AssertionError("mass-agent single_turn must not upgrade to agentic")
+
+    original_single = bench._call_declared_llm_judge
+    original_agentic = bench._call_declared_agentic_llm_judge
+    try:
+        bench._call_declared_llm_judge = fake_single
+        bench._call_declared_agentic_llm_judge = fake_agentic
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+    finally:
+        bench._call_declared_llm_judge = original_single
+        bench._call_declared_agentic_llm_judge = original_agentic
+
+    assert passed is True
+    assert reason is None
+    assert single_calls == ["t1-andy-only"]
+    assert agentic_calls == []
+    assert results[0]["passed"] is True
+
+
+def test_first_level_gp_count_static_uses_collected_transcripts():
+    """T2 is a named static row: collected transcripts win over stale Agent.messageCount=1."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "first_level_gp_count", "min": 50}]}
+    root = "root-mass"
+    tree = {
+        root: {
+            "parent_agent_id": None,
+            "status": "COMPLETED",
+            "goal": "Analyze the top 50 creators for Andy Prevalsky",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": "spawned",
+                    "metadata": {
+                        "toolName": "spawn_general_purpose_agent",
+                        "toolStatus": "FINISHED",
+                        "subAgentId": "gp-49",
+                        "childToolCounts": {"web_search": 12, "spawn_agent": 3},
+                    },
+                }
+            ],
+        }
+    }
+    all_agents = [{"agent_id": root, "status": "COMPLETED", "goal": "Analyze", "message_count": 1}]
+    for index in range(50):
+        agent_id = f"gp-{index}"
+        messages = [
+            {"role": "USER", "message": "You are analyzing ONE creator for Andy Prevalsky"},
+            {
+                "role": "TOOL",
+                "message": "search",
+                "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+            },
+        ]
+        # smoke13 shape: one child has collected messages omitted, stale count=1
+        if index == 49:
+            messages = []
+        tree[agent_id] = {
+            "parent_agent_id": root,
+            "status": "COMPLETED",
+            "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+            "messages": messages,
+            "message_count": 1,
+        }
+        all_agents.append(
+            {
+                "agent_id": agent_id,
+                "parent_agent_id": root,
+                "status": "COMPLETED",
+                "goal": "You are analyzing ONE creator",
+                "message_count": 1,
+            }
+        )
+    data = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "messages": tree[root]["messages"],
+        "_benchmark": {"tree": tree, "all_agents": all_agents},
+    }
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    stub_only = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {"parent_agent_id": None, "status": "COMPLETED", "goal": "Analyze", "messages": []},
+                **{
+                    f"gp-{index}": {
+                        "parent_agent_id": root,
+                        "status": "STARTING",
+                        "goal": "You are analyzing ONE creator",
+                        "messages": [],
+                        "message_count": 1,
+                    }
+                    for index in range(50)
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, stub_only)
+    assert passed is False
+    assert "T2:" in reason
+
+
+def test_root_deliverable_markers_use_dag_assemble_not_stub_card():
+    """T7 is a named static row: DAG assemble counts when Task Complete is a stub."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {
+                "type": "root_deliverable_markers",
+                "min_chars": 4000,
+                "required_strings": ["positioning", "90-day", "hook", "Huberman", "Attia"],
+            }
+        ]
+    }
+    assemble = (
+        "POSITIONING STATEMENT for Andy Prevalsky. "
+        "90-day content calendar across YouTube, IG, TikTok, and Substack. "
+        "30 hook-tested video script openings. "
+        "Weekly engagement targets include Huberman and Attia. "
+    ) * 40
+    good = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "Completed a 50-creator analysis into Andy’s positioning.",
+                        "outputs": [],
+                    },
+                },
+            },
+            {
+                "role": "ASSISTANT",
+                "message": assemble,
+                "metadata": {"plannedToolName": "reasoning", "dagTaskIndex": 2},
+            },
+        ]
+    }
+    assert _run_declared_static_check(evaluator, good) == (True, "All declared static checks passed")
+
+    stub = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "Fast Mode cache trajectory ended; the task completed successfully.",
+                        "outputs": [],
+                    },
+                },
+            }
+        ]
+    }
+    passed, reason = _run_declared_static_check(evaluator, stub)
+    assert passed is False
+    assert "T7:" in reason
+
+
+def test_tree_agent_status_ignores_recovered_error_tool_chips():
+    """T9 is a named static row: COMPLETED children pass even with recovered ERROR chips."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "tree_agent_status", "value": "COMPLETED"}]}
+    data = {
+        "agent": {"agent_id": "root", "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                "root": {"parent_agent_id": None, "status": "COMPLETED", "goal": "Analyze", "messages": []},
+                "gp-1": {
+                    "parent_agent_id": "root",
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "retry",
+                            "metadata": {
+                                "toolName": "attempt_completion_with_result",
+                                "toolStatus": "ERROR",
+                            },
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    leftover = {
+        "agent": {"agent_id": "root", "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                "root": {"parent_agent_id": None, "status": "COMPLETED", "goal": "Analyze", "messages": []},
+                "gp-1": {
+                    "parent_agent_id": "root",
+                    "status": "ACTIVE",
+                    "goal": "You are analyzing ONE creator",
+                    "messages": [],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, leftover)
+    assert passed is False
+    assert "T9:" in reason
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -3966,6 +4380,364 @@ def test_completion_summary_and_sms_static_checks_are_fail_closed():
     passed, reason = _run_declared_static_check(evaluator, child_notification)
     assert passed is False
     assert "exactly 1" in reason
+
+
+def test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs():
+    """T7 must fail when Task Complete is a Fast Mode stub or has no schema outputs."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {
+                "type": "completion_summary_length",
+                "min_chars": 80,
+                "forbidden_substrings": ["Fast Mode cache trajectory ended", "cached trajectory"],
+                "require_outputs": True,
+                "include_first_level_gps": True,
+            }
+        ]
+    }
+    real_summary = (
+        "Analyzed Huberman Lab cadence, hooks, and 90-day coverage gaps "
+        "for Andy Prevalsky's health and founder brand."
+    )
+    outputs = [{"key": "creator_name", "label": "Creator Name", "value": "Andrew Huberman"}]
+    root_id = "root-oai"
+    gp_id = "gp-huberman"
+    good = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": real_summary, "outputs": outputs},
+                },
+            }
+        ],
+        "_benchmark": {
+            "tree": {
+                root_id: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators",
+                    "messages": [],
+                },
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {"summary": real_summary, "outputs": outputs},
+                            },
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, good) == (True, "All declared static checks passed")
+
+    ablated = {
+        **good,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": (
+                            "Fast Mode cache trajectory ended; the task completed "
+                            "successfully based on prior tool evidence."
+                        ),
+                        "outputs": outputs,
+                    },
+                },
+            }
+        ],
+    }
+    passed, reason = _run_declared_static_check(evaluator, ablated)
+    assert passed is False
+    assert "ablat" in reason.lower() or "fast mode" in reason.lower() or "forbidden" in reason.lower()
+
+    empty_outputs = {
+        **good,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": real_summary, "outputs": []},
+                },
+            }
+        ],
+    }
+    passed, reason = _run_declared_static_check(evaluator, empty_outputs)
+    assert passed is False
+    assert "output" in reason.lower()
+
+    gp_ablated = {
+        **good,
+        "_benchmark": {
+            "tree": {
+                root_id: good["_benchmark"]["tree"][root_id],
+                gp_id: {
+                    **good["_benchmark"]["tree"][gp_id],
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Fast Mode cache trajectory ended; the task completed successfully.",
+                                    "outputs": outputs,
+                                },
+                            },
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, gp_ablated)
+    assert passed is False
+    assert "gp-" in reason.lower() or "first-level" in reason.lower() or "ablat" in reason.lower() or "fast mode" in reason.lower()
+
+
+def test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools():
+    """T3 static check fails Molly-style explore chips: reject loop, no web_search."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "explore_research_not_reject_loop", "min_rejects": 2}]}
+    explore_id = "472dac8c-aca1-4f0a-9c0d-mollyexplore"
+    gp_id = "1cd8d21f-dafd-4f58-9671-d43ca01f0f91"
+    root_id = "52898a93-af92-40ed-ad3b-2a2db6755fe7"
+
+    def _reject_msg():
+        return {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "attempt_completion_with_result",
+                "toolStatus": "ERROR",
+                "title": "attempt_completion_with_result rejected",
+                "taskId": explore_id,
+            },
+        }
+
+    def _search_msg():
+        return {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+                "title": "web_search",
+                "taskId": explore_id,
+            },
+        }
+
+    broken = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_search",
+                    "title": "web_search",
+                    "taskId": "root-explore-task",
+                },
+            }
+        ],
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Molly Maloof.",  # pragma: allowlist secret
+                    "messages": [_reject_msg(), _reject_msg()],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, broken)
+    assert passed is False
+    assert "472dac8c" in reason
+    assert "0 research" in reason
+
+    healthy = {
+        **broken,
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Andrew Huberman.",  # pragma: allowlist secret
+                    "messages": [_search_msg(), _search_msg()],
+                }
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, healthy) == (True, "All declared static checks passed")
+
+    via_benchmark_tree = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [],
+        "_benchmark": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "messages": [_reject_msg(), _reject_msg(), _reject_msg()],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, via_benchmark_tree)
+    assert passed is False
+    assert "0 research" in reason
+
+
+def test_explore_completion_summary_fails_thinking_only_chip():
+    """T3 fails Nick-style chips: research tools, then Thinking... / Research started."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "explore_completion_summary", "min_chars": 200}]}
+    explore_id = "dcb89890-94ab-40db-920d-norwitzex"
+    gp_id = "00f5a3bd-0e60-4ca4-90eb-420ef4ec8739"
+    root_id = "721e1c39-201d-41d5-820a-e8bf07203c93"
+    real_summary = (
+        "Nick Norwitz posts about four times a week on YouTube and Substack. "
+        "Top hooks are mechanism-first metabolic explainers with view proxies "
+        "from June 2026 Stay Curious issues and the @nicknorwitzPhD channel, "
+        "plus Instagram cadence notes for Andy Prevalsky's personal brand research."  # pragma: allowlist secret
+    )
+    assert len(real_summary) >= 200
+
+    def _search():
+        return {
+            "role": "TOOL",
+            "message": "Query: Nick Norwitz YouTube June 2026",
+            "metadata": {
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+                "title": "Searched the web",
+                "agentType": "explore",
+                "taskId": explore_id,
+            },
+        }
+
+    broken = {
+        "agent": {"agent_id": root_id, "status": "COMPLETED"},
+        "messages": [],
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Nick Norwitz.",  # pragma: allowlist secret
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Research started.",
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Research public web/platform information for creator Nick Norwitz",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                                "fastModeParallel": True,
+                            },
+                        },
+                        _search(),
+                        _search(),
+                        {
+                            "role": "TOOL",
+                            "message": "",
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Explore agent thinking",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                            },
+                        },
+                    ],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, broken)
+    assert passed is False
+    assert "dcb89890" in reason
+    assert "0 chars" in reason or "chip summary" in reason
+
+    fallback = {
+        **broken,
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: Nick Norwitz.",  # pragma: allowlist secret
+                    "messages": [
+                        _search(),
+                        {
+                            "role": "TOOL",
+                            "message": (
+                                "Explore sub-agent completed without a final summary. "
+                                "Raw tool results below; extract the requested values directly:\n\n"
+                                + ("web_search result " * 30)
+                            ),
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Research Nick Norwitz",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                            },
+                        },
+                    ],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, fallback)
+    assert passed is False
+    assert "dcb89890" in reason
+
+    healthy = {
+        **broken,
+        "logs": {
+            "tree": {
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Creator: David Sinclair.",  # pragma: allowlist secret
+                    "messages": [
+                        _search(),
+                        {
+                            "role": "TOOL",
+                            "message": real_summary,
+                            "metadata": {
+                                "toolName": "spawn_agent",
+                                "toolStatus": "FINISHED",
+                                "title": "Research David Sinclair public content",
+                                "agentType": "explore",
+                                "taskId": explore_id,
+                            },
+                        },
+                    ],
+                }
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, healthy) == (
+        True,
+        "All declared static checks passed",
+    )
+
 
 def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
     """Blue Bottle guest checkout stops at an unresolved payment-card request."""
@@ -10346,6 +11118,54 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] = prior_cf_timeout
 
 
+def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
+    """test-mass-agent-run-0 must read the July cache without Andy write-through."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    original_popen = local_bench.subprocess.Popen
+    original_wait = local_bench.wait_for_services
+    prior_cache_database_url = os.environ.get("FAST_MODE_CACHE_DATABASE_URL")
+    os.environ["FAST_MODE_CACHE_DATABASE_URL"] = "postgresql://july.example.test:6543/postgres"
+    try:
+        local_bench.subprocess.Popen = fake_popen
+        local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            local_bench, "_prime_local_seed_dump_from_shared_stack"
+        ):
+            context_dir = Path(tmp) / "july-cache-run"
+            stack = local_bench.ServiceStack(
+                run_id="july-cache-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-july-cache-run",
+                base_port=55140,
+            )
+            local_bench.start_services(stack, clean_first=False, tasks=["test-mass-agent-run-0"])
+            assert captured["env"]["FAST_MODE_CACHE_DATABASE_URL"] == "postgresql://july.example.test:6543/postgres"
+            assert captured["env"]["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] == "1"
+            assert "FAST_MODE_CACHE_USE_LOCAL" not in captured["env"]
+    finally:
+        local_bench.subprocess.Popen = original_popen
+        local_bench.wait_for_services = original_wait
+        if prior_cache_database_url is None:
+            os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+        else:
+            os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
 def test_local_cold_seed_bootstrap_extends_service_start_timeout():
     """An explicitly allowed cold seed must not exhaust the warm-start watchdog."""
     from unittest.mock import patch
@@ -13288,7 +14108,7 @@ def test_unified_catalog_delineates_bench_axes():
     Rose Bench entries are harness-INDEPENDENT: fixture + prompt + evaluators
     must be portable to any harness (e.g. swap in Claude Code and measure).
     """
-    from benchmarks.long_horizon import TASK_BENCHES, validate_catalog
+    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES, TASK_BENCHES, validate_catalog
 
     tasks = validate_catalog()
     by_name = {t["name"]: t for t in tasks}
@@ -13299,6 +14119,91 @@ def test_unified_catalog_delineates_bench_axes():
     assert {"test-mass-agent-run-0", "browser-agent", "job-applications"} <= rose
     for name in ("chat-mode", "browser-smoke", "spawn-sub-agents", "single-creator-arm", "cache-coverage"):
         assert by_name[name]["bench"] == "pipeline-e2e"
+    mass = by_name["test-mass-agent-run-0"]
+    assert "smoke" in mass["tags"]
+    assert mass["group"] == "pre-deploy"
+    assert mass["fast_cache"] == "on"
+    assert mass["enforce_declared_evaluators"] is True
+    assert mass["min_agent_count"] == 50
+    evaluators = {evaluator["id"]: evaluator for evaluator in mass["evaluators"]}
+    assert set(evaluators) == {
+        "t8-root-completed",
+        "t10-no-tool-failures",
+        "t3-gp-explore-research-tools",
+        "t7-completion-summary-length",
+        "t1-andy-only",
+        "t2-fifty-first-level-gps",
+        "t3-full-explore-trajectories",
+        "t4-full-july-gp-trajectories",
+        "t5-zero-live-spend",
+        "t6-no-nested-gps",
+        "t7-real-deliverable",
+        "t7-schema-task-complete",
+        "t9-no-leftover-children",
+    }
+    static_by_id = {
+        evaluator_id: [check.get("type") for check in evaluator.get("checks", [])]
+        for evaluator_id, evaluator in evaluators.items()
+        if evaluator.get("method") == "static_check"
+    }
+    assert static_by_id == {
+        "t8-root-completed": ["agent_status"],
+        "t10-no-tool-failures": ["no_tool_failures"],
+        "t3-gp-explore-research-tools": [
+            "explore_research_not_reject_loop",
+            "explore_completion_summary",
+        ],
+        "t7-completion-summary-length": ["completion_summary_length"],
+        "t2-fifty-first-level-gps": ["first_level_gp_count"],
+        "t7-real-deliverable": ["root_deliverable_markers"],
+        "t9-no-leftover-children": ["tree_agent_status"],
+    }
+    explore_check = next(
+        check
+        for check in evaluators["t3-gp-explore-research-tools"]["checks"]
+        if check.get("type") == "explore_research_not_reject_loop"
+    )
+    assert explore_check.get("min_rejects") == 2
+    summary_check = next(
+        check
+        for check in evaluators["t3-gp-explore-research-tools"]["checks"]
+        if check.get("type") == "explore_completion_summary"
+    )
+    assert summary_check.get("min_chars") == 200
+    assert all(
+        check_type in RUNTIME_STATIC_CHECK_TYPES
+        for types in static_by_id.values()
+        for check_type in types
+    )
+    judge_ids = [
+        evaluator["id"]
+        for evaluator in mass["evaluators"]
+        if evaluator["method"] == "single_turn_llm_judge"
+    ]
+    assert judge_ids == [
+        "t1-andy-only",
+        "t3-full-explore-trajectories",
+        "t4-full-july-gp-trajectories",
+        "t5-zero-live-spend",
+        "t6-no-nested-gps",
+        "t7-schema-task-complete",
+    ]
+    criteria = [criterion for evaluator in mass["evaluators"] for criterion in evaluator["criteria"]]
+    assert any(criterion.startswith("T1:") for criterion in criteria)
+    assert any(criterion.startswith("T2:") for criterion in criteria)
+    assert any(criterion.startswith("T3:") for criterion in criteria)
+    assert any(criterion.startswith("T4:") for criterion in criteria)
+    assert any(criterion.startswith("T5:") for criterion in criteria)
+    assert any(criterion.startswith("T6:") for criterion in criteria)
+    assert any(criterion.startswith("T7:") for criterion in criteria)
+    assert any(criterion.startswith("T8:") for criterion in criteria)
+    assert any(criterion.startswith("T9:") for criterion in criteria)
+    assert any(criterion.startswith("T10:") for criterion in criteria)
+    assert any("0 tokens streamed from non-fast-cache" in criterion for criterion in criteria)
+    assert any("$0 spent" in criterion for criterion in criteria)
+    assert any("assemble-final" in criterion for criterion in criteria)
+    assert any(evaluator.get("method") == "static_check" for evaluator in mass["evaluators"])
+    assert all(evaluator["method"] in {"static_check", "single_turn_llm_judge"} for evaluator in mass["evaluators"])
     # Live capability eval keeps its live environment contract
     live = by_name["browser-agent"]
     assert live["environment"]["mode"] == "live"
@@ -15571,6 +16476,10 @@ async def run_all_tests():
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
+        "local_isolated_july_cache_read_only",
+        test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only,
+    )
+    r.record(
         "local_cold_seed_extended_start_timeout",
         test_local_cold_seed_bootstrap_extends_service_start_timeout,
     )
@@ -15985,6 +16894,26 @@ async def run_all_tests():
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
     r.record(
+        "declared_evaluator_evidence_compacts_mass_agent_tree",
+        test_declared_evaluator_evidence_compacts_mass_agent_tree,
+    )
+    await r.record_async(
+        "mass_agent_single_turn_judge_does_not_upgrade_to_agentic",
+        test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic,
+    )
+    r.record(
+        "first_level_gp_count_static_uses_collected_transcripts",
+        test_first_level_gp_count_static_uses_collected_transcripts,
+    )
+    r.record(
+        "root_deliverable_markers_use_dag_assemble_not_stub_card",
+        test_root_deliverable_markers_use_dag_assemble_not_stub_card,
+    )
+    r.record(
+        "tree_agent_status_ignores_recovered_error_tool_chips",
+        test_tree_agent_status_ignores_recovered_error_tool_chips,
+    )
+    r.record(
         "opentable_static_runtime_contract",
         test_opentable_static_evaluator_checks_full_runtime_contract,
     )
@@ -16067,6 +16996,18 @@ async def run_all_tests():
     r.record(
         "declared_static_completion_summary_and_sms",
         test_completion_summary_and_sms_static_checks_are_fail_closed,
+    )
+    r.record(
+        "declared_static_completion_summary_rejects_fast_mode_ablation",
+        test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs,
+    )
+    r.record(
+        "declared_static_gp_explore_reject_loop",
+        test_explore_research_not_reject_loop_fails_gp_chip_without_research_tools,
+    )
+    r.record(
+        "declared_static_gp_explore_completion_summary",
+        test_explore_completion_summary_fails_thinking_only_chip,
     )
     r.record(
         "blue_bottle_payment_card_request_contract",

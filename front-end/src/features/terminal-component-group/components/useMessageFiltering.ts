@@ -11,6 +11,7 @@
  * [NO TERMINAL YET] -> keep live child tree rows visible
  */
 import { useMemo } from 'react';
+import { userFacingMessageText } from '@/lib/userFacingMessage';
 import {
   deduplicateToolMessages,
   type Message,
@@ -24,6 +25,13 @@ import type { ExploreStep, WaitForCheck } from '../types';
 import { isDirectSpawnChildProgress } from './useSubAgentTreeMerge';
 
 // ─── Filter messages by subAgentId ───────────────────────────────────────
+
+function sanitizeTrajectoryMessage(message: Message): Message {
+  if (message.role === 'USER' || message.role === 'SYSTEM') return message;
+  const text = userFacingMessageText(message.text);
+  if (text === message.text) return message;
+  return { ...message, text };
+}
 
 function filterMessagesForSubAgent(messages: Message[], subAgentId: string | undefined): Message[] {
   const target = subAgentId ?? null;
@@ -52,7 +60,9 @@ export function useFilteredMessages(
   return useMemo(() => {
     const filtered = filterMessagesForSubAgent(messages, subAgentId);
     const withoutSystem = filtered.filter((m) => m.role !== 'SYSTEM');
-    const withoutHidden = withoutSystem.filter((m) => !m.metadata?.hidden);
+    const withoutHidden = withoutSystem
+      .filter((m) => !m.metadata?.hidden)
+      .map(sanitizeTrajectoryMessage);
     const [filteredMessagesRaw, exploreStepMap, waitForCheckMap] =
       deduplicateToolMessages(withoutHidden);
     return { filteredMessagesRaw, exploreStepMap, waitForCheckMap };
@@ -88,10 +98,7 @@ function accumulateSubAgentMetrics(
   const existing = map.get(key) ?? { charCount: 0 };
   existing.charCount += charDelta;
   if (startedAtMs) {
-    existing.streamStartedAtMs = Math.min(
-      existing.streamStartedAtMs ?? startedAtMs,
-      startedAtMs,
-    );
+    existing.streamStartedAtMs = Math.min(existing.streamStartedAtMs ?? startedAtMs, startedAtMs);
   }
   map.set(key, existing);
 }
