@@ -53,6 +53,10 @@ GATES = (
         "agent-behavior-approval",
         ("bash", "scripts/tests/check-agent-behavior-approval.test.sh"),
     ),
+    Gate(
+        "llm-trajectory-injection-approval",
+        ("bash", "scripts/tests/check-llm-trajectory-injection-approval.test.sh"),
+    ),
     Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
     Gate(
         "durable-evidence-links",

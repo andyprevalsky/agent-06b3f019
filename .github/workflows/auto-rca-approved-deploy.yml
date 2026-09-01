@@ -54,6 +54,7 @@ jobs:
           sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool
           sudo install -o root -g root -m 0555 scripts/check-prompt-human-approval.sh /usr/local/bin/rose-prompt-approval-guard
           sudo install -o root -g root -m 0555 scripts/check-agent-behavior-approval.sh /usr/local/bin/rose-agent-behavior-approval-guard
+          sudo install -o root -g root -m 0555 scripts/check-llm-trajectory-injection-approval.sh /usr/local/bin/rose-llm-trajectory-injection-approval-guard
 
       - name: Resolve the exact approval snapshot
         shell: bash
@@ -172,6 +173,8 @@ jobs:
           /usr/local/bin/rose-prompt-approval-guard \
             mandatory-human-approval-retrieved=true --base-ref=origin/main
           /usr/local/bin/rose-agent-behavior-approval-guard \
+            mandatory-human-approval-retrieved=true --base-ref=origin/main
+          /usr/local/bin/rose-llm-trajectory-injection-approval-guard \
             mandatory-human-approval-retrieved=true --base-ref=origin/main
 
       - name: Merge the exact approved RCA head
