@@ -8,8 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import { useAgentContext, type Message, type ResponseSchemaField } from '../hooks';
-import { fetchCodeAgentSession } from '../api';
+import { useAgentContext, fetchCodeAgentSession, type Message, type ResponseSchemaField } from '../hooks';
 import { type ChipState, type CodeProvider } from '../types';
 import {
   useClaudeCodeWebSocket,

@@ -21,7 +21,7 @@ export function resolveBackendBaseUrl(
       locationLike.hostname.endsWith('.ngrok.app');
     if (isNgrokHost) {
       // Cloud preview tunnels: same-origin /api via vite proxy → local backend.
-      return `${locationLike.protocol}//${locationLike.host}`;
+      return '';
     }
     const explicitIsDefaultLocal =
       explicit === 'http://localhost:3001' || explicit === 'http://127.0.0.1:3001';

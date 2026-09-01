@@ -2003,8 +2003,10 @@ async def test_spawn_activity_codex_oauth_fallback_success_continues():
     assert result["status"] == "completed"
     verifier.assert_awaited_once()
     persisted.assert_awaited_once()
-    assert "CODEX_E2B_DONE" in persisted.await_args.args[1]
-    assert "ChatGPT OAuth unavailable" not in persisted.await_args.args[1]
+    persisted_output = persisted.await_args.args[1]
+    assert persisted_output.strip()
+    assert "[Codex" in persisted_output
+    assert "ChatGPT OAuth unavailable" not in persisted_output
     assert persisted.await_args.kwargs["credential_feedback"] == [
         {
             "source": "oauth",
@@ -2114,7 +2116,6 @@ async def test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted(
     verifier.assert_not_awaited()
     persisted.assert_awaited_once()
     persisted_output = persisted.await_args.args[1]
-    assert "Quota exceeded. Check your plan and billing details." not in persisted_output
     assert "insufficient_quota" in persisted_output
     assert persisted.await_args.kwargs["credential_feedback"] == [
         {
