@@ -3,10 +3,14 @@
 After the provider solver, cookie variants are probed in one parallel wave
 (≤5) on **ephemeral** provider sessions — never via ``new_context`` on the live
 Kernel desktop (that paints stacked Chromium windows into the debug view).
-Known anti-bot cookie strips that probe clean may be committed to the live
-context; guest / anonymous goals may also commit a clean ``all_target`` strip.
-Opaque / auth-like cookies are never deleted on signed-in paths — those cases
-escalate to ephemeral provider/proxy config search (auth_kept / stripped lanes).
+
+When a known anti-bot cookie strip (or guest ``all_target`` strip) probes clean,
+recovery does **not** strip cookies on the live tab. It hands off through the
+same config-search verifier + promote path used for proxy/IP recovery: an
+ephemeral session carrying the stripped storage is classified with the same
+LLM context and, if clean, atomically promoted. Opaque / auth-like cookies are
+never deleted on signed-in paths — those cases escalate to config search with
+auth_kept / stripped lanes.
 """
 
 from __future__ import annotations
@@ -950,13 +954,12 @@ async def recover_from_challenge(
     provider_exit_rejected: bool = False,
     allow_logged_out_cookie_commit: bool = False,
 ) -> ChallengeRecoveryResult:
-    """Run solver → ephemeral cookie-probe wave → live commit / config search.
+    """Run solver → ephemeral cookie-probe wave → config-search promote (same verifier + handover).
 
     ``probe`` must hit ephemeral provider sessions (or a test double), **not**
     ``new_context`` on the live Kernel browser — that paints stacked Chromium
-    windows into the debug view. Known anti-bot strips that probe clean may be
-    committed on the live tab; guest tasks may commit a clean ``all_target``
-    strip. Opaque cookie findings stay diagnostic and escalate to config search.
+    windows into the debug view. Known anti-bot / guest strips that probe clean promote via the same
+    config-search verifier and session handover as proxy recovery. Opaque cookie findings stay diagnostic and escalate to config search.
     """
     original_digest = _state_digest(source_state)
 
@@ -1066,13 +1069,14 @@ async def recover_from_challenge(
         raise RuntimeError("Challenge recovery mutated its source browser state")
 
     if known_safe and clean_by_label.get("known_challenge"):
+        # Same verifier + handover as proxy config recovery: do not mutate the
+        # live tab. Promote via config-search with the stripped cookie lane.
         await progress(
-            "apply_cookie_fix",
-            "Applying the proven known-challenge cookie strip on the live tab and "
-            "requiring one clean navigation.",
+            "browser_config_search",
+            "Known-challenge cookie strip probed clean on an ephemeral session; "
+            "promoting via the same config-search verifier and session handover "
+            "(not a live-tab cookie strip).",
         )
-        if await commit_cookie_removals(known_safe):
-            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
         return await search_with_preserved_auth_state(known_safe)
 
     all_target_keys = tuple(target_keys)
@@ -1082,12 +1086,13 @@ async def recover_from_challenge(
         and clean_by_label.get("all_target")
     ):
         await progress(
-            "apply_cookie_fix",
-            "Guest path: applying the proven all-target cookie strip on the live tab "
-            "and requiring one clean navigation.",
+            "browser_config_search",
+            "Guest path: all-target cookie strip probed clean on an ephemeral session; "
+            "promoting via the same config-search verifier and session handover "
+            "(not a live-tab cookie strip).",
         )
-        if await commit_cookie_removals(all_target_keys):
-            return ChallengeRecoveryResult("cookies_sanitized", all_target_keys)
+        # Guest allow_logged_out already sets preserve_auth=False, which includes
+        # the fully stripped lane — same promote handover as config search.
         return await search_with_preserved_auth_state()
 
     diagnostic_clean = any(

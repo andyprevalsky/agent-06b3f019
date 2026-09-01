@@ -13,6 +13,8 @@ import {
 import {
   challengeClassifierCostCents,
   CHALLENGE_LLM_MODEL,
+  citedBlockedResourceUncleared,
+  extractCitedBlockedResourceUrl,
 } from '../../providers/browser/challengeLlmClassifier';
 import {
   createSessionWithContextUsingDependencies,
@@ -301,6 +303,28 @@ function testSameSiteNavigationUrl(): void {
   assert.equal(sameSiteNavigationUrl(kabuki, ''), null);
 }
 
+function testCitedBlockedResourceHardGate(): void {
+  const reason =
+    'Checkout payment widget never mounted.\n' +
+    'Blocked third-party resource that must become reachable/usable: https://js.stripe.com/v3/';
+  assert.equal(extractCitedBlockedResourceUrl(reason), 'https://js.stripe.com/v3/');
+  assert.equal(
+    citedBlockedResourceUncleared('status=200 80ms https://www.doordash.com/graphql', reason),
+    true,
+    'missing cited host must stay challenged'
+  );
+  assert.equal(
+    citedBlockedResourceUncleared('status=0 ERR_BLOCKED_BY_ORB https://js.stripe.com/v3/', reason),
+    true,
+    'ORB/blocked cited host must stay challenged'
+  );
+  assert.equal(
+    citedBlockedResourceUncleared('status=200 45ms https://js.stripe.com/v3/', reason),
+    false,
+    'successful cited host clears the hard-gate'
+  );
+}
+
 function testChallengeLlmClassifierCostRouting(): void {
   assert.equal(CHALLENGE_LLM_MODEL, 'rose-labs/rose-1-mini');
   const paid = challengeClassifierCostCents({
@@ -333,6 +357,7 @@ async function main(): Promise<void> {
   await testUnavailableLearnedConfigFallsBackToDeploymentDefault();
   testRecoveryRequestSchema();
   testSameSiteNavigationUrl();
+  testCitedBlockedResourceHardGate();
   testChallengeLlmClassifierCostRouting();
   process.stdout.write('PASS staged browser challenge recovery part2\n');
 }

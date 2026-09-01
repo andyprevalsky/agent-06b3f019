@@ -22,6 +22,8 @@ from _test_utils import BlackboxResult
 from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
     build_challenge_classifier_messages,
     capture_network_summary,
+    cited_blocked_resource_uncleared,
+    extract_cited_blocked_resource_url,
     format_network_summary_lines,
     recovery_soft_block_still_present,
 )
@@ -139,6 +141,33 @@ def test_soft_block_gate_forces_challenged_when_429_remains():
     )
 
 
+def test_cited_blocked_resource_gate_forces_challenged_when_stripe_missing():
+    """23:40-style false clean: UI looks fine but cited js.stripe.com never loads."""
+    reason = (
+        "Checkout payment widget never mounted.\n"
+        "Blocked third-party resource that must become reachable/usable: "
+        "https://js.stripe.com/v3/"
+    )
+    assert (
+        extract_cited_blocked_resource_url(reason) == "https://js.stripe.com/v3/"
+    )
+    # Host absent from network summary → still challenged.
+    assert cited_blocked_resource_uncleared(
+        "status=200 80ms https://www.doordash.com/graphql",
+        reason,
+    )
+    # Host present but failing (ORB / blocked) → still challenged.
+    assert cited_blocked_resource_uncleared(
+        "status=0 ERR_BLOCKED_BY_ORB https://js.stripe.com/v3/",
+        reason,
+    )
+    # Host loaded successfully → gate clears (LLM may still judge UI).
+    assert not cited_blocked_resource_uncleared(
+        "status=200 45ms https://js.stripe.com/v3/",
+        reason,
+    )
+
+
 async def test_network_entries_override_prefers_explicit_status_rows():
     summary = await capture_network_summary(
         _PerfOnlyPage(),
@@ -179,6 +208,10 @@ async def run_all_tests() -> bool:
     result.record(
         "soft_block_gate_forces_challenged_when_429_remains",
         test_soft_block_gate_forces_challenged_when_429_remains,
+    )
+    result.record(
+        "cited_blocked_resource_gate_forces_challenged_when_stripe_missing",
+        test_cited_blocked_resource_gate_forces_challenged_when_stripe_missing,
     )
     await result.record_async(
         "network_entries_override_prefers_explicit_status_rows",

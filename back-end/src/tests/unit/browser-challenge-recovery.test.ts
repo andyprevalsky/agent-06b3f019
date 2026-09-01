@@ -680,6 +680,9 @@ function testProbeAppliesFingerprintBeforeNavigationAndPassesToolParityInputs():
   );
   assert.match(cookieSource, /blockedConfigKeys/);
   assert.match(cookieSource, /applyConfigBlacklist/);
+  // Cookie probes must use the same fingerprint + classifier inputs as config search.
+  assert.match(cookieSource, /fingerprintInjection/);
+  assert.match(cookieSource, /getFingerprintInjectionData/);
 }
 
 async function main(): Promise<void> {

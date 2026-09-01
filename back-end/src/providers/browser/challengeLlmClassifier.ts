@@ -248,6 +248,77 @@ export function recoverySoftBlockStillPresent(
   );
 }
 
+/**
+ * When recovery cites a blocked third-party URL (payment script/CDN/widget),
+ * challenged=false is only legal once network evidence shows that URL (or its
+ * host) loaded successfully. UI-looking-fine with the resource absent/failing
+ * must stay challenged — matches the system prompt contract the LLM sometimes
+ * ignores when the screenshot looks like the real site.
+ */
+export function extractCitedBlockedResourceUrl(recoveryReason?: string | null): string | null {
+  const reason = String(recoveryReason || '');
+  const match = reason.match(
+    /Blocked third-party resource that must become reachable\/usable:\s*(\S+)/i
+  );
+  if (!match) return null;
+  const raw = match[1].trim().replace(/[.,;)]+$/, '');
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function citedBlockedResourceUncleared(
+  networkSummary: string,
+  recoveryReason?: string | null
+): boolean {
+  const cited = extractCitedBlockedResourceUrl(recoveryReason);
+  if (!cited) return false;
+  const summary = networkSummary || '';
+  if (!summary.trim()) return true;
+  let host = '';
+  let path = '';
+  try {
+    const url = new URL(cited);
+    host = url.hostname.toLowerCase();
+    path = url.pathname || '';
+  } catch {
+    return true;
+  }
+  const lines = summary.split(/\n+/);
+  let sawHost = false;
+  let sawSuccess = false;
+  let sawFailure = false;
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (!lower.includes(host)) continue;
+    sawHost = true;
+    // Failure markers from CDP/ORB/proxy or non-2xx statuses.
+    if (
+      /err[_:]|blocked|orb|failed|status=0\b|status=4\d\d|status=5\d\d|\b4\d\d\b|\b5\d\d\b/.test(
+        lower
+      )
+    ) {
+      sawFailure = true;
+      continue;
+    }
+    if (/status=2\d\d|\b2\d\d\s*ok\b|\b200\b/.test(lower)) {
+      // Prefer path match when path is distinctive; otherwise host success counts.
+      if (!path || path === '/' || lower.includes(path.toLowerCase()) || lower.includes(host)) {
+        sawSuccess = true;
+      }
+    }
+  }
+  if (sawFailure && !sawSuccess) return true;
+  if (!sawHost) return true;
+  if (!sawSuccess) return true;
+  return false;
+}
+
+
 export async function captureNetworkSummary(
   page: Page,
   options?: {
@@ -478,6 +549,20 @@ export async function classifyChallengeWithLlm(
       challenged: true,
       reason:
         'recovery_reason soft-block still present in network summary (HTTP 429 / rate-limit evidence uncleared)',
+      usage: null,
+    };
+  }
+  if (citedBlockedResourceUncleared(context.networkSummary, context.recoveryReason)) {
+    const cited = extractCitedBlockedResourceUrl(context.recoveryReason);
+    log.info('Challenge LLM classifier forced challenged — cited blocked resource uncleared', {
+      url: context.url.slice(0, 200),
+      cited_blocked_resource: cited,
+      recovery_reason: (context.recoveryReason || '').slice(0, 200),
+      agent_id: billing.agentId ?? null,
+    });
+    return {
+      challenged: true,
+      reason: `cited blocked third-party resource still missing or failing in network evidence: ${cited}`,
       usage: null,
     };
   }

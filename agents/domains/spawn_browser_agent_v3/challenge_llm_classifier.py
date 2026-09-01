@@ -17,7 +17,9 @@ and persists ToolUsage rows.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlparse
 
 import structlog
 from pydantic import BaseModel, Field
@@ -42,10 +44,12 @@ Return challenged=true when:
 - Navigation failed into a block page even if some marketing text leaked into the DOM
 - Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
 - The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
+- A blocked third-party resource cited in the recovery reason (payment script/CDN, required widget) is still missing or failing in network evidence
 
 Return challenged=false ONLY when:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
 - AND if an agent recovery reason is provided, that specific failure mode is cleared (network + DOM evidence)
+- AND any cited blocked third-party resource is no longer failing in the provided evidence
 
 Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use the agent DOM tree + network metadata (including HTTP status and truncated response bodies) as supporting evidence. Prefer challenged=true when uncertain."""
 
@@ -302,6 +306,79 @@ def recovery_soft_block_still_present(
     )
 
 
+_CITED_BLOCKED_RESOURCE_RE = re.compile(
+    r"Blocked third-party resource that must become reachable/usable:\s*(\S+)",
+    re.IGNORECASE,
+)
+
+
+def extract_cited_blocked_resource_url(recovery_reason: str | None) -> str | None:
+    """Parse the folded blocked-resource URL from a recovery reason (backend parity)."""
+    reason = str(recovery_reason or "")
+    match = _CITED_BLOCKED_RESOURCE_RE.search(reason)
+    if not match:
+        return None
+    raw = match.group(1).strip().rstrip(".,;)")
+    try:
+        parsed = urlparse(raw)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        return raw
+    except Exception:
+        return None
+
+
+def cited_blocked_resource_uncleared(
+    network_summary: str,
+    recovery_reason: str | None,
+) -> bool:
+    """Fail closed when a cited payment/CDN URL is still missing or failing.
+
+    Matches the backend hard-gate: UI-looking-fine with the cited third-party
+    resource absent/failing must stay challenged (the LLM sometimes ignores
+    the system-prompt rule when the screenshot looks like the real site).
+    """
+    cited = extract_cited_blocked_resource_url(recovery_reason)
+    if not cited:
+        return False
+    summary = network_summary or ""
+    if not summary.strip():
+        return True
+    try:
+        parsed = urlparse(cited)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
+    except Exception:
+        return True
+    if not host:
+        return True
+    saw_host = False
+    saw_success = False
+    saw_failure = False
+    failure_re = re.compile(
+        r"err[_:]|blocked|orb|failed|status=0\b|status=4\d\d|status=5\d\d|\b4\d\d\b|\b5\d\d\b"
+    )
+    success_re = re.compile(r"status=2\d\d|\b2\d\d\s*ok\b|\b200\b")
+    for line in summary.splitlines():
+        lower = line.lower()
+        if host not in lower:
+            continue
+        saw_host = True
+        if failure_re.search(lower):
+            saw_failure = True
+            continue
+        if success_re.search(lower):
+            if not path or path == "/" or path.lower() in lower or host in lower:
+                saw_success = True
+    if saw_failure and not saw_success:
+        return True
+    if not saw_host:
+        return True
+    if not saw_success:
+        return True
+    return False
+
+
 async def capture_challenge_classifier_context(
     page: Any,
     response: Any = None,
@@ -440,14 +517,17 @@ async def classify_challenge_with_llm(
     """Fail closed: errors ⇒ challenged=True so probes cannot promote on outage."""
     from helpers.llm import call_llm
 
-    if recovery_soft_block_still_present(
-        str(context.get("network_summary") or ""),
-        context.get("recovery_reason") if isinstance(context.get("recovery_reason"), str) else None,
-    ):
+    recovery_reason = (
+        context.get("recovery_reason")
+        if isinstance(context.get("recovery_reason"), str)
+        else None
+    )
+    network_summary = str(context.get("network_summary") or "")
+    if recovery_soft_block_still_present(network_summary, recovery_reason):
         logger.info(
             "Challenge LLM classifier forced challenged — recovery soft-block still in network",
             url=str(context.get("url") or "")[:200],
-            recovery_reason=str(context.get("recovery_reason") or "")[:200],
+            recovery_reason=str(recovery_reason or "")[:200],
             agent_id=agent_id,
         )
         return {
@@ -455,6 +535,23 @@ async def classify_challenge_with_llm(
             "reason": (
                 "recovery_reason soft-block still present in network summary "
                 "(HTTP 429 / rate-limit evidence uncleared)"
+            ),
+            "usage": empty_classifier_usage(),
+        }
+    if cited_blocked_resource_uncleared(network_summary, recovery_reason):
+        cited = extract_cited_blocked_resource_url(recovery_reason)
+        logger.info(
+            "Challenge LLM classifier forced challenged — cited blocked resource uncleared",
+            url=str(context.get("url") or "")[:200],
+            cited_blocked_resource=cited,
+            recovery_reason=str(recovery_reason or "")[:200],
+            agent_id=agent_id,
+        )
+        return {
+            "challenged": True,
+            "reason": (
+                "cited blocked third-party resource still missing or failing in "
+                f"network evidence: {cited}"
             ),
             "usage": empty_classifier_usage(),
         }

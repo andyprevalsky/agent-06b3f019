@@ -480,6 +480,8 @@ export async function probeCookieVariant(
     recoveryReason?: string | null;
     /** Skip configs that already failed for this agent until catalog exhaust. */
     blockedConfigKeys?: string[];
+    /** Optional override; defaults to the task owner's stored fingerprint (config-search parity). */
+    fingerprintInjection?: FingerprintInjectionData | null;
   },
   dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
 ): Promise<{ clean: boolean; configKey: string; latencyMs: number }> {
@@ -509,6 +511,12 @@ export async function probeCookieVariant(
   const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
     requirePaymentCdn: false,
   });
+  const fingerprintInjection =
+    input.fingerprintInjection !== undefined
+      ? input.fingerprintInjection
+      : billing.userId
+        ? await import('../steel/files').then((mod) => mod.getFingerprintInjectionData(billing.userId!))
+        : null;
   const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
   const cookieBlacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
   const config = cookieBlacklist.configs[0];
@@ -547,6 +555,7 @@ export async function probeCookieVariant(
         laneKey: 'cookie_probe',
         blockedResourceUrl: input.blockedResourceUrl,
         recoveryReason: input.recoveryReason,
+        fingerprintInjection,
       },
       billing
     );
