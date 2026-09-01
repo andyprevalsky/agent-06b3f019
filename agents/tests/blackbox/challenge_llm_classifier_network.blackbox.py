@@ -22,8 +22,7 @@ from _test_utils import BlackboxResult
 from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
     build_challenge_classifier_messages,
     capture_network_summary,
-    cited_blocked_resource_uncleared,
-    extract_cited_blocked_resource_url,
+    CHALLENGE_LLM_SYSTEM_PROMPT,
     format_network_summary_lines,
     recovery_soft_block_still_present,
 )
@@ -124,7 +123,7 @@ def test_classifier_messages_include_network_block_and_recovery_reason():
     text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
     assert "status=429" in text or "429" in text
     assert "Network metadata" in text
-    assert "Agent recover_from_challenge reason:" in text
+    assert "CRITICAL recovery constraint" in text
     assert "Offers Loading" in text
     assert "truncated" in text.lower()
     assert "DOM tree" in text
@@ -141,31 +140,45 @@ def test_soft_block_gate_forces_challenged_when_429_remains():
     )
 
 
-def test_cited_blocked_resource_gate_forces_challenged_when_stripe_missing():
-    """23:40-style false clean: UI looks fine but cited js.stripe.com never loads."""
+def test_classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource():
+    """23:40 failure mode: screenshot looked fine while js.stripe.com stayed blocked.
+
+    No deterministic regex hard-gate — the LLM must be instructed hard enough that
+    a painted product UI cannot clear a recovery reason citing a blocked third-party.
+    """
     reason = (
         "Checkout payment widget never mounted.\n"
         "Blocked third-party resource that must become reachable/usable: "
         "https://js.stripe.com/v3/"
     )
-    assert (
-        extract_cited_blocked_resource_url(reason) == "https://js.stripe.com/v3/"
+    assert "screenshot looks like the real product site" in CHALLENGE_LLM_SYSTEM_PROMPT.lower() or (
+        "screenshot appearance alone never" in CHALLENGE_LLM_SYSTEM_PROMPT.lower()
     )
-    # Host absent from network summary → still challenged.
-    assert cited_blocked_resource_uncleared(
-        "status=200 80ms https://www.doordash.com/graphql",
-        reason,
+    assert "blocked third-party" in CHALLENGE_LLM_SYSTEM_PROMPT.lower()
+    assert "Evidence priority" in CHALLENGE_LLM_SYSTEM_PROMPT or "Evidence priority" in CHALLENGE_LLM_SYSTEM_PROMPT
+
+    msgs = build_challenge_classifier_messages(
+        {
+            "url": "https://www.doordash.com/checkout",
+            "title": "DoorDash",
+            "status": 200,
+            "cleaned_dom": "Checkout  Subtotal  Place Order",
+            "network_summary": "status=200 80ms https://www.doordash.com/graphql",
+            "screenshot_base64_png": None,
+            "recovery_reason": reason,
+        }
     )
-    # Host present but failing (ORB / blocked) → still challenged.
-    assert cited_blocked_resource_uncleared(
-        "status=0 ERR_BLOCKED_BY_ORB https://js.stripe.com/v3/",
-        reason,
-    )
-    # Host loaded successfully → gate clears (LLM may still judge UI).
-    assert not cited_blocked_resource_uncleared(
-        "status=200 45ms https://js.stripe.com/v3/",
-        reason,
-    )
+    system = next(m for m in msgs if m.get("role") == "system")["content"]
+    user = next(m for m in msgs if m.get("role") == "user")
+    text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
+    assert "CRITICAL recovery constraint" in text
+    assert "https://js.stripe.com/v3/" in text
+    assert "even when the screenshot looks like" in text.lower() or "even when the screenshot" in text.lower()
+    assert "screenshot alone cannot clear" in text.lower() or "visual context only" in text.lower()
+    assert "network metadata" in text.lower()
+    # System prompt must override screenshot-as-ground-truth overweighting.
+    assert "do not return challenged=false just because the screenshot" in system.lower()
+
 
 
 async def test_network_entries_override_prefers_explicit_status_rows():
@@ -210,8 +223,8 @@ async def run_all_tests() -> bool:
         test_soft_block_gate_forces_challenged_when_429_remains,
     )
     result.record(
-        "cited_blocked_resource_gate_forces_challenged_when_stripe_missing",
-        test_cited_blocked_resource_gate_forces_challenged_when_stripe_missing,
+        "classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource",
+        test_classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource,
     )
     await result.record_async(
         "network_entries_override_prefers_explicit_status_rows",

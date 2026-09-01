@@ -36,7 +36,7 @@ const ChallengeClassificationSchema = z.object({
   challenged: z
     .boolean()
     .describe(
-      'True when the page is still an anti-bot / CAPTCHA / access wall or otherwise unusable for the intended site task. False only when the real destination UI is visible and interactive.'
+      'True when the page is still challenged/unusable for the task (including uncleared recovery soft-blocks or cited blocked third-party resources). False only when the real destination UI is usable AND any recovery reason / cited blocked resource is cleared in network+DOM evidence — not merely because the screenshot looks fine.'
     ),
   reason: z.string().describe('One short sentence explaining the challenged/clean decision.'),
 });
@@ -56,22 +56,31 @@ export interface ChallengeClassifierLlmUsage {
 
 export const CHALLENGE_LLM_SYSTEM_PROMPT = `You are a binary page-state classifier for a browser agent.
 
-Decide whether the CURRENT page is still blocked by an anti-bot challenge (CAPTCHA, bot check, access denied, blank soft-wall, rate-limit interstitial, "checking your browser", vendor challenge widget, empty shell that is not the real site UI) OR whether the real destination page is usable.
+Decide whether the CURRENT page is still blocked by an anti-bot challenge (CAPTCHA, bot check, access denied, blank soft-wall, rate-limit interstitial, "checking your browser", vendor challenge widget, empty shell that is not the real site UI) OR whether the real destination page is usable for the agent task.
 
-Return challenged=true when:
+Return challenged=true when ANY of these hold:
 - A challenge / CAPTCHA / human-verification interstitial is visible or dominating the page
 - The document is an empty/blank soft-wall, error gateway, or host-only shell without the real product UI
 - Navigation failed into a block page even if some marketing text leaked into the DOM
 - Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
 - The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
-- A blocked third-party resource cited in the recovery reason (payment script/CDN, required widget) is still missing or failing in network evidence
+- A blocked third-party resource cited in the recovery reason (payment script/CDN, required widget) is still missing, status=0, blocked/ORB/failed, or non-2xx in network evidence
 
-Return challenged=false ONLY when:
+Return challenged=false ONLY when ALL of these hold:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
-- AND if an agent recovery reason is provided, that specific failure mode is cleared (network + DOM evidence)
-- AND any cited blocked third-party resource is no longer failing in the provided evidence
+- AND if an agent recovery reason is provided, that specific failure mode is cleared in network + DOM evidence
+- AND any cited blocked third-party resource shows a successful load in the provided network evidence
 
-Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use the agent DOM tree + network metadata (including HTTP status and truncated response bodies) as supporting evidence. Prefer challenged=true when uncertain.`;
+Critical anti-pattern (do NOT do this):
+- Do NOT return challenged=false just because the screenshot looks like the real product site.
+- A painted / partially hydrated UI is common while payment CDNs, challenge widgets, or cited third-party scripts are still blocked. Screenshot appearance alone never clears a recovery reason that cites a blocked third-party resource — you must check network metadata for that resource.
+
+Evidence priority when a recovery reason is present:
+1) Network metadata for the cited failure / blocked resource
+2) DOM evidence that the failure mode cleared
+3) Screenshot as supporting visual context only
+
+Prefer challenged=true when uncertain. Do not overfit to one vendor.`;
 
 export interface ChallengeClassifierContext {
   url: string;
@@ -248,76 +257,6 @@ export function recoverySoftBlockStillPresent(
   );
 }
 
-/**
- * When recovery cites a blocked third-party URL (payment script/CDN/widget),
- * challenged=false is only legal once network evidence shows that URL (or its
- * host) loaded successfully. UI-looking-fine with the resource absent/failing
- * must stay challenged — matches the system prompt contract the LLM sometimes
- * ignores when the screenshot looks like the real site.
- */
-export function extractCitedBlockedResourceUrl(recoveryReason?: string | null): string | null {
-  const reason = String(recoveryReason || '');
-  const match = reason.match(
-    /Blocked third-party resource that must become reachable\/usable:\s*(\S+)/i
-  );
-  if (!match) return null;
-  const raw = match[1].trim().replace(/[.,;)]+$/, '');
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-export function citedBlockedResourceUncleared(
-  networkSummary: string,
-  recoveryReason?: string | null
-): boolean {
-  const cited = extractCitedBlockedResourceUrl(recoveryReason);
-  if (!cited) return false;
-  const summary = networkSummary || '';
-  if (!summary.trim()) return true;
-  let host = '';
-  let path = '';
-  try {
-    const url = new URL(cited);
-    host = url.hostname.toLowerCase();
-    path = url.pathname || '';
-  } catch {
-    return true;
-  }
-  const lines = summary.split(/\n+/);
-  let sawHost = false;
-  let sawSuccess = false;
-  let sawFailure = false;
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    if (!lower.includes(host)) continue;
-    sawHost = true;
-    // Failure markers from CDP/ORB/proxy or non-2xx statuses.
-    if (
-      /err[_:]|blocked|orb|failed|status=0\b|status=4\d\d|status=5\d\d|\b4\d\d\b|\b5\d\d\b/.test(
-        lower
-      )
-    ) {
-      sawFailure = true;
-      continue;
-    }
-    if (/status=2\d\d|\b2\d\d\s*ok\b|\b200\b/.test(lower)) {
-      // Prefer path match when path is distinctive; otherwise host success counts.
-      if (!path || path === '/' || lower.includes(path.toLowerCase()) || lower.includes(host)) {
-        sawSuccess = true;
-      }
-    }
-  }
-  if (sawFailure && !sawSuccess) return true;
-  if (!sawHost) return true;
-  if (!sawSuccess) return true;
-  return false;
-}
-
 
 export async function captureNetworkSummary(
   page: Page,
@@ -407,8 +346,10 @@ export function buildChallengeClassifierMessages(
   const recoveryLines =
     context.recoveryReason && context.recoveryReason.trim()
       ? [
-          `Agent recover_from_challenge reason: ${context.recoveryReason}`,
-          'Return challenged=false only if this specific failure mode is cleared in DOM + network evidence (not merely because the HTML shell looks fine).',
+          'CRITICAL recovery constraint (must be cleared for challenged=false):',
+          context.recoveryReason.trim(),
+          'If this reason cites a blocked third-party URL (payment script/CDN/widget), inspect network metadata for that host/URL. Missing, status=0, blocked/ORB/failed, or non-2xx ⇒ challenged=true — even when the screenshot looks like a normal product page.',
+          'Do not clear just because the HTML shell or screenshot looks fine.',
           '',
         ]
       : [];
@@ -424,7 +365,9 @@ export function buildChallengeClassifierMessages(
     'DOM tree (same stripped page text the browser agent uses; scripts/styles removed):',
     context.cleanedDom || '(empty)',
     '',
-    'Classify challenged true/false for this page state.',
+    context.recoveryReason && context.recoveryReason.trim()
+      ? 'Screenshot follows as visual context only. Classify challenged true/false — screenshot alone cannot clear the recovery constraint above.'
+      : 'Classify challenged true/false for this page state.',
   ].join('\n');
 
   const userContent: CompletionMessage['content'] = [{ type: 'text', text: textBlock }];
@@ -549,20 +492,6 @@ export async function classifyChallengeWithLlm(
       challenged: true,
       reason:
         'recovery_reason soft-block still present in network summary (HTTP 429 / rate-limit evidence uncleared)',
-      usage: null,
-    };
-  }
-  if (citedBlockedResourceUncleared(context.networkSummary, context.recoveryReason)) {
-    const cited = extractCitedBlockedResourceUrl(context.recoveryReason);
-    log.info('Challenge LLM classifier forced challenged — cited blocked resource uncleared', {
-      url: context.url.slice(0, 200),
-      cited_blocked_resource: cited,
-      recovery_reason: (context.recoveryReason || '').slice(0, 200),
-      agent_id: billing.agentId ?? null,
-    });
-    return {
-      challenged: true,
-      reason: `cited blocked third-party resource still missing or failing in network evidence: ${cited}`,
       usage: null,
     };
   }

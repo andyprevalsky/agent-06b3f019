@@ -11,10 +11,10 @@ import {
   sameSiteNavigationUrl,
 } from '../../providers/browser/challengeRecovery';
 import {
+  buildChallengeClassifierMessages,
   challengeClassifierCostCents,
   CHALLENGE_LLM_MODEL,
-  citedBlockedResourceUncleared,
-  extractCitedBlockedResourceUrl,
+  CHALLENGE_LLM_SYSTEM_PROMPT,
 } from '../../providers/browser/challengeLlmClassifier';
 import {
   createSessionWithContextUsingDependencies,
@@ -303,26 +303,38 @@ function testSameSiteNavigationUrl(): void {
   assert.equal(sameSiteNavigationUrl(kabuki, ''), null);
 }
 
-function testCitedBlockedResourceHardGate(): void {
+function testClassifierMessagesSurfaceBlockedResourceConstraintForLlm(): void {
+  // No deterministic regex hard-gate — the model must see an explicit recovery
+  // constraint + anti-screenshot-overfit instructions (23:40 DoorDash false clean).
+  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /Critical anti-pattern/i);
+  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /Screenshot appearance alone never clears/i);
+  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /blocked third-party resource/i);
+
   const reason =
     'Checkout payment widget never mounted.\n' +
     'Blocked third-party resource that must become reachable/usable: https://js.stripe.com/v3/';
-  assert.equal(extractCitedBlockedResourceUrl(reason), 'https://js.stripe.com/v3/');
-  assert.equal(
-    citedBlockedResourceUncleared('status=200 80ms https://www.doordash.com/graphql', reason),
-    true,
-    'missing cited host must stay challenged'
-  );
-  assert.equal(
-    citedBlockedResourceUncleared('status=0 ERR_BLOCKED_BY_ORB https://js.stripe.com/v3/', reason),
-    true,
-    'ORB/blocked cited host must stay challenged'
-  );
-  assert.equal(
-    citedBlockedResourceUncleared('status=200 45ms https://js.stripe.com/v3/', reason),
-    false,
-    'successful cited host clears the hard-gate'
-  );
+  const messages = buildChallengeClassifierMessages({
+    url: 'https://www.doordash.com/checkout',
+    title: 'DoorDash',
+    status: 200,
+    cleanedDom: 'Checkout  Subtotal  Place Order',
+    networkSummary: 'status=200 80ms https://www.doordash.com/graphql',
+    screenshotBase64Png: null,
+    recoveryReason: reason,
+  });
+  const user = messages.find((m) => m.role === 'user');
+  assert.ok(user);
+  const text =
+    typeof user!.content === 'string'
+      ? user!.content
+      : (user!.content as Array<{ type: string; text?: string }>)
+          .filter((part) => part.type === 'text')
+          .map((part) => part.text || '')
+          .join('\n');
+  assert.match(text, /CRITICAL recovery constraint/i);
+  assert.match(text, /https:\/\/js\.stripe\.com\/v3\//);
+  assert.match(text, /even when the screenshot looks like a normal product page/i);
+  assert.match(text, /screenshot alone cannot clear the recovery constraint/i);
 }
 
 function testChallengeLlmClassifierCostRouting(): void {
@@ -357,7 +369,7 @@ async function main(): Promise<void> {
   await testUnavailableLearnedConfigFallsBackToDeploymentDefault();
   testRecoveryRequestSchema();
   testSameSiteNavigationUrl();
-  testCitedBlockedResourceHardGate();
+  testClassifierMessagesSurfaceBlockedResourceConstraintForLlm();
   testChallengeLlmClassifierCostRouting();
   process.stdout.write('PASS staged browser challenge recovery part2\n');
 }
