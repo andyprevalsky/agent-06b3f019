@@ -19,10 +19,7 @@ import {
 } from './challengeRecoveryShared';
 import type { BrowserProviderName } from './types';
 
-export {
-  recoveryConfigKeyForSession,
-  sameSiteNavigationUrl,
-} from './challengeRecoveryShared';
+export { recoveryConfigKeyForSession, sameSiteNavigationUrl } from './challengeRecoveryShared';
 
 export {
   bestSpecificity,
