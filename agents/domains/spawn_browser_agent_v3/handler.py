@@ -5647,6 +5647,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         )
         return injected
 
+    # Pause-for-resume returns (write / payment / auth assistance) still run
+    # ``finally`` teardown, but must NOT emit task_complete — the browser task
+    # resumes in a later activity call and the FE chip must stay open.
+    browser_task_paused_for_resume = False
+
     try:
         # ===== SETUP TIMING TRACKER =====
         setup_origin = time.monotonic()
@@ -7871,6 +7876,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
+                browser_task_paused_for_resume = True
                 return {
                     "status": "awaiting_auth_assistance",
                     "request_id": request_id,
@@ -9060,6 +9066,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     cdp_url=cdp_url[:50] if cdp_url else None,
                 )
                 await browser_stream.finish_tools(status="FINISHED")
+                browser_task_paused_for_resume = True
                 return {
                     "status": "awaiting_write_approval",
                     "approval_type": approval_type,
@@ -9187,6 +9194,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         logger.warning(f"Failed to disconnect browser before payment card return: {e}")
 
                 await browser_stream.finish_tools(status="FINISHED")
+                browser_task_paused_for_resume = True
                 return {
                     "status": "awaiting_payment_card_approval",
                     "payment_request": payment_request,
@@ -9643,7 +9651,9 @@ Based on this feedback, I need to continue working on the task and address the i
             # Happy-path / error handlers already post task_complete before
             # finally. CancelledError also posts one, but force-cancel and
             # hub-archive races still need cleanup as the terminal safety net.
-            emit_task_terminal=True,
+            # Pause-for-resume returns must keep the FE chip open for the next
+            # activity call (write / payment / auth assistance).
+            emit_task_terminal=not browser_task_paused_for_resume,
         )
         playwright_browser = None
         playwright_instance = None
