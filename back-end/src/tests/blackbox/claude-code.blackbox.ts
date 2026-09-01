@@ -62,6 +62,7 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
+import { syncAndyClaudeTokensFromProd } from '../../scripts/sync-andy-claude-tokens-from-prod';
 import { prisma } from '../../providers/database';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
@@ -395,19 +396,59 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
   return typeof body.accessToken === 'string' && body.accessToken.startsWith('sk-ant-');
 }
 
+function isClaudeOAuthAuthFailure(text: string): boolean {
+  return (
+    /Invalid authentication credentials/i.test(text) ||
+    /Failed to authenticate/i.test(text) ||
+    /OAuth access token has been (?:expired|revoked)/i.test(text)
+  );
+}
+
+async function syncAndyProdClaudeTokensForSmoke(reason: string): Promise<void> {
+  console.log(`    [info] ${reason} — syncing Andy (+19729777432) claude_code keys from prod…`);
+  await syncAndyClaudeTokensFromProd({
+    localDatabaseUrl: process.env.BLACKBOX_TEST_DATABASE_URL ?? process.env.DATABASE_URL,
+  });
+}
+
 /**
  * Ensure DEV_USER_ID can resolve a Claude Code OAuth token for the real E2B
  * smoke. macOS deploys refresh from Keychain; Linux/Cloud VMs have no Keychain,
  * so a pre-seeded local `claude_code` row (copied from prod) is enough.
+ *
+ * When local rows are missing or stale, fall back to a strict prod sync for Andy
+ * (+19729777432) only — never other users' pool tokens.
  */
 async function ensureSmokeUserClaudeCredentials(): Promise<void> {
   if (process.platform === 'darwin') {
-    await syncSmokeUserCredentialsFromKeychain();
-    return;
+    try {
+      await syncSmokeUserCredentialsFromKeychain();
+      return;
+    } catch (error) {
+      console.log(
+        `    [warn] Keychain Claude sync failed (${error instanceof Error ? error.message : String(error)}); trying prod fallback`
+      );
+    }
   }
+
+  if (process.env.BLACKBOX_SMOKE === '1' && process.platform !== 'darwin') {
+    await syncAndyProdClaudeTokensForSmoke(
+      'Claude Code E2B smoke on Linux/Cloud refreshes Andy prod keys before run'
+    );
+    if (await smokeUserHasResolvableClaudeToken()) {
+      return;
+    }
+  }
+
   if (await smokeUserHasResolvableClaudeToken()) {
     return;
   }
+
+  await syncAndyProdClaudeTokensForSmoke('Local Claude token unavailable');
+  if (await smokeUserHasResolvableClaudeToken()) {
+    return;
+  }
+
   // Linux/Cloud: when the OAuth pool is empty/revoked, Claude Code falls through
   // to the funded ANTHROPIC_API_KEY (see resolveClaudeCodeAuthEnvs). That is a
   // valid smoke path — do not hard-require Keychain on non-Darwin hosts.
@@ -418,8 +459,8 @@ async function ensureSmokeUserClaudeCredentials(): Promise<void> {
   throw new Error(
     'Claude Code smoke credentials unavailable on this host: no macOS Keychain ' +
       `(${CLAUDE_KEYCHAIN_SERVICE}), GET /api/integrations/claude-code/credentials/token ` +
-      'returned no sk-ant-* accessToken for DEV_USER_ID, and ANTHROPIC_API_KEY is unset. ' +
-      'Sync a usable claude_code integration or configure ANTHROPIC_API_KEY and retry.'
+      'returned no sk-ant-* accessToken for DEV_USER_ID after Andy prod sync, and ANTHROPIC_API_KEY is unset. ' +
+      'Sync usable claude_code integrations for +19729777432 in prod and retry.'
   );
 }
 
@@ -1194,18 +1235,10 @@ async function testBoundary_createGithubMissingUserIdNoOutbound() {
  * and verify the output contains "4". This validates the full pipeline:
  * sandbox creation, credential injection, trust dialog dismissal,
  * Claude Code authentication, LLM round-trip, and WebSocket streaming.
- *
- * Fails if:
- *  - Session creation returns non-200
- *  - WebSocket never connects
- *  - Claude Code output never contains "4" within 90s
  */
-async function testSmoke_claudeCodeAnswersQuestion() {
-  await ensureSmokeUserClaudeCredentials();
+type ClaudeSmokeAttemptResult = 'success' | 'skip_credentials' | 'skip_credits' | 'auth_failure';
 
-  // 1. Create a real session with a simple math question.
-  // Pass user_id so the backend resolves per-user Claude Code credentials
-  // (ANTHROPIC_API_KEY fallback uses a stale key that won't authenticate).
+async function runClaudeCodeSmokeAttempt(): Promise<ClaudeSmokeAttemptResult> {
   const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
     method: 'POST',
     headers: apiKeyHeaders(),
@@ -1224,7 +1257,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       console.log(
         '    [skip] Claude E2B smoke could not start: code-agent credentials unavailable (credits/cooldown/auth)'
       );
-      return;
+      return 'skip_credentials';
     }
   }
   assertStatus(res.status, 200, res.data);
@@ -1236,7 +1269,6 @@ async function testSmoke_claudeCodeAnswersQuestion() {
 
   const taskId = body.task_id;
 
-  // 2. Connect to WebSocket and wait for Claude Code to answer
   let wsOutput = '';
   const wsEvents: unknown[] = [];
   let wsConnected = false;
@@ -1280,11 +1312,10 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         if (msg.type === 'code_agent_events' && Array.isArray(msg.data)) {
           wsEvents.push(...msg.data);
         }
-        // Strip ANSI codes to get clean text
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
         if (
           clean.includes('CLAUDE_E2B_DONE') ||
-          clean.includes('Invalid authentication credentials') ||
+          isClaudeOAuthAuthFailure(clean) ||
           /credit balance is too low/i.test(clean)
         ) {
           clearTimeout(timeout);
@@ -1309,20 +1340,14 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     const finalOutput = await outputPromise;
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
-    if (finalOutput.includes('Invalid authentication credentials')) {
-      console.log(
-        '    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)'
-      );
-      return;
+    if (isClaudeOAuthAuthFailure(finalOutput)) {
+      return 'auth_failure';
     }
-    // Same credential-health class as Anthropic WARN: exhausted API credits are
-    // not a harness regression. Subscription/OAuth tokens are preferred; when
-    // only a depleted API key is available, skip rather than fail /deploy.
     if (/credit balance is too low/i.test(finalOutput)) {
       console.log(
         '    [skip] Claude E2B smoke reached the SDK server, but Anthropic credits are exhausted'
       );
-      return;
+      return 'skip_credits';
     }
     assert(
       finalOutput.includes('CLAUDE_E2B_DONE'),
@@ -1350,8 +1375,8 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       String(fileContent).trim() === 'CLAUDE_E2B_OK',
       `Expected Claude output file sentinel, got: ${String(fileContent).slice(0, 200)}`
     );
+    return 'success';
   } finally {
-    // 3. Clean up: close the session
     try {
       await request(`${BASE_URL}/api/claude-code-session/close`, {
         method: 'POST',
@@ -1362,6 +1387,29 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       // Best-effort cleanup
     }
   }
+}
+
+async function testSmoke_claudeCodeAnswersQuestion() {
+  await ensureSmokeUserClaudeCredentials();
+
+  let result = await runClaudeCodeSmokeAttempt();
+  if (result === 'auth_failure') {
+    await syncAndyProdClaudeTokensForSmoke(
+      'Claude OAuth rejected the local token during E2B smoke'
+    );
+    result = await runClaudeCodeSmokeAttempt();
+  }
+
+  if (result === 'auth_failure') {
+    console.log(
+      '    [skip] Claude E2B smoke reached the SDK server, but Andy prod Claude credentials are still invalid (401/expired/revoked)'
+    );
+    return;
+  }
+  if (result === 'skip_credentials' || result === 'skip_credits') {
+    return;
+  }
+  assert(result === 'success', `Unexpected Claude smoke attempt result: ${result}`);
 }
 
 // ==================== ADDITIONAL COVERAGE ====================
