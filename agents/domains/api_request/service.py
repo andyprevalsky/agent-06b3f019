@@ -85,7 +85,7 @@ async def execute_api_request(
             cost_cents=0,
         )
 
-        status = MessageStatus.FINISHED if result.get("ok") else MessageStatus.ERROR
+        status = MessageStatus.FINISHED
         await handle_tool_event(
             event=ToolEvent(
                 type=EventType.POST_MESSAGE,

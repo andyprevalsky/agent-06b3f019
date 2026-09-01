@@ -99,6 +99,52 @@ async def test_api_request_backend_error():
             assert "bad url" in str(exc)
 
 
+async def test_api_request_http_error_response_is_finished_not_tool_error():
+    setup_mock({
+        "/api/external-http/request": {
+            "status": 200,
+            "json": {
+                "ok": False,
+                "status": 404,
+                "status_text": "Not Found",
+                "url": "https://api.github.com/repos/foo/bar",
+                "headers": {},
+                "body": {"message": "Not Found"},
+                "body_encoding": "json",
+                "content_type": "application/json",
+                "elapsed_ms": 50,
+                "attempts": 1,
+            },
+        }
+    })
+
+    posted = []
+
+    async def capture_event(event, **kwargs):
+        posted.append(event)
+
+    with patch("temporalio.activity.heartbeat"), patch(
+        "domains.api_request.service.handle_tool_event", new=AsyncMock(side_effect=capture_event)
+    ):
+        from tools.api_request import ApiRequestManager
+
+        manager = ApiRequestManager()
+        result = await manager.execute_tool(
+            execute_activity=lambda fn, args=None, **kwargs: fn(*(args or [])),
+            tool_call={
+                "tool": "api_request",
+                "method": "GET",
+                "url": "https://api.github.com/repos/foo/bar",
+            },
+            tool_call_id="tc-404",
+            agent_id="agent-1",
+            user_id="user-42",
+        )
+
+    assert result["result"]["status"] == 404
+    assert posted[-1].status.name == "FINISHED"
+
+
 async def test_api_request_manager_posts_events():
     _setup_success()
 
@@ -133,6 +179,7 @@ async def _run_all():
         ("happy_path", test_api_request_happy_path),
         ("boundary", test_api_request_boundary),
         ("backend_error", test_api_request_backend_error),
+        ("http_error_finished", test_api_request_http_error_response_is_finished_not_tool_error),
         ("manager_events", test_api_request_manager_posts_events),
     ]
     passed = 0

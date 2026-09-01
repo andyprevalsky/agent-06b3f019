@@ -4321,19 +4321,21 @@ def test_claude_code_session_output_static_check_is_fail_closed():
     assert "api_base_url is missing" in reason
 
 
-def test_cuda_kernel_catalog_enforces_claude_code_session_output():
-    """CUDA ranking bench requires durable Claude Code transcript storage."""
+def test_cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures():
+    """CUDA ranking bench requires api_request route with zero tool failures."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
 
-    assert "claude_code_session_output" in RUNTIME_STATIC_CHECK_TYPES
+    assert "no_tool_failures" in RUNTIME_STATIC_CHECK_TYPES
     task = get_task_by_name("cuda-kernel-github-top100-code-agent")
+    assert "api_request" in task.expected_tools
+    assert task.requires_claude_code is False
     static = next(e for e in task.evaluators if e["method"] == "static_check")
     checks = {c["type"]: c for c in static["checks"]}
-    assert "claude_code_session_output" in checks
-    assert checks["claude_code_session_output"]["min_sessions"] == 1
-    assert checks["claude_code_session_output"]["min_chars"] >= 1
+    assert "no_tool_failures" in checks
     assert checks["agent_status"]["value"] == "COMPLETED"
+    assert "Github API token:" in task.prompt
+    assert "{GITHUB_DISPATCH_TOKEN}" in task.prompt
 
 
 async def test_declared_evaluator_hydrates_claude_code_sessions():
@@ -4344,21 +4346,16 @@ async def test_declared_evaluator_hydrates_claude_code_sessions():
     import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    static_evaluator = next(
-        item
-        for item in get_task_by_name("cuda-kernel-github-top100-code-agent").evaluators
-        if item["method"] == "static_check"
-    )
-    # Keep only the transcript check so hydration is exercised in isolation.
-    transcript_only = {
-        **static_evaluator,
+    static_evaluator = {
+        "id": "claude-code-transcript",
+        "method": "static_check",
         "checks": [
-            c for c in static_evaluator["checks"] if c["type"] == "claude_code_session_output"
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
         ],
     }
     task = replace(
         get_task_by_name("cuda-kernel-github-top100-code-agent"),
-        evaluators=[transcript_only],
+        evaluators=[static_evaluator],
     )
     data = {
         "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
@@ -17285,8 +17282,8 @@ async def run_all_tests():
         test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
     )
     r.record(
-        "cuda_kernel_catalog_enforces_claude_code_session_output",
-        test_cuda_kernel_catalog_enforces_claude_code_session_output,
+        "cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures",
+        test_cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures,
     )
     await r.record_async(
         "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",

@@ -5231,7 +5231,7 @@
   {
     "name": "cuda-kernel-github-top100-code-agent",
     "title": "CUDA Kernel GitHub Top 100 (Code Agent Ranking)",
-    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nUse this GitHub token for API calls: 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",
+    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nGithub API token: {GITHUB_DISPATCH_TOKEN}",
     "timeout_seconds": 1800,
     "is_chat_mode": false,
     "expected_tools": [
@@ -5316,12 +5316,16 @@
           "At least one api_request call returns GitHub repository data",
           "No spawn_general_purpose_agent detour is used",
           "Final structured output contains a repos list",
-          "Agent status is COMPLETED"
+          "Agent status is COMPLETED",
+          "No tool failures anywhere in the agent tree"
         ],
         "checks": [
           {
             "type": "agent_status",
             "value": "COMPLETED"
+          },
+          {
+            "type": "no_tool_failures"
           }
         ]
       },

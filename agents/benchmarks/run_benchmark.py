@@ -1925,6 +1925,18 @@ def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
     return f"navi-agent-tasks-{workspace}"
 
 
+def _inject_benchmark_prompt_secrets(goal: str) -> str:
+    """Substitute secret placeholders in benchmark prompts from the environment."""
+    if "{GITHUB_DISPATCH_TOKEN}" in goal:
+        token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
+        if not token:
+            raise ValueError(
+                "GITHUB_DISPATCH_TOKEN is required for this benchmark prompt placeholder"
+            )
+        goal = goal.replace("{GITHUB_DISPATCH_TOKEN}", token)
+    return goal
+
+
 def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     """Resolve the root-agent goal sent to POST /api/agents for a benchmark task."""
     from utils.payment_boundary_goal import payment_boundary_operational_suffix
@@ -1932,6 +1944,7 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
+    goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
         goal += payment_boundary_operational_suffix()
     return goal
@@ -9588,50 +9601,68 @@ def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[
     return failures
 
 
+def _all_trajectory_messages(data: dict) -> list[tuple[list, str]]:
+    """Return (messages, agent_label) pairs for root + captured benchmark tree."""
+    sections: list[tuple[list, str]] = []
+    root_messages = data.get("messages", []) or []
+    if root_messages:
+        sections.append((root_messages, "root"))
+    tree = data.get("_benchmark", {}).get("tree") if isinstance(data.get("_benchmark"), dict) else None
+    if isinstance(tree, dict):
+        for agent_id, info in tree.items():
+            if not isinstance(info, dict):
+                continue
+            messages = info.get("messages") or []
+            if messages:
+                sections.append((messages, str(agent_id)[:8]))
+    return sections
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
-    """Return grounded failed tool lifecycle events from the root trajectory."""
+    """Return grounded failed tool lifecycle events from root + tree trajectories."""
     failures: list[str] = []
-    messages = data.get("messages", []) or []
-    for message_index, message in enumerate(messages):
-        metadata = message.get("metadata") if isinstance(message, dict) else None
-        if not isinstance(metadata, dict):
-            continue
-        message_text = _tool_message_body(message)
-        candidates = [metadata]
-        if isinstance(metadata.get("auxiliary"), dict):
-            candidates.append(metadata["auxiliary"])
-        for candidate in candidates:
-            tool_name = candidate.get("toolName") or candidate.get("tool_name")
-            if not tool_name:
+    for messages, agent_label in _all_trajectory_messages(data):
+        for message_index, message in enumerate(messages):
+            metadata = message.get("metadata") if isinstance(message, dict) else None
+            if not isinstance(metadata, dict):
                 continue
-            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
-                continue
-            if _is_recoverable_browser_element_miss_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_pinned_host_refusal_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_browser_evaluate_uncaught_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
-            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
-            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
-                call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
-                failures.append(f"{tool_name} {call_id} status={status or 'unsuccessful'}")
+            message_text = _tool_message_body(message)
+            candidates = [metadata]
+            if isinstance(metadata.get("auxiliary"), dict):
+                candidates.append(metadata["auxiliary"])
+            for candidate in candidates:
+                tool_name = candidate.get("toolName") or candidate.get("tool_name")
+                if not tool_name:
+                    continue
+                if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                    continue
+                if _is_recoverable_browser_element_miss_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_pinned_host_refusal_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_browser_evaluate_uncaught_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+                event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+                if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                    call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
+                    prefix = f"{agent_label}:" if agent_label != "root" else ""
+                    failures.append(f"{prefix}{tool_name} {call_id} status={status or 'unsuccessful'}")
     return failures
 
 
