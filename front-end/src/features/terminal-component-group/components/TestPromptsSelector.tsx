@@ -22,13 +22,15 @@
  * [CLOSED]
  *
  * State:
- * - prompts: TestPrompt[] (fetched from the unified eval catalog via the backend)
+ * - prompts: TestPrompt[] (fetched from the unified eval catalog via the backend;
+ *   each entry may carry lastFivePassed from run history for the green check)
  * - selectedTags: string[] (tag filter; OR semantics across selected tags)
  * - searchQuery: string (text filter composed with selectedTags)
  * - isOpen: boolean (popover open state)
  * - isLoading: boolean (while resolving attachment URLs into File objects)
  *
  * UI: icon-only trigger (document icon) styled to match the other query-box icon buttons.
+ * Prompt rows show a green check when lastFivePassed is true (last 5 runs passed).
  *
  * Only visible in development mode (gated by the parent `TopBar`).
  */

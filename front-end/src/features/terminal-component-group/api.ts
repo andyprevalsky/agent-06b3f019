@@ -126,6 +126,8 @@ export interface CatalogTestPrompt {
   attachmentUrls: string[];
   /** Catalog tags — optional so an older backend payload without tags still parses. */
   tags?: string[];
+  /** Optional so an older backend without the last-5 signal still parses. */
+  lastFivePassed?: boolean;
 }
 
 /**
@@ -206,6 +208,7 @@ export {
   resumeBrowserSession,
   MAX_FILE_SIZE,
   MAX_TOTAL_ATTACHMENTS_SIZE,
+  reportAgentBug,
 } from '@/lib/api';
 
 export type {
@@ -220,6 +223,7 @@ export type {
   Tool,
   PeoplePaginatedResponse,
   Person,
+  ReportAgentBugResult,
 } from '@/lib/api';
 
 export { subscribeToAttentionRequests, unsubscribe } from '@/lib/realtime';

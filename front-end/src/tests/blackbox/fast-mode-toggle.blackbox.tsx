@@ -3,7 +3,7 @@
  *
  * Proves checklist items:
  *  - #2  the toggle is hidden unless the user is in FAST_MODE_USER_IDS
- *  - #4  default off (controlled value starts false; toggling flips it)
+ *  - #4  default on for allowlisted accounts (controlled value; toggling flips it)
  *  - #3  the toggle drives the boolean threaded into the create-agent payload
  */
 import React from 'react';
@@ -17,12 +17,16 @@ import RoseToolSetChip from '@/features/terminal-component-group/components/Rose
 import SimulatorToggle from '@/features/terminal-component-group/components/SimulatorToggle';
 import { TopBar } from '@/features/terminal-component-group/components/query-input/TopBar';
 import { ADMIN_USER_IDS } from '@/features/terminal-component-group/config';
+import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
 import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 
+const CURRENT_ANDY_ID = ADMIN_ACCOUNTS[0]!.userId;
+const CURRENT_TAMY_ID = ADMIN_ACCOUNTS[1]!.userId;
+
 const hookMocks = vi.hoisted(() => ({
-  authUserId: '1f85ff25-6e29-4c1b-8739-f917bd101a30',
+  authUserId: '' as string,
 }));
 
 const originalInnerWidth = window.innerWidth;
@@ -101,8 +105,12 @@ afterEach(() => {
 });
 
 describe('Fast Mode account gating', () => {
+  beforeEach(() => {
+    hookMocks.authUserId = CURRENT_ANDY_ID;
+  });
+
   it('#2 shows the toggle in an existing-agent query box for allow-listed users', () => {
-    hookMocks.authUserId = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+    hookMocks.authUserId = CURRENT_ANDY_ID;
 
     render(
       <TooltipProvider>
@@ -166,7 +174,7 @@ describe('Fast Mode account gating', () => {
   });
 
   it('hides Test-Prompts on mobile for admin accounts', () => {
-    hookMocks.authUserId = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+    hookMocks.authUserId = CURRENT_ANDY_ID;
     setViewportWidth(390);
 
     render(
@@ -187,9 +195,16 @@ describe('Fast Mode account gating', () => {
   });
 
   it('config allow-list contains exactly the two intended accounts', () => {
-    expect(FAST_MODE_USER_IDS).toContain('1f85ff25-6e29-4c1b-8739-f917bd101a30'); // Andy
-    expect(FAST_MODE_USER_IDS).toContain('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'); // Tamy
+    expect(FAST_MODE_USER_IDS).toContain(CURRENT_ANDY_ID); // Andy
+    expect(FAST_MODE_USER_IDS).toContain(CURRENT_TAMY_ID); // Tamy
     expect(FAST_MODE_USER_IDS.length).toBe(2);
+  });
+
+  it('defaults Fast Mode on for Andy and Tamy', async () => {
+    const { DEFAULT_FAST_MODE_USER_IDS } = await import('@/lib/fastModeAccounts');
+    expect(DEFAULT_FAST_MODE_USER_IDS).toContain(CURRENT_ANDY_ID);
+    expect(DEFAULT_FAST_MODE_USER_IDS).toContain(CURRENT_TAMY_ID);
+    expect(DEFAULT_FAST_MODE_USER_IDS.length).toBe(2);
   });
 });
 

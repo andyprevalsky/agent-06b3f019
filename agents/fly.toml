@@ -5,6 +5,10 @@
 app = "navi-whisper-lux"
 primary_region = "iad"  # Ashburn, Virginia
 
+# Finish in-flight activities (incl. 30m browser) before Fly SIGKILLs the machine.
+kill_signal = "SIGTERM"
+kill_timeout = "35m"
+
 [build]
   dockerfile = "Dockerfile"
 
@@ -31,7 +35,9 @@ primary_region = "iad"  # Ashburn, Virginia
   
   # Worker tuning
   HEALTH_CHECK_PORT = "8080"
-  WORKER_SHUTDOWN_GRACE_PERIOD = "30s"
+  # Must cover the longest in-flight activity (browser start_to_close = 30m).
+  # On SIGTERM the worker stops polling and waits for current activities to finish.
+  WORKER_SHUTDOWN_GRACE_PERIOD = "35m"
   MAX_HEARTBEAT_THROTTLE_INTERVAL = "60s"
   DEFAULT_HEARTBEAT_THROTTLE_INTERVAL = "30s"
   MEMORY_SCALE_UP_THRESHOLD_PERCENT = "80"

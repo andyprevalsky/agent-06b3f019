@@ -24,7 +24,10 @@ async function testMessagesIgnorePendingComputeAuth(): Promise<void> {
       return [];
     },
   };
-  const context = startInitialChatContext({ agentId: 'agent-1' }, dependencies);
+  const context = startInitialChatContext(
+    { agentId: 'agent-1', requestedModel: 'rose-labs/rose-1-lite' },
+    dependencies
+  );
 
   assert.strictEqual(credentialCalls, 0, 'chat startup must not read compute credentials');
   assert.deepStrictEqual(starts, ['messages:agent-1']);
@@ -48,7 +51,7 @@ async function testPreservesMessageOrderAndMapping(): Promise<void> {
   ];
 
   const context = startInitialChatContext(
-    { agentId: 'agent-2' },
+    { agentId: 'agent-2', requestedModel: 'rose-labs/rose-1-lite' },
     {
       findMessages: async () => dbMessages,
     }
@@ -73,7 +76,7 @@ async function testPreservesMessageOrderAndMapping(): Promise<void> {
 async function testMessageQueryFailurePropagates(): Promise<void> {
   const expected = new Error('message query failed');
   const context = startInitialChatContext(
-    { agentId: 'agent-3' },
+    { agentId: 'agent-3', requestedModel: 'rose-labs/rose-1-lite' },
     {
       findMessages: async () => {
         throw expected;
@@ -94,7 +97,10 @@ async function testWebAndEscalationNeverReadChatCredentials(): Promise<void> {
     findMessages: async () => [],
   };
 
-  const webContext = startInitialChatContext({ agentId: 'web-agent' }, dependencies);
+  const webContext = startInitialChatContext(
+    { agentId: 'web-agent', requestedModel: 'rose-labs/rose-1-lite' },
+    dependencies
+  );
   const webMessages = await webContext.messages;
   await resolveGeneratorMessages({
     action: 'web_search',
@@ -102,7 +108,10 @@ async function testWebAndEscalationNeverReadChatCredentials(): Promise<void> {
     refreshMessages: async () => webMessages,
   });
 
-  const escalationContext = startInitialChatContext({ agentId: 'escalation-agent' }, dependencies);
+  const escalationContext = startInitialChatContext(
+    { agentId: 'escalation-agent', requestedModel: 'rose-labs/rose-1-lite' },
+    dependencies
+  );
   await escalationContext.messages;
   assert.strictEqual(credentialCalls, 0, 'web and escalation chat paths read no credentials');
 }

@@ -253,13 +253,16 @@ def _patch_handler_workflow(fake):
 
 
 class _WFInstance:
-    def __init__(self, *, paused=False, cost_limit_reached=False):
+    def __init__(self, *, paused=False, cost_limit_reached=False, fast_mode_cache_enabled=False, goal=""):
         self.user_id = "user-1"
         self.agent_id = "agent-1"
         self.model = "rose-1-lite"
         self.context_gates = {}
         self.is_paused = paused
         self._cost_limit_reached = cost_limit_reached
+        self.fast_mode_cache_enabled = fast_mode_cache_enabled
+        self.goal = goal
+        self.fast_cache_goal = None
         self.handled = []
 
     async def _handle_tool_event(self, event, tcid, tname):
@@ -871,6 +874,130 @@ async def test_handler_timestamp_resume_nonbool_still_errors_in_past():
     assert MessageStatus.FINISHED not in statuses
 
 
+async def test_handler_timestamp_fast_mode_past_completes_not_errors():
+    """Fast Mode replay of a July wait_for must FINISH, not ERROR, once the target is past.
+
+    The OAi demo recorded wait_until 2026-07-17…; replaying in August used to
+    emit ``Timestamp … is in the past`` and leave children ACTIVE.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 27, 2, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(fast_mode_cache_enabled=True),
+                tool_call={"until_timestamp": "2026-07-17T07:03:00+00:00"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    assert MessageStatus.ERROR not in statuses
+    assert fake.sleep_records == []
+    assert "past" not in events[0].message.lower()
+
+
+async def test_handler_timestamp_fast_mode_far_future_completes_not_errors():
+    """Fast Mode replay of a July wait that is now >31d ahead must FINISH, not ERROR.
+
+    A target that was a legal live wait in July (e.g. 2026-09-20 from 2026-07-17)
+    is more than 31 days in the future when replayed in late August.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 27, 2, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(fast_mode_cache_enabled=True),
+                tool_call={"until_timestamp": "2026-10-01T00:00:00+00:00"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    assert MessageStatus.ERROR not in statuses
+    assert fake.sleep_records == []
+    assert "31 days" not in events[0].message.lower()
+
+
+async def test_handler_condition_oai_demo_fast_mode_does_not_await_explore():
+    """OAi-demo Fast Mode wait_for must fire-and-track the explore, not capture/await it."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    captured = {"capture": "unset", "evals": 0}
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        captured["capture"] = capture_tool_results
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore started",
+            message="Fast Mode parallel replay",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id, "fastModeParallel": True},
+        )
+
+    def _eval_should_not_run(*_a, **_k):
+        captured["evals"] += 1
+        return {"satisfied": False, "reasoning": "should not run"}
+
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval_should_not_run})
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal=(
+                        "You are analyzing ONE creator for Andy Prevalsky. "
+                        "Research the last 90 days (approximately 2026-04-04 through 2026-07-03)."  # pragma: allowlist secret
+                    ),
+                ),
+                tool_call={
+                    "description": "the research to finish",
+                    "condition": "enough evidence gathered",
+                    "check_interval_seconds": 30,
+                    "max_checks": 5,
+                },
+                tool_call_id="tc-oai-wait",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert captured["capture"] is None
+    assert captured["evals"] == 0
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert (finished[-1].metadata or {}).get("fastModeParallel") is True
+    assert (finished[-1].data or {}).get("condition_met") is True
+
+
 async def run_all_tests():
     print("wait-for blackbox tests:")
     r = BlackboxResult()
@@ -927,6 +1054,18 @@ async def run_all_tests():
     r.record("resume_latest_wins", test_resume_latest_wait_wins)
     await r.record_async("handler_ts_resume_past", test_handler_timestamp_resume_past_completes_not_errors)
     await r.record_async("handler_ts_resume_nonbool", test_handler_timestamp_resume_nonbool_still_errors_in_past)
+    await r.record_async(
+        "handler_ts_fast_mode_past",
+        test_handler_timestamp_fast_mode_past_completes_not_errors,
+    )
+    await r.record_async(
+        "handler_ts_fast_mode_far_future",
+        test_handler_timestamp_fast_mode_far_future_completes_not_errors,
+    )
+    await r.record_async(
+        "handler_cond_oai_demo_fast_mode_parallel",
+        test_handler_condition_oai_demo_fast_mode_does_not_await_explore,
+    )
     teardown_mock()
     return r.all_passed
 

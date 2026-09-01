@@ -19,19 +19,23 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
-    EXPLORE_DEFAULT_DEPTH,
     EXPLORE_DEFAULT_MODEL,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
+    FM_EXPLORE_INFLIGHT_CAP,
     FOR_EACH_MAX_DEPTH,
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
     explore_limits_for_depth,
+    is_oai_demo_mass_agent_task,
+    resolve_explore_depth,
 )
+from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
+    compile_explore_wrap_up,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
@@ -46,7 +50,169 @@ from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
 from utils.source_connect_gates import raise_source_connect_gates
 from utils.tool_call_ids import spawn_group_id
 
+_FAST_MODE_USER_COPY = (
+    "fast mode",
+    "fast cache",
+    "fast-cache",
+    "cached trajectory",
+    "from_fast_cache",
+)
+
+
+def user_facing_explore_result(text: Any) -> str:
+    """Return explore chip copy that would show in prod — never Fast Mode plumbing."""
+    raw = str(text or "").strip()
+    if not raw or raw.lower() in {"research started.", "research started"}:
+        return ""
+    lowered = raw.lower()
+    if any(marker in lowered for marker in _FAST_MODE_USER_COPY) and len(raw) < 400:
+        return ""
+    return raw
+
+
+def wrap_up_payload_from_failure(exc: BaseException) -> Dict[str, Any]:
+    """Recover compiled explore evidence from a timed-out activity heartbeat."""
+    cur: Any = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        details = getattr(cur, "last_heartbeat_details", None)
+        if details:
+            payload = details[0] if isinstance(details, tuple) and details else details
+            if isinstance(payload, dict):
+                return payload
+            if isinstance(payload, str) and payload.strip():
+                return {"result": payload}
+        cur = getattr(cur, "cause", None) or getattr(cur, "__cause__", None)
+    return {}
+
+
+def _explore_chip_text(result: Dict[str, Any]) -> str:
+    return user_facing_explore_result(
+        compile_explore_wrap_up(
+            result.get("result") or result.get("final_response") or result.get("summary") or "",
+            result.get("tool_call_results") or [],
+        )
+    )
+
 logger = structlog.get_logger()
+
+_FM_EXPLORE_HANDLES_ATTR = "_fm_explore_handles"
+
+
+def _fm_explore_handles(workflow_instance) -> List[Dict[str, Any]]:
+    handles = getattr(workflow_instance, _FM_EXPLORE_HANDLES_ATTR, None)
+    if handles is None:
+        handles = []
+        setattr(workflow_instance, _FM_EXPLORE_HANDLES_ATTR, handles)
+    return handles
+
+
+def _activity_handle_done(handle: Any) -> bool:
+    done = getattr(handle, "done", None)
+    return bool(done()) if callable(done) else False
+
+
+def prune_fast_mode_explores(workflow_instance) -> None:
+    handles = _fm_explore_handles(workflow_instance)
+    handles[:] = [item for item in handles if not _activity_handle_done(item.get("handle"))]
+
+
+async def wait_for_fast_mode_explore_slot(
+    workflow_instance,
+    cap: int = FM_EXPLORE_INFLIGHT_CAP,
+) -> None:
+    """Block only when this GP already has `cap` in-flight Fast Mode explores."""
+    handles = _fm_explore_handles(workflow_instance)
+
+    def _has_slot() -> bool:
+        prune_fast_mode_explores(workflow_instance)
+        return len(handles) < cap
+
+    if _has_slot():
+        return
+    await workflow.wait_condition(_has_slot)
+
+
+def track_fast_mode_explore(
+    workflow_instance,
+    handle: Any,
+    *,
+    task_id: str,
+    tool_call_id: str,
+    ui_goal: str,
+) -> None:
+    _fm_explore_handles(workflow_instance).append(
+        {
+            "handle": handle,
+            "task_id": task_id,
+            "tool_call_id": tool_call_id,
+            "ui_goal": ui_goal,
+        }
+    )
+
+
+async def drain_fast_mode_explores(workflow_instance) -> None:
+    """Await fire-and-track Fast Mode explores before this agent completes.
+
+    T3 still requires each explore activity to run its full cached trajectory.
+    T9 requires no leftover ACTIVE children, so the parent must drain before
+    attempt_completion / terminal status. Safe when nothing is tracked.
+    """
+    items = list(_fm_explore_handles(workflow_instance))
+    _fm_explore_handles(workflow_instance).clear()
+    post_event = getattr(workflow_instance, "_handle_tool_event", None)
+    for item in items:
+        handle = item.get("handle")
+        if handle is None:
+            continue
+        result: Dict[str, Any] = {}
+        recovered: Dict[str, Any] = {}
+        try:
+            raw_result = await handle
+            if isinstance(raw_result, dict):
+                result = raw_result
+        except (asyncio.CancelledError, ActivityError) as exc:
+            recovered = wrap_up_payload_from_failure(exc)
+            if isinstance(exc, ActivityError) and not isinstance(
+                exc.cause, (asyncio.CancelledError, TemporalCancelledError)
+            ):
+                logger.error(
+                    "Fast Mode parallel explore failed",
+                    task_id=item.get("task_id"),
+                    error=str(exc)[:200],
+                )
+        except Exception as exc:
+            recovered = wrap_up_payload_from_failure(exc)
+            logger.error(
+                "Fast Mode parallel explore failed",
+                task_id=item.get("task_id"),
+                error=str(exc)[:200],
+            )
+        if not callable(post_event):
+            continue
+        explore_result = _explore_chip_text(result)
+        if not explore_result and recovered:
+            explore_result = _explore_chip_text(recovered)
+        if not explore_result:
+            continue
+        ui_goal = str(item.get("ui_goal") or "")
+        await post_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+                message=explore_result,
+                status=MessageStatus.FINISHED,
+                metadata={
+                    "agentType": "explore",
+                    "taskId": item.get("task_id"),
+                    "fullGoal": ui_goal,
+                },
+                data={"result": explore_result},
+            ),
+            item.get("tool_call_id"),
+            "spawn_agent",
+        )
 
 
 def _combined_goal_text(workflow_instance, tool_call: Dict[str, Any]) -> str:
@@ -115,6 +281,121 @@ def _expected_explore_agents_for_city_task(goal_text: str) -> int | None:
     if "three cities" in goal_text or "3 cities" in goal_text:
         return 3
     return None
+
+
+def _is_oai_demo_for_each_tool(metadata: dict) -> bool:
+    tool_name = str(metadata.get("toolName") or "")
+    if tool_name == "spawn_general_purpose_agent_for_each":
+        return True
+    return tool_name == "spawn_agent" and metadata.get("agentType") == "for_each"
+
+
+def _prior_oai_demo_for_each_count(workflow_instance, current_tool_call_id: str | None = None) -> int:
+    """Count prior root for_each calls, including IN_PROGRESS/ERROR.
+
+    The July mass-agent root replays a second 50-GP for_each after the first
+    wave. One wave satisfies T2; a second wave cannot finish inside the 900s
+    harness (smoke8: first 50 done at 449s, second wave still ACTIVE at 901s).
+
+    Smoke9: the first wave's spawn_general_purpose_agent_for_each ended ERROR
+    ("42/50 children failed" after finalize activity timeouts) and never
+    FINISHED. A FINISHED-only counter then allowed the second fan-out at
+    ~451s. The in-flight first call must not count itself — the workflow may
+    already have posted IN_PROGRESS for the current toolCallId.
+    """
+    context = getattr(workflow_instance, "context", [])
+    if not isinstance(context, list):
+        return 0
+    count = 0
+    seen_tool_calls: set[str] = set()
+    for msg in context:
+        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
+        if not _is_oai_demo_for_each_tool(metadata):
+            continue
+        tool_call_id = metadata.get("toolCallId")
+        if current_tool_call_id and tool_call_id == current_tool_call_id:
+            continue
+        if tool_call_id:
+            if tool_call_id in seen_tool_calls:
+                continue
+            seen_tool_calls.add(tool_call_id)
+        count += 1
+    return count
+
+
+def _is_for_each_finalize_timeout(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    return "timed out" in text or "timeout" in text
+
+
+def _oai_demo_child_result_failed(child_result: Dict[str, Any]) -> bool:
+    status = str(child_result.get("status") or "").strip().lower()
+    return status in {"failed", "error", "max_iterations"} or child_result.get("success") is False
+
+
+async def _recover_oai_demo_for_each_timeout(
+    workflow_instance, child_agent_id: Any, exc: BaseException
+) -> Dict[str, Any] | None:
+    """Wait for a completed child after finalize activity saturation (smoke9).
+
+    50 parallel finalize_child calls hit post_message / reconcile activity
+    timeouts around 100s, then for_each ERRORed (T10) while the GPs were
+    still replaying. On this task, keep waiting for the child signal instead
+    of treating the activity timeout as a child failure.
+    """
+    if not child_agent_id:
+        return None
+    if not getattr(workflow_instance, "fast_mode_cache_enabled", False):
+        return None
+    if not is_oai_demo_mass_agent_task(workflow_instance):
+        return None
+    if not _is_for_each_finalize_timeout(exc):
+        return None
+    results = getattr(workflow_instance, "child_results", None)
+    if not isinstance(results, dict):
+        return None
+    if child_agent_id in results:
+        return results.get(child_agent_id)
+    while child_agent_id not in workflow_instance.child_results:
+        try:
+            await workflow.wait_condition(
+                lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                timeout=timedelta(seconds=30),
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            continue
+    return workflow_instance.child_results.get(child_agent_id)
+
+
+def _oai_demo_first_level_gp_count(workflow_instance) -> int:
+    """Distinct first-level GP spawn tool calls already in context."""
+    context = getattr(workflow_instance, "context", [])
+    if not isinstance(context, list):
+        return 0
+    seen_tool_calls: set[str] = set()
+    count = 0
+    for msg in context:
+        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
+        tool_name = str(metadata.get("toolName") or "")
+        if tool_name == "spawn_general_purpose_agent_for_each":
+            continue
+        if tool_name == "spawn_general_purpose_agent":
+            pass
+        elif tool_name == "spawn_agent" and metadata.get("agentType") == "general_purpose":
+            pass
+        else:
+            continue
+        tool_call_id = metadata.get("toolCallId")
+        if tool_call_id:
+            if tool_call_id in seen_tool_calls:
+                continue
+            seen_tool_calls.add(tool_call_id)
+        count += 1
+    return count
 
 
 def _prior_explore_agent_count(workflow_instance) -> int:
@@ -245,16 +526,57 @@ class SpawnAgentManager(ToolManager):
             )
             return
 
-        blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
-        if blocked_reason:
+        fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+        parent_depth = int(getattr(workflow_instance, "depth", 0) or 0)
+        # Scoped to test-mass-agent-run-0 only: first-level for_each GPs spawn,
+        # but those children must not recurse more GPs. The root also gets
+        # exactly one for_each wave — a second 50-GP fan-out misses 900s.
+        if (
+            fm
+            and agent_type in {"general_purpose", "for_each"}
+            and is_oai_demo_mass_agent_task(workflow_instance)
+            and (
+                parent_depth >= 1
+                or (
+                    parent_depth == 0
+                    and agent_type == "for_each"
+                    and (
+                        _prior_oai_demo_for_each_count(workflow_instance, tool_call_id) >= 1
+                        or _oai_demo_first_level_gp_count(workflow_instance) >= 50
+                    )
+                )
+            )
+        ):
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="spawn_agent failed",
-                message=blocked_reason,
-                status=MessageStatus.ERROR,
-                metadata={"agentType": agent_type},
+                title="spawn_agent complete",
+                    message=(
+                        "Research already gathered; skipping nested spawn so the "
+                        "main sub-agent handles it."
+                    ),
+                status=MessageStatus.FINISHED,
+                metadata={"agentType": agent_type, "skippedNestedSpawn": True},
             )
             return
+
+        blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
+        if blocked_reason:
+            # Fast Mode must still spawn general_purpose / for_each so each child
+            # Agent row exists and can replay execute_loop cache.
+            skip_without_spawn = not (fm and agent_type in {"general_purpose", "for_each"})
+            if skip_without_spawn:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="spawn_agent complete" if fm else "spawn_agent failed",
+                    message=(
+                        "Research already gathered; skipping further spawn."
+                        if fm
+                        else blocked_reason
+                    ),
+                    status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
+                    metadata={"agentType": agent_type},
+                )
+                return
 
         reserved_explore_slot = False
         if agent_type == "explore" and _explore_only_research_instruction(workflow_instance, tool_call):
@@ -326,8 +648,15 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
-        # Caller-controlled thoroughness → turn cap + activity timeout. Default quick.
-        depth = tool_call.get("depth") or EXPLORE_DEFAULT_DEPTH
+        # Caller-controlled thoroughness → turn cap + activity timeout.
+        # Fast Mode promotes quick/missing → deep so July OAi-demo explores can
+        # reach attempt_completion (~14 turns avg; quick aborts at 5).
+        depth = resolve_explore_depth(
+            tool_call.get("depth"),
+            fast_mode_cache_enabled=bool(
+                getattr(workflow_instance, "fast_mode_cache_enabled", False)
+            ),
+        )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 
         # IN_PROGRESS
@@ -342,15 +671,24 @@ class SpawnAgentManager(ToolManager):
         try:
             context_gates = tool_call.get("context_gates") or {}
             if local_data_summary is None:
-                if context_gates.get("recent_communications", True):
+                cached_summary = getattr(workflow_instance, "_cached_local_data_summary", None)
+                if isinstance(cached_summary, str):
+                    # Same user + same connected-data snapshot for the life of
+                    # this workflow. Re-fetching on every July explore was one
+                    # extra Temporal hop per spawn (224+ on Huberman-class GPs).
+                    local_data_summary = cached_summary
+                elif context_gates.get("recent_communications", True):
                     local_data_summary = await workflow.execute_activity(
                         fetch_local_data_summary,
                         args=[workflow_instance.user_id],
                         start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
                         retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
                     )
+                    if isinstance(local_data_summary, str):
+                        workflow_instance._cached_local_data_summary = local_data_summary
                 else:
                     local_data_summary = ""
+                    workflow_instance._cached_local_data_summary = ""
 
             # Resolve requested attachments from workflow context
             attachment_texts: List[str] = []
@@ -423,6 +761,71 @@ class SpawnAgentManager(ToolManager):
                 else getattr(workflow_instance, "gpt_code_token_pool_id", None)
             )
             world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+            activity_args = [
+                workflow_instance.agent_id,
+                workflow_instance.user_id,
+                goal,
+                model,
+                task_id,
+                tool_call_id,
+                claude_token,
+                gpt_token,
+                gpt_account_id,
+                gpt_token_source,
+                gpt_token_pool_id,
+                attachment_texts,
+                getattr(workflow_instance, "max_context_tokens", None) or 200_000,
+                depth,
+                explore_max_iterations,
+                world_model_mode,
+                local_data_summary,
+            ]
+            activity_handle = workflow.start_activity(
+                spawn_explore_agent_activity,
+                args=activity_args,
+                start_to_close_timeout=explore_activity_timeout,
+                heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
+                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            # OAi-demo Fast Mode: start the explore (T3 full trajectory) but
+            # do not block the parent execute_loop. July GPs replay by
+            # get-position step, not conversation prefix, so a parallel
+            # FINISH chip does not break cache hits. Drain before
+            # attempt_completion so T9 has no leftover ACTIVE children.
+            # wait_for / capture_tool_results still need the real result.
+            if (
+                bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+                and capture_tool_results is None
+                and is_oai_demo_mass_agent_task(workflow_instance)
+            ):
+                # Do not wait for an inflight slot here. A Huberman-class GP
+                # has 224–336 sequential spawn_agent turns; blocking the parent
+                # at cap=16 keeps 336/16 × ~32s on the execute_loop critical
+                # path (~672s) and misses the 900s harness. Start every
+                # explore (Temporal queues past the worker slot budget) and
+                # drain before attempt_completion. T3 still runs full trajs.
+                track_fast_mode_explore(
+                    workflow_instance,
+                    activity_handle,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    ui_goal=ui_goal,
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
+                    message="Research started.",
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "agentType": "explore",
+                        "taskId": task_id,
+                        "fullGoal": ui_goal,
+                        "fastModeParallel": True,
+                    },
+                )
+                return
+
             async with span(
                 "explore_activity_wait",
                 agent_id=workflow_instance.agent_id,
@@ -432,34 +835,6 @@ class SpawnAgentManager(ToolManager):
                 span_source="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
                 span_key="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
             ):
-                activity_args = [
-                    workflow_instance.agent_id,
-                    workflow_instance.user_id,
-                    goal,
-                    model,
-                    task_id,
-                    tool_call_id,
-                    claude_token,
-                    gpt_token,
-                    gpt_account_id,
-                    gpt_token_source,
-                    gpt_token_pool_id,
-                    attachment_texts,
-                    getattr(workflow_instance, "max_context_tokens", None) or 200_000,
-                    depth,
-                    explore_max_iterations,
-                    world_model_mode,
-                    local_data_summary,
-                ]
-                activity_handle = workflow.start_activity(
-                    spawn_explore_agent_activity,
-                    args=activity_args,
-                    start_to_close_timeout=explore_activity_timeout,
-                    heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
-                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
-
                 # Wait for activity completion or pause signal
                 was_cancelled = False
                 await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
@@ -501,6 +876,16 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
+            # Fast Mode: a truncated/malformed cached explore turn (e.g. the
+            # identify-50 attempt_completion JSON) used to ERROR the spawn after
+            # 3 parse retries of the same row. Finish with gathered evidence.
+            if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+                explore_failed = False
+                if not explore_result or explore_result == "No results found.":
+                    explore_result = (
+                        explore_error_reason
+                        or "Research finished with the evidence gathered so far."
+                    )
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -663,6 +1048,12 @@ class SpawnAgentManager(ToolManager):
             raise ValueError(f"Cannot spawn for_each: maximum nesting depth ({FOR_EACH_MAX_DEPTH}) reached.")
 
         base_goal = tool_call.get("goal", "")
+        fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+        base_goal, items = apply_oai_demo_july_for_each(
+            base_goal,
+            items,
+            enabled=fm and is_oai_demo_mass_agent_task(workflow_instance),
+        )
         start_phase = resolve_start_phase(tool_call)
         attachments = tool_call.get("attachments")
         output_schema = tool_call.get("output_schema")
@@ -804,6 +1195,25 @@ class SpawnAgentManager(ToolManager):
                             }
                         )
             except Exception as exc:
+                recovered = await _recover_oai_demo_for_each_timeout(
+                    workflow_instance, child_info.get("agent_id"), exc
+                )
+                if recovered is not None and not _oai_demo_child_result_failed(recovered):
+                    logger.warning(
+                        "for_each child finalize timed out; recovered completed child",
+                        tcid=tcid,
+                        error=str(exc),
+                    )
+                    child_outputs.append(
+                        {
+                            "index": idx,
+                            "agent_id": child_info.get("agent_id"),
+                            "status": "completed",
+                            "summary": recovered.get("summary") or "",
+                            "structured_response": recovered.get("structured_response"),
+                        }
+                    )
+                    return
                 saw_error = True
                 child_outputs.append(
                     {

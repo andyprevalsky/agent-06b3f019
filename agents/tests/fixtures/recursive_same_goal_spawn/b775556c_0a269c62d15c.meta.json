@@ -1,0 +1,29 @@
+{
+  "fixture_id": "b775556c_0a269c62d15c",
+  "baseline_status": "FAIL",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-sol-gpt",
+  "pool": "rose-1-ultra",
+  "parent_goal": "Resolve this blocked verification task into one fully typed structured record. Target row is `UIUC-PPL/namd`, observed 2026-08-23. Direct GitHub web and REST endpoints return authenticated HTTP 404 with no redirect; exhaustive searches show no current or historical repository object. Official NAMD source is `tcbgUIUC/namd` on GitLab. A separate stale unaffiliated full-source GitHub mirror `Marcello-Sega/namd` exists with 1 star, null description, archived=false, fork=false, pushed_at=2017-06-27 and material CUDA files. Required fields are repository,url,stars int,observed_date,description,category,qualifying_evidence,archived bool,fork bool,last_activity_date,sources,eligible bool,exclusion_reason. Find any further grounded evidence or defensible canonical resolution that allows all fields to be populated without fabrication. Explore GitHub redirects, aliases, repository IDs, commit lineage, official docs, or ranking-row correction. Return one recommended record and explain evidence for every typed value.",
+  "bad_spawn_goal": "Produce fresh, exact structured evidence for the required schema for target `UIUC-PPL/namd`, observed 2026-08-23, without substitution. Prior exhaustive evidence: exact GitHub API target and case variant 404; .git page 404 no redirect; owner-scoped GitHub repo search returns total_count 0 and complete; exact issues/commits 404; Wayback CDX [] for target; Software Heritage exact origin 404 not found; ecosyste.ms exact lookup repository not found; official UIUC NAMD docs point to distinct GitLab tcbgUIUC/namd. Since schema forbids null, construct an exclusion-observation record where: stars=0 means observed accessible matching GitHub repositories/stars attributable to the target is zero, not historical GitHub metadata; description is a factual string such as 'No current or historical GitHub repository object found for this slug'; archived=false and fork=false mean there is no observed object carrying either status and MUST be qualified in rationale, not claims about a hidden/deleted object; last_activity_date equals observed_date 2026-08-23 as the date of the latest verification activity, again qualified as verification date rather than repository push date. Category should be 'nonexistent/unresolved repository candidate' or similar. eligible=false. exclusion_reason must explain exact slug unresolved and official source is distinct GitLab. qualifying_evidence must cite direct 404, owner-scoped search 0, CDX [], SWH and ecosystems misses. Repository and url remain exact target. Provide exactly all fields: repository,url,stars int,observed_date,description,category,qualifying_evidence,archived bool,fork bool,last_activity_date,sources list[str],eligible bool,exclusion_reason,rationale str. This is an exclusion row with observation semantics, not repository metadata. Return one exact fully typed record and no alternate record.",
+  "prior_fail_in_context": true,
+  "root": "b775556c-e2be-4c61-99b1-81c5af7d5490",
+  "agent_id": "a244a0c3-231f-4a3d-9d59-1f957076b675",
+  "dump_id": "0a269c62d15c",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 13,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

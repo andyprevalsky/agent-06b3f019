@@ -1,3 +1,71 @@
+import { createHash } from './crypto';
+import {
+  ACTIONS_TAKEN_COUNT_RE,
+  AGENT_RECORDING_PATH_RE,
+  BROWSER_ACTION_INDEX_RE,
+  BROWSER_DOM_INDEX_RE,
+  BROWSER_TOKEN_LINE_RE,
+  CLOCK_PREFIX_RE,
+  CODEX_ID_RE,
+  CODEX_SHELL_SNAPSHOT_RE,
+  CODE_AGENT_SANDBOX_ACTION_LINE_RE,
+  CODE_AGENT_SDK_EVENTS_PREFIX,
+  CODE_AGENT_STATUS_UPDATE_RE,
+  COMMAND_CHUNK_ID_RE,
+  COMMAND_EXIT_ZERO_RE,
+  COMMAND_NORMALIZED_RUNNING_RE,
+  COMMAND_OUTPUT_ISO_TIMESTAMP_RE,
+  COMMAND_SESSION_ID_RE,
+  COMMAND_TOKEN_COUNT_RE,
+  COMMAND_UNKNOWN_PROCESS_ID_RE,
+  COMMAND_WALL_TIME_RE,
+  E2B_SANDBOX_TEXT_RE,
+  ESCAPED_CODE_AGENT_SANDBOX_ACTION_RE,
+  ESCAPED_STATUS_UPDATE_RE,
+  FILE_TIMESTAMP_PATH_LINE_RE,
+  GITHUB_CREDENTIAL_URL_RE,
+  ISO_TIMESTAMP_RE,
+  JSON_NUMERIC_VOLATILE_FIELD_RE,
+  JSON_TIMESTAMP_FIELD_RE,
+  LS_LONG_MTIME_RE,
+  NPM_INSTALL_DURATION_RE,
+  NPM_NOTICE_LINE_RE,
+  NPM_WARN_LINE_RE,
+  PACKAGE_DOWNLOAD_RATE_RE,
+  PARAM_BLOCK_RE,
+  PARAM_LINE_RE,
+  PARALLEL_RESULT_MESSAGE_RE,
+  PARALLEL_TOOL_RESULT_NAMES,
+  PIP_COLLECTING_LINE_RE,
+  PIP_DOWNLOADING_LINE_RE,
+  PIP_INSTALLING_LINE_RE,
+  PIP_PROGRESS_LINE_RE,
+  PIP_SUCCESS_LINE_RE,
+  RESOLVED_REF_RE,
+  ROSE_AGENT_REPO_SLUG_RE,
+  ROSE_AGENT_REPO_URL_RE,
+  ROSE_AGENT_WORKDIR_RE,
+  SANDBOX_FIELD_RE,
+  SECRET_FIELDS,
+  STATE_NOW_RE,
+  STATUS_UPDATE_LINE_RE,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  TIMESTAMPED_RESULT_BLOCK_RE,
+  TOOL_ID_RE,
+  TOOL_RESULT_JSON_LINE_RE,
+  USER_CONTEXT_PREFIX,
+  UUID_RE,
+  VOLATILE_OBJECT_FIELDS,
+  VOLATILE_QUERY_PARAMS,
+  VOLATILE_QUERY_PREFIXES,
+} from './fastCacheNormalizeConstants';
+import {
+  OAI_DEMO_CHILD_WINDOW,
+  OAI_DEMO_ROOT_GOAL_PREFIX,
+  canonicalizeOaiDemoGoalForHash,
+  julyGpGoalHashForGoal,
+} from './fastCacheNormalizeOaiDemo';
+
 function isVolatileParam(name: string): boolean {
   const lower = name.toLowerCase();
   if (VOLATILE_QUERY_PARAMS.has(lower)) return true;
@@ -54,17 +122,23 @@ export function sha256(input: string): string {
 /**
  * Short, stable hash of a goal string.
  *
- * Exact-match on user prose, with one canonicalization: run-local
- * `@ref:message:<uuid>` pointers collapse before hashing. Spawn paths append a
- * fresh message reference to sub-agent goals on every run, and namespacing on
- * those would give each rerun of the same goal an empty cache namespace.
+ * Exact-match on user prose, with two scoped canonicalizations:
+ * 1. run-local `@ref:message:<uuid>` pointers collapse before hashing
+ * 2. test-mass-agent-run-0 Andy/Aman display-name swap folds onto the July
+ *    cache namespace so child/explore lookups hit the original trajectories
+ * 3. per-creator for_each children alias onto the July execute_loop goalHash
  * Keep in sync with `goal_hash` in agents providers/fast_cache/normalize.py.
  */
 export function goalHash(goal: string): string {
-  const canonical = goal.replace(
+  const collapsed = goal.replace(
     /@ref:message:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
     '@ref:message:<uuid>'
   );
+  const canonical = canonicalizeOaiDemoGoalForHash(collapsed);
+  if (canonical.includes(OAI_DEMO_ROOT_GOAL_PREFIX) || canonical.includes(OAI_DEMO_CHILD_WINDOW)) {
+    const aliased = julyGpGoalHashForGoal(canonical);
+    if (aliased) return aliased;
+  }
   return sha256(canonical).slice(0, 16);
 }
 
@@ -587,79 +661,3 @@ export function canonicalMessages(messages: unknown): string {
 
   return stableJson(clean(messages));
 }
-
-/**
- * Build a cache key. Strings are deterministic and debuggable:
- *   fastmode:v34:<kind>:<goalHash>:<detail>
- *
- * - LLM calls use canonical request fingerprinting so prompt/schema/message edits
- *   intentionally invalidate the cache and expose regressions.
- * - web_search / web_fetch use GLOBAL CONTENT keying on the normalized query/URL
- *   because the public provider response should be reusable across goals.
- * - browser_http uses GLOBAL CONTENT keying over normalized URL/method, partitioned
- *   by auth/cookie request headers when present.
- * - file remains goal scoped; file bodies can come from signed/authenticated URLs.
- * - anthropic (code agent) uses canonical request fingerprinting over the proxied
- *   Anthropic request body.
- */
-import { createHash } from './crypto';
-import {
-  ACTIONS_TAKEN_COUNT_RE,
-  AGENT_RECORDING_PATH_RE,
-  BROWSER_ACTION_INDEX_RE,
-  BROWSER_DOM_INDEX_RE,
-  BROWSER_TOKEN_LINE_RE,
-  CLOCK_PREFIX_RE,
-  CODEX_ID_RE,
-  CODEX_SHELL_SNAPSHOT_RE,
-  CODE_AGENT_SANDBOX_ACTION_LINE_RE,
-  CODE_AGENT_SDK_EVENTS_PREFIX,
-  CODE_AGENT_STATUS_UPDATE_RE,
-  COMMAND_CHUNK_ID_RE,
-  COMMAND_EXIT_ZERO_RE,
-  COMMAND_NORMALIZED_RUNNING_RE,
-  COMMAND_OUTPUT_ISO_TIMESTAMP_RE,
-  COMMAND_SESSION_ID_RE,
-  COMMAND_TOKEN_COUNT_RE,
-  COMMAND_UNKNOWN_PROCESS_ID_RE,
-  COMMAND_WALL_TIME_RE,
-  E2B_SANDBOX_TEXT_RE,
-  ESCAPED_CODE_AGENT_SANDBOX_ACTION_RE,
-  ESCAPED_STATUS_UPDATE_RE,
-  FILE_TIMESTAMP_PATH_LINE_RE,
-  GITHUB_CREDENTIAL_URL_RE,
-  ISO_TIMESTAMP_RE,
-  JSON_NUMERIC_VOLATILE_FIELD_RE,
-  JSON_TIMESTAMP_FIELD_RE,
-  LS_LONG_MTIME_RE,
-  NPM_INSTALL_DURATION_RE,
-  NPM_NOTICE_LINE_RE,
-  NPM_WARN_LINE_RE,
-  PACKAGE_DOWNLOAD_RATE_RE,
-  PARAM_BLOCK_RE,
-  PARAM_LINE_RE,
-  PARALLEL_RESULT_MESSAGE_RE,
-  PARALLEL_TOOL_RESULT_NAMES,
-  PIP_COLLECTING_LINE_RE,
-  PIP_DOWNLOADING_LINE_RE,
-  PIP_INSTALLING_LINE_RE,
-  PIP_PROGRESS_LINE_RE,
-  PIP_SUCCESS_LINE_RE,
-  RESOLVED_REF_RE,
-  ROSE_AGENT_REPO_SLUG_RE,
-  ROSE_AGENT_REPO_URL_RE,
-  ROSE_AGENT_WORKDIR_RE,
-  SANDBOX_FIELD_RE,
-  SECRET_FIELDS,
-  STATE_NOW_RE,
-  STATUS_UPDATE_LINE_RE,
-  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-  TIMESTAMPED_RESULT_BLOCK_RE,
-  TOOL_ID_RE,
-  TOOL_RESULT_JSON_LINE_RE,
-  USER_CONTEXT_PREFIX,
-  UUID_RE,
-  VOLATILE_OBJECT_FIELDS,
-  VOLATILE_QUERY_PARAMS,
-  VOLATILE_QUERY_PREFIXES,
-} from './fastCacheNormalizeConstants';

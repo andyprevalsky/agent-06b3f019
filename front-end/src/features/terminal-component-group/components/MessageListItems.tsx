@@ -12,6 +12,10 @@
 import MessageBubble from './MessageBubble';
 import type { Message } from '../hooks';
 import type { ExploreStep, FeedbackData, WaitForCheck } from '../types';
+import {
+  resolveSubAgentStreamingMetrics,
+  type SubAgentStreamingMetrics,
+} from './useMessageFiltering';
 
 interface MessageListItemsProps {
   filteredMessages: Message[];
@@ -26,8 +30,22 @@ interface MessageListItemsProps {
   waitForCheckMap: Map<string, WaitForCheck[]>;
   streamingPlanCharCount?: number;
   streamingPlanStartedAtMs?: number;
-  thinkingStreamTokenCount?: number;
-  thinkingStreamStartedAtMs?: number;
+  streamingMetricsBySubAgentId: Map<string, SubAgentStreamingMetrics>;
+}
+
+function resolveMessageThinkingMetrics(
+  message: Message,
+  streamingMetricsBySubAgentId: Map<string, SubAgentStreamingMetrics>,
+): { thinkingStreamTokenCount?: number; thinkingStreamStartedAtMs?: number } {
+  const taskId = message.metadata?.taskId;
+  if (message.metadata?.agentType === 'explore' && typeof taskId === 'string') {
+    const metrics = resolveSubAgentStreamingMetrics(taskId, streamingMetricsBySubAgentId);
+    return {
+      thinkingStreamTokenCount: Math.round(metrics.charCount / 4),
+      thinkingStreamStartedAtMs: metrics.streamStartedAtMs,
+    };
+  }
+  return {};
 }
 
 function resolvePlanCharCount(
@@ -61,13 +79,13 @@ export function MessageListItems({
   waitForCheckMap,
   streamingPlanCharCount,
   streamingPlanStartedAtMs,
-  thinkingStreamTokenCount,
-  thinkingStreamStartedAtMs,
+  streamingMetricsBySubAgentId,
 }: MessageListItemsProps) {
   return (
     <>
       {filteredMessages.map((message) => {
         const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
+        const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
         const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
         const toolCallId =
           typeof message.metadata?.toolCallId === 'string'
@@ -114,8 +132,9 @@ export function MessageListItems({
               planStreamStartedAtMs={
                 planCharCount !== undefined ? streamingPlanStartedAtMs : undefined
               }
-              thinkingStreamTokenCount={thinkingStreamTokenCount}
-              thinkingStreamStartedAtMs={thinkingStreamStartedAtMs}
+              thinkingStreamTokenCount={thinkingMetrics.thinkingStreamTokenCount}
+              thinkingStreamStartedAtMs={thinkingMetrics.thinkingStreamStartedAtMs}
+              streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
             />
           </div>
         );

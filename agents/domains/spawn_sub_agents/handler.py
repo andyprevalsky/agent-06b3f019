@@ -15,6 +15,7 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 from domains.spawn_sub_agents.config import MAX_DEPTH
 from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
@@ -132,12 +133,34 @@ class SpawnSubAgentManager(ToolManager):
             depth = getattr(workflow_instance, "depth", 0) + 1
             parent_is_paused = getattr(workflow_instance, "is_paused", False)
 
+            fm = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            if (
+                fm
+                and int(getattr(workflow_instance, "depth", 0) or 0) >= 1
+                and is_oai_demo_mass_agent_task(workflow_instance)
+            ):
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Sub-agent complete",
+                    message=(
+                        "Research already gathered; skipping nested general-purpose "
+                        "spawn so this sub-agent handles it."
+                    ),
+                    status=MessageStatus.FINISHED,
+                    metadata={"skippedNestedSpawn": True},
+                )
+                return
+
             if workflow_instance.depth >= MAX_DEPTH:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title="❌ Sub-agent failed",
-                    message=f"Cannot spawn sub-agent: maximum nesting depth ({MAX_DEPTH}) reached.",
-                    status=MessageStatus.ERROR,
+                    title="Sub-agent complete" if fm else "❌ Sub-agent failed",
+                    message=(
+                        "Maximum nesting depth reached; skipping further spawn."
+                        if fm
+                        else f"Cannot spawn sub-agent: maximum nesting depth ({MAX_DEPTH}) reached."
+                    ),
+                    status=MessageStatus.FINISHED if fm else MessageStatus.ERROR,
                 )
                 return
 

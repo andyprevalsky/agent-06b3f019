@@ -1,0 +1,29 @@
+{
+  "fixture_id": "f0f03928_1d5ede3c1318",
+  "baseline_status": "PASS",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-terra-gpt",
+  "pool": "rose-1-lite",
+  "parent_goal": "Order a clothing iron and an ironing board, mat, or pad on DoorDash for ASAP delivery to 88 Howard St, Apt 1413, San Francisco, CA 94105. Log in using the authenticated DoorDash session, find a nearby retailer like Target, Walgreens, or CVS that has both items, add them to the cart, verify the address, use the saved payment method, and complete the order. Extract and return the: order_id, total_cost_usd, delivery_eta, and ordered_items (with name and price). Ensure you double-check the order is successful before finishing.",
+  "bad_spawn_goal": "Urgent: Complete the user's DoorDash order, which a browser agent failed to complete due to virtual-authentication error. Use the authenticated DoorDash session or another practical browser route. Deliver ASAP to 88 Howard St Apt 1413, San Francisco CA 94105. Order one clothing iron and one ironing board, mat, or pad from a nearby retailer, confirm saved payment and submit. Verify successful confirmation and report exact: order ID, total cost USD, delivery ETA, and ordered items with individual names and prices. Do not merely research or leave cart unsubmitted. If existing order is already placed, retrieve confirmation details rather than duplicate it.",
+  "prior_fail_in_context": true,
+  "root": "f0f03928-c3c0-4d0a-830f-c3183724dd00",
+  "agent_id": "33c5ec39-bb75-4abb-9ba1-b32db7b71488",
+  "dump_id": "1d5ede3c1318",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 8,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

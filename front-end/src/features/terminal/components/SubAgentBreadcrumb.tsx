@@ -1,6 +1,14 @@
 /**
  * STATE MACHINE: SubAgentBreadcrumb
- * STATIC: Renders ancestor chain + current agent goal breadcrumb.
+ *
+ *   API_CHAIN — ancestors[] from GET /ancestors (id + goal, root first)
+ *   PARENT_FALLBACK — API empty: one crumb from parent_agent_id + parent_goal
+ *                     (hub / archived GPs have parent_agent_id but a live CTE
+ *                     that finds no rows)
+ *   CURRENT_ONLY — no parent id: current goal, not clickable
+ *
+ * Clicks call onSelectAgent(ancestor.id) so the URL + panel switch to that
+ * ancestor. Hub archive GET /agents/:id then serves the parent the same way.
  */
 
 import type { AgentDetail, AncestorNode } from '@/lib/api';
@@ -14,6 +22,25 @@ interface SubAgentBreadcrumbProps {
   blur: number;
 }
 
+type LooseAncestor = AncestorNode & { agent_id?: string };
+
+export function resolveBreadcrumbAncestors(
+  ancestors: AncestorNode[],
+  agentDetail: AgentDetail,
+): AncestorNode[] {
+  const normalized = ancestors
+    .map((row) => {
+      const loose = row as LooseAncestor;
+      const id = loose.id || loose.agent_id || '';
+      return { id, goal: loose.goal };
+    })
+    .filter((row) => row.id.length > 0);
+  if (normalized.length > 0) return normalized;
+  const parentId = agentDetail.parent_agent_id;
+  if (!parentId) return [];
+  return [{ id: parentId, goal: agentDetail.parent_goal || 'parent' }];
+}
+
 export function SubAgentBreadcrumb({
   ancestors,
   agentDetail,
@@ -21,6 +48,7 @@ export function SubAgentBreadcrumb({
   dripStyles,
   blur,
 }: SubAgentBreadcrumbProps) {
+  const trail = resolveBreadcrumbAncestors(ancestors, agentDetail);
   return (
     <div className="absolute top-20 left-0 right-0 z-40 px-6">
       <div className="max-w-4xl mx-auto">
@@ -37,7 +65,7 @@ export function SubAgentBreadcrumb({
                 : undefined,
           }}
         >
-          {ancestors.map((ancestor) => (
+          {trail.map((ancestor) => (
             <span key={ancestor.id} className="flex items-center gap-1 flex-shrink-0">
               <button
                 type="button"

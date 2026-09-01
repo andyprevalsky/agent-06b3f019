@@ -144,6 +144,51 @@ describe('api.ts', () => {
       expect(capturedUrl).toContain('before=2026-01-01T00:00:00Z');
     });
 
+    it('hydrates response_schema from Task Complete outputs when Hub omits it', async () => {
+      server.use(
+        http.get(`${API_BASE}/agents/:agentId`, () =>
+          HttpResponse.json({
+            agent: {
+              agent_id: 'a3dc7669-1b6d-4858-a6b8-5bb4b22c99dc',
+              response_schema: null,
+            },
+            messages: [
+              {
+                message_id: 'final',
+                timestamp: '2026-08-27T00:00:00Z',
+                text: '',
+                role: 'TOOL',
+                metadata: {
+                  isFinalSummary: true,
+                  completionSummary: {
+                    summary: 'Completed a 50-creator competitive analysis.',
+                    outputs: [
+                      {
+                        key: 'positioning_statement',
+                        label: 'Positioning Statement',
+                        value: 'Engineer approach to longevity',
+                      },
+                      {
+                        key: 'top_creators_analysis',
+                        label: 'Top Creators Analysis',
+                        value: '1. Andrew Huberman',
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+            pagination: { has_more: false, oldest_timestamp: null },
+          }),
+        ),
+      );
+      const result = await getAgent('a3dc7669-1b6d-4858-a6b8-5bb4b22c99dc');
+      expect(result.agent.response_schema?.fields.map((field) => field.name)).toEqual([
+        'positioning_statement',
+        'top_creators_analysis',
+      ]);
+    });
+
     it('throws on failure', async () => {
       server.use(
         http.get(`${API_BASE}/agents/:agentId`, () =>
@@ -825,6 +870,18 @@ describe('api.ts', () => {
       const ancestors = await fetchAncestors('a');
       expect(ancestors.length).toBe(2);
       expect(ancestors[0].id).toBe('p1');
+    });
+
+    it('fetchAncestors normalizes agent_id rows to id', async () => {
+      server.use(
+        http.get(`${API_BASE}/agents/:agentId/ancestors`, () =>
+          HttpResponse.json({
+            ancestors: [{ agent_id: 'root', goal: 'root goal' }],
+          }),
+        ),
+      );
+      const ancestors = await fetchAncestors('a');
+      expect(ancestors).toEqual([{ id: 'root', goal: 'root goal' }]);
     });
 
     it('fetchAncestors throws on failure', async () => {

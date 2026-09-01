@@ -10,12 +10,16 @@ stripped by the normalizer.
 from __future__ import annotations
 
 import contextvars
+import os
 from dataclasses import dataclass
 from typing import Optional
 
 from . import normalize
 
-WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
+WRITE_THROUGH_USER_IDS = {
+    "1f85ff25-6e29-4c1b-8739-f917bd101a30",  # Andy
+    "43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9",  # Tamy
+}
 
 
 @dataclass
@@ -29,6 +33,9 @@ class FastCacheContext:
     # prior tool output text.
     base_step: Optional[int] = None
     write_enabled: Optional[bool] = None
+    # Root agent's goal (busId row). Soft-complete stubs require exact match of
+    # this agent's goal OR the tree root against a fast_cache:on bench prompt.
+    root_goal: Optional[str] = None
 
     @property
     def read_enabled(self) -> bool:
@@ -52,11 +59,21 @@ class FastCacheContext:
     def goal_hash(self) -> str:
         return normalize.goal_hash(self.goal)
 
+    @property
+    def soft_complete_allowed(self) -> bool:
+        return normalize.soft_complete_allowed(self.goal, root_goal=self.root_goal)
+
     def llm_key(self, call_site: str, messages: object = None) -> str:
         """Build the LLM cache key for the current request."""
         if self.base_step is not None:
             return normalize.position_key(self.goal, call_site, self.base_step, messages)
         return normalize.content_key(self.goal, call_site, messages)
+
+    def llm_lookup_keys(self, call_site: str, messages: object = None) -> list[str]:
+        """Exact keys to try for a cache read (current + OAi-demo aliases)."""
+        if self.base_step is not None:
+            return normalize.position_lookup_keys(self.goal, call_site, self.base_step, messages)
+        return [self.llm_key(call_site, messages)]
 
 
 _CTX: contextvars.ContextVar[Optional[FastCacheContext]] = contextvars.ContextVar(
@@ -82,4 +99,7 @@ def is_enabled() -> bool:
 
 
 def write_through_enabled_for_user(user_id: Optional[str]) -> bool:
+    flag = os.environ.get("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return False
     return bool(user_id) and user_id in WRITE_THROUGH_USER_IDS

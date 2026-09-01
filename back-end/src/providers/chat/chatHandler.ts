@@ -26,6 +26,7 @@
  * lookup or rotation. A later Temporal workflow retains its requested-model auth path.
  */
 
+import type { Prisma } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
 import { startAgentWorkflowExecution, type TemporalWorkflowExecutionRef } from '../temporal';
@@ -39,9 +40,9 @@ import { selectChatPhaseModels } from './phaseModels';
 import { executeWebSearch } from './chatTools';
 import { agentFastMode } from '../fastCacheStore';
 import {
-  mapChatDatabaseMessages,
   resolveGeneratorMessages,
   startInitialChatContext,
+  loadChatModelMessages,
 } from './initialContext';
 import {
   broadcastToolEvent,
@@ -81,8 +82,12 @@ export async function handleChatMessage(config: {
 
   const phaseModels = selectChatPhaseModels(config.model);
 
-  const initialContext = startInitialChatContext(config);
+  const initialContext = startInitialChatContext({
+    agentId: config.agentId,
+    requestedModel: config.model,
+  });
   const messages = await initialContext.messages;
+  const chatContextConfig = { agentId: config.agentId, requestedModel: config.model };
 
   const runGenerator = async (
     generatorMessages: typeof messages,
@@ -149,15 +154,18 @@ export async function handleChatMessage(config: {
       mode: decision.mode,
     });
 
-    // Insert ASSISTANT message with router's reasoning before escalation
-    // This clears the thinking bubble and persists the thought
+    // Persist ASSISTANT + Cloud Agent chip before Temporal start.
+    // Prefetch the agent row only on this branch so it overlaps those writes.
+    const cloudAgentToolCallId = uuidv4();
+    const escalationAgentPromise = prisma.agent.findUnique({
+      where: { id: config.agentId },
+      include: { verifier: true },
+    });
     await createMessage({
       agentId: config.agentId,
       role: 'ASSISTANT',
       text: decision.reasoning,
     });
-
-    const cloudAgentToolCallId = uuidv4();
     await createMessage({
       agentId: config.agentId,
       role: 'TOOL',
@@ -172,15 +180,14 @@ export async function handleChatMessage(config: {
       },
     });
 
-    // Start Temporal workflow immediately - NO more LLM calls
-    // Pass mode to determine whether to skip PLAN phase
     let started: boolean;
     try {
       started = await startTemporalWorkflowForChat(
         config.agentId,
         config.userId,
         decision.goal,
-        decision.mode // 'plan' or 'execute'
+        decision.mode,
+        await escalationAgentPromise
       );
     } catch (error) {
       // Pre-acceptance failures only: startTemporalWorkflowForChat swallows
@@ -321,13 +328,7 @@ export async function handleChatMessage(config: {
   const generatorMessages = await resolveGeneratorMessages({
     action: decision.action,
     initialMessages: messages,
-    refreshMessages: async () => {
-      const refreshedDbMessages = await prisma.message.findMany({
-        where: { agentId: config.agentId },
-        orderBy: { timestamp: 'asc' },
-      });
-      return mapChatDatabaseMessages(refreshedDbMessages);
-    },
+    refreshMessages: async () => loadChatModelMessages(chatContextConfig),
   });
 
   const earlyGeneratorResponse =
@@ -445,13 +446,15 @@ async function startTemporalWorkflowForChat(
   agentId: string,
   userId: string,
   goal: string,
-  startPhase: 'plan' | 'execute' = 'plan'
+  startPhase: 'plan' | 'execute' = 'plan',
+  prefetchedAgent?: Prisma.AgentGetPayload<{ include: { verifier: true } }> | null
 ): Promise<boolean> {
-  // Fetch agent to get model and verifier
-  const agent = await prisma.agent.findUnique({
-    where: { id: agentId },
-    include: { verifier: true },
-  });
+  const agent =
+    prefetchedAgent ??
+    (await prisma.agent.findUnique({
+      where: { id: agentId },
+      include: { verifier: true },
+    }));
 
   if (agent === null) {
     throw new Error(`Agent ${agentId} not found`);

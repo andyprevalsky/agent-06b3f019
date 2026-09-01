@@ -43,6 +43,8 @@ function hedge(options: {
   cache: Promise<CacheLookupResult<string>>;
   createLive: (signal: AbortSignal) => Promise<AsyncIterable<Chunk>>;
   graceMs?: number;
+  awaitCacheFirst?: boolean;
+  hangTimeoutMs?: number;
   errors?: unknown[];
   winners?: string[];
 }): AsyncIterable<Chunk> {
@@ -52,6 +54,8 @@ function hedge(options: {
     createCached: (value) => stream([{ content: value, marker: 'cache' }]),
     isLiveCommitChunk: (chunk) => Boolean(chunk.content || chunk.reasoning),
     graceMs: options.graceMs ?? 10,
+    awaitCacheFirst: options.awaitCacheFirst,
+    hangTimeoutMs: options.hangTimeoutMs,
     onCacheError: (error) => options.errors?.push(error),
     onWinner: (winner) => options.winners?.push(winner),
   });
@@ -156,6 +160,75 @@ async function testCacheCanWinAfterGraceBeforeLiveContent(): Promise<void> {
   assert.equal(returned, true, 'cache winner must close the provider iterator');
 }
 
+async function testAwaitCacheFirstSlowHitNeverStartsLive(): Promise<void> {
+  // Shared-cache replay: remote lookup (~1s) is slower than Cerebras first
+  // token (~500ms). The 25ms UX hedge commits live and records gemma tokens
+  // even though the row exists. Fast Mode read must wait for the lookup.
+  const cache = deferred<CacheLookupResult<string>>();
+  let liveConstructions = 0;
+  const winners: string[] = [];
+  const chunksPromise = collect(
+    hedge({
+      cache: cache.promise,
+      awaitCacheFirst: true,
+      hangTimeoutMs: 1_000,
+      winners,
+      createLive: async () => {
+        liveConstructions += 1;
+        return stream([{ content: 'gemma-live', marker: 'live' }]);
+      },
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  cache.resolve({ hit: true, value: 'cached-router-json' });
+  assert.deepEqual(await chunksPromise, [{ content: 'cached-router-json', marker: 'cache' }]);
+  assert.equal(liveConstructions, 0, 'a known cache row must not start Cerebras');
+  assert.deepEqual(winners, ['cache']);
+}
+
+async function testAwaitCacheFirstMissStartsLiveAfterLookup(): Promise<void> {
+  const cache = deferred<CacheLookupResult<string>>();
+  let liveConstructions = 0;
+  const chunksPromise = collect(
+    hedge({
+      cache: cache.promise,
+      awaitCacheFirst: true,
+      hangTimeoutMs: 1_000,
+      createLive: async () => {
+        liveConstructions += 1;
+        return stream([{ content: 'live-after-miss', marker: 'live' }]);
+      },
+    })
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(liveConstructions, 0, 'live must not start while cache is still resolving');
+  cache.resolve({ hit: false });
+  assert.deepEqual(await chunksPromise, [{ content: 'live-after-miss', marker: 'live' }]);
+  assert.equal(liveConstructions, 1);
+}
+
+async function testAwaitCacheFirstHangTimeoutStartsLive(): Promise<void> {
+  const cache = deferred<CacheLookupResult<string>>();
+  let liveConstructions = 0;
+  const chunks = await collect(
+    hedge({
+      cache: cache.promise,
+      awaitCacheFirst: true,
+      hangTimeoutMs: 20,
+      createLive: async () => {
+        liveConstructions += 1;
+        return stream([{ content: 'live-after-hang', marker: 'live' }]);
+      },
+    })
+  );
+
+  assert.deepEqual(chunks, [{ content: 'live-after-hang', marker: 'live' }]);
+  assert.equal(liveConstructions, 1);
+  cache.resolve({ hit: true, value: 'too-late' });
+}
+
 async function testLiveWinnerLocksOutLateCacheWithoutSplicing(): Promise<void> {
   const cache = deferred<CacheLookupResult<string>>();
   const chunksPromise = collect(
@@ -219,6 +292,9 @@ async function main(): Promise<void> {
   await testEarlyMissStartsLiveImmediately();
   await testSlowMissNeverGatesFirstLiveChunk();
   await testCacheCanWinAfterGraceBeforeLiveContent();
+  await testAwaitCacheFirstSlowHitNeverStartsLive();
+  await testAwaitCacheFirstMissStartsLiveAfterLookup();
+  await testAwaitCacheFirstHangTimeoutStartsLive();
   await testLiveWinnerLocksOutLateCacheWithoutSplicing();
   await testCacheErrorIsObservedAndStartsLive();
   await testProviderErrorBeforeContentPropagates();

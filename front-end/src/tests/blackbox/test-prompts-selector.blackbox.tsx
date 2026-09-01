@@ -20,6 +20,7 @@ const CATALOG_PROMPTS = [
     prompt: 'whats the latest news?',
     attachmentUrls: [],
     tags: ['chat', 'smoke'],
+    lastFivePassed: true,
   },
   {
     title: 'Image Attachment Processing',
@@ -28,6 +29,7 @@ const CATALOG_PROMPTS = [
       'Make this image completely red-tinted (apply a red color overlay to the entire image).',
     attachmentUrls: ['/test-assets/rs.jpeg'],
     tags: ['attachment', 'smoke'],
+    lastFivePassed: false,
   },
 ];
 
@@ -289,6 +291,50 @@ describe('TestPromptsSelector', () => {
     const [, files] = onSelectPrompt.mock.calls[0];
     expect(files).toEqual([]);
     errSpy.mockRestore();
+  });
+
+  it('shows a green check only for prompts whose last 5 runs passed', async () => {
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Basic Chat Response/i)).toBeInTheDocument());
+
+    const checks = screen.getAllByTestId('last-five-passed-check');
+    expect(checks).toHaveLength(1);
+    expect(checks[0]).toHaveAttribute('aria-label', 'Last 5 runs passed');
+
+    const chatRow = screen.getByText(/Basic Chat Response/i).closest('button');
+    const imageRow = screen.getByText(/Image Attachment Processing/i).closest('button');
+    expect(chatRow).not.toBeNull();
+    expect(imageRow).not.toBeNull();
+    expect(chatRow!.querySelector('[data-testid="last-five-passed-check"]')).not.toBeNull();
+    expect(imageRow!.querySelector('[data-testid="last-five-passed-check"]')).toBeNull();
+  });
+
+  it('does not show a green check when lastFivePassed is omitted', async () => {
+    fetchSpy.mockImplementation(async (input: FetchInput) => {
+      const url = inputUrl(input);
+      if (isCatalogUrl(url)) {
+        return new Response(
+          JSON.stringify({
+            prompts: [
+              {
+                title: 'Legacy Prompt',
+                description: 'Older backend without lastFivePassed',
+                prompt: 'hello',
+                attachmentUrls: [],
+                tags: ['legacy'],
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    renderWithProviders(<TestPromptsSelector onSelectPrompt={vi.fn()} />);
+    fireEvent.mouseEnter(screen.getByTitle('Select a test prompt'));
+    await waitFor(() => expect(screen.getByText(/Legacy Prompt/i)).toBeInTheDocument());
+    expect(screen.queryByTestId('last-five-passed-check')).not.toBeInTheDocument();
   });
 
   it('shows loading state and warns when the catalog fetch fails', async () => {

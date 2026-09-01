@@ -377,9 +377,21 @@ default_benchmark_worker_processes() {
     fi
 }
 
+# Benchmark mode must set WORKER_PROCESSES on Cloud too. `.cloud-env` machines
+# used to skip this entire block, so run_local_worker.sh fell back to 1 process
+# while the ports line / services.json still printed the `:-8` echo default.
+# One event loop + 51 mass-agent children saturates a core (loop lag, 600s
+# timeout) even when wrap-up is correct. /deploy Step 5 already pins 8; isolated
+# `run-bench --local` on Cloud must get the same default.
+if $BENCHMARK_MODE; then
+    if $IS_CLOUD; then
+        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-8}}"
+    else
+        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-$(default_benchmark_worker_processes)}}"
+    fi
+fi
 if ! $IS_CLOUD; then
     if $BENCHMARK_MODE; then
-        export WORKER_PROCESSES="${WORKER_PROCESSES:-${BENCHMARK_AGENT_WORKERS:-$(default_benchmark_worker_processes)}}"
         export MAX_CONCURRENT_ACTIVITIES="${MAX_CONCURRENT_ACTIVITIES:-16}"
         export MAX_CONCURRENT_ACTIVITY_TASK_POLLERS="${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-16}"
         export MAX_CONCURRENT_WORKFLOWS="${MAX_CONCURRENT_WORKFLOWS:-32}"
@@ -640,9 +652,18 @@ if $IS_CLOUD; then
             CLOUD_KILLED=true
         fi
     done
+    # Pattern kills only apply to the non-isolated cloud stack. Even then, never
+    # SIGKILL a live isolated benchmark sibling (run-bench --local / predeploy
+    # smoke): those share this worktree and record ACTIVE services.json PIDs.
+    # Without this guard, a Step 5 semantic run.sh murders in-flight smoke
+    # workers that kill_stale_same_worktree_benchmark_stack just preserved.
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                if pid_belongs_to_active_isolated_benchmark "$pid"; then
+                    echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
+                    continue
+                fi
                 echo "🧹 Killing $pattern (PID $pid)"
                 kill -9 "$pid" 2>/dev/null || true
                 CLOUD_KILLED=true
@@ -1407,9 +1428,15 @@ PY
         --domain "$domain" \
         --description "Conductor workspace $CONDUCTOR_WORKSPACE_NAME public frontend" 2>&1) || {
         echo "$create_output"
-        echo "❌ Could not reserve $domain. Confirm the ngrok account is on Pay-as-you-go and the domain is available."
+        # Reservation is advisory. ERR_NGROK_415 (account at the 100 reserved-
+        # domain cap) and other create rejections must not tear down the stack —
+        # the agent bind (or ephemeral/cloudflare/localtunnel fallback) is the
+        # authoritative path. Soft callers still see return 1 so they can skip
+        # a reserved-domain bind that was never created.
+        echo "⚠️  Could not reserve $domain. Continuing — tunnel start / fallback is authoritative."
+        echo "   (Pay-as-you-go + domain headroom: https://dashboard.ngrok.com/billing/choose-a-plan)"
         [ "$failure_mode" = "soft" ] && return 1
-        exit 1
+        return 0
     }
 }
 
@@ -1819,10 +1846,20 @@ start_ngrok_public_tunnel() {
     if [ "$NGROK_RESERVE_DOMAIN" = "1" ]; then
         WORKTREE_DOMAIN="$configured_domain"
         export WORKTREE_DOMAIN
-        export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
-        export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
-        export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
-        ensure_ngrok_domain_reserved
+        # Soft: a full reserved-domain roster (ERR_NGROK_415) or any create
+        # rejection must not bind --domain to a hostname we never reserved, or
+        # ngrok exits and the default fatal path kills the whole stack. Fall
+        # back to a provider-assigned endpoint; publish_reported_environment
+        # rewrites PUBLIC_BASE_URL once the agent is up.
+        if ensure_ngrok_domain_reserved "$WORKTREE_DOMAIN" soft; then
+            export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
+            export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
+            export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+        else
+            echo "⚠️  Reserved domain $WORKTREE_DOMAIN unavailable; using ephemeral ngrok endpoint."
+            ngrok_configure_endpoint_mode 1
+            unset PUBLIC_BASE_URL WORKTREE_DOMAIN VITE_ALLOWED_HOSTS 2>/dev/null || true
+        fi
     fi
 
     mkdir -p "$RUN_CONTEXT_DIR"

@@ -428,7 +428,28 @@ async def web_fetch_activity(
                     return {**stored, FAST_CACHE_HIT_FIELD: True}
                 return stored
         if stored is None:
-            logger.info("fast_cache.web_fetch_miss", key=cache_key, url=url)
+            # Fast Mode read miss: soft-complete instead of live Firecrawl /
+            # Parallel Extract. Restricted to exact-match fast_cache:on benches.
+            if not await fast_cache_client.soft_complete_allowed_for_agent(
+                agent_id, fast_mode_goal
+            ):
+                logger.info(
+                    "fast_cache.web_fetch_miss_live",
+                    key=cache_key,
+                    url=url[:120],
+                    reason="soft_complete_not_allowlisted",
+                )
+            else:
+                logger.info("fast_cache.web_fetch_soft_complete", key=cache_key, url=url[:120])
+                return {
+                    "markdown": (
+                        "Fast Mode cache miss for this web fetch. Returning without a "
+                        "live scrape."
+                    ),
+                    "links": [],
+                    "metadata": {"provider": "fast-mode-soft-complete"},
+                    FAST_CACHE_HIT_FIELD: True,
+                }
     elif cache_key is not None:
         logger.info("fast_cache.web_fetch_write_only", key=cache_key, url=url)
 

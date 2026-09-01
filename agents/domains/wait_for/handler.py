@@ -16,6 +16,7 @@ from typing import Any, AsyncGenerator, Optional
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 from domains.wait_for.config import (
     DEFAULT_CHECK_INTERVAL_SECONDS,
     DEFAULT_MAX_CHECKS,
@@ -113,16 +114,23 @@ class WaitForManager(ToolManager):
 
         delta_seconds = int((target - now).total_seconds())
         if delta_seconds <= 0:
-            if resume:
-                # Deploy migration re-armed a wait whose target elapsed during
-                # downtime — treat it as satisfied so the agent proceeds without
-                # depending on the LLM to re-issue wait_for.
+            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            if resume or fast_mode:
+                # resume=True: deploy migration re-armed a wait whose target
+                # elapsed during downtime. Fast Mode: July demo timestamps
+                # (e.g. 2026-07-17T07:03Z) are already past on replay — treat
+                # them as satisfied so children continue instead of ERROR.
+                reason = (
+                    "target already elapsed during deploy"
+                    if resume
+                    else "target already elapsed (Fast Mode replay)"
+                )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Wait complete",
-                    message=f"Reached {until_timestamp} (target already elapsed during deploy)",
+                    message=f"Reached {until_timestamp} ({reason})",
                     status=MessageStatus.FINISHED,
-                    metadata={"waitForMode": "timestamp", "resumed": True},
+                    metadata={"waitForMode": "timestamp", "resumed": bool(resume)},
                 )
                 return
             yield ToolEvent(
@@ -134,6 +142,24 @@ class WaitForManager(ToolManager):
             return
 
         if delta_seconds > MAX_WAIT_SECONDS:
+            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            if resume or fast_mode:
+                # Live path caps waits at 31 days. Fast Mode replay of a July
+                # timestamp that was legal then (e.g. +60d from 2026-07-17) is
+                # now >31d in the future — treat it as already waited.
+                reason = (
+                    "target already elapsed during deploy"
+                    if resume
+                    else "target already elapsed (Fast Mode replay)"
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Wait complete",
+                    message=f"Reached {until_timestamp} ({reason})",
+                    status=MessageStatus.FINISHED,
+                    metadata={"waitForMode": "timestamp", "resumed": bool(resume)},
+                )
+                return
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="wait_for failed",
@@ -270,9 +296,15 @@ class WaitForManager(ToolManager):
             # Delegate to _spawn_explore. Pass a local list for raw tool results
             # so the ~150 KB sub-agent trace stays in-process and never gets
             # persisted into ToolEvent.data / shipped across activity boundaries.
+            # OAi-demo Fast Mode replays by get-position step, so wait_for must
+            # not await the explore (capture_tool_results forces the blocking
+            # path). Track + drain still run the full cached traj for T3/T9.
             explore_tool_call_results: list[str] = []
             explore_usage: dict[str, list[Any]] = {}
             explore_unavailable_sources: list[dict] = []
+            oai_demo_fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)) and (
+                is_oai_demo_mass_agent_task(workflow_instance)
+            )
 
             async for event in spawn_mgr._spawn_explore(
                 workflow_instance,
@@ -280,7 +312,7 @@ class WaitForManager(ToolManager):
                 explore_tool_call_id,
                 task_id=task_id,
                 display_goal=condition,
-                capture_tool_results=explore_tool_call_results,
+                capture_tool_results=None if oai_demo_fast_mode else explore_tool_call_results,
             ):
                 # Route explore events as spawn_agent messages (correct toolName for FE grouping)
                 await workflow_instance._handle_tool_event(event, explore_tool_call_id, "spawn_agent")
@@ -292,6 +324,31 @@ class WaitForManager(ToolManager):
                         explore_usage = event.data.get("usage", {})
                     if "unavailable_sources" in event.data:
                         explore_unavailable_sources = event.data.get("unavailable_sources") or []
+
+            if oai_demo_fast_mode:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Wait complete",
+                    message="Condition resolved; research will finish before this agent completes.",
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "waitForMode": "condition",
+                        "description": description,
+                        "condition": condition,
+                        "checkNum": check_num,
+                        "maxChecks": max_checks_param,
+                        "exploreTaskId": task_id,
+                        "conditionMet": True,
+                        "fastModeParallel": True,
+                    },
+                    data={
+                        "condition_met": True,
+                        "checks_completed": check_num,
+                        "evidence": "Fast Mode parallel replay",
+                        "usage": all_usage,
+                    },
+                )
+                return
 
             # Direct _spawn_explore callers must raise source_connect gates the
             # same way execute_tool does; wait_for previously dropped them.

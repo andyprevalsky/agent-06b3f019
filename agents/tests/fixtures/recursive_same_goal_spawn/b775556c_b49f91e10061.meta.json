@@ -1,0 +1,29 @@
+{
+  "fixture_id": "b775556c_b49f91e10061",
+  "baseline_status": "PASS",
+  "route": "openrouter",
+  "actual_model": "openai/gpt-5.6-sol",
+  "pool": "rose-1-ultra",
+  "parent_goal": "Consolidate the evidence in the five referenced task-result messages into the requested final CUDA-kernel/adjacent-technology ranking artifact. Source inputs, all observed 2026-08-23: recovery task @ref:message:af471428-16ab-48a4-acc8-2fe85fcf908a ; direct kernel-library partition @ref:message:5e80cd89-bc3a-4c25-bdf9-bc924580060d ; profiling/debugging/benchmark partition @ref:message:f68965c4-debf-4cd8-b93f-02d6dbd34bbb ; compiler/core-runtime partition @ref:message:5a091b87-1ec7-4045-b086-ba47e4065d32 ; communication/memory/data-infrastructure partition @ref:message:fcd427a6-6692-4732-a047-542c9144874c . Prefer newest verified 2026-08-23 metadata on overlap, resolve canonical redirects, deduplicate repository identities case-insensitively, and exclude archived=true, fork=true, non-public, non-GitHub, dependency-only, UI, curated-list, sample-only, deprecated/superseded, or merely incidental-CUDA projects. Apply inclusive scope to substantive CUDA C/C++ kernels, Triton/CUTLASS/CuTe kernels, GPU compiler/codegen stacks, core GPU libraries, communication/memory infrastructure, and profiling/debugging/benchmark/simulation/tooling. Rank all eligible records globally by exact stars descending, canonical owner/name ascending as tie-breaker. The supplied results appear to contain fewer than 100 distinct accepted records. You must therefore perform enough fresh direct GitHub verification to expand the grounded candidate universe above 100, prioritizing likely high-star eligible repositories and then searching downward past the cutoff. For every new candidate, obtain exact GitHub REST metadata on 2026-08-23 and inspect direct repository code or official in-repository documentation. Never estimate stars. Select exactly the first 100 globally. Produce exactly four top-level fields and no others: methodology, cutoff_notes, repos, audit_summary. Every repos object must contain exactly rank, repository, url, stars, observed_date, description, category, qualifying_evidence, archived, fork, last_activity_date, sources. Requirements: exactly 100 unique repos, ranks 1..100, observed_date exactly '2026-08-23', archived=false, fork=false, populated descriptions and evidence, activity date YYYY-MM-DD, sources nonempty and including direct GitHub API plus direct code/docs URL, stars monotonically non-increasing, tie ordering correct. Explain exact rank-100 cutoff and verified near misses. Mechanically audit before returning. Do not return a partial list or estimates. You may spawn explore agents or for_each agents internally for fresh verification; do not ask the user for input.",
+  "bad_spawn_goal": "Produce the complete final artifact requested in the user's 2026-08-23 CUDA-kernel/adjacent ranking task. Consolidate the five source task-result messages embedded in @ref:message:af471428-16ab-48a4-acc8-2fe85fcf908a, @ref:message:5e80cd89-bc3a-4c25-bdf9-bc924580060d, @ref:message:f68965c4-debf-4cd8-b93f-02d6dbd34bbb, @ref:message:5a091b87-1ec7-4045-b086-ba47e4065d32, and @ref:message:fcd427a6-6692-4732-a047-542c9144874c. You must expand via fresh direct GitHub verification to over 100 eligible candidates and return exactly the top 100 globally ranked by exact stars descending, canonical owner/name ascending tie-break. Every repo must be directly REST-verified with metadata observed 2026-08-23 and direct repository code or official in-repo docs inspected. Eligibility: substantive CUDA C/C++ kernels, Triton/CUTLASS/CuTe kernels, GPU compiler/codegen stacks, core GPU libraries, communication/memory infrastructure, and profiling/debugging/benchmark/simulation/tooling. Exclude archived, forks, non-public/non-GitHub, dependency-only, UI, curated-list, sample-only, deprecated/superseded, incidental-CUDA. Resolve redirects and case-insensitive dedupe. Exact output requirements: exactly four top-level fields methodology (string), cutoff_notes (string), repos (array), audit_summary (string). Each of exactly 100 repo objects has exactly: rank, repository, url, stars, observed_date='2026-08-23', description, category, qualifying_evidence, archived=false, fork=false, last_activity_date YYYY-MM-DD, sources (nonempty, includes direct GitHub API and direct code/docs URL). No estimated stars, complete descriptions/evidence. Explain rank-100 cutoff and verified near misses. Mechanically audit. Return all content in structured output, no partial answer. Use parallel subagents/for_each aggressively but avoid duplicates and ensure global ordering.",
+  "prior_fail_in_context": false,
+  "root": "b775556c-e2be-4c61-99b1-81c5af7d5490",
+  "agent_id": "0d97675c-464c-4fe8-82e3-328df21ad4ac",
+  "dump_id": "b49f91e10061",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 5,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

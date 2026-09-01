@@ -869,39 +869,6 @@ async def minimize_passing_cookie_removal(
 _COOKIE_PROBE_WAVE_CAP = 5
 
 
-def goal_allows_logged_out_cookie_commit(goal: Optional[str]) -> bool:
-    """True when the browser task explicitly prefers guest / anonymous checkout.
-
-    Guest payment-boundary tasks inject site cookies that often trip challenges;
-    a clean ``all_target`` strip is the intended recovery (logged-out page), not
-    an auth wipe to refuse. Signed-in flows keep the preserve-auth path.
-    """
-    text = (goal or "").lower()
-    signed_in_needles = (
-        "sign in",
-        "sign-in",
-        "log in",
-        "login",
-        "saved credentials",
-        "use my account",
-        "use my credentials",
-    )
-    if any(needle in text for needle in signed_in_needles):
-        return False
-    needles = (
-        "guest checkout",
-        "as guest",
-        "continue as guest",
-        "do not sign in",
-        "don't sign in",
-        "without signing in",
-        "no account needed",
-        "do not log in",
-        "don't log in",
-    )
-    return any(needle in text for needle in needles)
-
-
 async def recover_from_challenge(
     *,
     source_state: StorageState,
@@ -919,8 +886,10 @@ async def recover_from_challenge(
     ``probe`` must hit ephemeral provider sessions (or a test double), **not**
     ``new_context`` on the live Kernel browser — that paints stacked Chromium
     windows into the debug view. Known anti-bot strips that probe clean may be
-    committed on the live tab; guest tasks may commit a clean ``all_target``
-    strip. Opaque cookie findings stay diagnostic and escalate to config search.
+    committed on the live tab; when ``allow_logged_out_cookie_commit`` is true
+    (tool-call param for guest/anonymous tasks), a clean ``all_target`` strip
+    may also be committed. Opaque cookie findings stay diagnostic and escalate
+    to config search.
     """
     original_digest = _state_digest(source_state)
 
@@ -1029,16 +998,10 @@ async def recover_from_challenge(
     if _state_digest(source_state) != original_digest:
         raise RuntimeError("Challenge recovery mutated its source browser state")
 
-    if known_safe and clean_by_label.get("known_challenge"):
-        await progress(
-            "apply_cookie_fix",
-            "Applying the proven known-challenge cookie strip on the live tab and "
-            "requiring one clean navigation.",
-        )
-        if await commit_cookie_removals(known_safe):
-            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
-        return await search_with_preserved_auth_state(known_safe)
-
+    # When fresh-cookie recovery is allowed, prefer the stronger all_target strip
+    # over a known-challenge-only strip if both probed clean. Preferring the weak
+    # strip first left poisoned non-challenge cookies on the live tab (Hotels.com
+    # GraphQL 429 soft-blocks after Bot-or-Not clear).
     all_target_keys = tuple(target_keys)
     if (
         allow_logged_out_cookie_commit
@@ -1054,6 +1017,16 @@ async def recover_from_challenge(
             return ChallengeRecoveryResult("cookies_sanitized", all_target_keys)
         return await search_with_preserved_auth_state()
 
+    if known_safe and clean_by_label.get("known_challenge"):
+        await progress(
+            "apply_cookie_fix",
+            "Applying the proven known-challenge cookie strip on the live tab and "
+            "requiring one clean navigation.",
+        )
+        if await commit_cookie_removals(known_safe):
+            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
+        return await search_with_preserved_auth_state(known_safe)
+
     diagnostic_clean = any(
         clean_by_label.get(label)
         for label in ("all_target", "diagnostic", "diagnostic_half_a", "diagnostic_half_b")
@@ -1061,12 +1034,20 @@ async def recover_from_challenge(
     if diagnostic_clean:
         # Clean logged-out / stripped probes are diagnostic only — opaque cookies
         # may be auth credentials, so never commit unclassified removals on
-        # signed-in / default paths.
-        await progress(
-            "preserve_auth_state",
-            "A cookie variant looked clean in isolation, but unknown cookies are preserved; "
-            "continuing with browser/IP search.",
-        )
+        # signed-in / default paths. Fresh-cookie recoveries still escalate to
+        # config search, but must not claim auth is being preserved.
+        if allow_logged_out_cookie_commit:
+            await progress(
+                "fresh_cookie_config_search",
+                "A cookie variant looked clean in isolation but is not a safe live commit; "
+                "searching configs with a fresh cookie lane.",
+            )
+        else:
+            await progress(
+                "preserve_auth_state",
+                "A cookie variant looked clean in isolation, but unknown cookies are preserved; "
+                "continuing with browser/IP search.",
+            )
         return await search_with_preserved_auth_state()
 
     return await search_with_preserved_auth_state()

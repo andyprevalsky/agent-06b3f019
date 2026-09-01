@@ -147,6 +147,59 @@ def test_no_hanging_tool_calls_snapshot_reconcile_clears_missed_finished_frame()
     assert invariant.failure_reason is None
 
 
+def test_no_hanging_tool_calls_ignores_late_dag_reasoning_flush():
+    """Smoke11: assemble ASSISTANT INSERT after attempt_completion IN_PROGRESS."""
+    from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
+
+    invariant = NoHangingToolCallsInvariant("agent-1")
+    invariant.handle_insert(
+        {
+            "agentId": "agent-1",
+            "id": "ac-in-progress",
+            "timestamp": "2026-08-27T23:51:25.531Z",
+            "role": "TOOL",
+            "text": "Running verifier to check completion...",
+            "metadata": {
+                "toolCallId": "post-dag-attempt-completion-1",
+                "toolName": "attempt_completion",
+                "toolStatus": "IN_PROGRESS",
+            },
+        }
+    )
+    invariant.handle_insert(
+        {
+            "agentId": "agent-1",
+            "id": "dag-reasoning",
+            "timestamp": "2026-08-27T23:51:25.738Z",
+            "role": "ASSISTANT",
+            "text": "July Fast Mode assemble of the original OAi demo cache",
+            "metadata": {
+                "dagTaskIndex": 6,
+                "plannedToolName": "reasoning",
+                "streamId": "dag-reasoning-6-1",
+                "firstTimestamp": "2026-08-27T23:51:25.158381+00:00",
+                "startedAt": "2026-08-27T23:51:25.158381+00:00",
+            },
+        }
+    )
+    invariant.handle_insert(
+        {
+            "agentId": "agent-1",
+            "id": "ac-finished",
+            "timestamp": "2026-08-27T23:51:26.433Z",
+            "role": "TOOL",
+            "text": "Fast Mode cache trajectory ended",
+            "metadata": {
+                "toolCallId": "post-dag-attempt-completion-1",
+                "toolName": "attempt_completion",
+                "toolStatus": "FINISHED",
+            },
+        }
+    )
+
+    assert invariant.failure_reason is None
+
+
 def test_no_hanging_tool_calls_ignores_older_assistant_delivered_late():
     from benchmarks.realtime_monitor import NoHangingToolCallsInvariant
 
@@ -214,6 +267,10 @@ async def run_all_tests():
     r.record(
         "no_hanging_tool_calls_ignores_older_assistant_delivered_late",
         test_no_hanging_tool_calls_ignores_older_assistant_delivered_late,
+    )
+    r.record(
+        "no_hanging_tool_calls_ignores_late_dag_reasoning_flush",
+        test_no_hanging_tool_calls_ignores_late_dag_reasoning_flush,
     )
     r.record(
         "realtime_log_collector_records_and_filters_frames",

@@ -1,15 +1,15 @@
 /**
  * STATE MACHINE: FastModeToggle
  *
- * [OFF] <-- enabled: false (default every session — label says Fast Mode Off)
+ * [ON] <-- enabled: true (default for allowlisted accounts — label says Fast Mode On)
  *     |
  *     | (click)
  *     v
- * [ON] <-- enabled: true (label says Fast Mode On; record/replay third-party responses)
+ * [OFF] <-- enabled: false (label says Fast Mode Off; cache inert)
  *     |
  *     | (click)
  *     v
- * [OFF]
+ * [ON]
  *
  * State:
  * - enabled: boolean (controlled by parent; query-box scoped, session-only, never persisted client-side)
@@ -18,8 +18,8 @@
  * Hover shows an explanatory tooltip for the current state.
  *
  * Gating: only rendered when the current user is in FAST_MODE_USER_IDS (Andy / Tamy).
- * The value is threaded into the create-agent payload as `fastMode`; default off means
- * the cache is completely inert (no read, no write).
+ * The value is threaded into the create-agent payload as `fastMode`; default on means
+ * Rose complete calls use provider fast mode and the aggressive cache is active.
  */
 
 import { Zap } from 'lucide-react';

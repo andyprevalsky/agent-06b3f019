@@ -53,4 +53,135 @@ describe('tool chip resolution by toolCallId', () => {
     expect(bubbles[0]?.text).toContain('Andy Prevalsky');
     expect(bubbles[0]?.metadata?.toolStatus).toBe('FINISHED');
   });
+
+  it('prefers the later explore summary over a Fast Mode fire-and-track stub', () => {
+    const taskId = 'task-huberman-explore';
+    const messages: Message[] = [
+      {
+        message_id: 'explore-start',
+        timestamp: '2026-08-28T00:00:00.000Z',
+        role: 'TOOL',
+        text: 'Research Andrew Huberman last 90 days',
+        metadata: {
+          toolCallId: 'tc-explore',
+          toolName: 'spawn_agent',
+          toolStatus: 'IN_PROGRESS',
+          agentType: 'explore',
+          taskId,
+          title: 'Exploring',
+          fullGoal: 'Research Andrew Huberman last 90 days',
+        },
+      },
+      {
+        message_id: 'explore-stub',
+        timestamp: '2026-08-28T00:00:01.000Z',
+        role: 'TOOL',
+        text: 'Fast Mode parallel replay: explore started and will run its full cached trajectory before this agent completes.',
+        metadata: {
+          toolCallId: 'tc-explore',
+          toolName: 'spawn_agent',
+          toolStatus: 'FINISHED',
+          agentType: 'explore',
+          taskId,
+          title: 'Research Andrew Huberman last 90 days',
+          fullGoal: 'Research Andrew Huberman last 90 days',
+          fastModeParallel: true,
+        },
+      },
+      {
+        message_id: 'explore-search',
+        timestamp: '2026-08-28T00:00:02.000Z',
+        role: 'TOOL',
+        text: '**Result:** Huberman Lab channel stats',
+        metadata: {
+          toolCallId: 'tc-search',
+          toolName: 'web_search',
+          toolStatus: 'FINISHED',
+          agentType: 'explore',
+          taskId,
+          title: 'Searched the web',
+        },
+      },
+      {
+        message_id: 'explore-summary',
+        timestamp: '2026-08-28T00:00:10.000Z',
+        role: 'TOOL',
+        text: 'Huberman posts 3x/week on YouTube. Top hooks are protocol + mechanism.',
+        metadata: {
+          toolCallId: 'tc-explore',
+          toolName: 'spawn_agent',
+          toolStatus: 'FINISHED',
+          agentType: 'explore',
+          taskId,
+          title: 'Research Andrew Huberman last 90 days',
+          fullGoal: 'Research Andrew Huberman last 90 days',
+        },
+      },
+    ];
+
+    const [rendered] = deduplicateToolMessages(messages);
+    const bubbles = rendered.filter((m) => m.metadata?.agentType === 'explore');
+    expect(bubbles).toHaveLength(1);
+    expect(bubbles[0]?.text).toContain('Huberman posts 3x/week');
+    expect(bubbles[0]?.text).not.toMatch(/fast\s*mode/i);
+    expect(bubbles[0]?.text).not.toMatch(/cached trajectory/i);
+  });
+
+  it('shows the later explore summary over a Research started. fire-and-track stub', () => {
+    const taskId = 'task-delauer-explore';
+    const messages: Message[] = [
+      {
+        message_id: 'explore-start',
+        timestamp: '2026-08-28T00:00:00.000Z',
+        role: 'TOOL',
+        text: 'Research Thomas DeLauer last 90 days',
+        metadata: {
+          toolCallId: 'tc-explore',
+          toolName: 'spawn_agent',
+          toolStatus: 'IN_PROGRESS',
+          agentType: 'explore',
+          taskId,
+          title: 'Exploring',
+          fullGoal: 'Research Thomas DeLauer last 90 days',
+        },
+      },
+      {
+        message_id: 'explore-stub',
+        timestamp: '2026-08-28T00:00:01.000Z',
+        role: 'TOOL',
+        text: 'Research started.',
+        metadata: {
+          toolCallId: 'tc-explore',
+          toolName: 'spawn_agent',
+          toolStatus: 'FINISHED',
+          agentType: 'explore',
+          taskId,
+          title: 'Research Thomas DeLauer last 90 days',
+          fullGoal: 'Research Thomas DeLauer last 90 days',
+          fastModeParallel: true,
+        },
+      },
+      {
+        message_id: 'explore-summary',
+        timestamp: '2026-08-28T00:00:12.000Z',
+        role: 'TOOL',
+        text: '## (1) Thomas DeLauer — 90-day cadence\nPosts ~4x/week. Hooks are fasting + training.',
+        metadata: {
+          toolCallId: 'tc-explore',
+          toolName: 'spawn_agent',
+          toolStatus: 'FINISHED',
+          agentType: 'explore',
+          taskId,
+          title: 'Research Thomas DeLauer last 90 days',
+          fullGoal: 'Research Thomas DeLauer last 90 days',
+        },
+      },
+    ];
+
+    const [rendered] = deduplicateToolMessages(messages);
+    const bubbles = rendered.filter((m) => m.metadata?.agentType === 'explore');
+    expect(bubbles).toHaveLength(1);
+    expect(bubbles[0]?.text).toContain('Thomas DeLauer — 90-day cadence');
+    expect(bubbles[0]?.text).not.toMatch(/research started/i);
+  });
 });

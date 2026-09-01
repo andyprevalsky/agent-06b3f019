@@ -179,6 +179,7 @@ async def run_agent(
     wait_for_messages: Optional[Callable[[], Awaitable[bool]]] = None,
     on_context_overflow: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
     check_credits: Optional[Callable[[], Awaitable[None]]] = None,  # Checks credits, sets pause if depleted
+    check_generation_handoff: Optional[Callable[[], Awaitable[Optional[str]]]] = None,  # Live task queue if stale
     # For posting messages and executing tools
     post_message: Optional[Callable[[str, str, Optional[Dict]], Awaitable[None]]] = None,
     poll_messages: Optional[Callable[[datetime], Awaitable[List[Dict]]]] = None,  # Takes last_checked timestamp
@@ -252,7 +253,7 @@ async def run_agent(
 
     Returns:
         Dict with:
-        - status: "completed" | "paused" | "needs_user_response" | "max_iterations" | "error"
+        - status: "completed" | "paused" | "needs_user_response" | "max_iterations" | "error" | "generation_handoff"
         - context: Final context (for passing to next phase or continue_as_new)
         - tokens_in/out/count: Token usage
         - message: Final message/summary
@@ -639,6 +640,36 @@ async def run_agent(
 
         if paused:
             consecutive_paused += 1
+            # Cooperative generation handoff while paused: check periodically so
+            # a user-paused agent still moves to the live queue without waiting
+            # for the 45m force-migrate SLO.
+            if check_generation_handoff and (
+                consecutive_paused == 1 or consecutive_paused % 10 == 0
+            ):
+                try:
+                    handoff_queue = await check_generation_handoff()
+                except Exception as e:
+                    logger.warning(f"Generation handoff check failed while paused (continuing): {e}")
+                    handoff_queue = None
+                if handoff_queue:
+                    logger.info(
+                        "run_agent.generation_handoff_while_paused",
+                        agent_id=agent_id,
+                        consecutive_paused=consecutive_paused,
+                        handoff_task_queue=handoff_queue,
+                    )
+                    _pending_llm_context.pop(agent_id, None)
+                    return {
+                        "status": "generation_handoff",
+                        "handoff_task_queue": handoff_queue,
+                        "context": context,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "token_count": token_count,
+                        "context_size": context_size,
+                        "cache_read_input_tokens": cache_read_total,
+                        "cache_creation_input_tokens": cache_write_total,
+                    }
             # Log on the first pause and then only periodically — never every
             # iteration. If the wait below ever fails to block, an unthrottled
             # log would flood the worker (prod incident 2026-07-05: ~30–100
@@ -718,6 +749,35 @@ async def run_agent(
                 # If callback set is_paused, next iteration will catch it
             except Exception as e:
                 logger.warning(f"Credit check failed (continuing): {e}")
+
+        # 1.6. Cooperative generation handoff — only between turns (tools/LLM done).
+        # If the live AgentQueuePointer points at a newer generation queue, yield so
+        # the workflow can continue_as_new onto that queue before the next LLM call.
+        if check_generation_handoff:
+            try:
+                handoff_queue = await check_generation_handoff()
+            except Exception as e:
+                logger.warning(f"Generation handoff check failed (continuing): {e}")
+                handoff_queue = None
+            if handoff_queue:
+                logger.info(
+                    "run_agent.generation_handoff",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    handoff_task_queue=handoff_queue,
+                )
+                _pending_llm_context.pop(agent_id, None)
+                return {
+                    "status": "generation_handoff",
+                    "handoff_task_queue": handoff_queue,
+                    "context": context,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "token_count": token_count,
+                    "context_size": context_size,
+                    "cache_read_input_tokens": cache_read_total,
+                    "cache_creation_input_tokens": cache_write_total,
+                }
 
         # 2. Poll for new messages (pass our own last_checked, not workflow's)
         if poll_messages:
@@ -1153,12 +1213,16 @@ async def run_agent(
 
                 write_through_enabled = write_through_enabled_for_user(user_id)
                 if goal_text and (fast_mode_cache_enabled or write_through_enabled):
+                    from providers.fast_cache.client import resolve_soft_complete_root_goal
+
+                    root_goal = await resolve_soft_complete_root_goal(agent_id, goal_text)
                     set_context(
                         FastCacheContext(
                             enabled=fast_mode_cache_enabled,
                             goal=goal_text,
                             base_step=fast_cache_step,
                             write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                            root_goal=root_goal,
                         )
                     )
                 else:

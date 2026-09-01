@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import hashlib
 import json as _json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -24,11 +25,16 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/general_purpose/explore
+    from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
+        drain_fast_mode_explores,
+        spawn_agent,
+    )
     from domains.wait_for.service import pending_timestamp_wait_to_resume
+    from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
         check_user_usage,
         fetch_agent_config,
+        fetch_agent_queue_pointer,
         finalize_workflow_replacement_bootstrap,
         generate_completion_summary,
         get_model_context_window,
@@ -49,6 +55,7 @@ with workflow.unsafe.imports_passed_through():
         call_llm_activity,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
+        release_compute_token_lineage_activity,
         set_response_schema_activity,
     )
     from helpers.messages import update_agent_tree_state
@@ -98,6 +105,14 @@ logger = structlog.get_logger()
 # is unreachable in a way that can't be classified as terminal. With the loop's 1s
 # floor sleep this is ~30s+ of continuous unreachability before giving up.
 _ORPHAN_TRANSIENT_FAILURE_LIMIT = 30
+# 50-way Fast Mode fan-out was flooding the parent workflow and the backend
+# with per-message tree broadcasts + per-iteration parent queries. Those
+# activities timed out (10s parent query, 10s tree update) and left children
+# ACTIVE when the 900s harness cap hit. Coalesce to one emit/query per
+# interval so cost stays O(1) per agent per window, not O(messages).
+_TREE_STATE_EMIT_MIN_INTERVAL = timedelta(seconds=3)
+_PARENT_STATE_QUERY_MIN_INTERVAL = timedelta(seconds=15)
+_QUERY_PARENT_STATE_TIMEOUT = timedelta(seconds=60)
 
 CLOUD_AGENT_TOOL_NAME = "cloud_agent"
 CREATING_CLOUD_AGENT_TITLE = "Creating Cloud Agent"
@@ -160,6 +175,437 @@ TOOL_EXECUTORS = {
 APPROVAL_REQUIRED_TOOLS = {
     "call_phone_number": get_call_phone_manager,
 }
+
+
+_SNAKE_HEADING = re.compile(r"^#+\s+([a-z][a-z0-9_]{2,})\s*$", flags=re.MULTILINE)
+
+
+def structured_response_from_schema_headings(text: str, schema: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse `# field_name` markdown sections into a structured_response dict."""
+    if not text:
+        return {}
+    fields = schema.get("fields") or [] if isinstance(schema, dict) else []
+    names = [str(field.get("name")) for field in fields if isinstance(field, dict) and field.get("name")]
+    if not names:
+        seen: set[str] = set()
+        names = []
+        for name in _SNAKE_HEADING.findall(text):
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    if not names:
+        return {}
+    matches: List[Tuple[int, str, int]] = []
+    for name in names:
+        found = re.search(rf"^#+\s+{re.escape(name)}\s*$", text, flags=re.IGNORECASE | re.MULTILINE)
+        if found:
+            matches.append((found.start(), name, found.end()))
+    if not matches:
+        return {}
+    matches.sort()
+    out: Dict[str, Any] = {}
+    for index, (_start, name, end) in enumerate(matches):
+        next_start = matches[index + 1][0] if index + 1 < len(matches) else len(text)
+        body = text[end:next_start].strip()
+        if body:
+            out[name] = body
+    return out
+
+
+_FAST_MODE_SUMMARY_MARKERS = (
+    "fast mode",
+    "cached trajectory",
+    "from_fast_cache",
+    "based on prior tool evidence",
+    "the task completed successfully; verified results are included below",
+)
+_PLUMBING_TOOL_MARKERS = (
+    "research started.",
+    "agent initializing",
+    "agent initialization complete",
+    "running verifier to check completion",
+    "explore agent thinking",
+    "**params passed:**",
+)
+_ROW_ITEM_TO_SCHEMA = {
+    "name": "creator_name",
+    "creator_name": "creator_name",
+    "rank": "rank_from_initial_list",
+    "rank_from_initial_list": "rank_from_initial_list",
+}
+_SCHEMA_FIELD_SECTION_ALIASES = {
+    "creator_name": ("creator name", "assigned creator"),
+    "platform_handles_and_urls": (
+        "handles",
+        "platform",
+        "youtube",
+        "instagram",
+        "tiktok",
+        "substack",
+        "account stats",
+    ),
+    "posting_cadence_by_platform": ("cadence", "posting frequency", "updated weekly"),
+    "hook_formulas": ("hook", "title pattern", "headline formula"),
+    "top_5_performing_pieces_last_90_days": (
+        "top 5",
+        "performing",
+        "last ~90",
+        "last 90",
+        "recent long-form",
+        "recent newsletter",
+    ),
+    "core_content_pillars": ("pillar", "formats across"),
+    "audience_persona": ("audience", "persona", "promise"),
+    "monetization_funnels": ("monetiz", "sponsorship", "paid/free", "pricing"),
+    "content_gaps": ("gap", "underserved"),
+    "opportunities_for_aman": ("takeaway", "opportunit", "whitespace", "competitive"),
+    "engagement_approach": ("engagement", "collab"),
+    "citations_sources": ("citation", "source note"),
+    "confidence_level": ("confidence",),
+}
+_EVIDENCE_TOOLS = {
+    "attempt_completion",
+    "attempt_completion_with_result",
+    "spawn_agent",
+    "send_message_to_user",
+    "web_fetch",
+    "web_search",
+    "grep",
+    "people_search",
+}
+_FLEX_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", flags=re.MULTILINE)
+
+
+def is_ablated_completion_summary(text: Any) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    lowered = raw.lower()
+    return any(marker in lowered for marker in _FAST_MODE_SUMMARY_MARKERS)
+
+
+def _message_body(message: Dict[str, Any]) -> str:
+    if not isinstance(message, dict):
+        return ""
+    text = str(message.get("text") or message.get("message") or "").strip()
+    if text:
+        return text
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    return str(
+        metadata.get("result") or metadata.get("content") or metadata.get("message") or ""
+    ).strip()
+
+
+def _is_plumbing_tool_text(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True
+    # web_search / web_fetch bodies start with **Params Passed:** then the
+    # actual result. A long result is evidence, not chip plumbing.
+    if len(lowered) >= 200:
+        return False
+    return any(marker in lowered for marker in _PLUMBING_TOOL_MARKERS)
+
+
+def last_real_completion_text(
+    context: List[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Best user-facing Task Complete body from already-replayed trajectory evidence."""
+    for message in reversed(context or []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        status = str(metadata.get("toolStatus") or "").upper()
+        text = _message_body(message)
+        if is_ablated_completion_summary(text) or _is_plumbing_tool_text(text):
+            continue
+        if tool_name in {"attempt_completion", "attempt_completion_with_result"} and status in {
+            "FINISHED",
+            "",
+        }:
+            return text
+        if tool_name in _EVIDENCE_TOOLS and status in {"FINISHED", ""} and len(text) >= 200:
+            return text
+        if (
+            str(message.get("role") or "").upper() == "ASSISTANT"
+            and len(text) >= 200
+            and (
+                metadata.get("plannedToolName") == "reasoning"
+                or metadata.get("dagTaskIndex") is not None
+            )
+        ):
+            return text
+    if isinstance(structured_response, dict):
+        for value in structured_response.values():
+            if (
+                isinstance(value, str)
+                and len(value.strip()) >= 200
+                and not is_ablated_completion_summary(value)
+            ):
+                return value.strip()
+    return ""
+
+
+def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800) -> str:
+    """Collapse a long replayed report into a Task Complete card body."""
+    kept: List[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if is_ablated_completion_summary(line) or _is_plumbing_tool_text(line):
+            continue
+        kept.append(line)
+    blob = " ".join(kept).strip()
+    if not blob:
+        return ""
+    if len(blob) <= max_chars:
+        return blob
+    clipped = blob[:max_chars]
+    for separator in (". ", "! ", "? "):
+        idx = clipped.rfind(separator)
+        if idx >= min_chars:
+            return clipped[: idx + 1].strip()
+    return clipped.strip()
+
+
+def _completion_message_identity(message: Dict[str, Any]) -> str:
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    tool_call_id = str(metadata.get("toolCallId") or "").strip()
+    if tool_call_id:
+        return f"tc:{tool_call_id}"
+    return f"{message.get('role')}|{_message_body(message)[:80]}"
+
+
+def _merge_completion_transcripts(
+    polled: Optional[List[Dict[str, Any]]],
+    context: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep both in-memory context and posted rows; prefer the longer body."""
+    merged: List[Dict[str, Any]] = []
+    seen: Dict[str, int] = {}
+    for source in (context or [], polled or []):
+        if not isinstance(source, list):
+            continue
+        for message in source:
+            if not isinstance(message, dict):
+                continue
+            key = _completion_message_identity(message)
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = len(merged)
+                merged.append(message)
+                continue
+            if len(_message_body(message)) > len(_message_body(merged[existing])):
+                merged[existing] = message
+    return merged
+
+
+def card_summary_from_evidence(
+    context: List[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]] = None,
+    *,
+    min_chars: int = 200,
+) -> str:
+    """1-2 sentence Task Complete summary from replayed evidence, never Fast Mode copy."""
+    candidate = last_real_completion_text(context, structured_response)
+    brief = brief_card_summary(candidate, min_chars=min_chars)
+    if brief and not is_ablated_completion_summary(brief) and len(brief) >= min_chars:
+        return brief
+    if isinstance(structured_response, dict):
+        parts = [
+            str(value).strip()
+            for value in structured_response.values()
+            if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value)
+        ]
+        brief = brief_card_summary(" ".join(parts), min_chars=min_chars)
+        if brief and len(brief) >= min_chars:
+            return brief
+    return ""
+
+
+def _json_objects_in_text(text: str) -> List[Dict[str, Any]]:
+    raw = str(text or "")
+    if "{" not in raw:
+        return []
+    decoder = _json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    index = 0
+    while True:
+        start = raw.find("{", index)
+        if start < 0:
+            break
+        try:
+            obj, consumed = decoder.raw_decode(raw[start:])
+        except _json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        index = start + max(int(consumed), 1)
+    return found
+
+
+def _markdown_sections(text: str) -> List[Tuple[str, str]]:
+    matches = list(_FLEX_HEADING.finditer(text or ""))
+    if not matches:
+        return []
+    sections: List[Tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end() : end].strip()
+        if body:
+            sections.append((match.group(1).strip(), body))
+    return sections
+
+
+def _section_matches_field(title: str, field_name: str) -> bool:
+    lowered = title.lower()
+    human = field_name.replace("_", " ")
+    if human in lowered or field_name.lower() in lowered:
+        return True
+    for alias in _SCHEMA_FIELD_SECTION_ALIASES.get(field_name, ()):
+        if alias in lowered:
+            return True
+    return False
+
+
+def _fill_from_row_and_sections(
+    merged: Dict[str, Any],
+    names: List[str],
+    context: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    empty = (None, "", [], {})
+
+    def missing() -> List[str]:
+        return [name for name in names if name not in merged or merged[name] in empty]
+
+    for message in context or []:
+        if not isinstance(message, dict):
+            continue
+        for obj in _json_objects_in_text(_message_body(message)):
+            for raw_key, value in obj.items():
+                target = _ROW_ITEM_TO_SCHEMA.get(str(raw_key))
+                if target and target in names and merged.get(target) in empty + (None,):
+                    if value not in empty:
+                        merged[target] = value
+            for name in names:
+                if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
+                    merged[name] = obj[name]
+        if not missing():
+            return merged
+
+    used_titles: Set[str] = set()
+    for message in reversed(context or []):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = str(metadata.get("toolName") or "")
+        role = str(message.get("role") or "").upper()
+        if role == "USER" and tool_name not in _EVIDENCE_TOOLS:
+            continue
+        text = _message_body(message)
+        if len(text) < 200 or _is_plumbing_tool_text(text):
+            continue
+        for title, body in _markdown_sections(text):
+            if title in used_titles:
+                continue
+            for name in missing():
+                if not _section_matches_field(title, name):
+                    continue
+                merged[name] = body
+                used_titles.add(title)
+                break
+        if not missing():
+            break
+    return merged
+
+
+def coalesce_structured_response(
+    context: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Merge verifier output with `# field_name` sections from the transcript."""
+    merged: Dict[str, Any] = dict(structured_response) if isinstance(structured_response, dict) else {}
+    names = [
+        str(field.get("name"))
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    ]
+    if not names:
+        for message in reversed(context or []):
+            text = _message_body(message)
+            extracted = structured_response_from_schema_headings(text, None)
+            if not extracted:
+                continue
+            for key, value in extracted.items():
+                if key not in merged or merged[key] in (None, "", [], {}):
+                    merged[key] = value
+        return merged or structured_response
+
+    def _missing(current: Dict[str, Any]) -> List[str]:
+        empty = (None, "", [], {})
+        return [name for name in names if name not in current or current[name] in empty]
+
+    if not _missing(merged):
+        return merged
+    for message in reversed(context or []):
+        text = _message_body(message)
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        extracted = structured_response_from_schema_headings(text, schema)
+        if not extracted:
+            extracted = _structured_from_payload(message, names)
+        if not extracted:
+            extracted = _structured_from_payload(metadata, names)
+        if not extracted:
+            continue
+        for key, value in extracted.items():
+            if key not in merged or merged[key] in (None, "", [], {}):
+                merged[key] = value
+        if not _missing(merged):
+            break
+    return merged or structured_response
+
+
+def structured_response_from_evidence(
+    context: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Fill schema outputs from replayed assemble / explore / row-item evidence."""
+    merged = coalesce_structured_response(context, schema, structured_response)
+    merged = dict(merged) if isinstance(merged, dict) else {}
+    names = [
+        str(field.get("name"))
+        for field in (schema or {}).get("fields") or []
+        if isinstance(field, dict) and field.get("name")
+    ]
+    if names:
+        merged = _fill_from_row_and_sections(merged, names, context)
+    return merged or structured_response
+
+
+def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
+    """Pull schema keys off a dict / JSON string without inventing values."""
+    if not names:
+        return {}
+    obj = payload
+    if isinstance(obj, str):
+        raw = obj.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                obj = _json.loads(raw)
+            except _json.JSONDecodeError:
+                return {}
+    if not isinstance(obj, dict):
+        return {}
+    nested = obj.get("structured_response") or obj.get("structuredResponse") or obj
+    if not isinstance(nested, dict):
+        return {}
+    return {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
 
 
 @workflow.defn
@@ -266,6 +712,11 @@ class AgentWorkflow:
         # Coalesce bursts to at most one emit per _TREE_COST_EMIT_MIN_INTERVAL;
         # terminal/cost-limit transitions force-flush so the final value lands.
         self._last_tree_cost_emit_at: Optional[datetime] = None
+        self._last_tree_state_emit_at: Optional[datetime] = None
+        self._last_parent_state_query_at: Optional[datetime] = None
+        self._last_parent_state: Dict = {}
+        self._pending_message_handles: List[Any] = []
+        self._cached_local_data_summary: Optional[str] = None
         self.child_workflow_ids: Dict[str, str] = {}  # child_agent_id -> child_temporal_workflow_id
 
         # Tree token tracking (hierarchical relay: child → parent → root)
@@ -474,6 +925,10 @@ class AgentWorkflow:
         if runtime_start_time is not None:
             self.start_time = runtime_start_time
         self._last_tree_cost_emit_at = self._restored_datetime(runtime.get("last_tree_cost_emit_at"))
+        self._last_tree_state_emit_at = self._restored_datetime(runtime.get("last_tree_state_emit_at"))
+        self._last_parent_state_query_at = self._restored_datetime(runtime.get("last_parent_state_query_at"))
+        last_parent_state = runtime.get("last_parent_state")
+        self._last_parent_state = dict(last_parent_state) if isinstance(last_parent_state, dict) else {}
         for field_name in (
             "compute_token_lineage_key",
             "compute_token_fast_cache_affinity_key",
@@ -593,6 +1048,9 @@ class AgentWorkflow:
                 "output_schema": self.output_schema,
                 "start_time": self._serialized_datetime(self.start_time),
                 "last_tree_cost_emit_at": self._serialized_datetime(self._last_tree_cost_emit_at),
+                "last_tree_state_emit_at": self._serialized_datetime(self._last_tree_state_emit_at),
+                "last_parent_state_query_at": self._serialized_datetime(self._last_parent_state_query_at),
+                "last_parent_state": dict(self._last_parent_state),
                 "compute_token_lineage_key": self.compute_token_lineage_key,
                 "compute_token_fast_cache_affinity_key": (self.compute_token_fast_cache_affinity_key),
                 "input_cents_per_1k": self.input_cents_per_1k,
@@ -1021,9 +1479,16 @@ class AgentWorkflow:
                 # Deployment-restored cold states must not enter run_agent's
                 # bounded pause polling before reaching a durable wait. Consume no
                 # workflow timers or activities until a valid signal unpauses us.
-                await workflow.wait_condition(lambda: not self.is_paused)
+                handoff_queue = await self._wait_for_unpause_or_handoff()
                 await self._wait_for_response_schema_refresh()
-                workflow.continue_as_new(args=self._continuation_args(context))
+                await self._flush_pending_messages()
+                if handoff_queue:
+                    workflow.continue_as_new(
+                        args=self._continuation_args(context),
+                        task_queue=handoff_queue.strip(),
+                    )
+                else:
+                    workflow.continue_as_new(args=self._continuation_args(context))
                 return {"status": "paused", "goal": goal}
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
@@ -1139,84 +1604,107 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
 
-        # Send SMS notification for agent_started to every ROOT agent, regardless
-        # of source, so the user always gets a text with the deep link to any
-        # agent they create (SMS, web, mac-app, API). Sub-agents (parent_workflow_id
-        # set) are intentionally excluded — at 10k agents a per-spawn SMS would
-        # firehose the user's phone. Benchmark/eval runs are suppressed centrally
-        # on the backend (Agent.isBenchmark) so this never texts the operator.
+        # Helper: gate is open unless explicitly False
+        def _gate_open(name: str) -> bool:
+            return self.context_gates.get(name, True)
+
+        # Kick SMS off the critical path — start now, await after first LLM.
+        # Prod traces showed ~2–4s here before any model call.
+        self._deferred_startup_sms_handle = None
         if not parent_workflow_id and not self._deployment_resume:
             try:
                 notification_args = [user_id, "agent_started", agent_id, {"goal": goal}]
                 if self.world_model_mode != "real":
                     notification_args.append(self.world_model_mode)
-                await workflow.execute_activity(
+                self._deferred_startup_sms_handle = workflow.start_activity(
                     notify_sms_event_activity,
                     args=notification_args,
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                workflow.logger.info("Sent agent_started SMS notification")
+                workflow.logger.info("Started agent_started SMS notification (deferred await)")
             except Exception as e:
-                workflow.logger.warning(f"Failed to send agent_started SMS notification: {e}")
+                workflow.logger.warning(f"Failed to start agent_started SMS notification: {e}")
 
-        # Fetch user context once (for both phases), respecting context_gates
+        # Parallelize independent startup fetches (historically one Temporal RTT each).
         user_context_section = getattr(self, "user_context_section", "")
 
-        # Helper: gate is open unless explicitly set to False
-        def _gate_open(name: str) -> bool:
-            return self.context_gates.get(name, True)
-
-        try:
-            user_context_section = await workflow.execute_activity(
-                get_user_context,
-                args=[user_id, self.context_gates],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch user context: {e}")
-        self.user_context_section = user_context_section
-
-        if self.context_gates:
-            workflow.logger.info(f"Context gates applied: {self.context_gates}")
-
-        # Fetch user's custom system name (for approval messages and SMS)
-        try:
-            self.system_name = await workflow.execute_activity(
-                get_user_system_name,
-                args=[user_id],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            workflow.logger.info(f"Using system name: {self.system_name}")
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
-
-        # Fetch user's custom system prompt (for personality injection)
-        # Skip if custom_system_prompt gate is closed
-        if _gate_open("custom_system_prompt"):
+        async def _fetch_user_context() -> str:
             try:
-                self.custom_system_prompt = await workflow.execute_activity(
+                return await workflow.execute_activity(
+                    get_user_context,
+                    args=[user_id, self.context_gates],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch user context: {e}")
+                return user_context_section
+
+        async def _fetch_system_name() -> Optional[str]:
+            try:
+                return await workflow.execute_activity(
+                    get_user_system_name,
+                    args=[user_id],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
+                return None
+
+        async def _fetch_custom_system_prompt() -> Optional[str]:
+            if not _gate_open("custom_system_prompt"):
+                workflow.logger.info("Skipping custom system prompt (gate closed)")
+                return None
+            try:
+                return await workflow.execute_activity(
                     get_user_custom_system_prompt,
                     args=[user_id],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                if self.custom_system_prompt:
-                    workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
             except Exception as e:
                 workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
-        else:
-            workflow.logger.info("Skipping custom system prompt (gate closed)")
+                return None
 
-        # Fetch one direct compute token for Rose. Claude is preferred when
-        # available; otherwise GPT/Codex is used. Each LLM call receives only
-        # the selected token family.
-        await self._refresh_compute_token(user_id)
+        async def _fetch_agent_config() -> Dict[str, Any]:
+            try:
+                return await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[agent_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
+                return {}
+
+        (
+            user_context_section,
+            fetched_system_name,
+            fetched_custom_system_prompt,
+            agent_config,
+            _,
+        ) = await asyncio.gather(
+            _fetch_user_context(),
+            _fetch_system_name(),
+            _fetch_custom_system_prompt(),
+            _fetch_agent_config(),
+            self._refresh_compute_token(user_id),
+        )
+
+        self.user_context_section = user_context_section or ""
+        if self.context_gates:
+            workflow.logger.info(f"Context gates applied: {self.context_gates}")
+        if fetched_system_name:
+            self.system_name = fetched_system_name
+            workflow.logger.info(f"Using system name: {self.system_name}")
+        if fetched_custom_system_prompt:
+            self.custom_system_prompt = fetched_custom_system_prompt
+            workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
 
         # Inject custom system prompt as hidden USER message for new agents
-        # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
         if self.custom_system_prompt and not context and not self._deployment_resume:
             try:
                 await self._post_message(
@@ -1231,25 +1719,16 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to inject custom system prompt: {e}")
 
-        # Fetch response schema and write_lock_enabled from agent config
         response_schema = self.output_schema
         fetched_parent_agent_id = None
-        try:
-            agent_config = await workflow.execute_activity(
-                fetch_agent_config,
-                args=[agent_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+        if agent_config:
             response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
-            self.output_schema = response_schema  # Single source of truth for output schema
-            self.write_lock_enabled = agent_config.get("write_lock_enabled", True)  # Default to True (locked)
+            self.output_schema = response_schema
+            self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
             workflow.logger.info(
                 f"Fetched output_schema: {response_schema is not None}, write_lock_enabled: {self.write_lock_enabled}"
             )
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
         # If no schema was provided at create time, generate one synchronously NOW.
         # The schema appears in the initial main/verifier system prompts. Awaiting
@@ -1385,6 +1864,7 @@ class AgentWorkflow:
                 wait_for_messages=self._wait_for_messages,
                 on_context_overflow=self._handle_context_overflow,
                 check_credits=self._check_credits,
+                check_generation_handoff=self._check_generation_handoff,
                 post_message=self._post_message,
                 poll_messages=self._poll_messages,
                 execute_tool=self._execute_tool,
@@ -1501,6 +1981,7 @@ class AgentWorkflow:
                     # attempt as an LLM-initiated finish.
                     if dag_result["status"] == "completed":
                         workflow.logger.info("[DAG] Tasks completed, attempting completion")
+                        await self._flush_pending_messages()
                         post_dag_result = await self._attempt_post_dag_completion(
                             agent_id=agent_id,
                             user_id=user_id,
@@ -1571,6 +2052,7 @@ class AgentWorkflow:
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,
+                check_generation_handoff=self._check_generation_handoff,
             post_message=self._post_message,
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
@@ -1732,8 +2214,7 @@ class AgentWorkflow:
     def _make_verifier_prompt_generator(self):
         """Create a generator function that builds the verifier prompt at verification time.
 
-        Main-agent reasoning never waits for schema generation, but completion
-        verification must use the latest accepted revision.
+        Completion verification must use the latest accepted schema revision.
         """
 
         async def generate() -> str:
@@ -2001,6 +2482,8 @@ class AgentWorkflow:
 
         # The canonical continuation contract also carries mutable counters,
         # credentials, and signal state so compaction cannot reset billing/limits.
+        await self._drain_fast_mode_explores()
+        await self._flush_pending_messages()
         workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
     async def _check_paused(self) -> bool:
@@ -2016,6 +2499,51 @@ class AgentWorkflow:
         preceding _check_paused. The loop then returns status='aborted' instead of
         waiting forever on a parent that will never resume it."""
         return self._orphaned
+
+
+    async def _check_generation_handoff(self) -> Optional[str]:
+        """Return live task queue when this execution should hand off generations.
+
+        Safe checkpoint: called only at the top of a run_agent iteration, after any
+        prior LLM/tool/browser activity completed. Returns None when we are already
+        on the live generation (or the pointer cannot be read).
+        """
+        try:
+            pointer = await workflow.execute_activity(
+                fetch_agent_queue_pointer,
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Generation pointer check failed (continuing): {e}")
+            return None
+        live_queue = (pointer or {}).get("task_queue")
+        current_queue = workflow.info().task_queue
+        if should_handoff_to_generation(current_queue, live_queue):
+            workflow.logger.info(
+                f"Generation handoff required: current={current_queue} live={live_queue}"
+            )
+            return live_queue
+        return None
+
+    async def _wait_for_unpause_or_handoff(self) -> Optional[str]:
+        """Block until unpaused, re-checking generation handoff every 30s.
+
+        Returns the live task queue when cooperative cutover is required while
+        paused; otherwise None once the agent is unpaused.
+        """
+        while self.is_paused:
+            handoff_queue = await self._check_generation_handoff()
+            if handoff_queue:
+                return handoff_queue
+            try:
+                await workflow.wait_condition(
+                    lambda: not self.is_paused,
+                    timeout=timedelta(seconds=30),
+                )
+            except (asyncio.TimeoutError, TemporalTimeoutError):
+                pass
+        return None
 
     async def _check_credits(self) -> None:
         """Check user credits. Sets is_paused=True if depleted."""
@@ -2106,11 +2634,13 @@ class AgentWorkflow:
         self.compute_token_fetched_at = now
         return True
 
-    async def _refresh_compute_token(self, user_id: str) -> None:
+    async def _refresh_compute_token(
+        self, user_id: str, *, force: bool = False, token_type: Optional[str] = None
+    ) -> None:
         """Fetch or refresh the selected direct compute token if missing or expired."""
         now = workflow.now()
         fetched_at = self.compute_token_fetched_at or self.claude_max_token_fetched_at
-        if fetched_at:
+        if not force and fetched_at:
             age = now - fetched_at
             if age < self.COMPUTE_TOKEN_TTL:
                 return  # Still fresh
@@ -2125,6 +2655,7 @@ class AgentWorkflow:
                     self.agent_id,
                     self.agent_id,
                     self.compute_token_fast_cache_affinity_key,
+                    token_type,
                 ],
                 start_to_close_timeout=timedelta(seconds=20),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -2139,6 +2670,29 @@ class AgentWorkflow:
             workflow.logger.warning(f"Failed to fetch compute token: {e}")
 
         self._clear_compute_token()
+
+    async def _rotate_compute_token(self, user_id: str) -> None:
+        """Release lineage, clear the cached token, and fetch the next available compute token."""
+        failed_provider = self.compute_token_provider
+        rotate_token_type: Optional[str] = None
+        if failed_provider == "claude":
+            rotate_token_type = "gpt"
+        elif failed_provider == "gpt":
+            rotate_token_type = "claude"
+        if self.compute_token_lineage_key:
+            try:
+                await workflow.execute_activity(
+                    release_compute_token_lineage_activity,
+                    args=[self.compute_token_lineage_key],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as release_error:
+                workflow.logger.warning(
+                    f"Failed to release compute token lineage during rotation: {release_error}"
+                )
+        self._clear_compute_token()
+        await self._refresh_compute_token(user_id, force=True, token_type=rotate_token_type)
 
     def _active_claude_token(self) -> Optional[str]:
         return self.claude_max_token if self.compute_token_provider == "claude" else None
@@ -2193,6 +2747,22 @@ class AgentWorkflow:
         """Compatibility wrapper for older tests/callers."""
         await self._refresh_compute_token(user_id)
 
+    async def _flush_pending_messages(self) -> None:
+        """Await Fast Mode message writes started off the critical path."""
+        handles = self._pending_message_handles
+        self._pending_message_handles = []
+        for handle in handles:
+            try:
+                await handle
+            except Exception as e:
+                workflow.logger.error(f"Failed to post message: {e}")
+
+    async def _drain_fast_mode_explores(self) -> None:
+        """Wait for fire-and-track OAi-demo explores before terminal status."""
+        if not getattr(self, "fast_mode_cache_enabled", False):
+            return
+        await drain_fast_mode_explores(self)
+
     async def _post_message(
         self,
         text: str,
@@ -2203,6 +2773,25 @@ class AgentWorkflow:
     ) -> None:
         """Post message to database."""
         try:
+            # Fast Mode replay is CPU/DB local. Awaiting every post_message
+            # activity under 50-way fan-out was the 900s leftover-ACTIVE
+            # bottleneck: each July GP step blocked on a 30s write. Start the
+            # write and keep looping; flush before terminal status so the
+            # transcript is durable when COMPLETED lands.
+            if self.fast_mode_cache_enabled and not self._is_finished:
+                handle = workflow.start_activity(
+                    post_agent_message,
+                    args=[self.agent_id, text, role, metadata],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                self._pending_message_handles.append(handle)
+                self.message_count += 1
+                if len(self._pending_message_handles) >= 20:
+                    await self._flush_pending_messages()
+                if update_tree:
+                    await self._update_tree_state()
+                return
             await workflow.execute_activity(
                 post_agent_message,
                 args=[self.agent_id, text, role, metadata],
@@ -2261,14 +2850,41 @@ class AgentWorkflow:
 
         if pending_tool_call_id in terminal_tool_call_ids:
             self._cloud_agent_lifecycle_finished = True
-        elif pending_tool_call_id is None:
-            # Most agent-mode workflows are created directly and never receive
-            # the chat-mode cloud_agent lifecycle row. Cache that absence after
-            # the first scan so later token callbacks do not keep scheduling
-            # message-poll activities before user-visible tool execution.
-            self._cloud_agent_lifecycle_finished = True
+            return None
 
+        # Direct API / SMS root spawns never get a chat-mode cloud_agent chip.
+        # Synthesize a stable toolCallId so Preparing/Starting Reasoning/Ready
+        # still emit (spawn-latency ratchet + FE parity). Sub-agents skip this
+        # to avoid an extra message-poll on every token callback.
+        if not self.parent_workflow_id:
+            self._cloud_agent_lifecycle_tool_call_id = f"tc-cloud-agent-{self.agent_id}"
+            # current_phase is set in run(); bare unit instances may not have it yet.
+            self._cloud_agent_lifecycle_start_phase = self._cloud_agent_lifecycle_start_phase or (
+                "execute" if getattr(self, "current_phase", None) == "EXECUTE" else "plan"
+            )
+            return self._cloud_agent_lifecycle_tool_call_id
+
+        # Cache absence for sub-agents so later token callbacks do not keep
+        # scheduling message-poll activities before user-visible tool execution.
+        self._cloud_agent_lifecycle_finished = True
         return None
+
+    async def _await_deferred_startup(self) -> None:
+        """Await SMS activity kicked off during startup (off critical path).
+
+        SMS notify is ~2–4s on prod traces. Started during init and awaited after
+        the first reasoning turn begins (or at end-of-run for short/smoke paths
+        that never emit tokens). Idempotent — safe to call multiple times.
+        """
+        sms_handle = getattr(self, "_deferred_startup_sms_handle", None)
+        self._deferred_startup_sms_handle = None
+
+        if sms_handle is not None:
+            try:
+                await sms_handle
+                workflow.logger.info("Completed deferred agent_started SMS notification")
+            except Exception as e:
+                workflow.logger.warning(f"Deferred agent_started SMS notification failed: {e}")
 
     async def _advance_cloud_agent_lifecycle(self, title: str, tool_status: str) -> None:
         """Advance the chat-mode cloud-agent chip without exposing it to LLM context."""
@@ -2392,6 +3008,10 @@ class AgentWorkflow:
         role_alternation and causes the LLM to re-emit the same tool_calls
         (regression: smoke task `parallel-tool-calls`).
         """
+        if tool_name == "attempt_completion":
+            # OAi-demo Fast Mode fire-and-track explores must finish before
+            # this agent claims completion (T3 full trajs, T9 no leftovers).
+            await self._drain_fast_mode_explores()
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
             await self._handle_tool_event(
@@ -3110,16 +3730,29 @@ class AgentWorkflow:
         """
         if not self.parent_workflow_id:
             return {}
+        now = workflow.now()
+        if (
+            not self._paused_by_parent
+            and self._last_parent_state_query_at is not None
+            and (now - self._last_parent_state_query_at) < _PARENT_STATE_QUERY_MIN_INTERVAL
+        ):
+            return dict(self._last_parent_state)
         try:
-            return await workflow.execute_activity(
+            state = await workflow.execute_activity(
                 query_parent_state_activity,
                 args=[self.parent_workflow_id],
-                start_to_close_timeout=timedelta(seconds=10),
+                start_to_close_timeout=_QUERY_PARENT_STATE_TIMEOUT,
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except Exception as e:
             workflow.logger.warning(f"Failed to query parent state: {e}")
-            return {}
+            self._last_parent_state_query_at = now
+            return dict(self._last_parent_state)
+        self._last_parent_state_query_at = now
+        if isinstance(state, dict):
+            self._last_parent_state = dict(state)
+            return state
+        return dict(self._last_parent_state)
 
     async def _check_parent_state(self) -> None:
         """Pull-based parent state check. Mirrors parent's pause/cost-limit state.
@@ -3245,6 +3878,7 @@ class AgentWorkflow:
             self.iteration_offset = max(self.iteration_offset, iteration)
         self.context_size = tokens_in_delta + cache_read_input_tokens + cache_creation_input_tokens
         await self._advance_cloud_agent_lifecycle(CLOUD_AGENT_READY_TITLE, "FINISHED")
+        await self._await_deferred_startup()
 
         # Track actual_model for credit billing
         if actual_model:
@@ -3269,10 +3903,9 @@ class AgentWorkflow:
                 and not compute_token_used
             ):
                 workflow.logger.info("🔁 Claude token rotated inside RoseClient; refreshing workflow cached token")
-                self._clear_compute_token()
                 if self.user_id:
                     try:
-                        await self._refresh_compute_token(self.user_id)
+                        await self._rotate_compute_token(self.user_id)
                     except Exception as refresh_error:
                         workflow.logger.warning(
                             f"Rotation refetch failed after successful claudeAuth call: {refresh_error}"
@@ -3316,14 +3949,9 @@ class AgentWorkflow:
                             )
                         except Exception as mark_error:
                             workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
-                    # Clear cache to force refetch on next call → rotation kicks in
-                    self._clear_compute_token()
-                    # Proactively refetch so subsequent LLM calls in this phase use the
-                    # rotated token (otherwise they'd fall through to the waterfall until
-                    # the next phase boundary calls _refresh_compute_token).
                     if self.user_id:
                         try:
-                            await self._refresh_compute_token(self.user_id)
+                            await self._rotate_compute_token(self.user_id)
                         except Exception as refresh_error:
                             workflow.logger.warning(f"Rotation refetch failed: {refresh_error}")
                 else:
@@ -3339,10 +3967,9 @@ class AgentWorkflow:
                 and not compute_token_used
             ):
                 workflow.logger.info("🔁 GPT token rotated inside RoseClient; refreshing workflow cached token")
-                self._clear_compute_token()
                 if self.user_id:
                     try:
-                        await self._refresh_compute_token(self.user_id)
+                        await self._rotate_compute_token(self.user_id)
                     except Exception as refresh_error:
                         workflow.logger.warning(
                             f"GPT rotation refetch failed after successful gptAuth call: {refresh_error}"
@@ -3377,10 +4004,9 @@ class AgentWorkflow:
                             )
                         except Exception as mark_error:
                             workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
-                    self._clear_compute_token()
                     if self.user_id:
                         try:
-                            await self._refresh_compute_token(self.user_id)
+                            await self._rotate_compute_token(self.user_id)
                         except Exception as refresh_error:
                             workflow.logger.warning(f"GPT rotation refetch failed: {refresh_error}")
                 else:
@@ -3680,6 +4306,20 @@ class AgentWorkflow:
         if not self.bus_id:
             return
 
+        # Per-message broadcasts from 50 parallel children melt the 10s tree
+        # activity. Keep status transitions and the first message (so FE can
+        # leave "spinning up...") immediate; coalesce the rest.
+        explicit_status = status is not None
+        now = workflow.now()
+        if (
+            not explicit_status
+            and self.message_count != 1
+            and self._last_tree_state_emit_at is not None
+            and (now - self._last_tree_state_emit_at) < _TREE_STATE_EMIT_MIN_INTERVAL
+        ):
+            return
+        self._last_tree_state_emit_at = now
+
         tools_list = list(self.tools_in_use)
 
         # Build broadcast payload
@@ -3735,12 +4375,39 @@ class AgentWorkflow:
         workflow.logger.info(f"{phase} ended: {result['status']}")
 
         if result["status"] == "paused":
-            await workflow.wait_condition(lambda: not self.is_paused)
+            handoff_queue = await self._wait_for_unpause_or_handoff()
             # Preserve feedback received while paused before continue-as-new
             # resets this workflow instance's revision counters.
             await self._wait_for_response_schema_refresh()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
-            workflow.continue_as_new(args=self._continuation_args(result.get("context")))
+            await self._drain_fast_mode_explores()
+            await self._flush_pending_messages()
+            if handoff_queue:
+                workflow.continue_as_new(
+                    args=self._continuation_args(result.get("context")),
+                    task_queue=handoff_queue.strip(),
+                )
+            else:
+                workflow.continue_as_new(args=self._continuation_args(result.get("context")))
+            return result
+
+        if result["status"] == "generation_handoff":
+            # Cooperative cutover: current tools/LLM finished; move to the live
+            # generation queue before the next LLM call. Do NOT terminate.
+            handoff_queue = result.get("handoff_task_queue")
+            if not isinstance(handoff_queue, str) or not handoff_queue.strip():
+                workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")
+                return result
+            await self._wait_for_response_schema_refresh()
+            await self._drain_fast_mode_explores()
+            await self._flush_pending_messages()
+            workflow.logger.info(
+                f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
+            )
+            workflow.continue_as_new(
+                args=self._continuation_args(result.get("context")),
+                task_queue=handoff_queue.strip(),
+            )
             return result
 
         if result["status"] == "aborted":
@@ -3759,12 +4426,27 @@ class AgentWorkflow:
 
         if result["status"] == "max_iterations":
             await self._wait_for_response_schema_refresh()
+            verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
+            verifier_reasoning = str(result.get("verifier_reasoning") or "")
+            fm_trajectory_complete = bool(getattr(self, "fast_mode_cache_enabled", False)) and (
+                verifier_progress >= 1.0
+                or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+            )
+            if fm_trajectory_complete:
+                # Fast Mode replay hit the step cap after the verifier already
+                # accepted the cached work (100% / trajectory-end). Mark
+                # COMPLETED so the parent for_each does not ERROR the child.
+                await self._mark_complete(
+                    result.get("context", []),
+                    result.get("partial_structured_response") or result.get("structured_response"),
+                )
+                return {"status": "completed", "goal": self.goal}
             await self._mark_failed(
                 context=result.get("context", []),
                 reason="max_iterations",
                 message="Max Steps Reached",
-                verifier_progress=result.get("verifier_progress", 0.0),
-                verifier_reasoning=result.get("verifier_reasoning", ""),
+                verifier_progress=verifier_progress,
+                verifier_reasoning=verifier_reasoning,
                 partial_structured_response=result.get("partial_structured_response"),
             )
             return {"status": "failed", "reason": "max_iterations", "goal": self.goal}
@@ -3902,9 +4584,13 @@ class AgentWorkflow:
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
+        # Drain fire-and-track explores before latching so leftover ACTIVE
+        # children cannot survive a FAILED parent (T9).
+        await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
         self._is_finished = True
+        await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
         # stale) value is corrected to the exact terminal cost. Recalc first; do
@@ -4025,12 +4711,41 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to signal parent: {e}")
 
+    async def _completion_transcript(self, context: List[Dict]) -> List[Dict]:
+        """Durable posted transcript, including assemble/explore rows posted after context snapshot."""
+        try:
+            polled = await workflow.execute_activity(
+                poll_new_messages,
+                args=[self.agent_id, datetime.fromtimestamp(0, tz=timezone.utc), True],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception as exc:
+            workflow.logger.warning(f"completion transcript poll failed: {exc}")
+            polled = None
+        return _merge_completion_transcripts(
+            polled if isinstance(polled, list) else None,
+            list(context or []),
+        )
+
+    def _coalesce_structured_response(
+        self, context: List[Dict], structured_response: Optional[Dict]
+    ) -> Optional[Dict]:
+        """Fill missing schema fields from `# field_name` sections in the transcript.
+
+        Fast Mode assemble-final (and other dag_reasoning slots) often persist the
+        deliverable as markdown headings that match the output schema, while the
+        verifier `output` dict stays empty because schema gen missed. Without this
+        merge, Task Complete has a summary but no Output section.
+        """
+        return structured_response_from_evidence(context, self.output_schema, structured_response)
+
     def _format_outputs(self, structured_response: Optional[Dict]) -> List[Dict]:
         """Convert structured_response → CompletionSummaryCard outputs format."""
-        if not structured_response or not self.output_schema:
+        if not structured_response:
             return []
 
-        fields = self.output_schema.get("fields", [])
+        fields = (self.output_schema or {}).get("fields", []) if isinstance(self.output_schema, dict) else []
         outputs = []
 
         for field in fields:
@@ -4039,11 +4754,24 @@ class AgentWorkflow:
                 outputs.append(
                     {
                         "key": field_name,
-                        "label": field.get("description", field_name.replace("_", " ").title()),
+                        "label": field.get("description") or field_name.replace("_", " ").title(),
                         "value": structured_response[field_name],
                     }
                 )
 
+        if outputs:
+            return outputs
+
+        for field_name, value in structured_response.items():
+            if not isinstance(field_name, str) or not field_name or field_name.startswith("_"):
+                continue
+            outputs.append(
+                {
+                    "key": field_name,
+                    "label": field_name.replace("_", " ").title(),
+                    "value": value,
+                }
+            )
         return outputs
 
     async def _mark_complete(self, context: List[Dict], structured_response: Optional[Dict] = None) -> None:
@@ -4058,11 +4786,16 @@ class AgentWorkflow:
         6. Signal parent (if sub-agent)
         7. Save blueprint (fire-and-forget, no UI)
         """
+        await self._await_deferred_startup()
         workflow.logger.info("✓ Marking task complete")
+        # Drain fire-and-track explores before latching COMPLETED so T9 sees
+        # no leftover ACTIVE children under a finished GP.
+        await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST so any late child_cost_update signal
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
         # overwrite the COMPLETED status with ACTIVE/Processing.
         self._is_finished = True
+        await self._flush_pending_messages()
 
         # Force a final tree-cost persist so the debounced emitter's last (≤3s
         # stale) value is corrected to the exact terminal cost. Recalc first, then
@@ -4163,6 +4896,16 @@ class AgentWorkflow:
                 workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
 
             summary = summary_result.get("summary", "")
+            transcript = await self._completion_transcript(context)
+            structured_response = self._coalesce_structured_response(transcript, structured_response)
+            if is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200:
+                recovered = card_summary_from_evidence(transcript, structured_response)
+                if (
+                    recovered
+                    and not is_ablated_completion_summary(recovered)
+                    and len(recovered) >= 200
+                ):
+                    summary = recovered
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":
                 # the root completion SMS is gated on `summary` being truthy,

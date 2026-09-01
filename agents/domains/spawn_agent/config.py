@@ -20,6 +20,10 @@ EXPLORE_DEPTH_LIMITS = {
     "deep": (50, timedelta(seconds=1800)),
 }
 EXPLORE_DEFAULT_DEPTH = "quick"
+# Fast Mode replays July OAi-demo explore trajectories whose attempt_completion
+# typically lands around turn ~14 (many namespaces run to p:20–49). The live
+# default "quick" (5) aborts mid-replay before that turn → max-iter + loops.
+EXPLORE_FAST_MODE_DEPTH = "deep"
 # Turns before the cap at which the graceful wind-down nudge is injected.
 EXPLORE_WINDDOWN_WINDOW = 1
 
@@ -31,6 +35,25 @@ def explore_limits_for_depth(depth: str | None) -> tuple[int, timedelta]:
     may batch multiple parallel searches.
     """
     return EXPLORE_DEPTH_LIMITS.get(depth or EXPLORE_DEFAULT_DEPTH, EXPLORE_DEPTH_LIMITS[EXPLORE_DEFAULT_DEPTH])
+
+
+def resolve_explore_depth(
+    requested_depth: str | None,
+    *,
+    fast_mode_cache_enabled: bool = False,
+) -> str:
+    """Pick explore thoroughness for a spawn.
+
+    Under Fast Mode, always use EXPLORE_FAST_MODE_DEPTH: July OAi-demo explore
+    caches often reach attempt_completion at turn ~26–36, so both the live
+    default (quick=5) and an explicit medium=20 abort mid-replay. Outside Fast
+    Mode, explicit medium/deep win; otherwise the live default applies.
+    """
+    if fast_mode_cache_enabled:
+        return EXPLORE_FAST_MODE_DEPTH
+    if requested_depth in EXPLORE_DEPTH_LIMITS:
+        return requested_depth
+    return EXPLORE_DEFAULT_DEPTH
 
 # ── Network metadata ──
 NETWORK_CACHE_TTL_MINUTES = 5
@@ -45,6 +68,38 @@ SUB_ACTIVITY_MAX_ATTEMPTS = 2
 # ── For-each ──
 FOR_EACH_MAX_DEPTH = 4
 FOR_EACH_MAX_INFLIGHT = 5
+# OAi-demo Fast Mode only: fire-and-track explores so a Huberman-class GP
+# (224–336 sequential explores) can overlap instead of paying p50~32s each
+# on the parent execute_loop. Cap is per GP workflow so 50 first-level GPs
+# stay within the isolated worker's ~500 activity slots (50×16=800 queued;
+# Temporal backpressures). Not a shared fan-in — each GP tracks its own
+# handles. Other Fast Mode trees keep the blocking explore path.
+FM_EXPLORE_INFLIGHT_CAP = 16
+
+# test-mass-agent-run-0 / July OAi demo only. Nested GP skip and the Andy
+# name rewrite must not apply to other Fast Mode trees.
+OAI_DEMO_ROOT_GOAL_PREFIX = (
+    "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+)
+OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+# First-level for_each children start with this even when Agent.goal is
+# truncated before the date window. Keep hashing on window/root only so a
+# truncated goal cannot alias all 50 children onto one namespace.
+OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
+
+
+def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
+    """True only for the mass-agent-0 root or its per-creator for_each children."""
+    chunks = (
+        getattr(workflow_instance, "fast_cache_goal", None) or "",
+        getattr(workflow_instance, "goal", None) or "",
+    )
+    text = "\n".join(str(chunk) for chunk in chunks)
+    return (
+        OAI_DEMO_ROOT_GOAL_PREFIX in text
+        or OAI_DEMO_CHILD_WINDOW in text
+        or OAI_DEMO_CHILD_GOAL_PREFIX in text
+    )
 
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0

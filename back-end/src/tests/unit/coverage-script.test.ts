@@ -248,7 +248,7 @@ assert.match(
 );
 assert.match(
   unitRunner,
-  /spawn\(process\.execPath, \['--import', 'tsx', file\]/,
+  /spawn\(process\.execPath, \['--experimental-test-module-mocks', '--import', 'tsx', file\]/,
   'unit files must avoid npm and tsx wrapper processes under V8 coverage'
 );
 assert.match(

@@ -16,27 +16,27 @@ async function main(): Promise<void> {
   assert.match(
     generatorSource,
     /createGeneratorCacheStream/,
-    'the generator must use the bounded cache/live race'
+    'the generator must use the Fast Mode cache stream'
   );
   assert.match(
     hedgeSource,
     /delayedCacheStreamHedge/,
-    'the generator must race the optional remote cache against the live provider stream'
+    'the generator must go through the shared cache/live hedge'
   );
   assert.doesNotMatch(
     generatorSource,
     /cacheGet\(/,
-    'a remote cache lookup must never block generator provider startup'
+    'generator startup must stay on the shared cache-stream helper'
   );
   assert.match(
     hedgeSource,
-    /const GENERATOR_CACHE_GRACE_MS = 25;/,
-    'the cache head start must stay bounded to 25ms'
+    /awaitCacheFirst:\s*true/,
+    'Fast Mode read must wait for cache before starting Cerebras'
   );
   assert.match(
     hedgeSource,
-    /graceMs:\s*GENERATOR_CACHE_GRACE_MS/,
-    'the cache should receive only a small head start before live generation begins'
+    /hangTimeoutMs:\s*GENERATOR_CACHE_HANG_MS/,
+    'a hung cache lookup must still fall through to live'
   );
   assert.doesNotMatch(
     generatorSource,

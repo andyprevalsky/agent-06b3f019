@@ -1,3 +1,5 @@
 export const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
 export const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY ?? '';
 export const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET ?? '';
+/** Live Rose Labs account webhook signing secret (prod subscription checkout). */
+export const STRIPE_WEBHOOK_SECRET_LIVE = process.env.STRIPE_WEBHOOK_SECRET_LIVE ?? '';

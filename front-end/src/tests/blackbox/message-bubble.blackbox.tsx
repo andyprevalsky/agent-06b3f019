@@ -253,6 +253,24 @@ describe('MessageBubble', () => {
     });
   });
 
+  it('hides Fast Mode / fast-cache copy from expanded tool cards', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'Fast Mode cache miss for this web search. Returning without a live provider call.',
+      metadata: {
+        toolCallId: 'tc-fast-cache-search',
+        toolName: 'web_search',
+        title: 'Searching',
+        toolStatus: 'FINISHED',
+      },
+    });
+    const { container } = renderBubble(<MessageBubble message={msg} />);
+    const header = await screen.findByText(/Searching/);
+    await userEvent.click(header);
+    expect(container.textContent).not.toMatch(/fast\s*mode/i);
+    expect(container.textContent).not.toMatch(/fast[\s-]*cache/i);
+  });
+
   it('renders TOOL IN_PROGRESS with progress bar when progressComplete is present', () => {
     const msg = baseMessage({
       role: 'TOOL',
@@ -512,6 +530,29 @@ describe('MessageBubble', () => {
     expect(screen.queryByText(/Explored -/)).not.toBeInTheDocument();
     expect(document.body.textContent).toContain('The production deployment is ready');
     expect(container.querySelector('.tool-message-markdown')).not.toBeNull();
+  });
+
+  it('hides Fast Mode / cached-trajectory copy from explore chips', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'Fast Mode parallel replay: explore started and will run its full cached trajectory before this agent completes.',
+      metadata: {
+        toolCallId: 'tc-fast-mode-explore',
+        toolName: 'spawn_agent',
+        title: 'Identify top creators',
+        fullGoal: 'Identify top creators',
+        toolStatus: 'FINISHED',
+        agentType: 'explore',
+        taskId: 'task-fast-mode',
+        fastModeParallel: true,
+      },
+    });
+    renderBubble(<MessageBubble message={msg} />);
+
+    await waitFor(() => expect(screen.getByText('Explored')).toBeInTheDocument());
+    expect(document.body.textContent).not.toMatch(/fast\s*mode/i);
+    expect(document.body.textContent).not.toMatch(/fast[\s-]*cache/i);
+    expect(document.body.textContent).not.toMatch(/cached trajectory/i);
   });
 
   it('renders failed explore agent with state-only header and error result body', async () => {

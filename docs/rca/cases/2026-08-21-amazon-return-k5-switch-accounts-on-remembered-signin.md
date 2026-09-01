@@ -21,8 +21,8 @@ tags:
 sources:
   - agent 4789b9f3-f674-4bda-b979-f833747f0761
   - agent fbc36706-4093-4bb4-a457-d4a8f486e62b
-  - memory:agents/benchmarks/runs/20260821_225850_browser-amazon-return.json
-repro: pending — owning-boundary prompt/policy repro not yet cemented
+  - plan:agents/benchmarks/runs/20260821_225850_browser-amazon-return.json
+repro: none-recorded
 status: open
 ---
 

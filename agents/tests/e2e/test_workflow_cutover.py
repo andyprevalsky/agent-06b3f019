@@ -1,4 +1,9 @@
-"""Live cutover e2e: a deploy must CLOSE a running sub-agent, not clobber its steps.
+"""Live cutover e2e: force-migrate (restart API) must CLOSE a running sub-agent.
+
+NOTE: This exercises the **break-glass / force-migrate** path via
+``POST /api/agents/:id/restart`` (same as ``migrate-open-agent-workflows.ts``),
+NOT the happy-path cooperative cutover (activity-drain + continue_as_new handoff).
+Cooperative handoff is covered by unit/blackbox tests on ``generation_handoff``.
 
 What this proves that no blackbox can
 -------------------------------------

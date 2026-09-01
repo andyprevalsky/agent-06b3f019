@@ -448,6 +448,9 @@ class _FakeParentWorkflow:
         self.depth = depth
         self.is_paused = False
         self.bus_id = bus_id
+        self.goal = "generic parent goal"
+        self.fast_cache_goal = None
+        self.fast_mode_cache_enabled = False
         self.model = "rose-labs/rose-1-lite"
         self.agent_source = "WEB"
         self.child_tool_ids = {}
@@ -511,6 +514,93 @@ async def test_execute_tool_max_depth_exceeded():
     assert events[0].status == MessageStatus.ERROR
     assert "maximum nesting depth" in events[0].message
     assert str(MAX_DEPTH) in events[0].message
+
+
+async def test_execute_tool_fast_mode_skips_nested_spawn():
+    """Fast Mode children must not recursively spawn more general-purpose agents."""
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule()
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow(depth=1)
+        parent.fast_mode_cache_enabled = True
+        parent.goal = (
+            "You are analyzing ONE creator for Andy Prevalsky. "
+            "Research public activity in the last 90 days "
+            "(approximately 2026-04-04 through 2026-07-03)."  # pragma: allowlist secret
+        )
+        manager = SpawnSubAgentManager()
+        events = await _collect_events(
+            manager.execute_tool(
+                parent,
+                {"sub_agent": {"goal": "synthesize Sahil Bloom"}},
+                "tc-nested-fm",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.FINISHED
+    assert "skipping nested" in events[0].message
+
+
+async def test_execute_tool_fast_mode_nested_spawn_other_tasks_still_attempt():
+    """Non-demo Fast Mode trees must still attempt nested GP spawns."""
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule(activity_result={"agents": []})
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow(depth=1)
+        parent.fast_mode_cache_enabled = True
+        parent.goal = "Find the current population of Tokyo."
+        manager = SpawnSubAgentManager()
+        events = await _collect_events(
+            manager.execute_tool(
+                parent,
+                {"sub_agent": {"goal": "Tokyo population"}},
+                "tc-other-fm",
+            )
+        )
+    finally:
+        restore()
+
+    assert events
+    assert not any("skipping nested" in str(e.message or "") for e in events)
+    assert any(e.status == MessageStatus.ERROR for e in events)
+
+
+async def test_execute_tool_max_depth_fast_mode_finishes():
+    """Fast Mode replay at MAX_DEPTH must FINISH, not ERROR."""
+    from domains.spawn_sub_agents.config import MAX_DEPTH
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule()
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow(depth=MAX_DEPTH)
+        parent.fast_mode_cache_enabled = True
+        manager = SpawnSubAgentManager()
+        events = await _collect_events(
+            manager.execute_tool(
+                parent,
+                {"sub_agent": {"goal": "g"}},
+                "tc-deep-fm",
+            )
+        )
+    finally:
+        restore()
+
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.FINISHED
+    assert "skipping further spawn" in events[0].message.lower()
+    assert "Fast Mode" not in events[0].message
+    assert "fast cache" not in events[0].message.lower()
 
 
 async def test_execute_tool_empty_agents_list_yields_error():
@@ -1138,6 +1228,12 @@ async def run_all_tests():
     # execute_tool branches
     await r.record_async("exec_missing_sub_agent", test_execute_tool_missing_sub_agent_yields_error)
     await r.record_async("exec_max_depth", test_execute_tool_max_depth_exceeded)
+    await r.record_async("exec_max_depth_fast_mode_finishes", test_execute_tool_max_depth_fast_mode_finishes)
+    await r.record_async("exec_fast_mode_skips_nested_spawn", test_execute_tool_fast_mode_skips_nested_spawn)
+    await r.record_async(
+        "exec_fast_mode_nested_spawn_other_tasks_still_attempt",
+        test_execute_tool_fast_mode_nested_spawn_other_tasks_still_attempt,
+    )
     await r.record_async("exec_empty_agents", test_execute_tool_empty_agents_list_yields_error)
     await r.record_async("exec_child_error_key", test_execute_tool_child_info_has_error_key)
     await r.record_async("exec_exception_path", test_execute_tool_exception_path_yields_error)

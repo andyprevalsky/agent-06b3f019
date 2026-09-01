@@ -6,35 +6,167 @@ import { getTemporalClient } from '../../providers/temporal';
 import { resolvePendingGateByKey } from '../../providers/gateResolution';
 import { ensureRoseApiKeyForUser } from '../../providers/supabaseApiKeys';
 import * as repo from './repo';
-import { STRIPE_WEBHOOK_SECRET } from './config';
+import { STRIPE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET_LIVE } from './config';
 
 const log = createLogger('Webhooks');
 
-/**
- * Verify and construct a Stripe webhook event from raw body + signature
- */
-export function constructStripeEvent(rawBody: Buffer, signature: string): Stripe.Event {
-  return stripe.webhooks.constructEvent(rawBody, signature, STRIPE_WEBHOOK_SECRET);
+function stripeSubscriptionId(
+  value: string | Stripe.Subscription | null | undefined
+): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'string') return value;
+  return value.id ?? null;
 }
 
 /**
- * Handle successful payment (initial purchase or renewal)
- * invoice.payment_succeeded covers BOTH cases
+ * Verify and construct a Stripe webhook event from raw body + signature.
+ * Tries the sandbox secret first, then the live-account secret when configured.
+ */
+export function constructStripeEvent(rawBody: Buffer, signature: string): Stripe.Event {
+  const secrets = [
+    ...new Set([STRIPE_WEBHOOK_SECRET, STRIPE_WEBHOOK_SECRET_LIVE].filter((s) => s !== '')),
+  ];
+  if (secrets.length === 0) {
+    throw new Error('STRIPE_WEBHOOK_SECRET is required');
+  }
+
+  let lastError: unknown;
+  for (const secret of secrets) {
+    try {
+      return stripe.webhooks.constructEvent(rawBody, signature, secret);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function activateSubscriptionForUser(
+  userId: string,
+  params: {
+    stripeSubscriptionId: string;
+    stripeCustomerId: string;
+    tier: number;
+    currentPeriodEnd: Date;
+    livemode: boolean;
+  }
+): Promise<void> {
+  await repo.upsertUser(userId);
+
+  await repo.upsertSubscription({
+    userId,
+    subscriptionTier: params.tier,
+    stripeSubscriptionId: params.stripeSubscriptionId,
+    stripeCustomerId: params.stripeCustomerId,
+    stripeLivemode: params.livemode,
+    currentPeriodEnd: params.currentPeriodEnd,
+  });
+
+  await repo.createCredit({
+    userId,
+    amountCents: params.tier * 100,
+    expirationDate: params.currentPeriodEnd,
+  });
+
+  log.info('Activated subscription for user', {
+    user_id: userId,
+    tier_dollars: params.tier,
+    livemode: params.livemode,
+    expires: params.currentPeriodEnd.toISOString(),
+  });
+
+  await unpauseUserAgents(userId);
+  await resolvePendingGateByKey(userId, 'subscription', 'SUBSCRIPTION_ACTIVE');
+  await ensureRoseApiKeyForUser(userId);
+}
+
+function subscriptionActivationFromStripe(
+  subscription: Stripe.Subscription,
+  livemode: boolean
+): {
+  stripeSubscriptionId: string;
+  stripeCustomerId: string;
+  tier: number;
+  currentPeriodEnd: Date;
+  livemode: boolean;
+} {
+  const unitAmount = subscription.items.data[0]?.price.unit_amount;
+  const tier = Math.round((unitAmount ?? 0) / 100);
+  return {
+    stripeSubscriptionId: subscription.id,
+    stripeCustomerId:
+      typeof subscription.customer === 'string'
+        ? subscription.customer
+        : (subscription.customer?.id ?? ''),
+    tier,
+    currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+    livemode,
+  };
+}
+
+/**
+ * Primary subscription-gate detection path: checkout.session.completed carries
+ * client_reference_id directly (the userId minted at checkout creation).
+ */
+export async function handleCheckoutSessionCompleted(
+  session: Stripe.Checkout.Session
+): Promise<void> {
+  if (session.mode !== 'subscription') {
+    log.info('Ignoring non-subscription checkout session', { session_id: session.id });
+    return;
+  }
+
+  const userId = session.client_reference_id;
+  if (userId === undefined || userId === null || userId === '') {
+    log.error('checkout.session.completed missing client_reference_id', { session_id: session.id });
+    return;
+  }
+
+  const stripeClient = getStripeClientForLivemode(session.livemode === true);
+  const subscriptionId = stripeSubscriptionId(session.subscription);
+  if (subscriptionId === null) {
+    log.error('checkout.session.completed missing subscription id', { session_id: session.id });
+    return;
+  }
+
+  let activation = {
+    stripeSubscriptionId: subscriptionId,
+    stripeCustomerId:
+      typeof session.customer === 'string' ? session.customer : (session.customer?.id ?? ''),
+    tier: 30,
+    currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000),
+    livemode: session.livemode === true,
+  };
+
+  try {
+    const subscription = await stripeClient.subscriptions.retrieve(subscriptionId);
+    activation = subscriptionActivationFromStripe(subscription, session.livemode === true);
+  } catch (error) {
+    log.warn('checkout.session.completed could not retrieve subscription; using defaults', {
+      session_id: session.id,
+      subscription_id: subscriptionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  await activateSubscriptionForUser(userId, activation);
+}
+
+/**
+ * Handle successful payment (initial purchase or renewal).
+ * invoice.payment_succeeded covers BOTH cases.
  */
 export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<void> {
   log.info('Payment successful', { invoice_id: invoice.id, livemode: invoice.livemode });
 
-  const subscriptionId = invoice.subscription as string;
-
-  if (subscriptionId === undefined || subscriptionId === null || subscriptionId === '') {
+  const subscriptionId = stripeSubscriptionId(invoice.subscription);
+  if (subscriptionId === null) {
     log.info('No subscription associated with invoice');
     return;
   }
 
-  // Live checkouts land on the live Rose Labs account; the sandbox billing
-  // singleton cannot retrieve those subscription/session objects.
   const stripeClient = getStripeClientForLivemode(invoice.livemode === true);
-
   const subscription = await stripeClient.subscriptions.retrieve(subscriptionId);
 
   const sessions = await stripeClient.checkout.sessions.list({
@@ -43,50 +175,22 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
   });
 
   const session = sessions.data[0];
-  const userId = session?.client_reference_id;
+  let userId = session?.client_reference_id ?? null;
 
-  if (userId === undefined || userId === null || userId === '') {
-    log.error('No client_reference_id found in checkout session');
-    log.error('Make sure payment link URL includes ?client_reference_id=USER_ID');
+  if (userId === null || userId === '') {
+    const existing = await repo.findSubscriptionByStripeSubscriptionId(subscriptionId);
+    userId = existing?.userId ?? null;
+  }
+
+  if (userId === null || userId === '') {
+    log.error('No client_reference_id found for subscription payment');
+    log.error('Make sure checkout includes client_reference_id=USER_ID');
     return;
   }
 
-  log.info('Found userId from client_reference_id', { user_id: userId });
-
-  await repo.upsertUser(userId);
-
-  const unitAmount = subscription.items.data[0]?.price.unit_amount;
-  const amountInDollars = (unitAmount ?? 0) / 100;
-  const tier = Math.round(amountInDollars);
-
-  const currentPeriodEnd = new Date(subscription.current_period_end * 1000);
-
-  await repo.upsertSubscription({
-    userId,
-    subscriptionTier: tier,
-    stripeSubscriptionId: subscription.id,
-    stripeCustomerId: subscription.customer as string,
-    stripeLivemode: invoice.livemode === true,
-    currentPeriodEnd,
-  });
-
-  await repo.createCredit({
-    userId,
-    amountCents: tier * 100,
-    expirationDate: currentPeriodEnd,
-  });
-
-  log.info('Added credit for user', {
-    user_id: userId,
-    tier_dollars: tier,
-    livemode: invoice.livemode === true,
-    expires: currentPeriodEnd.toISOString(),
-  });
-
-  await unpauseUserAgents(userId);
-  await resolvePendingGateByKey(userId, 'subscription', 'SUBSCRIPTION_ACTIVE');
-
-  await ensureRoseApiKeyForUser(userId);
+  log.info('Found userId for subscription payment', { user_id: userId });
+  const activation = subscriptionActivationFromStripe(subscription, invoice.livemode === true);
+  await activateSubscriptionForUser(userId, activation);
 }
 
 /**
@@ -196,7 +300,7 @@ async function resolveUserIdFromStripeSubscription(
  * invoice.payment_succeeded, which unpauses them again.
  */
 export async function handlePaymentFailed(invoice: Stripe.Invoice): Promise<void> {
-  const subscriptionId = invoice.subscription as string | null;
+  const subscriptionId = stripeSubscriptionId(invoice.subscription);
   log.info('Invoice payment failed', { invoice_id: invoice.id, subscription_id: subscriptionId });
 
   const userId = await resolveUserIdFromStripeSubscription(subscriptionId);

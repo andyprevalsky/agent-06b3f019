@@ -57,6 +57,39 @@ def normalize_evaluate_timeout_seconds(
 # ============================================================================
 
 
+_READ_BROWSER_STATE_EXAMPLE = """# Current Browser State
+
+Timestamp: 2026-08-22T20:31:00Z
+<page_stats>12 links, 8 interactive, 0 iframes, 1 scroll containers, 42 total elements</page_stats>
+Current URL: https://example.com/checkout - Checkout
+Viewport: 1280x800
+Scroll: (0, 0) | 0.0 pages above, 1.2 pages below
+Interactive elements:
+[Start of page]
+[3]<input>Email</input>
+[7]<button>Pay now</button>
+[End of page]"""
+
+
+_READ_BROWSER_STATE_TOOL_DESCRIPTION = (
+    "Read the current browser page state: URL, viewport, scroll position, tabs, page stats, "
+    "and indexed interactive DOM tree. Call before click/input_text/scroll when you need "
+    "element [index] values or to see what changed after navigation. Returns formatted text "
+    "beginning with '# Current Browser State' (same shape as the old per-turn snapshot).\n\n"
+    "Example output:\n"
+    "```\n"
+    f"{_READ_BROWSER_STATE_EXAMPLE}\n"
+    "```"
+)
+
+
+class ReadBrowserStateTool(BaseModel):
+    tool: Literal["read_browser_state"]
+
+
+ReadBrowserStateTool.__doc__ = _READ_BROWSER_STATE_TOOL_DESCRIPTION
+
+
 class ScreenshotTool(BaseModel):
     """Take a screenshot of the current page."""
 
@@ -416,6 +449,16 @@ class RecoverFromChallengeBrowserTool(BaseModel):
             "One line of concrete evidence that the anti-bot challenge still persists after "
             "the agent's own solve attempt"
         )
+    )
+    auth_cookies_are_preserved: bool = Field(
+        default=True,
+        description=(
+            "True when the current browser session is logged in and the new machine must "
+            "maintain the current authenticated state to pass the goal/task. False when you "
+            "want to explore machines that have a fresh cookie state (and thus potentially "
+            "lose auth status, but potentially fix a bad cookie which is poisoning every "
+            "session with a forced anti-bot)."
+        ),
     )
 
 
@@ -857,6 +900,7 @@ class GenerateWriteLockNotificationTool(BaseModel):
 # Uses browser-use action model naming conventions
 BROWSER_TOOL_MODELS = {
     # Observation
+    "read_browser_state": ReadBrowserStateTool,
     "screenshot": ScreenshotTool,
     "read_logs": ReadLogsBrowserTool,
     "read_network_requests": ReadNetworkRequestsBrowserTool,

@@ -15,10 +15,11 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_DEFAULT_DEPTH,
+    EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
+    resolve_explore_depth,
 )
 from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
@@ -73,6 +74,45 @@ _TOOL_EVIDENCE_METADATA_KEYS = {
     "usage",
     "url",
 }
+
+EXPLORE_FALLBACK_PAYLOAD_BUDGET = 12_000
+_EXPLORE_STUB_MARKERS = ("fast mode", "cached trajectory")
+
+
+def compile_explore_wrap_up(
+    final_response: Any = "",
+    tool_call_results: Optional[List[Any]] = None,
+    *,
+    budget: int = EXPLORE_FALLBACK_PAYLOAD_BUDGET,
+) -> str:
+    """Build the user-facing explore chip from a completion or tool evidence.
+
+    Soft-complete plumbing ("Fast Mode cache trajectory ended...") is treated
+    as empty so the parent chip gets synthesized research, not Thinking... /
+    Research started. Used by the explore activity return path and by Fast
+    Mode drain when the activity times out after tools already ran.
+    """
+    text = str(final_response or "").strip()
+    lowered = text.lower()
+    if text and any(marker in lowered for marker in _EXPLORE_STUB_MARKERS) and len(text) < 400:
+        text = ""
+    if text:
+        return text
+    parts: list[str] = []
+    for item in tool_call_results or []:
+        raw = str(item)
+        marker = "**Result:**"
+        if marker in raw:
+            excerpt = raw.split(marker, 1)[1].strip()
+            if excerpt:
+                parts.append(excerpt)
+        elif raw.strip():
+            parts.append(raw.strip())
+    compiled = "\n\n".join(parts)
+    if len(compiled) > budget:
+        compiled = compiled[:budget] + "\n\n[truncated]"
+    return compiled
+
 
 _SOURCE_GOAL_TERMS = {
     "email": ("email", "gmail"),
@@ -269,8 +309,16 @@ def coerce_for_each_items(tool_call: Dict[str, Any]) -> List[Any]:
 
 
 def build_for_each_goal(base_goal: str, item: Any) -> str:
-    """Build a per-item sub-agent goal from shared goal + row context."""
-    item_text = json.dumps(item, ensure_ascii=True) if isinstance(item, dict) else str(item)
+    """Build a per-item sub-agent goal from shared goal + row context.
+
+    ``sort_keys=True`` is required for Fast Mode stability: FastModeCacheEntry
+    values round-trip through Postgres JSONB (which reorders object keys), so
+    insertion-order dumps diverge from the Jul 2026 OAi-demo namespaces and from
+    any later replay that re-materializes items from cached JSON.
+    """
+    item_text = (
+        json.dumps(item, ensure_ascii=True, sort_keys=True) if isinstance(item, dict) else str(item)
+    )
     return f"{base_goal}\n\nUse this row context for the task below.\nRow item:\n{item_text}"
 
 
@@ -327,10 +375,18 @@ async def spawn_explore_agent_activity(
         _explore_fast_mode_goal,
         _explore_fast_mode_write_enabled,
         _,
+        _,
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
 
+    # Do NOT re-promote depth from an independently resolved Fast Mode flag.
+    # `_spawn_explore` already paired depth + max_iterations with the activity
+    # timeout using workflow_instance.fast_mode_cache_enabled. Re-resolving here
+    # from resolve_agent_fast_mode can bump iterations to deep while the caller
+    # still holds the quick timeout.
+
     activity.heartbeat(f"Starting explore agent: {goal[:100]}...")
+    _heartbeat_stop = asyncio.Event()
 
     # Accumulate usage from all tool calls inside the explore agent
     accumulated_usage: List[Dict] = []
@@ -346,11 +402,33 @@ async def spawn_explore_agent_activity(
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
     has_usable_tool_evidence = bool(local_data_summary.strip())
+    completion_no_evidence_rejects = 0
 
     # Data sources the explore agent tried to grep but whose connector isn't
     # connected. Surfaced to the parent workflow, which raises one blocking
     # source_connect gate per unavailable source after this explore returns.
     unavailable_sources_collected: List[Dict] = []
+
+    def _heartbeat_payload() -> Dict[str, Any]:
+        compiled = compile_explore_wrap_up("", tool_call_results)
+        return {
+            "result": compiled,
+            "tool_call_results": list(tool_call_results[-8:]),
+        }
+
+    async def _heartbeat_loop() -> None:
+        """Keep the activity alive during wrap-up LLM calls; details hold evidence."""
+        while not _heartbeat_stop.is_set():
+            try:
+                activity.heartbeat(_heartbeat_payload())
+            except Exception:
+                logger.warning("Explore heartbeat failed", agent_id=agent_id, task_id=task_id)
+            try:
+                await asyncio.wait_for(_heartbeat_stop.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                continue
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
     async def on_tokens(
         tokens_in_delta: int,
@@ -502,8 +580,8 @@ async def spawn_explore_agent_activity(
 
     async def explore_execute_tool(tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool inside the explore activity context."""
-        nonlocal has_usable_tool_evidence
-        activity.heartbeat(f"Explore agent executing: {tool_name}")
+        nonlocal has_usable_tool_evidence, completion_no_evidence_rejects
+        activity.heartbeat(_heartbeat_payload())
 
         tool_call_dict = {"tool": tool_name, **tool_args}
 
@@ -528,6 +606,9 @@ async def spawn_explore_agent_activity(
                 tool_call_id=tool_call_id,
                 agent_id=agent_id,
                 user_id=user_id,
+                fast_mode_cache_enabled=_explore_fast_mode_enabled,
+                fast_mode_goal=_explore_fast_mode_goal,
+                fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
                 world_model_mode=world_model_mode,
             )
         elif tool_name == "web_fetch":
@@ -580,6 +661,12 @@ async def spawn_explore_agent_activity(
                         unavailable_sources_collected.append(normalized)
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
             if not attachment_texts and not has_usable_tool_evidence:
+                completion_no_evidence_rejects += 1
+                # Fast Mode cold stubs replay attempt_completion_with_result
+                # forever. One reject is enough signal; accepting the next
+                # ends the leaf so the chip does not fill with 50 rejects.
+                if completion_no_evidence_rejects >= 2:
+                    return {"success": True, "message": "Completion accepted"}
                 return {
                     "error": True,
                     "message": (
@@ -600,6 +687,7 @@ async def spawn_explore_agent_activity(
 
         if _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
+        activity.heartbeat(_heartbeat_payload())
 
         # Serialize the actual result into message so run_agent puts it in context.
         try:
@@ -655,9 +743,21 @@ async def spawn_explore_agent_activity(
     # the timestamp into the cacheable system prompt.
     current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Resolve the caller's thoroughness. The depth tag rides in the per-call goal
-    # (NOT the cacheable system prompt); the turn cap comes from the same depth.
-    effective_depth = depth or EXPLORE_DEFAULT_DEPTH
-    resolved_max_iterations = max_iterations or explore_limits_for_depth(effective_depth)[0]
+    # (NOT the cacheable system prompt); the turn cap must match the activity
+    # timeout sized by the handler. When max_iterations is provided, trust that
+    # contract — never bump iterations from a separately resolved Fast Mode flag.
+    if depth in ("quick", "medium", "deep"):
+        effective_depth = depth
+    else:
+        effective_depth = resolve_explore_depth(
+            depth,
+            fast_mode_cache_enabled=_explore_fast_mode_enabled,
+        )
+    depth_cap = explore_limits_for_depth(effective_depth)[0]
+    if max_iterations is None:
+        resolved_max_iterations = depth_cap
+    else:
+        resolved_max_iterations = max_iterations
     state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:
@@ -678,6 +778,7 @@ async def spawn_explore_agent_activity(
     # would otherwise dangle on the shared worker loop (asyncio "Task exception was
     # never retrieved") and the final iteration's FE messages would be dropped on
     # exactly the error path where visibility matters most.
+    result: Dict[str, Any] = {}
     try:
         result = await run_agent(
             agent_id=agent_id,
@@ -711,7 +812,22 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             goal_text=_explore_fast_mode_goal,
         )
+    except asyncio.CancelledError:
+        # Heartbeat timeout / TRY_CANCEL after research. CancelledError is
+        # BaseException, so a bare try/finally used to skip wrap-up synthesis
+        # and leave the fire-and-track chip on "Research started."
+        result = {
+            "status": "completed" if (tool_call_results or has_usable_tool_evidence) else "error",
+            "final_response": "",
+            "message": "cancelled after research",
+        }
     finally:
+        _heartbeat_stop.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except (asyncio.CancelledError, Exception):
+            pass
         # Flush any backgrounded FE posts before returning/propagating so the FE
         # receives every tool message even though they no longer blocked the leaf loop.
         await _drain_pending_fe_posts()
@@ -720,20 +836,10 @@ async def spawn_explore_agent_activity(
     # but leaves result empty, the parent receives no evidence. Synthesize a
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
-    final_response = result.get("final_response", "") or ""
-    if not final_response.strip() and tool_call_results:
-        # Cap the synthesized payload so we don't ship 100 KB+ back through the
-        # parent context. 12 KB matches the explore message truncation tier and
-        # leaves headroom for evidence from up to ~3 web_search results.
-        EXPLORE_FALLBACK_PAYLOAD_BUDGET = 12_000
-        joined = "\n\n".join(tool_call_results)
-        if len(joined) > EXPLORE_FALLBACK_PAYLOAD_BUDGET:
-            joined = joined[:EXPLORE_FALLBACK_PAYLOAD_BUDGET] + "\n\n[truncated]"
-        final_response = (
-            "Explore sub-agent completed without a final summary. "
-            "Raw tool results below; extract the requested values directly:\n\n"
-            f"{joined}"
-        )
+    final_response = compile_explore_wrap_up(
+        result.get("final_response", "") or "",
+        tool_call_results,
+    )
 
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
@@ -784,4 +890,20 @@ async def spawn_explore_agent_activity(
         "llm_iteration_usage": llm_iteration_usage,
         "tool_call_results": tool_call_results,
     }
+    if final_response and init_tool_call_id:
+        # Same chip the fire-and-track path stamped "Research started." on.
+        # Post here so a later parent-side timeout still leaves T3 a summary.
+        _dispatch_fe_post(
+            init_tool_call_id,
+            lambda: save_explore_message(
+                agent_id=agent_id,
+                title=(goal or "Explore")[:EXPLORE_GOAL_DISPLAY_LEN],
+                message=final_response[:EXPLORE_FALLBACK_PAYLOAD_BUDGET],
+                status=MessageStatus.FINISHED,
+                task_id=task_id,
+                tool_call_id=init_tool_call_id,
+                tool_name="spawn_agent",
+            ),
+        )
+        await _drain_pending_fe_posts()
     return result_payload

@@ -8,8 +8,8 @@ import os
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 import httpx
 import structlog
@@ -17,7 +17,7 @@ from temporalio import activity
 
 from config import load_config
 from helpers.context_compaction import project_model_context_after_compaction
-from helpers.context_scope import filter_internal_subagent_messages
+from helpers.context_scope import filter_internal_subagent_messages, select_completion_evidence_messages
 from helpers.fetch_config import _fetch_agent_data_impl
 from helpers.tracing import span
 from helpers.workflow_generation import (
@@ -824,8 +824,27 @@ async def update_agent_tree_state(
         logger.debug(f"Tree state update error (non-fatal): {str(e)}")
 
 
+def _coerce_poll_since(last_checked: Union[datetime, str]) -> datetime:
+    """Temporal may deliver the since stamp as an ISO string after payload decode."""
+    if isinstance(last_checked, datetime):
+        if last_checked.tzinfo is None:
+            return last_checked.replace(tzinfo=timezone.utc)
+        return last_checked
+    raw = str(last_checked or "").strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 @activity.defn
-async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
+async def poll_new_messages(
+    agent_id: str,
+    last_checked: Union[datetime, str],
+    include_internal_subagent: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Poll for ALL new messages (USER, ASSISTANT, TOOL) since last check.
 
@@ -841,11 +860,12 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
     """
     try:
         activity.heartbeat(f"Polling messages for agent {agent_id}")
+        since = _coerce_poll_since(last_checked)
 
-        logger.info(f"Polling for new messages: agent_id={agent_id}, last_checked={last_checked.isoformat()}")
+        logger.info(f"Polling for new messages: agent_id={agent_id}, last_checked={since.isoformat()}")
 
         # Use the single fetch_agent_data implementation with server-side filtering
-        data = await _fetch_agent_data_impl(agent_id, since=last_checked.isoformat())
+        data = await _fetch_agent_data_impl(agent_id, since=since.isoformat())
         new_messages = data.get("messages", [])
         new_messages = project_model_context_after_compaction(new_messages)
 
@@ -854,7 +874,14 @@ async def poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[
         # loop/context_utils.py and workflows/agent_workflow.py); doing it here
         # keeps the Temporal payload under the 2 MB cap when sub-agents have
         # produced large transcripts (e.g. post-DAG verifier polling from epoch).
-        new_messages = filter_internal_subagent_messages(new_messages)
+        # Completion-card recovery is the exception: Task Complete must see
+        # explore web_search/web_fetch bodies tagged with subAgentId.
+        if include_internal_subagent:
+            # Keep only bounded FINISHED research internals so Tim Ferriss-sized
+            # explore dumps stay under Temporal's 2 MB activity payload.
+            new_messages = select_completion_evidence_messages(new_messages)
+        else:
+            new_messages = filter_internal_subagent_messages(new_messages)
 
         if new_messages:
             logger.info(

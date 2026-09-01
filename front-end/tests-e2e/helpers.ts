@@ -300,10 +300,15 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
   // A stall or transient 404 is retried — the backend persists
   // temporal_workflow_id within a few seconds, so any healthy poll in the
   // window resolves it.
-  // Production edge stalls have reached ~2.5s while the persisted workflow was already running.
-  // Keep one stalled socket from consuming half of the five-second lifecycle SLA; healthy reads
-  // complete in well under this bound and the outer deadline still permits bounded retries.
-  const PER_REQUEST_TIMEOUT_MS = 500;
+  // Production edge stalls have reached ~2.5s while the persisted workflow was
+  // already running (docs/rca/cases/2026-07-18-poll-without-per-request-timeout-
+  // burns-whole-budget.md). The per-request bound MUST cover that stall window;
+  // Aug 2026's 500ms regression made every GH Actions→Render poll abort under
+  // load so the loop never observed an already-persisted workflow id (false
+  // "did not persist temporal_workflow_id" / fetch-error abort). The 5s
+  // FULL_LIFECYCLE_RATCHET_MS assertion is unchanged — this only bounds one
+  // poll so retries can still reach a healthy read inside the 15s milestone.
+  const PER_REQUEST_TIMEOUT_MS = 2_500;
   const POLL_INTERVAL_MS = 150;
 
   while (Date.now() < deadline) {

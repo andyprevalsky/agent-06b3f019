@@ -909,7 +909,7 @@ async def test_generate_completion_summary_uses_complete_fallback_after_two_trun
                 )
 
     assert calls == [1024, 4096]
-    assert out["summary"] == "The task completed successfully; verified results are included below."
+    assert out["summary"] == ""
     assert out["usage"]["total_tokens"] == 20
 
 

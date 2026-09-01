@@ -12,6 +12,7 @@ on:
       - '!agents/scripts/run_blackbox_tests.py'
       - '!agents/scripts/run_coverage_blackbox_parallel.py'
       - '.github/workflows/deploy-agents.yml'
+      - 'scripts/deploy-agents-cooperative-cutover.sh'
 
 permissions:
   contents: read
@@ -34,6 +35,12 @@ jobs:
       
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: back-end/package-lock.json
+
       - name: Compute workflow replay-surface generation hash
         id: surface
         run: |
@@ -47,6 +54,17 @@ jobs:
           echo "queue=navi-agent-tasks@$SURFACE_HASH" >> "$GITHUB_OUTPUT"
           echo "Workflow surface generation: $SURFACE_HASH"
 
+      - name: Resolve Fly app name from fly.toml
+        id: flyapp
+        run: |
+          APP=$(grep -E '^\s*app\s*=' agents/fly.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$APP" ]; then
+            echo "Could not read app from agents/fly.toml" >&2
+            exit 1
+          fi
+          echo "name=$APP" >> "$GITHUB_OUTPUT"
+          echo "Fly app: $APP"
+
       - name: Classify whether shipped worker runtime changed
         id: classify
         env:
@@ -57,7 +75,7 @@ jobs:
           if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
             CHANGED_AGENTS=$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- agents/)
             CHANGED_DEPLOY_WORKFLOW=$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- \
-              .github/workflows/deploy-agents.yml)
+              .github/workflows/deploy-agents.yml scripts/deploy-agents-cooperative-cutover.sh)
             CHANGED_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
               bash scripts/classify-agent-runtime-changes.sh)
             if [ -z "$CHANGED_RUNTIME$CHANGED_DEPLOY_WORKFLOW" ]; then REQUIRE_ACTIVATION=0; fi
@@ -65,53 +83,17 @@ jobs:
           echo "require_activation=$REQUIRE_ACTIVATION" >> "$GITHUB_OUTPUT"
           echo "Temporal activation gate: $REQUIRE_ACTIVATION"
 
-      - name: Deploy to Fly.io
-        run: >-
-          flyctl deploy --remote-only
-          --env TEMPORAL_WORKER_BUILD_ID="${GITHUB_SHA}"
-          --env TEMPORAL_WORKER_SURFACE_HASH="${SURFACE_HASH}"
-          --env TEMPORAL_WORKER_DEPLOYMENT_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          --env TEMPORAL_WORKER_REQUIRE_ACTIVATION="0"
-        working-directory: ./agents
+      # Same-hash: rolling fly deploy with activity-boundary drain.
+      # Changed-hash: overlap old+new gen machines, flip pointer, wait up to 45m
+      # for cooperative continue_as_new handoff, then force-migrate stragglers and
+      # retire old-gen machines. migrate-open is break-glass after the SLO only.
+      - name: Cooperative Fly deploy + generation cutover
+        id: cutover
+        timeout-minutes: 60
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          SURFACE_HASH: ${{ steps.surface.outputs.hash }}
-        # LIVE-AT-BOOT (no standby). Workers poll their OWN generation queue
-        # `navi-agent-tasks@<surfaceHash>` immediately at boot — a build can only
-        # ever replay its own generation's histories, so live-at-boot is correct.
-        # This is the load-bearing safety property of this pipeline: because a
-        # worker is never parked in standby waiting for an activation marker, a
-        # failed cutover (below) can NEVER strand the fleet. The prior standby
-        # model stranded prod on every deploy whose cutover hit any CI hiccup.
-
-      - name: Stop excess machines (deploy starts all, scale back to minimum)
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          # Derive the floor from the deployed fly.toml MIN_MACHINES so this step
-          # tracks the real autoscaler floor instead of dipping to a stale literal.
-          MIN=$(grep -E '^\s*MIN_MACHINES\s*=' agents/fly.toml | head -1 | sed -E 's/.*"([0-9]+)".*/\1/')
-          MIN=${MIN:-2}
-          echo "Scaling back to MIN_MACHINES=$MIN (from agents/fly.toml)"
-          APP="navi-whisper-lux"
-          STARTED=$(flyctl machines list -a "$APP" --json | jq -r '[.[] | select(.state == "started")] | sort_by(.id) | .[].id')
-          COUNT=0
-          for ID in $STARTED; do
-            COUNT=$((COUNT + 1))
-            if [ "$COUNT" -gt "$MIN" ]; then
-              echo "Stopping excess machine $ID"
-              flyctl machines stop "$ID" -a "$APP" || true
-            fi
-          done
-          echo "Fleet: kept $MIN running, stopped $((COUNT > MIN ? COUNT - MIN : 0)) excess"
-
-      - name: Hold production deploy lock until exact cutover completes
-        if: steps.classify.outputs.require_activation == '1'
-        timeout-minutes: 30
-        env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_CONTEXT: agent-cutover/${{ github.run_id }}-${{ github.run_attempt }}
-          # Self-driving cutover credentials (prod). Set as repo Actions secrets.
           DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
           DIRECT_URL: ${{ secrets.PROD_DIRECT_URL }}
           TEMPORAL_ADDRESS: ${{ secrets.TEMPORAL_ADDRESS }}
@@ -121,75 +103,20 @@ jobs:
           GENERATION_QUEUE: ${{ steps.surface.outputs.queue }}
           BUILD_ID: ${{ github.sha }}
           DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
+          DRAIN_TIMEOUT_SECONDS: "2700"
+          REQUIRE_ACTIVATION: ${{ steps.classify.outputs.require_activation }}
+          APP: ${{ steps.flyapp.outputs.name }}
         run: |
           set -euo pipefail
-          # SELF-DRIVING ROUTING CUTOVER (live-at-boot model). Workers already poll
-          # their own generation queue `navi-agent-tasks@<surfaceHash>` at boot
-          # (require_activation=0), so this step never "activates" anything and can
-          # NEVER strand the fleet — a failure here leaves the just-deployed LIVE
-          # workers serving. Its only job is routing: a surface-unchanged deploy is a
-          # pure no-op (needs only a DB pointer read — no Temporal); a surface CHANGE
-          # flips the routing pointer to the new (already-live) generation and
-          # respawns open old-gen workflows onto it. There is deliberately NO
-          # pointer rollback on migration failure — the old generation's workers are
-          # gone, so routing must stay on the live new generation.
-          release() {  # commit status for observers / the /deploy skill contract
+          release() {
             gh api "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -X POST \
               -f state="$1" -f context="$RELEASE_CONTEXT" -f description="$2" >/dev/null || true
           }
-          trap 'release error "self-driving cutover failed (workers remain live)"' ERR
-
-          cd back-end
-          # back-end is an npm workspace with no committed root lockfile; pin to the
-          # committed back-end lockfile. --ignore-scripts: we run prisma generate.
-          npm ci --workspaces=false --ignore-scripts
-          npx prisma generate
-
-          # Read the current routing pointer robustly. `--read` prints Prisma query
-          # logs before its JSON, so extract the last JSON line rather than parsing
-          # the whole stream. A non-zero exit is a genuine DB failure (an absent row
-          # still exits 0, printing "null").
-          if ! POINTER_OUT=$(npx tsx scripts/set-agent-queue-pointer.ts --read); then
-            echo "❌ routing-pointer read failed (DB unreachable?); leaving routing unchanged (workers stay live)" >&2
-            release failure "cutover skipped: pointer read failed"; trap - ERR; exit 1
+          trap 'release error "cooperative cutover failed (check old/new gen fleets)"' ERR
+          bash scripts/deploy-agents-cooperative-cutover.sh
+          if [ "$REQUIRE_ACTIVATION" = "1" ]; then
+            release success "cooperative cutover completed"
+          else
+            release success "rolling deploy completed (generation unchanged)"
           fi
-          pointer_field() { printf '%s' "$POINTER_OUT" | node -e 'const f=process.argv[1];let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{for(const l of s.split("\n").reverse()){const t=l.trim();if(!t.startsWith("{"))continue;try{const o=JSON.parse(t);if(o&&"surfaceHash"in o){process.stdout.write(String(o[f]||""));return}}catch{}}process.stdout.write("")})' "$1"; }
-          CURRENT_HASH=$(pointer_field surfaceHash)
-          CURRENT_QUEUE=$(pointer_field taskQueue)
-
-          # No-op: the current routing generation already matches this build. Workers
-          # are live at boot on it; nothing to change. (No Temporal needed here.)
-          if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
-            echo "Generation $SURFACE_HASH already current — workers live at boot, no routing change needed"
-            release success "generation unchanged (no rollover)"; trap - ERR; exit 0
-          fi
-
-          # Surface CHANGED -> roll routing over to the new generation. The new
-          # workers are already LIVE on their generation queue (require_activation=0),
-          # so this only repoints new-agent routing at them and respawns open old-gen
-          # workflows onto the new queue. No Render-wait is needed: the
-          # AgentQueuePointer table is permanent (created by an earlier migration) and
-          # the pointer-reading backend code is already deployed, so the flip is safe
-          # even while the old backend is still serving — it reads the same pointer.
-          echo "Surface generation changed ('${CURRENT_HASH:-<none>}' -> '$SURFACE_HASH'); flipping routing to the live new generation"
-          npx tsx scripts/set-agent-queue-pointer.ts \
-            --queue "$GENERATION_QUEUE" --surface-hash "$SURFACE_HASH" --by "deploy-${BUILD_ID}"
-          sleep 6   # cross-instance pointer-cache convergence (TTL is 5s)
-
-          # Respawn open OLD-generation workflows onto the new queue. On failure we do
-          # NOT roll the pointer back: the old generation's workers were replaced at
-          # boot, so pointing at it would strand NEW agents. New agents already route
-          # to the live new generation; a failed respawn only leaves some old-gen
-          # workflows unmigrated (idempotently retriable) — a smaller, bounded problem
-          # than stranding all new traffic.
-          if ! TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-               TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
-               TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
-               WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
-               npx tsx scripts/migrate-open-agent-workflows.ts --execute; then
-            echo "❌ old-generation workflow respawn failed — routing STAYS on the live new generation ($GENERATION_QUEUE); re-run the migration to respawn stragglers" >&2
-            release failure "cutover migration failed (routing kept on live new generation)"; trap - ERR; exit 1
-          fi
-
-          echo "✅ Routing cut over to generation $SURFACE_HASH"
-          release success "self-driving cutover completed"; trap - ERR
+          trap - ERR

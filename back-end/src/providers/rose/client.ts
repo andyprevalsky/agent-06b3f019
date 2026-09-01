@@ -103,6 +103,9 @@ export async function createStreamingCompletion(
 
   const normalizedOptions: CompletionOptions = {
     ...options,
+    // Provider Anthropic/OpenRouter speed=fast is on by default; callers opt out
+    // with an explicit false (e.g. Fast Mode toggle off on chat).
+    provider_fast_mode: options.provider_fast_mode ?? true,
     response_format: options.response_model
       ? buildOpenAiResponseFormat(options.response_model)
       : options.response_format,

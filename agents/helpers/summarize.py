@@ -1067,12 +1067,16 @@ Just write plain text describing what was done."""
         cache_user_id = claude_token_user_id or gpt_token_user_id
         write_through_enabled = write_through_enabled_for_user(cache_user_id)
         if goal and (fast_mode_cache_enabled or write_through_enabled):
+            from providers.fast_cache.client import resolve_soft_complete_root_goal
+
+            root_goal = await resolve_soft_complete_root_goal(agent_id, goal)
             set_fast_cache_context(
                 FastCacheContext(
                     enabled=fast_mode_cache_enabled,
                     goal=goal,
                     base_step=fast_mode_step,
                     write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                    root_goal=root_goal,
                 )
             )
 
@@ -1122,9 +1126,10 @@ Just write plain text describing what was done."""
             )
 
         if result.get("finish_reason") == "length":
-            # Never persist a known partial sentence. The verified values remain
-            # visible in the output card/SMS even if both prose attempts truncate.
-            summary = "The task completed successfully; verified results are included below."
+            # Never persist a known partial sentence or the T7-forbidden
+            # "verified results are included below" stub. Workflow recovery
+            # fills the card from replayed research evidence.
+            summary = ""
         else:
             summary = result.get("content", "")
         usage = {

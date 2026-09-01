@@ -259,6 +259,7 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/terminal/types.ts': ['Cross-domain import: "@/features/terminal-component-group'],
   'features/terminal-component-group/components/attention-inbox/gateConnect.ts': [
     'Cross-domain import: "@/features/integrations',
+    'Cross-domain import: "@/features/billing',
   ],
   // /gate-playground is a dev-only sandbox; its components read local preset data.
   'features/gate-playground/components/FauxChat.tsx': ['components layer imports "../presets"'],

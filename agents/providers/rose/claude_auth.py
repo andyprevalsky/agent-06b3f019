@@ -261,7 +261,7 @@ def build_anthropic_body(
     skip_cache_write: bool = False,
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
 ) -> Dict[str, Any]:
     """Assemble the Anthropic /v1/messages request body for a claudeAuth call.
 
@@ -375,7 +375,7 @@ async def claude_auth_complete(
     effort: Optional[str] = None,
     auth: ClaudeAuthContext,
     request_id: str,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
@@ -484,7 +484,7 @@ async def anthropic_api_key_complete(
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
     request_id: str,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,

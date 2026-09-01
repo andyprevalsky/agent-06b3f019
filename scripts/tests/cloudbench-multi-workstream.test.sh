@@ -78,6 +78,30 @@ mkdir -p "$SANDBOX/back-end/scripts" "$SANDBOX/back-end/prisma" \
   "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
 printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
+# Sibling of hub_upload.py: script-mode upload loads this via file path
+# (`_load_tree_helpers`), not `from benchmarks.logs` (a colliding
+# `benchmarks` package wins on sys.path). Keep the synthetic worktree
+# hermetic: only the two pure helpers, not the full httpx/asyncio logs module.
+cat > "$SANDBOX/agents/benchmarks/logs.py" <<'LOGSSTUB'
+"""Minimal stubs for hub_upload tree canonicalization in fleet fixtures."""
+
+
+def canonicalize_agent_tree(raw):
+    return raw if isinstance(raw, dict) else {}
+
+
+def tree_child_transcript_count(tree, root_id):
+    if not isinstance(tree, dict):
+        return 0
+    return sum(
+        1
+        for agent_id, info in tree.items()
+        if agent_id != root_id
+        and isinstance(info, dict)
+        and isinstance(info.get("messages"), list)
+        and info["messages"]
+    )
+LOGSSTUB
 # run-bench-fleet preflights the guest-pg canonical seed dump before clone.
 # Keep the synthetic worktrees hermetic: real token helper + stub R2 get.
 cp "$ROOT_DIR/agents/benchmarks/seed_cache_path.py" "$SANDBOX/agents/benchmarks/seed_cache_path.py"
@@ -94,6 +118,13 @@ console.error("usage: seed-dump-cache.ts <get|put> <token> <file>");
 process.exit(2);
 SEEDSTUB
 printf '{}\n' > "$SANDBOX/package.json"
+mkdir -p "$SANDBOX/node_modules/.bin"
+cat > "$SANDBOX/node_modules/.bin/tsx" <<'TSXSHIM'
+#!/bin/bash
+# Hermetic worktrees have no npm cache. Node 22 can load the stub .ts directly.
+exec node --experimental-strip-types "$@"
+TSXSHIM
+chmod +x "$SANDBOX/node_modules/.bin/tsx"
 printf '{}\n' > "$SANDBOX/back-end/package.json"
 printf '{}\n' > "$SANDBOX/front-end/package.json"
 printf '{}\n' > "$SANDBOX/back-end/package-lock.json"

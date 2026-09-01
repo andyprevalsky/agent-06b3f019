@@ -93,6 +93,7 @@ from helpers import (
     check_user_usage,
     compress_context,
     fetch_agent_config,
+    fetch_agent_queue_pointer,
     fetch_agent_tools,
     fetch_child_terminal_result_activity,
     fetch_model_pricing,
@@ -120,6 +121,7 @@ from helpers.llm import (
     mark_claude_token_rate_limited_activity,
     mark_compute_token_rate_limited_activity,
     mark_gpt_token_rate_limited_activity,
+    release_compute_token_lineage_activity,
     set_response_schema_activity,
 )
 from helpers.messages import update_agent_tree_state
@@ -134,6 +136,7 @@ from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_generation import resolve_production_task_queue
+from helpers.generation_handoff import parse_shutdown_grace_seconds
 from helpers.world_model_runtime import world_model_step_activity
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
@@ -582,6 +585,17 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
         resp.raise_for_status()
         machines = resp.json()
 
+        my_surface = (os.getenv("TEMPORAL_WORKER_SURFACE_HASH") or "").strip()
+
+        def _machine_surface(machine: dict) -> str:
+            env = ((machine.get("config") or {}).get("env") or {})
+            return str(env.get("TEMPORAL_WORKER_SURFACE_HASH") or "").strip()
+
+        # Overlapping generations share one Fly app. Only actuate machines that
+        # belong to this worker's surface hash so a new-gen leader cannot stop
+        # old-gen pollers mid cooperative drain.
+        if my_surface:
+            machines = [m for m in machines if _machine_surface(m) == my_surface]
         started = [m for m in machines if m["state"] == "started"]
         stopped = [m for m in machines if m["state"] == "stopped"]
         current = len(started)
@@ -1073,6 +1087,7 @@ async def main():
         mark_claude_token_rate_limited_activity,
         mark_compute_token_rate_limited_activity,
         mark_gpt_token_rate_limited_activity,
+        release_compute_token_lineage_activity,
         update_agent_status,
         acknowledge_workflow_replacement_bootstrap,
         finalize_workflow_replacement_bootstrap,
@@ -1093,6 +1108,7 @@ async def main():
         resolve_attachments_activity,
         mark_finished,
         fetch_agent_config,
+        fetch_agent_queue_pointer,
         fetch_child_terminal_result_activity,
         fetch_model_pricing,
         check_user_usage,
@@ -1186,6 +1202,10 @@ async def main():
     asyncio.create_task(monitor_event_loop_lag())
 
     # Create worker with all workflows and activities
+    shutdown_grace_seconds = parse_shutdown_grace_seconds(
+        os.getenv("WORKER_SHUTDOWN_GRACE_PERIOD"),
+        default=2100,
+    )
     worker = Worker(
         client,
         task_queue=production_task_queue,
@@ -1200,6 +1220,8 @@ async def main():
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
         nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
+        # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
+        graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
     )
 
     logger.info(
@@ -1275,7 +1297,7 @@ async def main():
 
         # If shutdown was signaled, shutdown worker cleanly with timeout
         if shutdown_task in done:
-            logger.info("Stopping worker task (5s timeout, Ctrl+C again to force)...")
+            logger.info(f"Stopping worker task ({shutdown_grace_seconds}s grace, Ctrl+C again to force)...")
 
             # Create a force kill watcher
             async def force_kill_watcher():
@@ -1286,10 +1308,10 @@ async def main():
 
             try:
                 # Try graceful shutdown with 5 second timeout
-                await asyncio.wait_for(worker.shutdown(), timeout=5.0)
+                await asyncio.wait_for(worker.shutdown(), timeout=shutdown_grace_seconds)
                 logger.info("Worker shutdown complete, cancelling worker task...")
             except asyncio.TimeoutError:
-                logger.warning("⚠️ Graceful shutdown timed out after 5s, forcing exit...")
+                logger.warning(f"⚠️ Graceful shutdown timed out after {shutdown_grace_seconds}s, forcing exit...")
                 # os._exit() bypasses the finally block below, so drain detached
                 # browser cleanups here too (bounded) before we hard-exit, or
                 # Steel/Playwright sessions get orphaned on the timeout path.
@@ -1309,7 +1331,7 @@ async def main():
     except asyncio.CancelledError:
         logger.info("Worker cancelled, shutting down...")
         try:
-            await asyncio.wait_for(worker.shutdown(), timeout=3.0)
+            await asyncio.wait_for(worker.shutdown(), timeout=min(30, shutdown_grace_seconds))
         except asyncio.TimeoutError:
             logger.warning("Shutdown timed out, forcing exit...")
     except SystemExit:

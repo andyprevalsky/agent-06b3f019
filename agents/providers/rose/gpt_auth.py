@@ -397,7 +397,7 @@ def build_codex_responses_body(
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     cache_namespace: Optional[str] = None,
     request_id: str,
 ) -> Dict[str, Any]:
@@ -460,7 +460,7 @@ async def gpt_auth_complete(
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     cache_namespace: Optional[str] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
@@ -565,7 +565,7 @@ async def openai_api_key_complete(
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     cache_namespace: Optional[str] = None,
-    provider_fast_mode: bool = False,
+    provider_fast_mode: bool = True,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:

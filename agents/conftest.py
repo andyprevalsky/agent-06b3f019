@@ -13,6 +13,9 @@ AGENTS_ROOT = Path(__file__).resolve().parent
 if str(AGENTS_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENTS_ROOT))
 
+from dotenv import load_dotenv  # noqa: E402
+
 from tests.env_defaults import apply_test_env_defaults  # noqa: E402
 
+load_dotenv(AGENTS_ROOT / ".env", override=False)
 apply_test_env_defaults()

@@ -11,6 +11,7 @@
  * [NO TERMINAL YET] -> keep live child tree rows visible
  */
 import { useMemo } from 'react';
+import { userFacingMessageText } from '@/lib/userFacingMessage';
 import {
   deduplicateToolMessages,
   type Message,
@@ -24,6 +25,13 @@ import type { ExploreStep, WaitForCheck } from '../types';
 import { isDirectSpawnChildProgress } from './useSubAgentTreeMerge';
 
 // ─── Filter messages by subAgentId ───────────────────────────────────────
+
+function sanitizeTrajectoryMessage(message: Message): Message {
+  if (message.role === 'USER' || message.role === 'SYSTEM') return message;
+  const text = userFacingMessageText(message.text);
+  if (text === message.text) return message;
+  return { ...message, text };
+}
 
 function filterMessagesForSubAgent(messages: Message[], subAgentId: string | undefined): Message[] {
   const target = subAgentId ?? null;
@@ -52,7 +60,9 @@ export function useFilteredMessages(
   return useMemo(() => {
     const filtered = filterMessagesForSubAgent(messages, subAgentId);
     const withoutSystem = filtered.filter((m) => m.role !== 'SYSTEM');
-    const withoutHidden = withoutSystem.filter((m) => !m.metadata?.hidden);
+    const withoutHidden = withoutSystem
+      .filter((m) => !m.metadata?.hidden)
+      .map(sanitizeTrajectoryMessage);
     const [filteredMessagesRaw, exploreStepMap, waitForCheckMap] =
       deduplicateToolMessages(withoutHidden);
     return { filteredMessagesRaw, exploreStepMap, waitForCheckMap };
@@ -70,6 +80,54 @@ export interface FilteredStreamingState {
   streamStartedAtMs?: number;
   isClaude: boolean;
   isGpt: boolean;
+}
+
+/** Per-sub-agent streaming byte totals keyed by subAgentId (empty string = root). */
+export interface SubAgentStreamingMetrics {
+  charCount: number;
+  streamStartedAtMs?: number;
+}
+
+function accumulateSubAgentMetrics(
+  map: Map<string, SubAgentStreamingMetrics>,
+  subAgentId: string | undefined,
+  charDelta: number,
+  startedAtMs?: number,
+): void {
+  const key = subAgentId ?? '';
+  const existing = map.get(key) ?? { charCount: 0 };
+  existing.charCount += charDelta;
+  if (startedAtMs) {
+    existing.streamStartedAtMs = Math.min(existing.streamStartedAtMs ?? startedAtMs, startedAtMs);
+  }
+  map.set(key, existing);
+}
+
+/** Build per-sub-agent char totals from raw streaming maps (before view filtering). */
+export function buildStreamingMetricsBySubAgentId(
+  streamingBubbles: Map<string, StreamingBubble>,
+  streamingTools: Map<string, StreamingTool>,
+): Map<string, SubAgentStreamingMetrics> {
+  const metrics = new Map<string, SubAgentStreamingMetrics>();
+  streamingBubbles.forEach((bubble) => {
+    accumulateSubAgentMetrics(
+      metrics,
+      bubble.subAgentId,
+      Math.max(bubble.charCount ?? 0, bubble.text.length),
+      bubble.startedAtMs,
+    );
+  });
+  streamingTools.forEach((tool) => {
+    accumulateSubAgentMetrics(metrics, tool.subAgentId, tool.charCount ?? 0, tool.startedAtMs);
+  });
+  return metrics;
+}
+
+export function resolveSubAgentStreamingMetrics(
+  subAgentId: string | null | undefined,
+  metricsBySubAgentId: Map<string, SubAgentStreamingMetrics>,
+): SubAgentStreamingMetrics {
+  return metricsBySubAgentId.get(subAgentId ?? '') ?? { charCount: 0 };
 }
 
 interface UseFilteredStreamingOptions {

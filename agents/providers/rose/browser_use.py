@@ -42,6 +42,16 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 
 BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+    "read_browser_state": {
+        "description": (
+            "Read the current browser page state (URL, viewport, scroll, tabs, page stats, indexed DOM tree). "
+            "Call before interacting when you need element [index] values or after navigation/actions that may "
+            "have changed the page. Example output begins with '# Current Browser State' and includes lines like "
+            "'Current URL: https://example.com/checkout - Checkout' and 'Interactive elements:' followed by "
+            "'[7]<button>Pay now</button>'."
+        ),
+        "params": {},
+    },
     "goto": {
         "description": "Navigate to a URL",
         "params": {"url": {"type": "string", "description": "URL to navigate to", "required": True}},
@@ -211,8 +221,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
             "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
-            "cookies, then parallel cookie-group reductions. The signed-in source context is not changed "
-            "during testing, and anything that may carry authentication is always preserved. If no safe "
+            "cookies, then parallel cookie-group reductions. Set auth_cookies_are_preserved=true when the "
+            "current session is logged in and the replacement machine must keep that authenticated state. "
+            "Set auth_cookies_are_preserved=false to explore machines with a fresh cookie state (may lose "
+            "auth, but can clear a poisoned cookie that forces anti-bot on every session). If no safe "
             "cookie fix is proven, it searches permission-compatible Kernel residential, Kernel mobile, "
             "Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration that "
             "passes repeated stability probes, and caches that configuration as this user's default for "
@@ -228,6 +240,17 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     "'repeated 429s on search')."
                 ),
                 "required": True,
+            },
+            "auth_cookies_are_preserved": {
+                "type": "boolean",
+                "description": (
+                    "True when the current browser session is logged in and the new machine must "
+                    "maintain the current authenticated state to pass the goal/task. False when you "
+                    "want to explore machines that have a fresh cookie state (and thus potentially "
+                    "lose auth status, but potentially fix a bad cookie which is poisoning every "
+                    "session with a forced anti-bot). Defaults to true."
+                ),
+                "required": False,
             },
         },
     },
@@ -707,12 +730,12 @@ You are a browser automation agent. You take in a user goal and complete the goa
 
 # Input
 
-Each turn you will receive a snapshot of the current browser environment which includes:
+Page state is NOT injected automatically. Call `read_browser_state` whenever you need:
 1. Current URL, viewport size, and scroll position
-2. Page stats
-3. Tab information
-4. DOM tree with interactive elements indexed for actions (format: [index]<type>text</type>)
-5. A full-page screenshot if the screenshot tool was called on the previous turn
+2. Page stats and open tabs
+3. DOM tree with interactive elements indexed for actions (format: [index]<type>text</type>)
+
+Use `screenshot` when you need a viewport image. Re-read state after navigation, scrolling, or actions that may change the page.
 
 # Browser Rules
 
@@ -797,6 +820,11 @@ def _format_action_history(action_history: List[Dict[str, Any]]) -> str:
             line += f" ✗ Error: {result.get('error') or 'Unknown error'}"
         parts.append(line + "\n")
     return "".join(parts)
+
+
+def format_browser_state_for_tool(browser_state: Dict[str, Any]) -> str:
+    """Format browser state exactly as read_browser_state returns it to the model."""
+    return _format_browser_state_text("", browser_state)
 
 
 def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
@@ -931,21 +959,11 @@ def build_browser_use_messages(
     """Build the OpenAI-style messages array for one browser-use step.
 
     When `turn_messages` is provided, returns a full browser-task transcript:
-    `[system, optional dynamic-system, initial user goal, prior turns,
-    current state]`. Legacy callers without `turn_messages` get the older
-    compact single-step shape.
+    `[system, optional dynamic-system, initial user goal, prior turns]`.
+    Page state is only present when the model previously called `read_browser_state`
+    and that tool result is in `turn_messages`. Legacy callers without `turn_messages`
+    get `[system, user goal (+ optional action history)]`.
     """
-    user_content = build_browser_state_message_content(
-        task=task,
-        browser_state=browser_state,
-        include_screenshot=include_screenshot,
-        include_task=turn_messages is None,
-    )
-    if turn_messages is None and isinstance(user_content, str):
-        user_content = user_content + _format_action_history(action_history)
-    elif turn_messages is None and isinstance(user_content, list) and user_content:
-        user_content[0]["text"] = str(user_content[0].get("text", "")) + _format_action_history(action_history)
-
     system_content = build_browser_use_system_prompt(available_actions)
     if dynamic_system_context:
         from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
@@ -957,8 +975,11 @@ def build_browser_use_messages(
     if turn_messages is not None:
         messages.append({"role": "user", "content": task})
         messages.extend(filter_browser_turn_messages(turn_messages))
-        messages.append({"role": "user", "content": user_content})
     else:
+        user_content = task
+        history_suffix = _format_action_history(action_history)
+        if history_suffix:
+            user_content = user_content + history_suffix
         messages.append({"role": "user", "content": user_content})
 
     state_extra_user_messages = (
@@ -1118,6 +1139,7 @@ _VALID_ACTIONS = frozenset(
         # allowlist or normalize_browser_use_response() rejects the model's call and
         # the browser step aborts before the handler can run staged recovery.
         "recover_from_challenge",
+        "read_browser_state",
         "read_logs",
         "read_network_requests",
     }
@@ -1368,6 +1390,20 @@ def _normalize_action_params(
         out["label"] = label
     if params.get("reason"):
         out["reason"] = params["reason"]
+    if normalized_action == "recover_from_challenge":
+        raw_preserve = params.get("auth_cookies_are_preserved")
+        if raw_preserve is None:
+            raw_preserve = first_action.get("auth_cookies_are_preserved")
+        if raw_preserve is not None:
+            if isinstance(raw_preserve, str):
+                out["auth_cookies_are_preserved"] = raw_preserve.strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "y",
+                )
+            else:
+                out["auth_cookies_are_preserved"] = bool(raw_preserve)
 
     if params.get("seconds") is not None:
         out["time_ms"] = params["seconds"] * 1000

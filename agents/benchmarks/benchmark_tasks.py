@@ -53,8 +53,10 @@ class BenchmarkTask:
     expected_structured_response_contains: Optional[dict] = None  # required substrings by browser result field
     required_structured_response_fields: List[str] = field(default_factory=list)  # non-empty browser result fields
     expected_gate: Optional[dict] = None  # Expected metadata.gate fields for gate-blocked tasks
+    simulate_gate_webhook: Optional[str] = None  # After gate is seen, replay webhook (e.g. subscription)
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     min_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory minimums by agent class
+    max_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory maximums by agent class
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts (toolName → count)
     min_tool_counts: Optional[dict] = None  # Minimum tool call counts (toolName → min count)
     tool_count_scope: str = "tree"  # "tree" counts all descendants; "root" counts root-visible tool calls only
@@ -135,6 +137,7 @@ SMOKE_TIMEOUT_CAPS: dict[str, int] = {
     "claude-code-agent": 300,
     "browser-smoke": 300,
     "browser-biometrics-webdecoy": 420,
+    "test-mass-agent-run-0": 600,
 }
 
 
@@ -199,6 +202,7 @@ def _load_tasks() -> List[BenchmarkTask]:
             if not t.browser_auth_realm:
                 raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without browser_auth_realm")
         t.min_steps = dict(t.min_steps)
+        t.max_steps = dict(t.max_steps)
         if t.requires_browser_agent and "browser" not in t.min_steps:
             t.min_steps["browser"] = DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"]
         if t.environment is None:
