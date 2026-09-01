@@ -1134,9 +1134,15 @@ class AgentWorkflow:
                 # Deployment-restored cold states must not enter run_agent's
                 # bounded pause polling before reaching a durable wait. Consume no
                 # workflow timers or activities until a valid signal unpauses us.
-                await workflow.wait_condition(lambda: not self.is_paused)
+                handoff_queue = await self._wait_for_unpause_or_handoff()
                 await self._wait_for_response_schema_refresh()
-                workflow.continue_as_new(args=self._continuation_args(context))
+                if handoff_queue:
+                    workflow.continue_as_new(
+                        args=self._continuation_args(context),
+                        task_queue=handoff_queue.strip(),
+                    )
+                else:
+                    workflow.continue_as_new(args=self._continuation_args(context))
                 return {"status": "paused", "goal": goal}
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
@@ -2156,6 +2162,25 @@ class AgentWorkflow:
                 f"Generation handoff required: current={current_queue} live={live_queue}"
             )
             return live_queue
+        return None
+
+    async def _wait_for_unpause_or_handoff(self) -> Optional[str]:
+        """Block until unpaused, re-checking generation handoff every 30s.
+
+        Returns the live task queue when cooperative cutover is required while
+        paused; otherwise None once the agent is unpaused.
+        """
+        while self.is_paused:
+            handoff_queue = await self._check_generation_handoff()
+            if handoff_queue:
+                return handoff_queue
+            try:
+                await workflow.wait_condition(
+                    lambda: not self.is_paused,
+                    timeout=timedelta(seconds=30),
+                )
+            except (asyncio.TimeoutError, TemporalTimeoutError):
+                pass
         return None
 
     async def _check_credits(self) -> None:
@@ -3894,12 +3919,18 @@ class AgentWorkflow:
         workflow.logger.info(f"{phase} ended: {result['status']}")
 
         if result["status"] == "paused":
-            await workflow.wait_condition(lambda: not self.is_paused)
+            handoff_queue = await self._wait_for_unpause_or_handoff()
             # Preserve feedback received while paused before continue-as-new
             # resets this workflow instance's revision counters.
             await self._wait_for_response_schema_refresh()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
-            workflow.continue_as_new(args=self._continuation_args(result.get("context")))
+            if handoff_queue:
+                workflow.continue_as_new(
+                    args=self._continuation_args(result.get("context")),
+                    task_queue=handoff_queue.strip(),
+                )
+            else:
+                workflow.continue_as_new(args=self._continuation_args(result.get("context")))
             return result
 
         if result["status"] == "generation_handoff":

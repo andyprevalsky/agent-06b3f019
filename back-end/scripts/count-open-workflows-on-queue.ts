@@ -3,9 +3,9 @@
  * Count open agent workflows still pinned to a generation task queue.
  *
  * Used by cooperative cutover to wait for continue_as_new handoff before the
- * 45-minute force-migrate SLO. Prefers the Agent.workflowTaskQueue column
- * (source of truth for which generation an open agent is on) and falls back
- * to a Temporal visibility count when the column is unset on older rows.
+ * 45-minute force-migrate SLO. Temporal visibility is authoritative (continue_as_new
+ * moves the execution to the new queue immediately). The Agent.workflowTaskQueue
+ * column is used as a fallback when visibility is unavailable.
  *
  * Usage:
  *   count-open-workflows-on-queue.ts --queue navi-agent-tasks@abc123
@@ -25,13 +25,26 @@ function argValue(flag: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-async function main(): Promise<void> {
-  const queue = argValue('--queue');
-  if (!queue) {
-    process.stderr.write('Usage: count-open-workflows-on-queue.ts --queue <task-queue>\n');
-    process.exit(2);
+async function countFromTemporal(queue: string): Promise<number | null> {
+  try {
+    const client = await getTemporalClient();
+    const query = `TaskQueue = "${queue}" AND ExecutionStatus = "Running"`;
+    let count = 0;
+    for await (const _execution of client.workflow.list({ query })) {
+      count += 1;
+    }
+    return count;
+  } catch (err) {
+    process.stderr.write(
+      `temporal visibility count failed (falling back to DB): ${
+        err instanceof Error ? err.message : String(err)
+      }\n`
+    );
+    return null;
   }
+}
 
+async function countFromDatabase(queue: string): Promise<number> {
   const dbCount = await prisma.agent.count({
     where: {
       deletedAt: null,
@@ -53,22 +66,26 @@ async function main(): Promise<void> {
 
   let temporalLegacy = 0;
   if (legacyOpen > 0) {
-    try {
-      const client = await getTemporalClient();
-      const query = `TaskQueue = "${queue}" AND ExecutionStatus = "Running"`;
-      for await (const _execution of client.workflow.list({ query })) {
-        temporalLegacy += 1;
-      }
-    } catch (err) {
-      process.stderr.write(
-        `temporal visibility fallback failed (using DB count only): ${
-          err instanceof Error ? err.message : String(err)
-        }\n`
-      );
+    const legacyCount = await countFromTemporal(queue);
+    if (legacyCount !== null) {
+      temporalLegacy = legacyCount;
     }
   }
 
-  process.stdout.write(`${dbCount + temporalLegacy}\n`);
+  return dbCount + temporalLegacy;
+}
+
+async function main(): Promise<void> {
+  const queue = argValue('--queue');
+  if (!queue) {
+    process.stderr.write('Usage: count-open-workflows-on-queue.ts --queue <task-queue>\n');
+    process.exit(2);
+  }
+
+  const temporalCount = await countFromTemporal(queue);
+  const total = temporalCount ?? (await countFromDatabase(queue));
+
+  process.stdout.write(`${total}\n`);
   await prisma.$disconnect();
 }
 

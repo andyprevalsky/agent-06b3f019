@@ -94,7 +94,7 @@ jobs:
           DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
           DRAIN_TIMEOUT_SECONDS: "2700"
           REQUIRE_ACTIVATION: ${{ steps.classify.outputs.require_activation }}
-          APP: ${{ secrets.FAS_APP_NAME }}
+          APP: ${{ secrets.FLY_APP_NAME || secrets.FAS_APP_NAME }}
         run: |
           set -euo pipefail
           release() {

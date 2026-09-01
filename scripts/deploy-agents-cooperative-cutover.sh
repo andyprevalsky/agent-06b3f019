@@ -12,15 +12,14 @@
 #   DEPLOYMENT_TOKEN, DATABASE_URL (and Temporal creds for migrate/count)
 set -euo pipefail
 
-# Prefer FLY_API_TOKEN (flyctl native). Fall back to FLY_API_TOKEN if that is
-# what CI injects under a legacy secret name.
-export FLY_API_TOKEN="${FLY_API_TOKEN:-${FLY_API_TOKEN:-}}"
 if [ -z "${FLY_API_TOKEN:-}" ]; then
   echo "FLY_API_TOKEN is required" >&2
   exit 2
 fi
+export FLY_API_TOKEN
 
-APP="${APP:?APP is required}"
+APP="${APP:-${FLY_APP_NAME:-}}"
+APP="${APP:?APP (or FLY_APP_NAME) is required}"
 SURFACE_HASH="${SURFACE_HASH:?SURFACE_HASH is required}"
 GENERATION_QUEUE="${GENERATION_QUEUE:?GENERATION_QUEUE is required}"
 BUILD_ID="${BUILD_ID:?BUILD_ID is required}"
@@ -66,6 +65,16 @@ all_started_ids() {
   flyctl machines list -a "$APP" --json | jq -r '.[] | select(.state=="started") | .id'
 }
 
+started_ids_for_hash() {
+  local hash="$1"
+  flyctl machines list -a "$APP" --json | jq -r --arg h "$hash" '
+    .[]
+    | select(.state=="started")
+    | select((.config.env.TEMPORAL_WORKER_SURFACE_HASH // "") == $h)
+    | .id
+  '
+}
+
 if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
   echo "Surface unchanged — rolling deploy with activity-boundary drain"
   cd "$ROOT/agents"
@@ -74,8 +83,8 @@ if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
     --env TEMPORAL_WORKER_SURFACE_HASH="$SURFACE_HASH" \
     --env TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
     --env TEMPORAL_WORKER_REQUIRE_ACTIVATION="0"
-  # Scale excess back to MIN (same-gen only).
-  STARTED="$(all_started_ids)"
+  # Scale excess back to MIN (same-gen only — do not stop other generations).
+  STARTED="$(started_ids_for_hash "$SURFACE_HASH")"
   COUNT=0
   for ID in $STARTED; do
     COUNT=$((COUNT + 1))

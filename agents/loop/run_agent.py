@@ -640,6 +640,36 @@ async def run_agent(
 
         if paused:
             consecutive_paused += 1
+            # Cooperative generation handoff while paused: check periodically so
+            # a user-paused agent still moves to the live queue without waiting
+            # for the 45m force-migrate SLO.
+            if check_generation_handoff and (
+                consecutive_paused == 1 or consecutive_paused % 10 == 0
+            ):
+                try:
+                    handoff_queue = await check_generation_handoff()
+                except Exception as e:
+                    logger.warning(f"Generation handoff check failed while paused (continuing): {e}")
+                    handoff_queue = None
+                if handoff_queue:
+                    logger.info(
+                        "run_agent.generation_handoff_while_paused",
+                        agent_id=agent_id,
+                        consecutive_paused=consecutive_paused,
+                        handoff_task_queue=handoff_queue,
+                    )
+                    _pending_llm_context.pop(agent_id, None)
+                    return {
+                        "status": "generation_handoff",
+                        "handoff_task_queue": handoff_queue,
+                        "context": context,
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "token_count": token_count,
+                        "context_size": context_size,
+                        "cache_read_input_tokens": cache_read_total,
+                        "cache_creation_input_tokens": cache_write_total,
+                    }
             # Log on the first pause and then only periodically — never every
             # iteration. If the wait below ever fails to block, an unthrottled
             # log would flood the worker (prod incident 2026-07-05: ~30–100
