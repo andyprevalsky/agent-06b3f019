@@ -14,7 +14,6 @@ from domains.spawn_browser_agent_v3.challenge_recovery import (
     blocked_resource_urls_for_verify,
     commit_cookie_removals,
     cookie_key,
-    goal_allows_logged_out_cookie_commit,
     is_auth_cookie,
     is_usable_document_title,
     page_looks_challenged,
@@ -198,85 +197,29 @@ async def test_guest_path_commits_clean_all_target_strip():
     assert any("Guest path" in event[2] for event in events)
 
 
-def test_goal_allows_logged_out_cookie_commit_for_guest_prompts():
-    assert goal_allows_logged_out_cookie_commit(
-        "Book Hotel Kabuki on hotels.com. Use guest checkout — do not sign in."
+async def test_guest_path_prefers_all_target_over_known_challenge_when_both_clean():
+    """auth_cookies_are_preserved=false must prefer full target clear over weak challenge strip."""
+    source = _state(
+        _cookie("cf_clearance"),
+        _cookie("prefs"),
+        _cookie("poison"),
+        _cookie("cart"),
     )
-    assert goal_allows_logged_out_cookie_commit("Continue as guest without an account.")
-    assert goal_allows_logged_out_cookie_commit("Check out as a guest without an account.")
-    assert goal_allows_logged_out_cookie_commit("Complete anonymous checkout without logging in.")
-    assert goal_allows_logged_out_cookie_commit(
-        "Buy the item and check out anonymously without creating an account."
+    before = copy.deepcopy(source)
+
+    async def probe(candidate):
+        # Both known_challenge (cf_clearance removed) and all_target (all removed) look clean.
+        return "cf_clearance" not in {cookie["name"] for cookie in candidate["cookies"]}
+
+    result, events, committed, config_inputs = await _run(
+        source, probe, allow_logged_out_cookie_commit=True
     )
-    assert goal_allows_logged_out_cookie_commit(
-        "Use guest checkout, not anonymous checkout"
-    )
-    assert goal_allows_logged_out_cookie_commit(
-        "Use anonymous checkout, not as a guest"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not continue as guest; sign in with my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Don't proceed as guest; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "do not proceed as a guest; sign in with my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not check out without logging in; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not continue without logging in; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not shop anonymously; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "No guest checkout; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Guest checkout is not what I want; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not use either guest checkout or anonymous checkout; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "I was a guest before; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Don't check out as guest; use my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not check out as guest; sign in with my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not check out as a guest; sign in with my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not use anonymous checkout; sign in with my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Don't check out anonymously; use my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Do not continue anonymously; use my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Don't continue anonymously; sign in with my account."
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "not guest checkout; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "not anonymously; use my account"
-    )
-    assert not goal_allows_logged_out_cookie_commit(
-        "Don’t continue anonymously; use my account."  # curly apostrophe
-    )
-    assert not goal_allows_logged_out_cookie_commit("Sign in with my Expedia account and book.")
-    assert not goal_allows_logged_out_cookie_commit("")
-    assert not goal_allows_logged_out_cookie_commit(None)
+    assert result.recovery == "cookies_sanitized"
+    assert set(committed) == {cookie_key(cookie) for cookie in before["cookies"]}
+    assert cookie_key(_cookie("cf_clearance")) in committed
+    assert cookie_key(_cookie("poison")) in committed
+    assert config_inputs == []
+    assert any("Guest path" in event[2] for event in events)
 
 
 async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
@@ -1054,9 +997,9 @@ async def run_all_tests():
         "guest_path_commits_clean_all_target",
         test_guest_path_commits_clean_all_target_strip,
     )
-    result.record(
-        "goal_allows_logged_out_cookie_commit",
-        test_goal_allows_logged_out_cookie_commit_for_guest_prompts,
+    await result.record_async(
+        "guest_path_prefers_all_target_over_known_challenge",
+        test_guest_path_prefers_all_target_over_known_challenge_when_both_clean,
     )
     await result.record_async(
         "opaque_auth_cookie_preserved",

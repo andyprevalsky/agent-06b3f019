@@ -221,8 +221,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
             "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
-            "cookies, then parallel cookie-group reductions. The signed-in source context is not changed "
-            "during testing, and anything that may carry authentication is always preserved. If no safe "
+            "cookies, then parallel cookie-group reductions. Set auth_cookies_are_preserved=true when the "
+            "current session is logged in and the replacement machine must keep that authenticated state. "
+            "Set auth_cookies_are_preserved=false to explore machines with a fresh cookie state (may lose "
+            "auth, but can clear a poisoned cookie that forces anti-bot on every session). If no safe "
             "cookie fix is proven, it searches permission-compatible Kernel residential, Kernel mobile, "
             "Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration that "
             "passes repeated stability probes, and caches that configuration as this user's default for "
@@ -238,6 +240,17 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     "'repeated 429s on search')."
                 ),
                 "required": True,
+            },
+            "auth_cookies_are_preserved": {
+                "type": "boolean",
+                "description": (
+                    "True when the current browser session is logged in and the new machine must "
+                    "maintain the current authenticated state to pass the goal/task. False when you "
+                    "want to explore machines that have a fresh cookie state (and thus potentially "
+                    "lose auth status, but potentially fix a bad cookie which is poisoning every "
+                    "session with a forced anti-bot). Defaults to true."
+                ),
+                "required": False,
             },
         },
     },
@@ -1377,6 +1390,20 @@ def _normalize_action_params(
         out["label"] = label
     if params.get("reason"):
         out["reason"] = params["reason"]
+    if normalized_action == "recover_from_challenge":
+        raw_preserve = params.get("auth_cookies_are_preserved")
+        if raw_preserve is None:
+            raw_preserve = first_action.get("auth_cookies_are_preserved")
+        if raw_preserve is not None:
+            if isinstance(raw_preserve, str):
+                out["auth_cookies_are_preserved"] = raw_preserve.strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "y",
+                )
+            else:
+                out["auth_cookies_are_preserved"] = bool(raw_preserve)
 
     if params.get("seconds") is not None:
         out["time_ms"] = params["seconds"] * 1000
