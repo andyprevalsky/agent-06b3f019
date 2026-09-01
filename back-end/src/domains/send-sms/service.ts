@@ -65,7 +65,12 @@ export async function sendViaSurge(phoneNumber: string, message: string): Promis
     if (result.error === 'Surge not configured') {
       throw new SurgeNotConfiguredError();
     }
-    throw new SurgeApiError(502, result.error ?? 'Surge send failed');
+    if (result.definitiveFailure === true) {
+      const statusMatch = result.error?.match(/Surge API error: (\d{3})/);
+      const status = statusMatch ? Number(statusMatch[1]) : 502;
+      throw new SurgeApiError(status, result.error ?? 'Surge send failed');
+    }
+    throw new Error(result.error ?? 'Surge send failed');
   }
 
   return {
