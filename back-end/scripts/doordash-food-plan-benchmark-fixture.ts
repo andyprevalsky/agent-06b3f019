@@ -23,7 +23,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const prisma = new PrismaClient();
-const USER_ID = process.env.BENCHMARK_USER_ID?.trim() || '5824c58c-7f11-4c92-8f81-33eb3c324a2f';
+const USER_ID = process.env.BENCHMARK_USER_ID?.trim() || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const PROD_AGENT_ID = 'c27b4f28-994b-467f-afc6-b4082d0155c1';
 const SOURCE_DATABASE_URL = process.env.BENCHMARK_DOORDASH_SOURCE_DATABASE_URL;
 
