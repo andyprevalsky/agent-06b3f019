@@ -8657,17 +8657,7 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
     return compact
 
 
-def _declared_evaluator_evidence(data: dict) -> list[dict]:
-    """Build a bounded evidence-only context for a declared LLM judge.
-
-    Message rows come from the tree-aware single-turn builder (payment-approval
-    metadata, sub-agent transcripts). ``benchmark_state`` is the compact T-row
-    view so mass-agent trees cannot 413 the judge with 35MB child bodies.
-    """
-    from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence
-
-    evidence = build_single_turn_evidence(data)
-    compact_state = _compact_benchmark_state_for_judge(data)
+def _apply_compact_benchmark_state(evidence: list[dict], compact_state: dict) -> list[dict]:
     for row in evidence:
         if isinstance(row, dict) and "benchmark_state" in row:
             row["benchmark_state"] = compact_state
@@ -8675,6 +8665,30 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     else:
         evidence.append({"benchmark_state": compact_state})
     return evidence
+
+
+def _declared_evaluator_evidence(data: dict) -> list[dict]:
+    """Build a bounded evidence-only context for a declared LLM judge.
+
+    Payment-approval metadata and root transcripts come from the tree-aware
+    single-turn builder. ``benchmark_state`` is the compact T-row view so
+    mass-agent trees cannot 413 the judge with 35MB child bodies. When the
+    hydrated child transcripts still blow the single-turn budget, drop them
+    and keep root rows + compact typed state — T-row judges are written for
+    that compact view, not the agentic Codex fallback.
+    """
+    from benchmarks.semantic_evaluator_evidence import (
+        build_single_turn_evidence,
+        single_turn_evidence_exceeds_budget,
+    )
+
+    compact_state = _compact_benchmark_state_for_judge(data)
+    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
+    if not single_turn_evidence_exceeds_budget(evidence):
+        return evidence
+    slim = dict(data)
+    slim["_semantic_evaluator_tree"] = None
+    return _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {

@@ -2945,6 +2945,10 @@ def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
+    from benchmarks.semantic_evaluator_evidence import (
+        SINGLE_TURN_CHAR_BUDGET,
+        single_turn_evidence_exceeds_budget,
+    )
 
     huge = "Fast Mode cache replay body " + ("x" * 40000)
     tree = {
@@ -2959,8 +2963,12 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
                     "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
                 }
             ],
-        },
-        "gp-1": {
+        }
+    }
+    all_agents = [{"agent_id": "root", "status": "COMPLETED", "goal": "Analyze", "message_count": 1}]
+    for index in range(50):
+        agent_id = f"gp-{index}"
+        tree[agent_id] = {
             "parent_agent_id": "root",
             "status": "COMPLETED",
             "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
@@ -2977,14 +2985,23 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
                         "toolName": "spawn_agent",
                         "agentType": "explore",
                         "toolStatus": "FINISHED",
-                        "subAgentId": "explore-1",
+                        "subAgentId": f"explore-{index}",
                     },
                 },
             ],
-        },
-    }
+        }
+        all_agents.append(
+            {
+                "agent_id": agent_id,
+                "parent_agent_id": "root",
+                "status": "COMPLETED",
+                "goal": "ONE creator",
+                "message_count": 1,
+            }
+        )
     evidence = _declared_evaluator_evidence(
         {
+            "agent": {"agent_id": "root", "status": "COMPLETED"},
             "messages": [
                 {
                     "role": "TOOL",
@@ -2996,31 +3013,140 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
             "tokens_out": 0,
             "cache_creation_input_tokens": 0,
             "live_output_tokens": 0,
+            "_semantic_evaluator_tree": tree,
             "_benchmark": {
                 "tree": tree,
-                "all_agents": [
-                    {"agent_id": "root", "status": "COMPLETED", "goal": "Analyze", "message_count": 1},
-                    {"agent_id": "gp-1", "parent_agent_id": "root", "status": "COMPLETED", "goal": "ONE creator", "message_count": 1},
-                ],
+                "all_agents": all_agents,
             },
         }
     )
     dumped = json.dumps(evidence)
     assert len(dumped) < 200_000
+    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
+    assert not single_turn_evidence_exceeds_budget(evidence)
     assert huge not in dumped
     state = next(item["benchmark_state"] for item in evidence if "benchmark_state" in item)
-    assert state["tree"]["gp-1"]["research_tool_count"] >= 1
-    assert state["tree"]["gp-1"]["explore_spawn_count"] >= 1
-    assert state["tree"]["gp-1"]["message_count"] == 2
-    assert state["tree"]["gp-1"]["has_real_transcript"] is True
-    assert state["tree"]["gp-1"]["mentions_andy"] is True
-    assert state["tree"]["gp-1"]["mentions_aman"] is False
-    assert state["tree"]["gp-1"]["has_traj_end_stub"] is False
+    assert state["tree"]["gp-0"]["research_tool_count"] >= 1
+    assert state["tree"]["gp-0"]["explore_spawn_count"] >= 1
+    assert state["tree"]["gp-0"]["message_count"] == 2
+    assert state["tree"]["gp-0"]["has_real_transcript"] is True
+    assert state["tree"]["gp-0"]["mentions_andy"] is True
+    assert state["tree"]["gp-0"]["mentions_aman"] is False
+    assert state["tree"]["gp-0"]["has_traj_end_stub"] is False
     assert state["all_agents"][1]["message_count"] == 2
-    assert state["first_level_gps"][0]["agent_id"] == "gp-1"
+    assert state["first_level_gps"][0]["agent_id"] == "gp-0"
     assert state["first_level_gps"][0]["has_real_transcript"] is True
+    assert len(state["first_level_gps"]) == 50
     assert state["usage"]["live_output_tokens"] == 0
     assert state["usage"]["cost_cents"] == 0
+
+
+async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
+    """Hydrated 50-GP trees must stay on single_turn — agentic Codex token fetch is a fail-closed flake."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import BenchmarkTask
+
+    huge = "Fast Mode cache replay body " + ("x" * 40000)
+    tree = {}
+    all_agents = []
+    for index in range(50):
+        agent_id = f"gp-{index}"
+        tree[agent_id] = {
+            "parent_agent_id": "root",
+            "status": "COMPLETED",
+            "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": huge,
+                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                }
+            ],
+        }
+        all_agents.append(
+            {"agent_id": agent_id, "parent_agent_id": "root", "status": "COMPLETED", "goal": "ONE creator"}
+        )
+    tree["root"] = {
+        "parent_agent_id": None,
+        "status": "COMPLETED",
+        "goal": "Analyze the top 50 creators for Andy Prevalsky",
+        "messages": [],
+    }
+    task = BenchmarkTask(
+        name="test-mass-agent-run-0",
+        title="Test Mass Agent Run - 0",
+        prompt="Analyze creators for Andy",
+        timeout_seconds=600,
+        is_chat_mode=False,
+        expected_tools=["spawn_general_purpose_agent_for_each"],
+        tags=["mass-agent", "smoke"],
+        price_limit_cents=200,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling=None,
+        start_phase=None,
+        enforce_declared_evaluators=True,
+        evaluators=[
+            {
+                "id": "t1-andy-only",
+                "method": "single_turn_llm_judge",
+                "criteria": ["Andy is the principal user"],
+                "judge_prompt": "Score 1.0 if mentions_andy",
+                "pass_threshold": 1.0,
+            }
+        ],
+    )
+    data = {
+        "agent": {"agent_id": "root", "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Task Complete",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": "Andy Prevalsky positioning", "outputs": []},
+                },
+            }
+        ],
+        "cost_cents": 0,
+        "tokens_out": 0,
+        "cache_creation_input_tokens": 0,
+        "live_output_tokens": 0,
+        "_semantic_evaluator_tree": tree,
+        "_benchmark": {"tree": tree, "all_agents": all_agents},
+    }
+    agentic_calls = []
+    single_calls = []
+
+    async def fake_single(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
+        single_calls.append(evaluator_arg["id"])
+        assert evidence is not None
+        from benchmarks.semantic_evaluator_evidence import single_turn_evidence_exceeds_budget
+
+        assert not single_turn_evidence_exceeds_budget(evidence)
+        return {"score": 1.0, "reasoning": "Andy is the principal user"}
+
+    async def fake_agentic(task_arg, evaluator_arg, data_arg, **_kwargs):
+        agentic_calls.append(evaluator_arg["id"])
+        raise AssertionError("mass-agent single_turn must not upgrade to agentic")
+
+    original_single = bench._call_declared_llm_judge
+    original_agentic = bench._call_declared_agentic_llm_judge
+    try:
+        bench._call_declared_llm_judge = fake_single
+        bench._call_declared_agentic_llm_judge = fake_agentic
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+    finally:
+        bench._call_declared_llm_judge = original_single
+        bench._call_declared_agentic_llm_judge = original_agentic
+
+    assert passed is True
+    assert reason is None
+    assert single_calls == ["t1-andy-only"]
+    assert agentic_calls == []
+    assert results[0]["passed"] is True
 
 
 def test_first_level_gp_count_static_uses_collected_transcripts():
@@ -16760,6 +16886,10 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
         test_declared_evaluator_evidence_compacts_mass_agent_tree,
+    )
+    await r.record_async(
+        "mass_agent_single_turn_judge_does_not_upgrade_to_agentic",
+        test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic,
     )
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",
