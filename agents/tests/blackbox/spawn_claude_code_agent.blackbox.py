@@ -2678,6 +2678,10 @@ async def run_all_tests():
         "format_code_events_transcript",
         test_format_code_events_transcript_skips_empty_tool_results,
     )
+    r.record(
+        "format_code_events_transcript_failed_status",
+        test_format_code_events_transcript_covers_failed_and_status_only_results,
+    )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
     await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
@@ -2842,6 +2846,23 @@ def test_format_code_events_transcript_skips_empty_tool_results():
     assert transcript.splitlines() == [
         "[Claude tool] Bash · ls",
         "[Claude result] command failed",
+    ]
+
+
+def test_format_code_events_transcript_covers_failed_and_status_only_results():
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "tool_use", "tool": "Write"},
+            {"type": "result", "status": "failed", "text": "rank script exited 1"},
+            {"type": "result", "status": "cancelled"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude tool] Write",
+        "[Claude result] failed - rank script exited 1",
+        "[Claude result] cancelled",
     ]
 
 
