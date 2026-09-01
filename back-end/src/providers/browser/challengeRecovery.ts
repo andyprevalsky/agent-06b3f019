@@ -17,7 +17,17 @@ import {
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
+import {
+  raceProbeAbort,
+  recoveryConfigKeyForSession,
+  sameSiteNavigationUrl,
+} from './challengeRecoveryShared';
 import type { BrowserProviderName } from './types';
+
+export {
+  recoveryConfigKeyForSession,
+  sameSiteNavigationUrl,
+} from './challengeRecoveryShared';
 
 export {
   bestSpecificity,
@@ -121,17 +131,6 @@ export interface CandidateProbeResult {
   /** Final same-site URL after the last clean probe settle (soft-redirect resume). */
   settledUrl?: string;
 }
-
-export {
-  raceProbeAbort,
-  recoveryConfigKeyForSession,
-  sameSiteNavigationUrl,
-} from './challengeRecoveryShared';
-import {
-  raceProbeAbort,
-  recoveryConfigKeyForSession,
-  sameSiteNavigationUrl,
-} from './challengeRecoveryShared';
 
 export interface SuccessfulRecoveryCandidate {
   config: BrowserRecoveryConfig;
@@ -589,7 +588,7 @@ export async function searchAndPromoteBrowserConfig(
       }
     },
     release: async (_config, session) => {
-      await closeValidationBrowser(session);
+      await closeValidationBrowser(session).catch(() => {});
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },

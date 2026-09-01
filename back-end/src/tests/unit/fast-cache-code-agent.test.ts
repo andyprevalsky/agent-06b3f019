@@ -82,7 +82,7 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'backend must route Claude Code Anthropic calls through the Fast Mode proxy'
   );
   assert.ok(
-    e2bProvider.includes('shouldWriteFastModeCacheForUser(userId)'),
+    e2bProvider.includes('resolveFastModeWriteEnabled(fastModeCacheEnabled, userId)'),
     'Claude Code must write through for the allowlisted account even when reads are off'
   );
   assert.ok(

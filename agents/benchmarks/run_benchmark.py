@@ -92,6 +92,7 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
+from benchmarks.spawn_contract import primary_live_target, should_disable_saved_browser_auth
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
@@ -8340,63 +8341,218 @@ async def run_minted_agent_account_task(
 
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge."""
-    evidence: list[dict] = []
-    for message in (data.get("messages") or [])[-120:]:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "").upper()
-        if role in {"USER", "SYSTEM"}:
-            continue
-        text_value = message.get("text", message.get("content", ""))
-        if not isinstance(text_value, str):
-            text_value = json.dumps(text_value, default=str)
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
-        evidence_metadata = {
-            key: metadata[key]
-            for key in (
-                "action_type",
-                "toolName",
-                "toolStatus",
-                "url",
-                "title",
-                "browser_session_metadata",
-            )
-            if key in metadata
-        }
-        evidence.append(
-            {
-                "role": role or "UNKNOWN",
-                "text": text_value[:12000],
-                "metadata": evidence_metadata,
-            }
+    from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence
+
+    return build_single_turn_evidence(data)
+
+
+_AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "fields": [
+        {
+            "name": "score",
+            "type": "float",
+            "description": (
+                "1.0 only when every catalog criterion is directly grounded in the attached "
+                "trajectory evidence; otherwise 0.0."
+            ),
+        },
+        {
+            "name": "reasoning",
+            "type": "str",
+            "description": (
+                "Concise pass/fail explanation citing the grounded evidence locations "
+                "(tool messages, payment approval metadata, browser actions)."
+            ),
+        },
+    ]
+}
+
+def _declared_agentic_evaluator_evidence(data: dict) -> dict[str, Any]:
+    """Build a full trajectory bundle for an agentic Codex judge."""
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
+
+    return build_agentic_evidence(data)
+
+
+async def _hydrate_semantic_evaluator_tree(data: dict, base_url: str) -> None:
+    """Attach full agent-tree transcripts for semantic evaluators (best-effort)."""
+    if data.get("_semantic_evaluator_tree") is not None:
+        return
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+    if not root_id or not base_url:
+        data["_semantic_evaluator_tree"] = None
+        return
+    try:
+        tree_agents = await get_agent_tree(base_url, root_id)
+        if len(tree_agents) <= 1:
+            data["_semantic_evaluator_tree"] = None
+            return
+        data["_semantic_evaluator_tree"] = await collect_tree_messages(
+            root_id,
+            tree_agents,
+            lambda agent_id: get_agent(base_url, agent_id),
         )
-    # The frontend renders completionSummary metadata as the root agent's final
-    # answer card, while its backing TOOL message normally has empty text. Give
-    # the semantic judge the same summary + outputs as one normalized assistant
-    # row; omit tool usage and cost metadata that are not part of that answer.
-    summaries = _final_completion_summaries(data)
-    if summaries:
-        completion = summaries[-1]
-        outputs = completion.get("outputs")
-        payload = {
-            "summary": str(completion.get("summary") or "")[:12000],
-            "outputs": outputs[:100] if isinstance(outputs, list) else [],
-        }
-        evidence.append(
-            {
-                "role": "ASSISTANT",
-                "text": json.dumps(payload, default=str),
-                "metadata": {"evidence_type": "final_completion"},
-            }
+    except Exception as exc:
+        data["_semantic_evaluator_tree"] = None
+        data.setdefault("_benchmark", {})["_semantic_evaluator_tree_error"] = str(exc)[:300]
+
+
+def _build_agentic_judge_goal(task: BenchmarkTask, evaluator: dict) -> str:
+    criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    return f"""You are a strict benchmark judge for a live agent trajectory.
+
+Read the attached `benchmark_evidence.json` file in /home/user/attachments/. Search it thoroughly
+with shell tools (grep, jq, less) before scoring. The task prompt and criteria below describe
+requirements; they are not evidence.
+
+Score exactly 1.0 only when every criterion is directly grounded in tool/browser output,
+payment-request metadata, or typed benchmark state inside the evidence file. Otherwise score 0.0
+and explain the first missing or contradicted requirement. The pending payment approval itself
+is valid grounding for item, total, store, and pickup facts when those fields appear there.
+Unsupported assistant claims without tool evidence are not proof.
+
+Task requirement: {task.prompt}
+Criteria:
+{criteria}
+Judge-specific instruction: {evaluator.get("judge_prompt", "")}
+
+Write the final verdict to `/home/user/output/judgment.json` as JSON with `score` (1.0 or 0.0)
+and `reasoning` fields, then validate that file exists before finishing.
+"""
+
+
+async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dict[str, Any]:
+    """Resolve a synced GPT/Codex compute token for the benchmark judge harness."""
+    from config import load_config
+    from helpers.llm import fetch_gpt_code_token_activity
+
+    token_data = await fetch_gpt_code_token_activity(user_id)
+    if token_data and token_data.get("accessToken"):
+        return {**token_data, "type": "gpt"}
+
+    config = load_config()
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            params={"tokenType": "gpt", "agentId": agent_id},
+            timeout=15.0,
         )
-    evidence.append({"benchmark_state": data.get("_benchmark", {})})
-    return evidence
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("accessToken") and data.get("type") == "gpt":
+                return {
+                    "type": "gpt",
+                    "accessToken": data["accessToken"],
+                    "accountId": data.get("accountId"),
+                    "source": data.get("source", "user"),
+                    "poolTokenId": data.get("poolTokenId"),
+                }
+
+    raise RuntimeError("Codex compute token unavailable for agentic benchmark judge")
+
+
+async def _parse_agentic_judge_verdict(result: dict) -> tuple[float, str]:
+    """Read the benchmark judge score from Codex output, not harness verifier progress."""
+    structured = result.get("structured_response") if isinstance(result.get("structured_response"), dict) else {}
+    if "score" in structured:
+        try:
+            score = float(structured["score"])
+            reasoning = str(structured.get("reasoning") or "")
+            if reasoning:
+                return score, reasoning
+        except (TypeError, ValueError):
+            pass
+
+    from helpers.attachments import FilePointer, get_file_content
+
+    for file_pointer in result.get("output_files") or []:
+        if not isinstance(file_pointer, dict):
+            continue
+        if str(file_pointer.get("original_filename") or "") != "judgment.json":
+            continue
+        try:
+            content = await get_file_content(FilePointer.from_dict(file_pointer))
+            parsed = json.loads(content.decode("utf-8"))
+            score = float(parsed.get("score", 0.0))
+            reasoning = str(parsed.get("reasoning") or "")
+            if reasoning:
+                return score, reasoning
+        except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+
+    message = str(result.get("message") or "")
+    for line in message.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{") or "score" not in stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+            score = float(parsed.get("score", 0.0))
+            reasoning = str(parsed.get("reasoning") or "")
+            if reasoning:
+                return score, reasoning
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+
+    return 0.0, "Agentic judge returned no parseable benchmark verdict"
+
+
+async def _call_declared_agentic_llm_judge(
+    task: BenchmarkTask,
+    evaluator: dict,
+    data: dict,
+) -> dict:
+    """Execute one catalog-declared agentic judge via the Codex code harness."""
+    from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
+    from helpers.attachments import upload_to_storage
+
+    _sync_compute_tokens(required_token_types=("gpt",))
+
+    user_id = _current_benchmark_user_id()
+    judge_agent_id = str(uuid.uuid4())
+    tool_call_id = str(uuid.uuid4())
+    token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id)
+
+    evidence = _declared_agentic_evaluator_evidence(data)
+    evidence_bytes = json.dumps(evidence, default=str, indent=2).encode("utf-8")
+    attachment = await upload_to_storage(
+        user_id,
+        evidence_bytes,
+        "benchmark_evidence.json",
+        "application/json",
+    )
+
+    result = await spawn_claude_code_activity(
+        user_id=user_id,
+        agent_id=judge_agent_id,
+        goal=_build_agentic_judge_goal(task, evaluator),
+        tool_call_id=tool_call_id,
+        output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
+        attachments=[attachment],
+        code_provider="codex",
+        gpt_token=token_data["accessToken"],
+        gpt_account_id=token_data.get("accountId"),
+        gpt_token_source=token_data.get("source"),
+        gpt_token_pool_id=token_data.get("poolTokenId"),
+        fast_mode_cache_enabled=False,
+    )
+
+    score, reasoning = await _parse_agentic_judge_verdict(result)
+    usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
+    usage = aggregate_usage_items(usage_items) if usage_items else None
+    return {"score": score, "reasoning": reasoning, "usage": usage}
 
 
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
     data: dict,
+    evidence: list[dict] | None = None,
 ) -> dict:
     """Execute one catalog-declared single-turn judge against grounded run evidence."""
     from helpers.llm import check_progress
@@ -8416,7 +8572,8 @@ Criteria:
 {criteria}
 Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
-    evidence = _declared_evaluator_evidence(data)
+    if evidence is None:
+        evidence = _declared_evaluator_evidence(data)
     return await check_progress(
         context=[
             {
@@ -9340,6 +9497,7 @@ def _run_declared_static_check(
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
+    base_url: str | None = None,
 ) -> tuple[bool, Optional[str], list[dict]]:
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
     if not task.enforce_declared_evaluators:
@@ -9353,17 +9511,41 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    needs_tree_evidence = any(
+        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge"}
+        for evaluator in task.evaluators
+    )
+    if needs_tree_evidence and base_url:
+        await _hydrate_semantic_evaluator_tree(data, base_url)
+
     results: list[dict] = []
     for evaluator in task.evaluators:
         evaluator_id = evaluator.get("id", "unnamed")
         method = evaluator.get("method")
         usage = None
+        evidence_mode = method
         try:
             if method == "static_check":
                 passed, reasoning = _run_declared_static_check(task, evaluator, data)
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
-                judged = await _call_declared_llm_judge(task, evaluator, data)
+                from benchmarks.semantic_evaluator_evidence import (
+                    build_single_turn_evidence,
+                    single_turn_evidence_exceeds_budget,
+                )
+
+                evidence = build_single_turn_evidence(data)
+                if single_turn_evidence_exceeds_budget(evidence):
+                    judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
+                    evidence_mode = "agentic_llm_judge"
+                else:
+                    judged = await _call_declared_llm_judge(task, evaluator, data, evidence=evidence)
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            elif method == "agentic_llm_judge":
+                judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
                 score = float(judged.get("score", 0.0))
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
@@ -9383,6 +9565,8 @@ async def _run_declared_evaluators(
             "passed": passed,
             "reasoning": reasoning,
         }
+        if evidence_mode != method:
+            result["evidence_mode"] = evidence_mode
         if usage is not None:
             result["usage"] = usage
         results.append(result)
@@ -9532,6 +9716,24 @@ async def run_single_task(
     if task.approval_handling:
         print(f"     approval={task.approval_handling}")
     print(f"  {'=' * 50}")
+
+    previous_active_task_name = os.environ.get("BENCHMARK_ACTIVE_TASK_NAME")
+    previous_active_task_live_target = os.environ.get("BENCHMARK_ACTIVE_TASK_LIVE_TARGET")
+    previous_active_task_block_dom_patch = os.environ.get("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH")
+    previous_disable_saved_browser_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
+    os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = task.name
+    live_target = primary_live_target(task.environment)
+    if live_target:
+        os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = live_target
+    else:
+        os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
+    if getattr(task, "success_on_payment_card_request", False):
+        os.environ["BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH"] = "1"
+    else:
+        os.environ.pop("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH", None)
+    if should_disable_saved_browser_auth(task):
+        os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
+        print("    🍪 Guest-checkout task: disabled saved browser auth material")
 
     start = time.time()
     start_time = datetime.now(timezone.utc)
@@ -9963,6 +10165,7 @@ async def run_single_task(
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,
                 data,
+                base_url=base_url,
             )
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),
@@ -10243,6 +10446,22 @@ async def run_single_task(
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
         await _restore_live_fixture_scenarios_async(live_fixture_manifests)
+        if previous_active_task_name is None:
+            os.environ.pop("BENCHMARK_ACTIVE_TASK_NAME", None)
+        else:
+            os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = previous_active_task_name
+        if previous_active_task_live_target is None:
+            os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
+        else:
+            os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = previous_active_task_live_target
+        if previous_active_task_block_dom_patch is None:
+            os.environ.pop("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH", None)
+        else:
+            os.environ["BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH"] = previous_active_task_block_dom_patch
+        if previous_disable_saved_browser_auth is None:
+            os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
+        else:
+            os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_browser_auth
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
