@@ -299,8 +299,8 @@ assert.deepStrictEqual(
   cacheAwareCost,
   {
     zeroLlmCostDollars: 0.25,
-    apiRateDollars: 1.135,
-    computeTokenRateDollars: 0.29425,
+    apiRateDollars: 0.84,
+    computeTokenRateDollars: 0.2795,
     sampleSize: 1,
     unpricedUsageTokens: 0,
   },
