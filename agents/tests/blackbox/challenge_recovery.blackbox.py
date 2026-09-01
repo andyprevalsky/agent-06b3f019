@@ -106,53 +106,6 @@ async def test_known_challenge_cookie_is_removed_without_touching_auth():
 
 
 
-async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solver():
-    source = _state(_cookie("cf_clearance"), _cookie("authState"), _cookie("opaque_state"))
-    before = copy.deepcopy(source)
-    events = []
-    config_inputs = []
-    solver_calls = 0
-
-    async def wait_for_solver():
-        nonlocal solver_calls
-        solver_calls += 1
-
-    async def forbidden_probe(_candidate):
-        raise AssertionError("an explicitly rejected IP must not trigger cookie experiments")
-
-    async def forbidden_commit(_keys):
-        raise AssertionError("an explicitly rejected IP must not mutate live cookies")
-
-    async def search_configs(lanes):
-        config_inputs.append(copy.deepcopy(lanes))
-        return {"provider": "kernel", "proxy_mode": "isp_city", "ws_url": "wss://winner"}
-
-    async def progress(stage, message):
-        events.append((stage, message))
-
-    result = await recover_from_challenge(
-        source_state=source,
-        target_url="https://order.online/store/blue-bottle",
-        wait_for_solver=wait_for_solver,
-        probe=forbidden_probe,
-        commit_cookie_removals=forbidden_commit,
-        search_configs=search_configs,
-        progress=progress,
-        provider_exit_rejected=True,
-    )
-
-    assert solver_calls == 1, "provider-native CAPTCHA solving must remain first"
-    assert [stage for stage, _ in events] == ["captcha_solver", "browser_config_search"]
-    assert len(config_inputs) == 1 and len(config_inputs[0]) == 1
-    assert config_inputs[0][0]["key"] == "auth_kept"
-    assert config_inputs[0][0]["storage_state"] == _state(
-        _cookie("authState"), _cookie("opaque_state")
-    ), "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
-    assert source == before
-    assert result.recovery == "config_selected"
-    assert result.removed_cookie_keys == ()
-
-
 async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
     """One settle-window wave: parallel variants, no multi-round cookie ddmin."""
     source = _state(*(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"]))
@@ -1016,10 +969,6 @@ async def run_all_tests():
     print("challenge-recovery blackbox tests:")
     result = BlackboxResult()
     await result.record_async("known_challenge_cookie", test_known_challenge_cookie_is_removed_without_touching_auth)
-    await result.record_async(
-        "explicit_provider_exit_rejection",
-        test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solver,
-    )
     await result.record_async(
         "unknown_cookie_parallel_wave", test_unknown_cookie_wave_probes_in_parallel_without_ddmin,
     )

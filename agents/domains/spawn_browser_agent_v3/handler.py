@@ -1785,8 +1785,6 @@ def _clear_browser_activity_memory_buffers(
             "_tasks",
             "_bodies",
             "_body_byte_sizes",
-            "_provider_exit_rejections",
-            "_rejected_network_generations",
             "_ignored_request_ids",
             "_active_request_ids",
             "_active_request_meta",
@@ -2234,72 +2232,6 @@ async def _feed_browser_tool_validation_error_back(
         tool_call_id=tool_call_id_action,
         steps_taken=iteration,
         total_steps=MAX_ITERATIONS,
-    )
-
-
-async def _feed_provider_exit_detected_back(
-    *,
-    provider_exit_rejection: Dict[str, Any],
-    unified_action: Dict[str, Any],
-    llm_result: Dict[str, Any],
-    action_history: Any,
-    browser_turn_messages: List[Dict[str, Any]],
-    dom_service: Any,
-    browser_stream: Any,
-    agent_id: str,
-    task_id: str,
-    browser_url: str,
-    iteration: int,
-) -> None:
-    """Surface provider/IP rejection to the planning LLM instead of synthetic recovery."""
-    rejected_action = str(unified_action.get("action") or "unknown")
-    tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
-    rejection_reason = str(
-        (provider_exit_rejection or {}).get("reason")
-        or "The current provider IP was explicitly rejected."
-    )
-    rejection_url = str((provider_exit_rejection or {}).get("url") or "").strip()
-    feedback = (
-        f"Browser network monitor detected that the current provider/IP was rejected "
-        f"before your `{rejected_action}` action could run.\n"
-        f"Rejection signal: {rejection_reason}"
-        + (f"\nRelated request URL: {rejection_url}" if rejection_url else "")
-        + "\nCall `recover_from_challenge` with a reason describing this failure "
-        "(include any blocked third-party script URLs you need cleared). "
-        "Preserve auth cookies unless you intentionally want a fresh-cookie search."
-    )
-    result = {
-        "success": False,
-        "error": feedback,
-        "provider_exit_detected": True,
-        "rejection": provider_exit_rejection,
-    }
-    await browser_stream.finish_tools(status="ERROR")
-    await action_history.record_action(
-        dom_service=dom_service,
-        action=rejected_action,
-        thinking=unified_action.get("thinking") or "",
-        params=unified_action.get("params") or {},
-        result=result,
-    )
-    _append_browser_turn_messages(
-        browser_turn_messages,
-        unified_action=unified_action,
-        result=result,
-        tool_call_id=tool_call_id_action,
-    )
-    await save_browser_action_message(
-        agent_id=agent_id,
-        title="Provider/IP rejected — call recover_from_challenge",
-        task_id=task_id,
-        message=feedback,
-        status=MessageStatus.FINISHED,
-        browser_url=browser_url,
-        action_type=rejected_action,
-        tool_call_id=tool_call_id_action,
-        steps_taken=iteration,
-        total_steps=MAX_ITERATIONS,
-        extra_metadata={"providerExitDetected": True},
     )
 
 
@@ -7421,37 +7353,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 llm_result = dict(llm_result)
                 llm_result["action"] = unified_action
 
-            # Some anti-bot services return an explicit network-reputation
-            # verdict even when the rendered page no longer looks challenged.
-            # Reject that exit deterministically before executing the model's
-            # next action. The synthetic recovery gets its own stable tool-call
-            # lifecycle and takes the solver -> config-search fast path below.
-            if browser_network_recorder is None and network_recorder_task is not None and network_recorder_task.done():
-                with contextlib.suppress(Exception):
-                    browser_network_recorder = network_recorder_task.result()
-            provider_exit_rejection = (
-                browser_network_recorder.pop_provider_exit_rejection() if browser_network_recorder is not None else None
-            )
-            if provider_exit_rejection is not None:
-                await _feed_provider_exit_detected_back(
-                    provider_exit_rejection=provider_exit_rejection,
-                    unified_action=unified_action,
-                    llm_result=llm_result,
-                    action_history=action_history,
-                    browser_turn_messages=browser_turn_messages,
-                    dom_service=dom_service,
-                    browser_stream=browser_stream,
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    browser_url=browser_url,
-                    iteration=iteration,
-                )
-                logger.warning(
-                    "Provider exit detected before browser action execution",
-                    rejected_action=unified_action.get("action", ""),
-                    rejection=provider_exit_rejection,
-                )
-                continue
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
@@ -7880,13 +7781,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     auth_cookies_are_preserved=auth_cookies_are_preserved,
                 )
 
-                provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
-                # If the live tab is already clean and this was not a hard
-                # provider-exit rejection, skip — avoids recovery loops the model
+                # If the live tab is already clean, skip — avoids recovery loops the model
                 # invents from third-party network noise on an otherwise fine page.
                 if (
-                    not provider_exit_rejected
-                    and input_page is not None
+                    input_page is not None
                     and not await live_tab_looks_challenged(input_page)
                 ):
                     skip_message = (
@@ -8022,9 +7920,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         emit_recovery_progress,
                     )
 
-                    escalate_after_cookie_false_stable = (
-                        not provider_exit_rejected and cookie_recovery_successes >= 1
-                    )
+                    escalate_after_cookie_false_stable = cookie_recovery_successes >= 1
                     if escalate_after_cookie_false_stable:
                         logger.warning(
                             "Escalating repeated challenge recovery to browser config search",
@@ -8077,8 +7973,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=provider_exit_rejected
-                        or escalate_after_cookie_false_stable,
+                        skip_cookie_probes=escalate_after_cookie_false_stable,
                         allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
                     )
                     if recovery.recovery == "cookies_sanitized":

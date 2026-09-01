@@ -3,6 +3,7 @@
  * No agent harness — browser-session init only.
  */
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { Page } from 'playwright';
 
 const BACKEND = process.env.BACKEND_URL ?? 'http://localhost:3020';
@@ -146,14 +147,56 @@ async function gotoCheckout(page: Page) {
   return { url: page.url(), detail: 'no checkout path' };
 }
 
+async function clearCartToZero(page: Page): Promise<{ removed: number; detail: string }> {
+  let removed = 0;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const count = await cartCount(page);
+    if (count === 0 || count === null) {
+      return { removed, detail: count === 0 ? 'cart_empty' : 'cart_count_unknown' };
+    }
+    await openCartDrawer(page).catch(() => null);
+    await page.waitForTimeout(2000);
+    const clicked = await page
+      .evaluate(() => {
+        const decSelectors = [
+          'button[aria-label*="Decrease" i]',
+          'button[aria-label*="Remove" i]',
+          'button[data-testid*="decrement" i]',
+          'button[data-testid*="remove" i]',
+        ];
+        for (const sel of decSelectors) {
+          const btn = document.querySelector(sel);
+          if (btn instanceof HTMLElement) {
+            btn.click();
+            return sel;
+          }
+        }
+        const minus = Array.from(document.querySelectorAll('button')).find((b) => {
+          const t = (b.textContent || '').trim();
+          return t === '−' || t === '-' || /remove/i.test(b.getAttribute('aria-label') || '');
+        });
+        if (minus instanceof HTMLElement) {
+          minus.click();
+          return minus.getAttribute('aria-label') || 'minus';
+        }
+        return null;
+      })
+      .catch(() => null);
+    if (!clicked) {
+      return { removed, detail: `stuck_with_${count}_items_no_decrement_button` };
+    }
+    removed += 1;
+    await page.waitForTimeout(1500);
+    await page.keyboard.press('Escape').catch(() => null);
+    await page.waitForTimeout(500);
+  }
+  return { removed, detail: 'max_attempts' };
+}
+
 async function main() {
   if (!API_KEY) throw new Error('Set API_KEY or BACKEND_API_KEY');
-  const agent = (await api('/api/agents', {
-    method: 'POST',
-    body: JSON.stringify({ goal: 'kernel cdp doordash drive', start_phase: 'execute' }),
-  })) as { agent_id: string };
-  const agentId = agent.agent_id;
-  log(`agent ${agentId}`);
+  const agentId = randomUUID();
+  log(`manual kernel drive (no agent spawn) session key ${agentId}`);
 
   const init = (await api('/api/browser-session/init', {
     method: 'POST',
@@ -188,6 +231,14 @@ async function main() {
   const loggedIn = /deliver to|account|orders|profile|welcome back/i.test(homeText);
   const loggedOut = /sign in|sign up|log in/i.test(homeText);
   if (loggedOut && !loggedIn) blockers.push('logged_out_after_production_injection');
+
+  const initialCart = await cartCount(page);
+  let cartClear = { removed: 0, detail: 'not_needed' };
+  if (initialCart !== null && initialCart > 0) {
+    cartClear = await clearCartToZero(page);
+    steps.push(await snap(page, 'cart_cleared', { initialCart, cartClear, cartCount: await cartCount(page) }));
+    log(`cleared injected cart: ${JSON.stringify(cartClear)}`);
+  }
 
   await page.goto(SAFEWAY, { waitUntil: 'domcontentloaded', timeout: 90_000 });
   await page.waitForTimeout(10_000);
@@ -231,6 +282,8 @@ async function main() {
     cookiesCount: init.cookies_count,
     authSource: init.auth_source,
     loggedIn,
+    initialCart,
+    cartClear,
     itemsAdded,
     addResults,
     steps,
@@ -249,7 +302,6 @@ async function main() {
     method: 'POST',
     body: JSON.stringify({ session_id: init.session_id, pause: false }),
   }).catch(() => null);
-  await api(`/api/agents/${agentId}`, { method: 'DELETE' }).catch(() => null);
   await browser.close().catch(() => {});
 }
 

@@ -636,9 +636,7 @@ async def live_tab_looks_challenged(
     """True when the live tab's current document still looks challenged (LLM).
 
     Used by the auth-assistance guard so CAPTCHA walls are not misrouted into
-    request_user_assistance_for_authentication. Does NOT replace provider-exit
-    recovery: callers must still run full recovery when ``provider_exit_rejected``
-    is set.
+    request_user_assistance_for_authentication.
     """
     from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
 
@@ -900,7 +898,7 @@ async def recover_from_challenge(
     commit_cookie_removals: CommitCookies,
     search_configs: ConfigSearch,
     progress: Progress,
-    provider_exit_rejected: bool = False,
+    skip_cookie_probes: bool = False,
     allow_logged_out_cookie_commit: bool = False,
 ) -> ChallengeRecoveryResult:
     """Run solver → ephemeral cookie-probe wave → config-search promote (same verifier + handover).
@@ -957,13 +955,7 @@ async def recover_from_challenge(
     )
     await wait_for_solver()
 
-    # A detector can sometimes identify the network exit itself as the cause
-    # (for example, an IP observed with many unrelated browser fingerprints).
-    # In that case cookie experiments cannot improve the exit's reputation and
-    # only risk wasting time around auth-bearing state. Still give the native
-    # provider solver its normal first chance, then preserve the entire source
-    # state and search fresh provider/IP configurations directly.
-    if provider_exit_rejected:
+    if skip_cookie_probes:
         return await search_with_preserved_auth_state()
 
     cookies = {
