@@ -2020,7 +2020,7 @@
       ],
       "secrets": [],
       "live_targets": [
-        "https://www.doordash.com/convenience/store/safeway-palo-alto-1741346/"
+        "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
       ],
       "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex.",
       "live_fixtures": [
