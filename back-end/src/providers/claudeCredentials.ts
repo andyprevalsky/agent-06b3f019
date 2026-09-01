@@ -1,4 +1,9 @@
 import crypto from 'crypto';
+import {
+  isIntegrationAuthFailureReason,
+  markConnectionNeedsReconnectFromIntegrationFailure,
+  syncConnectionAfterIntegrationAuthFailure,
+} from '../domains/compute-grants/integrationConnectionSync';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -435,10 +440,7 @@ export async function markPoolTokenRateLimited(
     failureReason?: string | null;
   }
 ): Promise<void> {
-  if (
-    options?.failureReason === 'auth_error' ||
-    options?.failureReason === 'claude_code_auth_error'
-  ) {
+  if (isIntegrationAuthFailureReason(options?.failureReason)) {
     await prisma.integration.update({
       where: { id: poolTokenId },
       data: {
@@ -448,6 +450,10 @@ export async function markPoolTokenRateLimited(
       },
     });
     log.info(`Pool token ${poolTokenId} disabled after ${options.failureReason}`);
+    await syncConnectionAfterIntegrationAuthFailure({
+      integrationId: poolTokenId,
+      failureReason: options.failureReason,
+    });
     return;
   }
 
@@ -487,18 +493,20 @@ export async function markUserTokenRateLimited(
     rateLimitedUntil?: string | Date | null;
     cooldownMs?: number;
     failureReason?: string | null;
+    accountId?: string | null;
+    integrationId?: string | null;
   }
 ): Promise<void> {
-  if (
-    options?.failureReason === 'auth_error' ||
-    options?.failureReason === 'claude_code_auth_error'
-  ) {
-    await prisma.integration.updateMany({
-      where: {
-        userId,
-        name: 'claude_code',
-        status: { in: ['CONNECTED', 'EXPIRED'] },
-      },
+  if (isIntegrationAuthFailureReason(options?.failureReason)) {
+    const scopedWhere = {
+      userId,
+      name: 'claude_code' as const,
+      status: { in: ['CONNECTED', 'EXPIRED'] as const },
+      ...(options?.integrationId ? { id: options.integrationId } : {}),
+      ...(options?.accountId ? { accountId: options.accountId } : {}),
+    };
+    const updated = await prisma.integration.updateMany({
+      where: scopedWhere,
       data: {
         status: 'EXPIRED',
         isActive: false,
@@ -506,7 +514,17 @@ export async function markUserTokenRateLimited(
         failureReason: options.failureReason,
       },
     });
-    log.info(`User token for ${userId} disabled after ${options.failureReason}`);
+    log.info(`User token for ${userId} disabled after ${options.failureReason}`, {
+      updated: updated.count,
+      accountId: options?.accountId ?? null,
+      integrationId: options?.integrationId ?? null,
+    });
+    await markConnectionNeedsReconnectFromIntegrationFailure({
+      userId,
+      integrationName: 'claude_code',
+      accountId: options?.accountId,
+      failureReason: options.failureReason,
+    });
     return;
   }
 
@@ -516,6 +534,8 @@ export async function markUserTokenRateLimited(
       userId,
       name: 'claude_code',
       status: { in: ['CONNECTED', 'EXPIRED'] },
+      ...(options?.integrationId ? { id: options.integrationId } : {}),
+      ...(options?.accountId ? { accountId: options.accountId } : {}),
       ...notAlreadyBackedOffLonger(until),
     },
     data: { rateLimitedUntil: until },
