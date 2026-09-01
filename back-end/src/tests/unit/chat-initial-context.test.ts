@@ -161,14 +161,34 @@ async function testMessageWritingAndFutureActionsRefreshMessages(): Promise<void
     return refreshedMessages;
   };
 
-  const webSearch = await resolveGeneratorMessages({
+  const webSearchRefresh = await resolveGeneratorMessages({
     action: 'web_search',
     initialMessages,
     refreshMessages,
   });
-  assert.strictEqual(webSearch, refreshedMessages, 'web_search should use the refreshed array');
+  assert.strictEqual(
+    webSearchRefresh,
+    refreshedMessages,
+    'web_search without branchMessages still refreshes'
+  );
   assert.strictEqual(refreshCalls, 1, 'web_search refresh count');
-  assert.deepStrictEqual(webSearch[0], refreshedMessages[0], 'full refreshed shape is preserved');
+
+  const branchMessages: ChatMessage[] = [
+    { role: 'ASSISTANT', text: 'searching' },
+    refreshedMessages[0],
+  ];
+  const webSearchBranch = await resolveGeneratorMessages({
+    action: 'web_search',
+    initialMessages,
+    refreshMessages,
+    branchMessages,
+  });
+  assert.deepStrictEqual(
+    webSearchBranch,
+    [...initialMessages, ...branchMessages],
+    'web_search with in-memory tool results must not refresh'
+  );
+  assert.strictEqual(refreshCalls, 1, 'in-memory web_search must not call refresh');
 
   const futureAction = await resolveGeneratorMessages({
     action: 'future_message_writing_action',
