@@ -21,6 +21,7 @@ tags:
   - place-pickup-order
 sources:
   - agent 3a7c0315-f363-4775-946b-2b02e8f4695b
+  - PR #1197
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_write_lock_purchase_button_detects_fulfillment_mode_order_controls (to be cemented with fix)
 status: open
 ---
