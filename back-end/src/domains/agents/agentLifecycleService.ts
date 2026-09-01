@@ -30,6 +30,14 @@ import {
 
 const log = createLogger('Agents');
 
+export function isRetryableEmptyStructuredOutput(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('Expected one structured output item') ||
+    message.includes('Router LLM returned no content')
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -126,7 +134,9 @@ async function startChatMode(
       });
     });
 
-  handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
+  const runChat = (): Promise<void> =>
+    handleChatMessage({ agentId: agentDbId, userId, model: body.model });
+  const failChat = (err: unknown): void => {
     log.error('Chat handler error', {
       agent_id: agentDbId,
       error: err instanceof Error ? err.message : String(err),
@@ -143,6 +153,17 @@ async function startChatMode(
           error: updateErr instanceof Error ? updateErr.message : String(updateErr),
         })
       );
+  };
+  runChat().catch((err: unknown) => {
+    if (!isRetryableEmptyStructuredOutput(err)) {
+      failChat(err);
+      return;
+    }
+    log.warn('Chat handler retry after empty structured output', {
+      agent_id: agentDbId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    runChat().catch(failChat);
   });
 }
 /* c8 ignore stop */

@@ -84,3 +84,19 @@ export class StructuredOutputAccumulator {
     );
   }
 }
+
+/** Chat/SMS: a reasoning-only or empty stream must not crash the turn. */
+export function structuredTextOrFallback(
+  structuredOutput: StructuredOutputAccumulator,
+  fallback: string
+): string {
+  try {
+    const text = structuredOutput.finalText();
+    return text.length > 0 ? text : fallback;
+  } catch (error) {
+    if (error instanceof StructuredOutputCardinalityError) {
+      return fallback;
+    }
+    throw error;
+  }
+}

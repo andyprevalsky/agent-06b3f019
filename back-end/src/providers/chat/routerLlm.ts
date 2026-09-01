@@ -11,7 +11,7 @@ import {
   type CompletionMessage,
   type CompletionOptions,
 } from '../rose';
-import { StructuredOutputAccumulator } from '../rose/structuredOutput';
+import { StructuredOutputAccumulator, structuredTextOrFallback } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
@@ -588,7 +588,7 @@ export async function callRouterLlm(params: {
 
   if (completionDeadline.expired()) {
     deadlineDecision = parseRouterDecisionAfterDeadline(
-      structuredOutput.finalText(),
+      structuredTextOrFallback(structuredOutput, accumulatedJson),
       accumulatedJson
     );
     if (!deadlineDecision) {
@@ -604,7 +604,9 @@ export async function callRouterLlm(params: {
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = deadlineDecision ? accumulatedJson : structuredOutput.finalText();
+  const fullJson = deadlineDecision
+    ? accumulatedJson
+    : structuredTextOrFallback(structuredOutput, accumulatedJson);
 
   // Broadcast final "done" signal for reasoning stream
   await broadcastAssistantStream(
