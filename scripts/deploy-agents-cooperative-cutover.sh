@@ -18,7 +18,12 @@ if [ -z "${FLY_API_TOKEN:-}" ]; then
 fi
 export FLY_API_TOKEN
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 APP="${APP:-${FLY_APP_NAME:-}}"
+if [ -z "$APP" ]; then
+  APP=$(grep -E '^\s*app\s*=' "$ROOT/agents/fly.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+fi
 APP="${APP:?APP (or FLY_APP_NAME) is required}"
 SURFACE_HASH="${SURFACE_HASH:?SURFACE_HASH is required}"
 GENERATION_QUEUE="${GENERATION_QUEUE:?GENERATION_QUEUE is required}"
@@ -27,7 +32,6 @@ DEPLOYMENT_TOKEN="${DEPLOYMENT_TOKEN:?DEPLOYMENT_TOKEN is required}"
 # 45 minutes cooperative drain SLO before force-migrate.
 DRAIN_TIMEOUT_SECONDS="${DRAIN_TIMEOUT_SECONDS:-2700}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-30}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 MIN=$(grep -E '^\s*MIN_MACHINES\s*=' "$ROOT/agents/fly.toml" | head -1 | sed -E 's/.*"([0-9]+)".*/\1/')
 MIN=${MIN:-8}
