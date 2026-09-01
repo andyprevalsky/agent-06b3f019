@@ -2174,7 +2174,198 @@ async def test_browser_cleanup_scheduler_does_not_block_on_recording_finalizatio
         assert cleanup_task not in _background_browser_cleanup_tasks
         assert recorder.cleanup_called is True
         upload_mock.assert_awaited_once()
-        save_mock.assert_awaited_once()
+        # recording finalize + task_complete terminal (FE chip close safety net)
+        assert save_mock.await_count >= 2
+        action_types = [
+            call.kwargs.get("action_type")
+            for call in save_mock.await_args_list
+            if call.kwargs.get("action_type")
+        ]
+        assert "recording" in action_types
+        assert "task_complete" in action_types
+
+
+async def test_browser_cleanup_emits_task_complete_terminal_for_fe_chip():
+    """Cleanup must post task_complete so FE live browser chips close.
+
+    Prod hotel k=5 hub archives (2026-08-31) finalized Kernel recordings but left
+    action_type=browser IN_PROGRESS with no terminal — computeActiveBrowserPanels
+    kept every FE link on an active chip. Recording alone is non-terminal.
+    """
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _schedule_browser_cleanup
+
+    class ImmediateRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+
+        async def close(self, *, include_steel_media=True, archive_artifacts=True):
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline replay</html>"
+
+        def cleanup_local_artifacts(self, *, persisted=False):
+            return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = ImmediateRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={"id": "file-pointer-1"},
+            ),
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            cleanup_task = _schedule_browser_cleanup(
+                agent_id="agent-1",
+                task_id="task-hotel-1",
+                user_id="user-1",
+                browser_url="https://debug",
+                browser_session_metadata={"provider": "kernel"},
+                input_page=None,
+                start_url="",
+                cursor_streamer=None,
+                interaction_layer_task=None,
+                humanizer=None,
+                browser_network_recorder=None,
+                network_recorder_task=None,
+                browser_recorder=recorder,
+                dom_service=None,
+                playwright_browser=None,
+                playwright_instance=None,
+                playwright_driver_pid=None,
+                tool_call_id="tool-call-1",
+                emit_task_terminal=True,
+            )
+            await cleanup_task
+
+    terminal_calls = [
+        call
+        for call in save_mock.await_args_list
+        if call.kwargs.get("action_type") == "task_complete"
+    ]
+    assert len(terminal_calls) == 1
+    assert terminal_calls[0].kwargs["task_id"] == "task-hotel-1"
+    assert terminal_calls[0].kwargs["tool_call_id"] == "tool-call-1"
+    assert terminal_calls[0].kwargs["is_completion_message"] is True
+
+
+async def test_browser_cleanup_skips_task_complete_when_paused_for_resume():
+    """Pause-for-resume teardown must not emit task_complete.
+
+    Write / payment / auth-assistance returns resume in a later activity call.
+    Emitting task_complete here closes the FE chip so resume never reopens it
+    (CodeRabbit finding on hotel payment-boundary PR).
+    """
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _schedule_browser_cleanup
+
+    class ImmediateRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+
+        async def close(self, *, include_steel_media=True, archive_artifacts=True):
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline replay</html>"
+
+        def cleanup_local_artifacts(self, *, persisted=False):
+            return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = ImmediateRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={"id": "file-pointer-1"},
+            ),
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            cleanup_task = _schedule_browser_cleanup(
+                agent_id="agent-1",
+                task_id="task-payment-pause-1",
+                user_id="user-1",
+                browser_url="https://checkout.example",
+                browser_session_metadata={"provider": "kernel"},
+                input_page=None,
+                start_url="",
+                cursor_streamer=None,
+                interaction_layer_task=None,
+                humanizer=None,
+                browser_network_recorder=None,
+                network_recorder_task=None,
+                browser_recorder=recorder,
+                dom_service=None,
+                playwright_browser=None,
+                playwright_instance=None,
+                playwright_driver_pid=None,
+                tool_call_id="tool-call-payment-1",
+                emit_task_terminal=False,
+            )
+            await cleanup_task
+
+    terminal_calls = [
+        call
+        for call in save_mock.await_args_list
+        if call.kwargs.get("action_type") == "task_complete"
+    ]
+    assert terminal_calls == []
+
+
+def test_browser_activity_finally_skips_terminal_on_pause_for_resume():
+    """Source guard: real-activity pause returns flip the flag that gates finally."""
+    import re
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text(encoding="utf-8")
+    # Simulated world-model path returns the same statuses but has no
+    # ``_schedule_browser_cleanup`` terminal safety net — only the real
+    # activity's finally was emitting false task_complete on pause.
+    match = re.search(
+        r"async def _spawn_browser_agent_activity_v3_real\b.*?(?=\nasync def |\nclass )",
+        source,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    real = match.group(0)
+    assert "browser_task_paused_for_resume = False" in real
+    assert real.count("browser_task_paused_for_resume = True") >= 3
+    assert "emit_task_terminal=not browser_task_paused_for_resume" in real
+    for status in (
+        "awaiting_write_approval",
+        "awaiting_payment_card_approval",
+        "awaiting_auth_assistance",
+    ):
+        idx = 0
+        found = False
+        while True:
+            idx = real.find(f'"status": "{status}"', idx)
+            if idx < 0:
+                break
+            window = real[max(0, idx - 200) : idx]
+            assert "browser_task_paused_for_resume = True" in window, status
+            found = True
+            idx += 1
+        assert found, status
+
 
 async def test_drain_background_browser_cleanups_waits_then_times_out():
     import contextlib
@@ -5957,6 +6148,28 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     finish_tool = finalizer_source.index("await browser_stream.finish_tools(", append_turn)
     assert history_guard < append_turn < finish_tool
 
+
+def test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal():
+    """Auth-cookie preserve is an explicit recover_from_challenge param, not goal sniffing."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name in ("attempt_completion", "done"):', start)
+    recovery_block = source[start:end]
+
+    assert "goal_allows_logged_out_cookie_commit" not in recovery_block
+    assert '"auth_cookies_are_preserved" in recovery_params' in recovery_block
+    assert "preserve_auth = auth_cookies_are_preserved" in recovery_block
+    assert "allow_logged_out_cookie_commit = not auth_cookies_are_preserved" in recovery_block
+    assert "allow_logged_out_cookie_commit=allow_logged_out_cookie_commit" in recovery_block
+    assert "fresh-cookie recovery was allowed" in source
+    assert "authenticated cookies were preserved" in source
+    assert "signed-in state was preserved" not in source
+
+
 def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
     """A target reset (proxy rotation) must re-seed passkeys, not just storage.
 
@@ -8266,7 +8479,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     }
     filtered = recorder.query_requests(url_pattern="/api/", limit=10)
     # Query string + fragment (token/sig) redacted by default; path preserved.
-    # response_ts_ms is part of the DevTools-grade summary when present.
+    # response_ts_ms is forwarded when present (DevTools-grade summary / read_logs ordering).
     assert filtered == [
         {
             "id": "1",
@@ -19194,6 +19407,10 @@ async def run_all_tests():
     r.record(
         "recovery_reconnect_failure_drops_handles",
         test_recovery_reconnect_failure_drops_disconnected_browser_handles,
+    )
+    r.record(
+        "recovery_guest_cookie_commit_from_tool_param",
+        test_recovery_guest_cookie_commit_comes_from_tool_param_not_goal,
     )
     r.record(
         "passkeys_reseed_on_target_reset",

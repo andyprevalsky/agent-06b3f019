@@ -1428,13 +1428,75 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
     poll_index = source.index("await poll_agent(")
     cleanup_index = source.index("ensure_payment_lifecycle_cleanup", poll_index)
     pause_index = source.index("pause_agent(base_url, agent_id)", poll_index)
+    refresh_index = source.index("_refresh_agent_after_pause_for_browser_terminal", poll_index)
 
     assert "_early_fail_should_pause_agent" in source[poll_index:cleanup_index]
     assert pause_index < cleanup_index
+    # Hub FE chips stay open without task_complete/session_paused — refresh the
+    # transcript after pause so archives include the terminal before upload.
+    assert pause_index < refresh_index < cleanup_index
     assert bench._early_fail_should_pause_agent("Timeout after 900s (dynamic cap=900s)")
     assert bench._early_fail_should_pause_agent("Tree stalled after 240s")
     assert not bench._early_fail_should_pause_agent(None)
     assert not bench._early_fail_should_pause_agent("Expected validated payment-card request")
+
+
+def test_agent_messages_have_browser_terminal_requires_explicit_close():
+    """FINISHED recording alone must not count as a browser-panel terminal.
+
+    FE computeActiveBrowserPanels ignores recording/network_recording cleanup
+    rows. Hotel k=5 hub archives (2026-08-31) had FINISHED recordings with an
+    IN_PROGRESS browser row and no task_complete — every FE link kept an active
+    chip. The archive refresh helper must wait for an explicit terminal.
+    """
+    import benchmarks.run_benchmark as bench
+
+    task_id = "task-hotel-1"
+    open_only = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "browser",
+                "toolStatus": "IN_PROGRESS",
+                "task_id": task_id,
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "recording",
+                "toolStatus": "FINISHED",
+                "task_id": task_id,
+                "recording_view_url": "https://kernel.example/replay",
+            }
+        },
+    ]
+    assert not bench._agent_messages_have_browser_terminal(open_only)
+
+    with_terminal = open_only + [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "task_complete",
+                "toolStatus": "FINISHED",
+                "task_id": task_id,
+            }
+        }
+    ]
+    assert bench._agent_messages_have_browser_terminal(with_terminal)
+
+    tool_call_scoped = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "session_paused",
+                "toolStatus": "ERROR",
+                "toolCallId": "tool-1",
+            }
+        }
+    ]
+    assert bench._agent_messages_have_browser_terminal(tool_call_scoped)
+    assert bench._agent_messages_have_browser_terminal([])
 
 
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
@@ -5479,9 +5541,10 @@ def test_benchmark_goal_injects_payment_boundary_operational_suffix():
 
     hotel = get_task_by_name("browser-hotel-booking")
     hotel_goal = bench._benchmark_goal_for_task(hotel, "http://localhost:3201")
-    assert PAYMENT_BOUNDARY_GOAL_MARKER not in hotel_goal
-    assert "request_payment_card" not in hotel_goal.lower()
-    assert "do not instruct the browser to submit payment" not in hotel_goal.lower()
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in hotel_goal
+    assert "request_payment_card" in hotel_goal.lower()
+    assert "do not instruct the browser to submit payment" in hotel_goal.lower()
+    assert "Complete the purchase" not in hotel_goal
 
     event_ticket = get_task_by_name("browser-event-ticket")
     goal = bench._benchmark_goal_for_task(event_ticket, "http://localhost:3201")
@@ -5513,13 +5576,20 @@ def test_hotel_double_spawn_run_artifact_fails_exact_tool_count():
 
 
 def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
-    """Replay e6a95458: completion-oriented spawn goal ends on phone write_lock, not payment_approval."""
+    """Replay e6a95458: historical completion-oriented spawn ends on phone write_lock.
+
+    The live harness goal now injects the payment-boundary operational suffix
+    (steer toward request_payment_card, never submit payment). The fixture spawn
+    goal still reflects the pre-suffix completion schema that stalled on
+    write_lock / payment_approval without ever calling request_payment_card.
+    """
     import json
     from pathlib import Path
 
     import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import evaluate_task
+    from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
 
     run_path = (
         Path(__file__).resolve().parents[1]
@@ -5535,7 +5605,8 @@ def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
     task = get_task_by_name("browser-hotel-booking")
     harness_goal = bench._benchmark_goal_for_task(task, "http://localhost:3201")
     assert "Complete the purchase" not in harness_goal
-    assert "request_payment_card" not in harness_goal.lower()
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in harness_goal
+    assert "request_payment_card" in harness_goal.lower()
 
     spawn_goal = None
     spawn_schema_fields: list[str] = []
@@ -15949,6 +16020,10 @@ async def run_all_tests():
     r.record(
         "timeout_early_fail_pauses_before_payment_cleanup",
         test_timeout_early_fail_pauses_agent_before_payment_cleanup,
+    )
+    r.record(
+        "agent_messages_have_browser_terminal_requires_explicit_close",
+        test_agent_messages_have_browser_terminal_requires_explicit_close,
     )
     r.record(
         "production_payment_abandonment_two_step_trajectory",
