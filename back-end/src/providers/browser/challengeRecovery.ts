@@ -104,7 +104,9 @@ export interface RecoveryCandidateSession {
 
 /** Close the Playwright validation CDP client without failing remote release. */
 async function closeValidationBrowser(session: RecoveryCandidateSession): Promise<void> {
-  await session.validationBrowser.close().catch(() => {});
+  const browser = session.validationBrowser as { close?: () => Promise<void> } | null | undefined;
+  if (browser == null || typeof browser.close !== 'function') return;
+  await browser.close().catch(() => {});
 }
 
 export interface CandidateProbeResult {
@@ -255,7 +257,7 @@ export async function probeCandidateBrowser(
   } finally {
     // Closing this CDP client leaves the remote default context (including any
     // solver-refreshed challenge cookies) alive for atomic promotion.
-    await session.validationBrowser.close().catch(() => {});
+    await closeValidationBrowser(session);
   }
   if (signal?.aborted) {
     throw new Error('lane_aborted');
@@ -583,7 +585,7 @@ export async function searchAndPromoteBrowserConfig(
       }
     },
     release: async (_config, session) => {
-      await closeValidationBrowser(session);
+      await closeValidationBrowser(session).catch(() => {});
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },
