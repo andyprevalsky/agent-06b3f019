@@ -374,8 +374,8 @@ migrate_exec_line=$(grep -n 'migrate-open-agent-workflows.ts --execute' "$DEPLOY
 # incident this redesign fixes). No external-driver hold, and a fail-safe rollback.
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'set-agent-queue-pointer.ts' \
   "deploy workflow must self-drive the routing-pointer flip via cooperative cutover"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'migrate-open-agent-workflows.ts --execute' \
-  "force-migrate remains available after the 45m cooperative drain SLO"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-generation-queue.ts' \
+  "force-clear remains available after the 45m cooperative drain SLO"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
   "self-driving cutover must use the prod DB secret"
 # Cooperative cutover keeps old-gen workers until drain/SLO. Pointer stays on the
@@ -383,8 +383,8 @@ require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
 if grep -q 'rollback-' "$DEPLOY_AGENTS_WORKFLOW" "$ROOT/scripts/deploy-agents-cooperative-cutover.sh"; then
   fail "cutover must NOT roll the routing pointer back to a drained generation on migrate failure"
 fi
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-migrating stragglers' \
-  "after the 45m SLO, cutover force-migrates stragglers while routing stays on the new generation"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clearing stragglers' \
+  "after the 45m SLO, cutover force-clears stragglers while routing stays on the new generation"
 if grep -Fq 'timeout-minutes: 125' "$DEPLOY_AGENTS_WORKFLOW"; then
   fail "the 125-minute external-driver hold must be gone (replaced by a self-driving cutover)"
 fi
@@ -436,8 +436,10 @@ require_file "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" \
   "cooperative cutover script must exist"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'DRAIN_TIMEOUT_SECONDS' \
   "cooperative cutover script must honor the drain SLO"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'migrate-open-agent-workflows.ts --execute' \
-  "cooperative cutover must force-migrate only after the drain SLO"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-generation-queue.ts' \
+  "generation cutover must force-clear stragglers on the old queue (not deployment migrate)"
+require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" '--execute' \
+  "generation force-clear must require --execute"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'count-open-workflows-on-queue.ts' \
   "cooperative cutover must poll open workflows on the old generation queue"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--image-label' \
