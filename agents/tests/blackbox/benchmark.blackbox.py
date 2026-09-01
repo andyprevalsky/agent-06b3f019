@@ -2771,8 +2771,9 @@ async def test_required_declared_evaluator_controls_pass_fail():
     calls = []
     original_call = bench._call_declared_llm_judge
 
-    async def fake_call(task_arg, evaluator_arg, data_arg):
+    async def fake_call(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
         calls.append((task_arg.name, evaluator_arg["id"], data_arg["agent"]["agent_id"]))
+        assert evidence is not None
         return next(scores)
 
     try:
@@ -5077,10 +5078,11 @@ async def test_toast_semantic_receipt_values_are_decided_by_llm_judge():
     )
     original_call = bench._call_declared_llm_judge
 
-    async def fake_call(task_arg, evaluator_arg, data_arg):
+    async def fake_call(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
         assert task_arg.name == "browser-toast-nopa-write-lock"
         assert evaluator_arg["id"] == "toast-order-semantics"
         assert data_arg["_benchmark"]["attention_requests_seen"][0]["metadata"]["requestPaymentCard"]
+        assert evidence is not None
         return next(decisions)
 
     try:

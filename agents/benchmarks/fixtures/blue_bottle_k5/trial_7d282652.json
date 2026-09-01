@@ -59,6 +59,10 @@
   "benchmark_state": {
     "approvals_triggered": 1,
     "approvals_resolved": 0,
+    "order_placed": false,
+    "order_confirmation_observed": false,
+    "completion_sms_observed": false,
+    "terminal_gate": "unresolved_payment_card",
     "attention_request_kind_seen": "payment_approval",
     "expected_attention_kind_seen": "payment_approval",
     "attention_requests_seen": [

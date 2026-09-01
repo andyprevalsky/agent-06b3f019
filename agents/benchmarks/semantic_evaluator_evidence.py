@@ -27,7 +27,8 @@ DECLARED_JUDGE_METADATA_KEYS = (
     "title",
     "browser_session_metadata",
     "requestUserApproval",
-    "completionSummary",
+    # completionSummary is normalized into a final_completion ASSISTANT row;
+    # keep it out of raw tool metadata so judges see one rendered answer card.
     "toolCallId",
     "subAgentId",
     "task_id",
