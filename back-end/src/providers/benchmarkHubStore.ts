@@ -20,16 +20,31 @@ import fs from 'fs';
 import path from 'path';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
 import {
-  completionOutputsFromMessages,
-  schemaFromCompletionOutputs,
-  structuredFromCompletionOutputs,
-} from './benchmarkHubOutputs';
-import {
   deleteHubAncestorSkeletonsFromBundle,
   slotHubAncestorSkeletonsFromBundle,
 } from './benchmarkHubAncestors';
+import {
+  agentIdsFromHubBundle,
+  applyHubRunToResolutionCaches,
+  forgetHubRunFromResolutionCaches,
+  __resetHubResolutionCachesForTest,
+} from './benchmarkHubLookup';
 import { prisma } from './database';
 import { createLogger } from './logger';
+
+export {
+  agentIdsFromHubBundle,
+  ancestorsFromHubTree,
+  applyHubRunToResolutionCaches,
+  findAgentAcrossRuns,
+  findAncestorsAcrossRuns,
+  findTreeAcrossRuns,
+  forgetHubRunFromResolutionCaches,
+  peekHubResolutionForTest,
+  resolveHubRunIdFromIndexes,
+  __resetHubResolutionCachesForTest,
+} from './benchmarkHubLookup';
+export { canonicalAgentTree, getRunAgent } from './benchmarkHubView';
 
 const log = createLogger('BenchmarkHubStore');
 
@@ -253,17 +268,7 @@ export async function putRun(
     tasks: storedSummary.tasks.length,
   });
   await slotHubAncestorSkeletonsFromBundle(bundle);
-  if (childIdToRun !== null) {
-    const tasks = Array.isArray(bundle.tasks) ? bundle.tasks : [];
-    for (const task of tasks) {
-      const logs = (task as { logs?: { tree?: unknown } }).logs;
-      const tree = canonicalAgentTree(logs?.tree);
-      for (const id of Object.keys(tree)) {
-        if (!childIdToRun.has(id)) childIdToRun.set(id, runId);
-        agentRunMissCache.delete(id);
-      }
-    }
-  }
+  applyHubRunToResolutionCaches(runId, agentIdsFromHubBundle(bundle));
   return storedSummary;
 }
 
@@ -389,231 +394,6 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
   };
 }
 
-function frontendMessage(
-  agentId: string,
-  index: number,
-  raw: Record<string, unknown>
-): Record<string, unknown> {
-  return {
-    message_id: raw.message_id ?? `${agentId}-hub-message-${String(index).padStart(4, '0')}`,
-    timestamp: raw.created_at ?? raw.timestamp ?? '',
-    text: raw.message ?? raw.text ?? '',
-    role: String(raw.role ?? 'ASSISTANT').toUpperCase(),
-    metadata: raw.metadata ?? {},
-    file_pointer: raw.file_pointer ?? null,
-  };
-}
-
-function agentSummaryFromTask(
-  task: Record<string, unknown>,
-  agentId: string,
-  messages: Array<Record<string, unknown>>,
-  runTimestamp: string,
-  parent: {
-    parentAgentId: string | null;
-    parentGoal: string | null;
-    busId: string;
-    goal: string;
-    status: string;
-  },
-  node: Record<string, unknown> = {}
-): Record<string, unknown> {
-  const tokensIn = Number(node.tokens_in ?? task.tokens_in ?? 0);
-  const tokensOut = Number(node.tokens_out ?? task.tokens_out ?? 0);
-  const outputs = completionOutputsFromMessages(messages);
-  return {
-    agent_id: agentId,
-    parent_agent_id: parent.parentAgentId,
-    parent_goal: parent.parentGoal,
-    busId: parent.busId,
-    goal: parent.goal,
-    model: 'benchmark-hub',
-    source: parent.parentAgentId === null ? 'WEB' : 'AGENT',
-    reasoning_effort: 'off',
-    reasoning_max_tokens: null,
-    progress: parent.status === 'COMPLETED' ? 100 : 0,
-    status: parent.status,
-    status_message: `Benchmark hub archive: ${String(task.name ?? '')}`,
-    temporal_workflow_id: `benchmark-hub-${agentId}`,
-    token_count: tokensIn + tokensOut,
-    tokens_in: tokensIn,
-    tokens_out: tokensOut,
-    tool_tokens_in: 0,
-    tool_tokens_out: 0,
-    tool_cost_cents: 0,
-    context_size: Number(node.context_size ?? task.context_size ?? 0),
-    message_count: messages.length,
-    price_limit_cents: 0,
-    tree_cost_cents: Number(task.cost_cents ?? 0),
-    fast_mode_cache_enabled: task.fast_mode_cache_enabled === true,
-    token_in_price_microdollars: null,
-    token_out_price_microdollars: null,
-    created_at: runTimestamp,
-    updated_at:
-      messages.length > 0
-        ? (messages[messages.length - 1].timestamp ?? runTimestamp)
-        : runTimestamp,
-    write_lock_enabled: true,
-    structured_output:
-      node.structured_output ??
-      task.structured_output ??
-      structuredFromCompletionOutputs(outputs) ??
-      null,
-    failure_context: null,
-    verifier: null,
-    tools: [],
-    tools_in_use: [],
-    response_schema:
-      node.response_schema ?? task.response_schema ?? schemaFromCompletionOutputs(outputs) ?? null,
-    benchmark_task: task.name ?? null,
-    benchmark_duration_seconds: Number(task.duration_seconds ?? 0),
-    benchmark_world_model_mode: task.world_model_mode ?? null,
-  };
-}
-
-const TOOL_USAGE_TREE_KEYS = new Set([
-  'root_agent_id',
-  'agent_count',
-  'tool_usage_count',
-  'llm_call_count',
-  'tokens_in',
-  'tokens_out',
-  'total_cost_cents',
-  'total_cost_dollars',
-  'total_tokens_from_tools',
-  'cache_read_input_tokens',
-  'cache_creation_input_tokens',
-]);
-
-function isAgentTreeNode(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const node = value as Record<string, unknown>;
-  return (
-    Array.isArray(node.messages) ||
-    'parent_agent_id' in node ||
-    typeof node.goal === 'string' ||
-    typeof node.status === 'string'
-  );
-}
-
-/** Keep agent-id-keyed transcript nodes; drop `/api/tool-usage/tree` rollups. */
-export function canonicalAgentTree(raw: unknown): Record<string, Record<string, unknown>> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const out: Record<string, Record<string, unknown>> = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!key || TOOL_USAGE_TREE_KEYS.has(key) || !isAgentTreeNode(value)) continue;
-    out[key] = value;
-  }
-  return out;
-}
-
-/**
- * Adapt a run bundle to the frontend agent-detail shape for one agent in the
- * run (root or any sub-agent captured by logs.tree), plus the fan-out tree.
- */
-export async function getRunAgent(runId: string, agentId: string): Promise<HubAgentView | null> {
-  const bundle = await getRunBundle(runId);
-  if (!bundle) return null;
-  const runTimestamp = String(bundle.timestamp ?? '');
-  const tasks = Array.isArray(bundle.tasks) ? (bundle.tasks as Array<Record<string, unknown>>) : [];
-
-  for (const task of tasks) {
-    const rootId = typeof task.agent_id === 'string' ? task.agent_id : '';
-    if (!rootId) continue;
-    const logs = (task.logs ?? {}) as Record<string, unknown>;
-    const tree = canonicalAgentTree(logs.tree);
-    const isRoot = agentId === rootId;
-    const inTree = Object.prototype.hasOwnProperty.call(tree, agentId);
-    if (!isRoot && !inTree) continue;
-
-    const rootMessages = Array.isArray(logs.messages)
-      ? (logs.messages as Array<Record<string, unknown>>)
-      : [];
-    const passedStatus = task.passed === true ? 'COMPLETED' : 'FAILED';
-
-    const nodeInfo = (
-      id: string
-    ): {
-      parent: string | null;
-      goal: string;
-      status: string;
-      raw: Array<Record<string, unknown>>;
-    } => {
-      const info = tree[id] ?? {};
-      const treeMessages = Array.isArray(info.messages)
-        ? (info.messages as Array<Record<string, unknown>>)
-        : [];
-      const isRootNode = id === rootId;
-      return {
-        parent: isRootNode ? null : ((info.parent_agent_id as string | null) ?? rootId),
-        goal:
-          typeof info.goal === 'string' && info.goal
-            ? info.goal
-            : isRootNode
-              ? String(
-                  rootMessages.find((m) => String(m.role ?? '').toUpperCase() === 'USER')
-                    ?.message ??
-                    task.name ??
-                    'benchmark task'
-                )
-              : 'sub-agent',
-        status: String(info.status ?? (isRootNode ? passedStatus : 'COMPLETED')).toUpperCase(),
-        raw: isRootNode && treeMessages.length === 0 ? rootMessages : treeMessages,
-      };
-    };
-
-    const target = nodeInfo(agentId);
-    const messages = target.raw.map((m, i) => frontendMessage(agentId, i, m));
-    const parentGoal = target.parent === null ? null : nodeInfo(target.parent).goal;
-    const agent = agentSummaryFromTask(
-      task,
-      agentId,
-      messages,
-      runTimestamp,
-      {
-        parentAgentId: target.parent,
-        parentGoal,
-        busId: rootId,
-        goal: target.goal,
-        status: target.status,
-      },
-      tree[agentId] ?? {}
-    );
-
-    const treeIds = new Set<string>([rootId, ...Object.keys(tree)]);
-    const treeNodes = [...treeIds].map((id) => {
-      const info = nodeInfo(id);
-      return {
-        agent_id: id,
-        parent_agent_id: info.parent,
-        goal: info.goal,
-        status: info.status,
-        progress: info.status === 'COMPLETED' ? 100 : 0,
-        tools_in_use: [],
-        message_count: info.raw.length,
-        tree_cost_cents: id === rootId ? Number(task.cost_cents ?? 0) : 0,
-        output_schema:
-          (tree[id] ?? {}).response_schema ??
-          (id === rootId ? task.response_schema : null) ??
-          schemaFromCompletionOutputs(completionOutputsFromMessages(info.raw)) ??
-          null,
-        structured_output:
-          (tree[id] ?? {}).structured_output ??
-          (id === rootId ? task.structured_output : null) ??
-          structuredFromCompletionOutputs(completionOutputsFromMessages(info.raw)) ??
-          null,
-        tokens_in: Number((tree[id] ?? {}).tokens_in ?? (id === rootId ? task.tokens_in : 0) ?? 0),
-        tokens_out: Number(
-          (tree[id] ?? {}).tokens_out ?? (id === rootId ? task.tokens_out : 0) ?? 0
-        ),
-      };
-    });
-
-    return { agent, messages, tree: treeNodes };
-  }
-  return null;
-}
-
 /**
  * Remove a run from the index (bundle object is left in place — index removal
  * hides it everywhere; object lifecycle is handled by bucket retention).
@@ -628,163 +408,15 @@ export async function deleteRun(runId: string): Promise<boolean> {
     await putObject('index.json', JSON.stringify(next));
     return true;
   });
-  if (removed && bundle) await deleteHubAncestorSkeletonsFromBundle(bundle);
+  if (removed && bundle) {
+    await deleteHubAncestorSkeletonsFromBundle(bundle);
+    forgetHubRunFromResolutionCaches(runId, agentIdsFromHubBundle(bundle));
+  }
   return removed;
-}
-
-// agentId → run_id resolution cache (bundles are immutable once final; a live
-// re-upload keeps the same run_id, so cached mappings never go stale).
-const agentRunCache = new Map<string, string>();
-const agentRunMissCache = new Set<string>();
-let childIdToRun: Map<string, string> | null = null;
-let childIdIndexPromise: Promise<Map<string, string>> | null = null;
-
-/**
- * One background walk of hub bundles builds the child-id index. Official 4w
- * (and any in-flight create) issues GET /agents/:new-uuid before the row
- * exists; a per-request Pass-2 scan of every bundle is O(hub) on that hot
- * path and starves Prisma. Unknown IDs must miss without reading bundles.
- */
-async function buildChildIdIndex(): Promise<Map<string, string>> {
-  const index = await listRuns();
-  const map = new Map<string, string>();
-  for (const run of index) {
-    const bundle = await getRunBundle(run.run_id);
-    if (bundle === null) continue;
-    const tasks = Array.isArray(bundle.tasks) ? bundle.tasks : [];
-    for (const task of tasks) {
-      const logs = (task as { logs?: { tree?: unknown } }).logs;
-      const tree = canonicalAgentTree(logs?.tree);
-      for (const id of Object.keys(tree)) {
-        if (!map.has(id)) map.set(id, run.run_id);
-      }
-    }
-  }
-  childIdToRun = map;
-  return map;
-}
-
-function scheduleChildIdIndex(): void {
-  if (childIdIndexPromise !== null || childIdToRun !== null) return;
-  childIdIndexPromise = buildChildIdIndex().catch((error: unknown) => {
-    childIdIndexPromise = null;
-    throw error;
-  });
-}
-
-function rememberHubRun(agentId: string, runId: string): void {
-  agentRunCache.set(agentId, runId);
-  agentRunMissCache.delete(agentId);
-}
-
-/** Index-only lookup: roots from listRuns, children from the built id map. */
-export function resolveHubRunIdFromIndexes(
-  agentId: string,
-  runs: HubRunSummary[],
-  childIndex: Map<string, string> | null
-): { kind: 'hit'; runId: string } | { kind: 'miss' } | { kind: 'pending' } {
-  for (const run of runs) {
-    if (run.tasks.some((task) => task.agent_id === agentId)) {
-      return { kind: 'hit', runId: run.run_id };
-    }
-  }
-  if (childIndex === null) return { kind: 'pending' };
-  const runId = childIndex.get(agentId);
-  return runId === undefined ? { kind: 'miss' } : { kind: 'hit', runId };
-}
-
-/**
- * Resolve a benchmark agent (root OR sub-agent) across stored runs.
- * Roots resolve from the index alone. Child IDs use a once-built map so an
- * unknown in-flight UUID is O(1) after the map exists and never scans every
- * bundle on the request path (Pass 2 used to).
- */
-export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView | null> {
-  if (!agentId) return null;
-  if (agentRunMissCache.has(agentId)) return null;
-  const cachedRunId = agentRunCache.get(agentId);
-  if (cachedRunId !== undefined) {
-    const view = await getRunAgent(cachedRunId, agentId);
-    if (view !== null) return view;
-    agentRunCache.delete(agentId);
-  }
-  const index = await listRuns();
-  const resolved = resolveHubRunIdFromIndexes(agentId, index, childIdToRun);
-  if (resolved.kind === 'hit') {
-    const view = await getRunAgent(resolved.runId, agentId);
-    if (view !== null) {
-      rememberHubRun(agentId, resolved.runId);
-      return view;
-    }
-  }
-  if (resolved.kind === 'pending') {
-    scheduleChildIdIndex();
-    return null;
-  }
-  agentRunMissCache.add(agentId);
-  return null;
-}
-
-/** Walk parent_agent_id from a hub tree node up to the root (root first). */
-export function ancestorsFromHubTree(
-  agentId: string,
-  tree: Array<Record<string, unknown>>
-): Array<{ id: string; goal: string }> {
-  const byId = new Map<string, Record<string, unknown>>();
-  for (const node of tree) {
-    const id = typeof node.agent_id === 'string' ? node.agent_id : '';
-    if (id.length > 0) byId.set(id, node);
-  }
-  const chain: Array<{ id: string; goal: string }> = [];
-  const seen = new Set<string>();
-  let current = byId.get(agentId);
-  while (current) {
-    const parentId = current.parent_agent_id;
-    if (typeof parentId !== 'string' || parentId.length === 0 || seen.has(parentId)) break;
-    seen.add(parentId);
-    const parent = byId.get(parentId);
-    if (!parent) break;
-    const goal = typeof parent.goal === 'string' && parent.goal.length > 0 ? parent.goal : 'parent';
-    chain.push({ id: parentId, goal });
-    current = parent;
-  }
-  return chain.reverse();
-}
-
-export async function findAncestorsAcrossRuns(
-  agentId: string
-): Promise<Array<{ id: string; goal: string }>> {
-  const view = await findAgentAcrossRuns(agentId);
-  if (view === null) return [];
-  return ancestorsFromHubTree(agentId, view.tree);
-}
-
-/**
- * The fan-out tree for a benchmark root, shaped like the normal
- * GET /api/agents/tree response so the main panel renders it unchanged.
- */
-export async function findTreeAcrossRuns(
-  busId: string
-): Promise<Array<Record<string, unknown>> | null> {
-  const view = await findAgentAcrossRuns(busId);
-  if (view === null) return null;
-  return view.tree.map((node) => ({
-    ...node,
-    tokens_in: Number(node.tokens_in ?? 0),
-    tokens_out: Number(node.tokens_out ?? 0),
-    output_schema: node.output_schema ?? null,
-    structured_output: node.structured_output ?? null,
-    failure_context: undefined,
-    created_at: null,
-    updated_at: null,
-  }));
 }
 
 /** Test-only: reset in-process state (local dir is controlled by the caller). */
 export function _resetForTests(): void {
   s3Client = null;
-  agentRunCache.clear();
-  agentRunMissCache.clear();
-  childIdToRun = null;
-  childIdIndexPromise = null;
+  __resetHubResolutionCachesForTest();
 }

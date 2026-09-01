@@ -8,6 +8,7 @@ import { config } from 'dotenv';
 config();
 
 const BASE =
+  process.env.TEST_BASE_URL ||
   process.env.BACKEND_URL ||
   process.env.BACKEND_API_URL ||
   `http://127.0.0.1:${process.env.PORT || '3001'}`;
@@ -38,6 +39,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  process.stderr.write(`${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+  process.stderr.write(`${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
   process.exit(1);
 });
