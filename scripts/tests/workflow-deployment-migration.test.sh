@@ -54,20 +54,19 @@ require_text "$DEPLOY" 'AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_D
 require_text "$DEPLOY" 'TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN"' "/deploy must pass the exact deployment token to migration"
 require_text "$DEPLOY" 'WORKFLOW_MIGRATION_CONCURRENCY=' "/deploy must bound migration concurrency"
 require_text "$DEPLOY" 'WORKFLOW_MIGRATION_CANARY_COUNT=' "/deploy must canary workflow cutover before bulk replacement"
-require_text "$DEPLOY" 'TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="navi-agent-candidate-${AGENT_DEPLOYMENT_TOKEN}"' "/deploy must derive an exact-attempt candidate validation queue"
 # Live-at-boot (REQUIRE_ACTIVATION=0): workers never poll navi-agent-candidate-*,
-# so validate-candidate-workflow-image / verify-agent-candidate-fleet hang. Cutover
-# proof is Render drain → pointer flip → idempotent migrate (not standby seals).
+# so validate-candidate-workflow-image / verify-agent-candidate-fleet hang. Cooperative
+# cutover proof is monitor --verify (pointer + old-queue drain), not standby seals.
 if grep -Fq 'npx tsx scripts/validate-candidate-workflow-image.ts --execute' "$DEPLOY"; then
   fail "/deploy must not run validate-candidate-workflow-image under live-at-boot (hangs on unpolled candidate queue)"
 fi
 if grep -Fq 'bash "$DEPLOY_ROOT/scripts/verify-agent-candidate-fleet.sh"' "$DEPLOY"; then
   fail "/deploy must not re-run verify-agent-candidate-fleet under live-at-boot"
 fi
-require_text "$DEPLOY" 'do NOT re-run verify-agent-candidate-fleet.sh' \
-  "/deploy must document skipping the obsolete standby fleet gate under live-at-boot"
-require_text "$DEPLOY" 'Migration exit 0 + pointer match is the authoritative gate' \
-  "/deploy must treat migration+pointer as the live-at-boot cutover proof"
+require_text "$DEPLOY" 'monitor --verify is authoritative' \
+  "/deploy must treat monitor --verify as the cooperative cutover proof"
+require_text "$DEPLOY" 'monitor-cooperative-cutover.ts' \
+  "/deploy must use monitor-cooperative-cutover.ts for handover verification"
 require_text "$DEPLOY" 'WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS=' "/deploy must bound candidate bootstrap acknowledgement"
 require_text "$DEPLOY" 'WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS=' "/deploy must bound each complete candidate replacement"
 require_text "$DEPLOY" 'WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS=' "/deploy must bound ambiguous descendant start draining"
@@ -76,7 +75,7 @@ require_text "$DEPLOY" 'RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE
 require_text "$DEPLOY" '"$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375' "/deploy must reject unsafe low drain overrides"
 require_text "$DEPLOY" 'RENDER_DEPLOY_FINISHED_AT=' "/deploy drain must be based on the exact live deploy timestamp"
 require_text "$DEPLOY" 'Old Render instance/request drain window elapsed' "/deploy must complete the old-backend drain before cutover"
-require_text "$DEPLOY" 'does not wait for a natural continue-as-new boundary' "/deploy must document immediate replacement semantics"
+require_text "$DEPLOY" 'activity-boundary handoff' "/deploy must document cooperative activity-boundary handoff semantics"
 require_text "$DEPLOY" '## Step 13ac: Validate workflow replacement edge cases in production' "/deploy must include the production replacement matrix"
 require_text "$DEPLOY" 'PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1' "/deploy must explicitly opt in to production validation"
 require_text "$DEPLOY" 'TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA"' "/deploy production matrix must identify the exact candidate build"
@@ -205,23 +204,19 @@ render_drain_line=$(grep -n 'Old Render instance/request drain window elapsed' "
 migration_command_line=$(grep -n 'npx tsx scripts/migrate-open-agent-workflows.ts --execute' "$DEPLOY" | tail -1 | cut -d: -f1)
 [[ $render_drain_line -lt $migration_command_line ]] || \
   fail "old Render instances and in-flight requests must drain before workflow tombstones"
-# Live-at-boot fallback driver order: drain → hold status check → pointer flip →
-# migrate → release. Standby fleet/candidate seals are intentionally absent.
-hold_status_line=$(grep -n 'Exact production deploy lock status=' "$DEPLOY" | cut -d: -f1)
+# Live-at-boot fallback driver order (break-glass only): Render drain → pointer flip →
+# migrate → release. Primary path uses monitor --verify after CI cooperative cutover.
+monitor_line=$(grep -n 'monitor-cooperative-cutover.ts' "$DEPLOY" | head -1 | cut -d: -f1)
 pointer_flip_cutover_line=$(grep -n 'set-agent-queue-pointer.ts' "$DEPLOY" | tail -1 | cut -d: -f1)
-# Two success-releases exist: the CI-already-cut-over short-circuit and the
-# fallback local driver. The ordering invariant applies to the fallback driver
-# (migrate → release), which is the last occurrence.
 release_line=$(grep -n 'release_agent_cutover_lock success' "$DEPLOY" | tail -1 | cut -d: -f1)
-[[ -n "$hold_status_line" && -n "$pointer_flip_cutover_line" ]] ||
-  fail "live-at-boot cutover must check hold status and flip the queue pointer"
-[[ $render_drain_line -lt $hold_status_line &&
-   $hold_status_line -lt $pointer_flip_cutover_line &&
+[[ -n "$monitor_line" ]] ||
+  fail "/deploy must monitor cooperative cutover handover progress"
+[[ -n "$pointer_flip_cutover_line" ]] ||
+  fail "fallback cutover must flip the queue pointer"
+[[ $render_drain_line -lt $pointer_flip_cutover_line &&
    $pointer_flip_cutover_line -lt $migration_command_line &&
    $migration_command_line -lt $release_line ]] ||
-  fail "live-at-boot pre-migrate order must be drain → hold check → pointer flip → migrate → release"
-[[ $migration_command_line -lt $release_line ]] ||
-  fail "the deploy concurrency lock must remain held through the complete workflow cutover"
+  fail "fallback pre-migrate order must be Render drain → pointer flip → migrate → release"
 
 WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 COOP="$ROOT/scripts/deploy-agents-cooperative-cutover.sh"
@@ -325,7 +320,7 @@ expected=$(printf '%s\n' agents/helpers/messages.py agents/workflows/agent_workf
   fail "runtime classifier must exclude additive tests/harnesses and retain shipped worker code"
 
 health_line=$(grep -n '## Step 13a: Verify prod backend health' "$DEPLOY" | cut -d: -f1)
-migration_line=$(grep -n '## Step 13ab: Replace open workflows' "$DEPLOY" | cut -d: -f1)
+migration_line=$(grep -n '## Step 13ab: Verify cooperative generation cutover' "$DEPLOY" | cut -d: -f1)
 production_validation_line=$(grep -n '## Step 13ac: Validate workflow replacement edge cases in production' "$DEPLOY" | cut -d: -f1)
 semantic_line=$(grep -n '## Step 13b: Production semantic' "$DEPLOY" | cut -d: -f1)
 [[ $health_line -lt $migration_line && $migration_line -lt $production_validation_line && $production_validation_line -lt $semantic_line ]] || \
@@ -451,6 +446,8 @@ require_text "$ROOT/agents/workflows/agent_workflow.py" 'task_queue=' \
   "workflow must continue_as_new onto the live generation queue"
 require_file "$ROOT/back-end/scripts/count-open-workflows-on-queue.ts" \
   "open-queue counter used by the 45m drain loop must exist"
+require_file "$ROOT/back-end/scripts/monitor-cooperative-cutover.ts" \
+  "cooperative cutover monitor used by /deploy post-merge verification must exist"
 require_file "$ROOT/back-end/src/domains/agent-queue-pointer/routes.ts" \
   "live pointer HTTP route must exist for run_agent checkpoints"
 
