@@ -201,18 +201,20 @@ async def test_network_entries_override_prefers_explicit_status_rows():
 
 def test_select_network_entries_pins_cited_hosts():
     from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        _NETWORK_ENTRY_CAP,
         select_network_entries_for_classifier,
     )
 
     entries = [
         {"url": f"https://www.doordash.com/api/{idx}", "status": 200}
-        for idx in range(90)
+        for idx in range(_NETWORK_ENTRY_CAP + 50)
     ] + [{"url": "https://js.stripe.com/v3/", "status": 0, "failed": True}]
     selected = select_network_entries_for_classifier(
         entries,
         recovery_reason="Stripe checkout script blocked: https://js.stripe.com/v3/",
-        cap=80,
+        cap=_NETWORK_ENTRY_CAP,
     )
+    assert len(selected) == _NETWORK_ENTRY_CAP
     assert any("js.stripe.com" in str(row.get("url") or "") for row in selected)
     assert selected[0]["url"].startswith("https://js.stripe.com")
 

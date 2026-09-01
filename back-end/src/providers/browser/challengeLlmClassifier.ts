@@ -28,7 +28,8 @@ const log = createLogger('ChallengeLlmClassifier');
 export const CHALLENGE_LLM_MODEL = 'rose-labs/rose-1-mini';
 export const CHALLENGE_LLM_SETTLE_MS = 60_000;
 const CLEANED_DOM_CHAR_CAP = 12_000;
-const NETWORK_ENTRY_CAP = 80;
+/** Parity with agents BrowserNetworkRecorder / BROWSER_AGENT_NETWORK_MAX_ENTRIES. */
+export const NETWORK_ENTRY_CAP = 600;
 const NETWORK_BODY_CHAR_CAP = 200;
 const NETWORK_SUMMARY_CHAR_CAP = 4_000;
 const URL_IN_TEXT_RE = /https?:\/\/[^\s)\]"'<>]+/gi;

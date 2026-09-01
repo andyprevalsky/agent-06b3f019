@@ -111,6 +111,16 @@ export interface CandidateProbeResult {
    * agent ToolUsage ledger via recover-challenge → usage_by_model).
    */
   classifierLlmUsage?: ChallengeClassifierLlmUsage[];
+  /** LLM classifier challenged=true on the final settle pass. */
+  classifierChallenged?: boolean;
+  /** One-sentence LLM classifier reason for the final settle pass. */
+  classifierReason?: string;
+  /** Raw network rows captured during navigation (before cap/pinning). */
+  networkEntriesCaptured?: number;
+  /** Rows passed into the classifier after cited-URL pinning + cap. */
+  classifierNetworkEntriesSelected?: number;
+  /** Whether js.stripe.com (or cited blocked host) appears in classifier network input. */
+  stripeInClassifierNetwork?: boolean;
   /** Final same-site URL after the last clean probe settle (soft-redirect resume). */
   settledUrl?: string;
 }
@@ -169,6 +179,11 @@ export async function probeCandidateBrowser(
   void logContext.blockedResourceUrl;
   const solve = logContext.waitForSolver ?? waitForProviderSolver;
   let settledUrl: string | undefined;
+  let classifierChallenged: boolean | undefined;
+  let classifierReason: string | undefined;
+  let networkEntriesCaptured = 0;
+  let classifierNetworkEntriesSelected = 0;
+  let stripeInClassifierNetwork = false;
   try {
     if (signal?.aborted) {
       throw new Error('lane_aborted');
@@ -283,6 +298,13 @@ export async function probeCandidateBrowser(
     const classifierNetworkEntries = selectNetworkEntriesForClassifier(networkEntries, {
       recoveryReason,
     });
+    networkEntriesCaptured = networkEntries.length;
+    classifierNetworkEntriesSelected = classifierNetworkEntries.length;
+    stripeInClassifierNetwork = classifierNetworkEntries.some((entry) =>
+      String(entry.url || entry.name || '')
+        .toLowerCase()
+        .includes('js.stripe.com')
+    );
     const attempt = await raceProbeAbort(
       solve(page, response, billing, {
         recoveryReason,
@@ -295,6 +317,8 @@ export async function probeCandidateBrowser(
       page.off('response', onResponse);
     }
     if (attempt.usage) classifierLlmUsage.push(attempt.usage);
+    classifierChallenged = !attempt.clean;
+    classifierReason = attempt.reason ?? undefined;
     if (!attempt.clean) {
       log.info('Challenge recovery candidate probe attempt still challenged', {
         ...logContext,
@@ -337,6 +361,11 @@ export async function probeCandidateBrowser(
     paymentCdnOk: true,
     paymentCdnHosts: {},
     classifierLlmUsage,
+    classifierChallenged,
+    classifierReason,
+    networkEntriesCaptured,
+    classifierNetworkEntriesSelected,
+    stripeInClassifierNetwork,
     ...(settledUrl ? { settledUrl } : {}),
   };
 }

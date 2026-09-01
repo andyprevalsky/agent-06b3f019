@@ -48,6 +48,11 @@ type ProbeRow = {
   latencyMs: number;
   stripeSeen: boolean;
   stripeOk: boolean;
+  classifierChallenged: boolean | null;
+  classifierReason: string;
+  networkEntriesCaptured: number;
+  classifierNetworkEntriesSelected: number;
+  stripeInClassifierNetwork: boolean;
   error?: string;
 };
 
@@ -168,9 +173,15 @@ async function probeOne(input: {
       latencyMs: probe.latencyMs || Date.now() - started,
       stripeSeen,
       stripeOk: stripeOk || Boolean(probe.paymentCdnOk),
+      classifierChallenged:
+        typeof probe.classifierChallenged === 'boolean' ? probe.classifierChallenged : null,
+      classifierReason: probe.classifierReason || '',
+      networkEntriesCaptured: probe.networkEntriesCaptured ?? 0,
+      classifierNetworkEntriesSelected: probe.classifierNetworkEntriesSelected ?? 0,
+      stripeInClassifierNetwork: Boolean(probe.stripeInClassifierNetwork),
     };
     log(
-      `[${input.lane}] ${input.config.key} clean=${clean} paymentCdnOk=${row.paymentCdnOk} stripeSeen=${stripeSeen} ${row.latencyMs}ms`
+      `[${input.lane}] ${input.config.key} clean=${clean} challenged=${row.classifierChallenged} stripeNet=${row.stripeInClassifierNetwork} net=${row.networkEntriesCaptured}/${row.classifierNetworkEntriesSelected} reason=${row.classifierReason.slice(0, 120)} ${row.latencyMs}ms`
     );
     return row;
   } catch (error) {
@@ -188,6 +199,11 @@ async function probeOne(input: {
       latencyMs: Date.now() - started,
       stripeSeen,
       stripeOk,
+      classifierChallenged: null,
+      classifierReason: '',
+      networkEntriesCaptured: 0,
+      classifierNetworkEntriesSelected: 0,
+      stripeInClassifierNetwork: false,
       error: message.slice(0, 400),
     };
   } finally {
@@ -250,6 +266,10 @@ async function main() {
   const outPath = `/tmp/doordash-config-sweep-${Date.now()}.json`;
   const results: ProbeRow[] = [];
   const writePartial = () => {
+    const winners = results.filter((r) => r.clean);
+    const challengedButStripeVisible = results.filter(
+      (r) => r.classifierChallenged && r.stripeInClassifierNetwork
+    );
     const payload = {
       target: TARGET_URL,
       store: STORE_URL,
@@ -257,9 +277,16 @@ async function main() {
       cookieCount: cookies.length,
       completed: results.length,
       total: jobs.length,
+      networkEntryCap: 600,
       results,
-      winners: results.filter((r) => r.clean),
+      winners,
       stripeWinners: results.filter((r) => r.clean && (r.stripeOk || r.paymentCdnOk)),
+      classifierSummary: {
+        challengedWithStripeInNetwork: challengedButStripeVisible.length,
+        challengedStripeMissingFromNetwork: results.filter(
+          (r) => r.classifierChallenged && !r.stripeInClassifierNetwork
+        ).length,
+      },
     };
     fs.writeFileSync(outPath, JSON.stringify(payload, null, 2));
     fs.writeFileSync(
@@ -276,12 +303,25 @@ async function main() {
   console.log('\n=== SUMMARY ===');
   for (const row of results) {
     console.log(
-      `${row.clean ? 'CLEAN' : 'FAIL '} ${row.lane.padEnd(16)} ${row.configKey.padEnd(28)} cdn=${row.paymentCdnOk ? 'ok' : 'no'} stripe=${row.stripeOk ? 'ok' : row.stripeSeen ? 'seen-fail' : 'missing'} ${row.latencyMs}ms ${(row.error || row.settledUrl || '').slice(0, 120)}`
+      `${row.clean ? 'CLEAN' : 'FAIL '} ${row.lane.padEnd(16)} ${row.configKey.padEnd(28)} challenged=${String(row.classifierChallenged).padEnd(5)} stripeNet=${row.stripeInClassifierNetwork ? 'yes' : 'no '} net=${String(row.networkEntriesCaptured).padStart(3)}/${String(row.classifierNetworkEntriesSelected).padEnd(3)} cdn=${row.paymentCdnOk ? 'ok' : 'no'} stripe=${row.stripeOk ? 'ok' : row.stripeSeen ? 'seen-fail' : 'missing'} ${row.latencyMs}ms`
     );
+    if (row.classifierReason) {
+      console.log(`       reason: ${row.classifierReason.slice(0, 200)}`);
+    }
+    if (row.error) console.log(`       error: ${row.error.slice(0, 200)}`);
   }
   const winners = results.filter((r) => r.clean);
   const stripeWinners = results.filter((r) => r.clean && (r.stripeOk || r.paymentCdnOk));
+  const challengedButStripeVisible = results.filter(
+    (r) => r.classifierChallenged && r.stripeInClassifierNetwork
+  );
+  const challengedStripeMissing = results.filter(
+    (r) => r.classifierChallenged && !r.stripeInClassifierNetwork
+  );
   console.log(`\nwinners=${winners.length} stripeCapableWinners=${stripeWinners.length}`);
+  console.log(
+    `classifier: challenged+stripeInNet=${challengedButStripeVisible.length} challenged+stripeMissing=${challengedStripeMissing.length}`
+  );
   console.log(`wrote ${outPath}`);
   if (winners.length === 0) process.exitCode = 2;
 }
