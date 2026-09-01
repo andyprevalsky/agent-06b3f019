@@ -628,6 +628,7 @@ class AgentWorkflow:
         self.fast_cache_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
         self.world_model_mode: str = "real"
+        self.forbidden_tools: List[str] = []
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
@@ -1088,7 +1089,21 @@ class AgentWorkflow:
         ]
         if self.world_model_mode != "real":
             args.append(self.world_model_mode)
+        if self.forbidden_tools:
+            args.append(self.forbidden_tools)
         return args
+
+    @staticmethod
+    def _effective_forbidden_tool_name(tool_name: str, tool_args: Dict) -> str:
+        if tool_name == "spawn_agent":
+            agent_type = tool_args.get("type")
+            if agent_type == "code":
+                return "spawn_claude_code_agent"
+            if agent_type == "general_purpose":
+                return "spawn_general_purpose_agent"
+            if agent_type == "for_each":
+                return "spawn_general_purpose_agent_for_each"
+        return tool_name
 
     def _iteration_resume_kwargs(self) -> Dict[str, int]:
         """Keep iteration/cache history across replacement and continuation runs."""
@@ -1402,6 +1417,7 @@ class AgentWorkflow:
         fast_mode_cache_enabled: bool = False,  # Fast Mode aggressive cache (own flag, NOT a context gate)
         resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
         world_model_mode: str = "real",  # Per-agent provider/environment execution mode
+        forbidden_tools: Optional[List[str]] = None,  # Benchmark harness: block tools at runtime
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
@@ -1423,6 +1439,7 @@ class AgentWorkflow:
         self.depth = depth
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
+        self.forbidden_tools = list(forbidden_tools or [])
         self.fast_mode_cache_enabled = fast_mode_cache_enabled  # Record/replay third-party responses
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.max_iterations = max_iterations
@@ -3023,6 +3040,24 @@ class AgentWorkflow:
                 ),
                 tool_call_id,
                 tool_name,
+            )
+            return {"error": True, "message": error_msg}
+
+        blocked_tool = self._effective_forbidden_tool_name(tool_name, tool_args)
+        if blocked_tool in self.forbidden_tools:
+            error_msg = (
+                f"Tool '{blocked_tool}' is not available for this agent run. "
+                "Use an allowed tool instead."
+            )
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"❌ {blocked_tool.replace('_', ' ').title()} blocked",
+                    message=error_msg,
+                    status=MessageStatus.ERROR,
+                ),
+                tool_call_id,
+                blocked_tool,
             )
             return {"error": True, "message": error_msg}
 

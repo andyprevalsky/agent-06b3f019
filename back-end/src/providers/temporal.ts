@@ -236,6 +236,7 @@ export interface StartAgentWorkflowParams {
   };
   fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
   worldModelMode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
+  forbiddenTools?: string[]; // Benchmark harness: block tools at runtime in the agent workflow
   workflowId?: string; // Optional preclaimed generation-specific workflow ID
   resumeState?: WorkflowResumeState; // Durable state captured before deployment replacement
   rejectDuplicateWorkflowId?: boolean; // Durable child-start outbox uses one immutable ID.
@@ -348,6 +349,9 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
   }
   if (params.worldModelMode !== undefined && params.worldModelMode !== 'real') {
     args.push(params.worldModelMode);
+  }
+  if (params.forbiddenTools !== undefined && params.forbiddenTools.length > 0) {
+    args.push(params.forbiddenTools);
   }
   return args;
 }

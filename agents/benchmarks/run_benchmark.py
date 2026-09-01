@@ -2013,6 +2013,9 @@ async def create_agent(
     if task.model:
         body["model"] = task.model
 
+    if task.forbidden_tools:
+        body["forbidden_tools"] = task.forbidden_tools
+
     if task.start_phase:
         body["start_phase"] = task.start_phase
     if task.response_schema:

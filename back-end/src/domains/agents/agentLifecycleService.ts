@@ -90,6 +90,7 @@ async function startDirectWorkflow(
       : {}),
     ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
+    ...(body.forbidden_tools !== undefined ? { forbiddenTools: body.forbidden_tools } : {}),
   });
   // temporalWorkflowId was set during createAgentTransaction (see comment on
   // startSubAgentWorkflow above), so no UPDATE is needed here.

@@ -113,6 +113,8 @@ const createAgentBaseSchema = z.object({
       shared_files: z.boolean().optional(),
     })
     .optional(),
+  // Benchmark harness only: block specific tools at runtime (evaluated in the agent workflow).
+  forbidden_tools: z.array(z.string()).optional(),
   // File attachments for the initial goal message
   attachments: z.array(filePointerSchema).optional(),
   // Fast Mode aggressive cache: record/replay third-party responses for clean demos.
