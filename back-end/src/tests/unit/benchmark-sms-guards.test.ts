@@ -13,10 +13,13 @@ const lifecycleSource = readFileSync(
   'utf8'
 );
 const batchSource = readFileSync(
-  resolve(repoRoot, 'back-end/src/domains/agents/agentBatchService.ts'),
+  resolve(repoRoot, 'back-end/src/domains/agents/agentBatchParentFlags.ts'),
   'utf8'
 );
-const smsQueueSource = readFileSync(resolve(repoRoot, 'back-end/src/providers/smsQueue.ts'), 'utf8');
+const smsQueueSource = readFileSync(
+  resolve(repoRoot, 'back-end/src/providers/smsQueue.ts'),
+  'utf8'
+);
 const whatsappCloudSource = readFileSync(
   resolve(repoRoot, 'back-end/src/providers/whatsappCloud.ts'),
   'utf8'
@@ -28,8 +31,16 @@ requireText(
   'parent?.isBenchmark === true',
   'sub-agents must inherit isBenchmark from benchmark parents'
 );
-requireText(batchSource, 'benchmarkFlagForBatchBody', 'batch spawn must inherit benchmark flag from parent');
-requireText(smsQueueSource, 'shouldMockBenchmarkSmsSend', 'Surge transport must consult benchmark SMS mock gate');
+requireText(
+  batchSource,
+  'inheritsBenchmarkFromBatchParent',
+  'batch spawn must inherit benchmark flag from parent'
+);
+requireText(
+  smsQueueSource,
+  'shouldMockBenchmarkSmsSend',
+  'Surge transport must consult benchmark SMS mock gate'
+);
 requireText(
   whatsappCloudSource,
   'shouldMockBenchmarkWhatsAppSend',
@@ -38,4 +49,4 @@ requireText(
 requireText(runSh, 'BLACKBOX_TEST_FAKE_AGENTPHONE', 'benchmark stacks must fake AgentPhone sends');
 requireText(runSh, 'BLACKBOX_TEST_FAKE_WHATSAPP', 'benchmark stacks must fake WhatsApp sends');
 
-console.log('benchmark-sms-guards: 5 passed, 0 failed');
+process.stdout.write('benchmark-sms-guards: 5 passed, 0 failed\n');

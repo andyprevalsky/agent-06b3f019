@@ -19,10 +19,10 @@ async function run() {
   if (oldFakeSurge === undefined) delete process.env.BLACKBOX_TEST_FAKE_SURGE;
   else process.env.BLACKBOX_TEST_FAKE_SURGE = oldFakeSurge;
 
-  console.log('sms-queue-benchmark-mock: 1 passed, 0 failed');
+  process.stdout.write('sms-queue-benchmark-mock: 1 passed, 0 failed\n');
 }
 
 run().catch((error) => {
-  console.error(error);
+  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   process.exit(1);
 });

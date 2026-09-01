@@ -485,7 +485,9 @@ export function installFetchCapture(): Router {
           headers: { 'content-type': 'text/plain' },
         });
       }
-      const body = JSON.stringify({ id: mockSurgeMessageId(`capture:${String(id)}:${requestBody ?? ''}`) });
+      const body = JSON.stringify({
+        id: mockSurgeMessageId(`capture:${String(id)}:${requestBody ?? ''}`),
+      });
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 200;
       entry.responseBody = body;

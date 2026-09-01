@@ -83,10 +83,10 @@ async function run() {
   if (oldFakeWhatsApp === undefined) delete process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
   else process.env.BLACKBOX_TEST_FAKE_WHATSAPP = oldFakeWhatsApp;
 
-  console.log('sms-transport-mock: 11 passed, 0 failed');
+  process.stdout.write('sms-transport-mock: 11 passed, 0 failed\n');
 }
 
 run().catch((error) => {
-  console.error(error);
+  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
   process.exit(1);
 });

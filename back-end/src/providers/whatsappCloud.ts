@@ -15,10 +15,7 @@ import { createHmac, timingSafeEqual } from './crypto';
 import { createLogger } from './logger';
 import { logTruncate } from '../utils/log';
 import { archiveJson } from './traceArchive';
-import {
-  buildMockWhatsAppSendResult,
-  shouldMockBenchmarkWhatsAppSend,
-} from './smsTransportMock';
+import { buildMockWhatsAppSendResult, shouldMockBenchmarkWhatsAppSend } from './smsTransportMock';
 
 const log = createLogger('WhatsApp');
 

@@ -151,6 +151,19 @@ async function startChatMode(
 // Create agent
 // ---------------------------------------------------------------------------
 
+async function resolveSubAgentBenchmarkFlag(
+  body: CreateAgentBody,
+  isBenchmark: boolean
+): Promise<boolean> {
+  if (body.parent_agent_id === undefined) return isBenchmark;
+  const parent = await repo.findAgentById(body.parent_agent_id);
+  if (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined) {
+    applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+    applyWorldModelModeInheritance(body, parent?.worldModelMode);
+  }
+  return !isBenchmark && parent?.isBenchmark === true ? true : isBenchmark;
+}
+
 export async function createAgent(
   body: CreateAgentBody,
   userId: string,
@@ -163,19 +176,7 @@ export async function createAgent(
   const isSubAgent = body.parent_agent_id !== undefined;
   applyFastModeDefault(body, userId);
 
-  // Execution settings inherit with one parent lookup, so a 10k fan-out does
-  // not pay separate reads for Fast Mode and world-model mode.
-  let benchmarkFlag = isBenchmark;
-  if (isSubAgent && body.parent_agent_id !== undefined) {
-    const parent = await repo.findAgentById(body.parent_agent_id);
-    if (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined) {
-      applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
-      applyWorldModelModeInheritance(body, parent?.worldModelMode);
-    }
-    if (!benchmarkFlag && parent?.isBenchmark === true) {
-      benchmarkFlag = true;
-    }
-  }
+  const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, isBenchmark);
   disableFastModeForWorldModel(body);
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);

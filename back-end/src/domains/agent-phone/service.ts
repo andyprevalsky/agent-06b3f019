@@ -72,6 +72,50 @@ function validateOutboundRequest(params: {
   };
 }
 
+function buildAgentPhoneOutboundResponse(receipt: {
+  status: string;
+  id: string;
+  channel: string;
+  fromNumber: string;
+  toNumber: string;
+  conversationId: string | null;
+}) {
+  return {
+    success: true,
+    status: receipt.status,
+    message_id: receipt.id,
+    provider: 'agentphone',
+    provider_channel: receipt.channel,
+    from_number: receipt.fromNumber,
+    to_number: receipt.toNumber,
+    conversation_id: receipt.conversationId,
+  };
+}
+
+async function deliverAgentPhoneOutbound(params: {
+  agentId: string;
+  idempotencyKey: string;
+  phoneNumber: string;
+  message: string;
+  identity: NonNullable<Awaited<ReturnType<typeof repo.findAgentIdentityForMessages>>>;
+}) {
+  const mockSeed = `${params.agentId}:${params.idempotencyKey}:${params.phoneNumber}:${params.message}`;
+  return isLocalBenchmarkAgentPhoneMockEnabled() ||
+    (await shouldMockBenchmarkSmsSend(params.agentId))
+    ? buildMockAgentPhoneSendResult({
+        fromNumber: params.identity.phone ?? '+10000000000',
+        toNumber: params.phoneNumber,
+        seed: mockSeed,
+      })
+    : sendAgentPhoneMessage({
+        agentId: params.identity.phoneProviderAgentId,
+        numberId: params.identity.phoneProviderNumberId,
+        fromNumber: params.identity.phone,
+        toNumber: params.phoneNumber,
+        body: params.message,
+      });
+}
+
 export async function sendOutboundAgentPhoneMessage(params: {
   userId: unknown;
   agentId: unknown;
@@ -121,31 +165,14 @@ export async function sendOutboundAgentPhoneMessage(params: {
   }
 
   try {
-    const mockSeed = `${agentId}:${idempotencyKey}:${phoneNumber}:${message}`;
-    const receipt =
-      isLocalBenchmarkAgentPhoneMockEnabled() || (await shouldMockBenchmarkSmsSend(agentId))
-        ? buildMockAgentPhoneSendResult({
-            fromNumber: identity.phone ?? '+10000000000',
-            toNumber: phoneNumber,
-            seed: mockSeed,
-          })
-        : await sendAgentPhoneMessage({
-            agentId: identity.phoneProviderAgentId,
-            numberId: identity.phoneProviderNumberId,
-            fromNumber: identity.phone,
-            toNumber: phoneNumber,
-            body: message,
-          });
-    const response = {
-      success: true,
-      status: receipt.status,
-      message_id: receipt.id,
-      provider: 'agentphone',
-      provider_channel: receipt.channel,
-      from_number: receipt.fromNumber,
-      to_number: receipt.toNumber,
-      conversation_id: receipt.conversationId,
-    };
+    const receipt = await deliverAgentPhoneOutbound({
+      agentId,
+      idempotencyKey,
+      phoneNumber,
+      message,
+      identity,
+    });
+    const response = buildAgentPhoneOutboundResponse(receipt);
     await markToolSideEffectSucceeded({
       operationKey,
       externalId: receipt.id,

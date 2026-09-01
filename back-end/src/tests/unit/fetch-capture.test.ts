@@ -247,7 +247,10 @@ async function run(): Promise<void> {
     });
     assert.strictEqual(surge.status, 200);
     const surgeBody = (await surge.json()) as { id?: string };
-    assert.strictEqual(surgeBody.id, mockSurgeMessageId('capture:7:{"to":"+15555550100","body":"hello"}'));
+    assert.strictEqual(
+      surgeBody.id,
+      mockSurgeMessageId('capture:7:{"to":"+15555550100","body":"hello"}')
+    );
 
     const whatsappSuccess = await fetch(
       'https://graph.facebook.com/v21.0/blackbox-phone/messages',
