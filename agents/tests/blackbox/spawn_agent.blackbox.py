@@ -2838,14 +2838,16 @@ async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_ev
 
 
 async def test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancelled():
-    """Heartbeat/cancel after research must still return a user-facing wrap-up.
+    """Demo cancel after research must still return a user-facing wrap-up.
 
     Explore 44c81111 had tool_call_results in-memory when Temporal cancelled
     the activity. CancelledError is BaseException, so synthesis after
     run_agent never ran and the parent chip stayed at Research started.
+    Live explores re-raise; this wrap-up is demo-only.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     evidence = (
@@ -2874,7 +2876,7 @@ async def test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancel
         result = await spawn_explore_agent_activity(
             agent_id="a-attia",
             user_id="u-7",
-            goal="Do 3 quick web searches about Peter Attia MD",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX}: Peter Attia. Do 3 quick web searches.",
             model="rose-1-lite",
             task_id="44c81111-1238-43f0-8b06-a1a20cc902b7",
             init_tool_call_id="tc-oai-timeout-44c81111",
@@ -2892,6 +2894,35 @@ async def test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancel
     ]
     assert wrap_posts, save_calls
     assert any(len(str(call.get("message") or "")) >= 200 for call in wrap_posts)
+
+
+async def test_spawn_explore_agent_activity_reraises_cancel_outside_demo():
+    """Live Temporal cancel must not fake a completed explore wrap-up."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "live evidence"})
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Blue Bottle"}, "tc-live")
+        raise asyncio.CancelledError()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="a-live",
+            user_id="u-7",
+            goal="Order a Vanilla Bean Shakerato and waffle from Blue Bottle",
+            model="rose-1-lite",
+            task_id="live-cancel",
+            init_tool_call_id="tc-live-cancel",
+        )
 
 
 async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds():
@@ -4056,6 +4087,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_returns_wrapup_when_run_agent_cancelled",
         test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancelled,
+    )
+    await r.record_async(
+        "explore_activity_reraises_cancel_outside_demo",
+        test_spawn_explore_agent_activity_reraises_cancel_outside_demo,
     )
     await r.record_async(
         "explore_activity_rejects_completion_until_evidence_succeeds",
