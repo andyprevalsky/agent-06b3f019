@@ -5232,7 +5232,7 @@
     "name": "cuda-kernel-github-top100-code-agent",
     "title": "CUDA Kernel GitHub Top 100 (Code Agent Ranking)",
     "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent",
-    "timeout_seconds": 900,
+    "timeout_seconds": 1800,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_claude_code_agent"
