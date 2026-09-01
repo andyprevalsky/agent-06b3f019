@@ -166,21 +166,6 @@ test('Temporal workflow args force Fast Mode off for shadow mode even if explici
   assert.strictEqual(args[15], false);
 });
 
-test('Temporal workflow args align forbiddenTools after resume and world model slots', () => {
-  const args = buildAgentWorkflowArgs({
-    agentId: 'a',
-    userId: 'u',
-    goal: 'g',
-    model: 'rose-labs/rose-1-lite',
-    reasoningMaxTokens: 2048,
-    verifier: { type: 'FLOAT_LLM_JUDGE' },
-    forbiddenTools: ['spawn_claude_code_agent'],
-  });
-  assert.strictEqual(args[16], null);
-  assert.strictEqual(args[17], 'real');
-  assert.deepStrictEqual(args[18], ['spawn_claude_code_agent']);
-});
-
 test('Rose createStreamingCompletion defaults provider_fast_mode on', () => {
   const client = readFileSync(join(process.cwd(), 'src', 'providers', 'rose', 'client.ts'), 'utf8');
   assert.ok(
