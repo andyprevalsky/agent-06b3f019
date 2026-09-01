@@ -1,0 +1,29 @@
+{
+  "fixture_id": "b775556c_d0a64881dfea",
+  "baseline_status": "PASS",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-sol-gpt",
+  "pool": "rose-1-ultra",
+  "parent_goal": "Produce the final answer to the user's request: identify exactly the top 100 public GitHub repositories where people actively develop CUDA kernels or closely adjacent kernel technology. Use an objective ranking by current GitHub star count at verification time. Include direct CUDA C/C++ kernels, Triton/CUTLASS kernels, GPU compiler/codegen stacks, core GPU libraries, and GPU-kernel profiling/debugging tools. Exclude repos with merely incidental CUDA support, wrappers/UIs that only consume another project's kernels, forks, archived repos when possible, and curated lists. Verify finalists using live GitHub repository metadata and repository code/docs. Return exactly 100 unique repos sorted by stars descending. Each repo object must have: rank, repository (owner/name), url, stars (integer), observed_date, description, category, qualifying_evidence, archived (bool), fork (bool), last_activity_date, and sources (list of URLs). Resolve redirects/renames to canonical URLs. Audit count, uniqueness, consecutive ranks, and descending stars before completion. Existing candidate research is available in these referenced messages and should be used as leads, but independently correct weak claims and stale counts: low-level infrastructure @ref:message:10259ff0-9e1c-447d-a559-073018279c4e ; DSL/tools @ref:message:bc737b45-d806-4284-929b-77c1228689a5 ; ML frameworks @ref:message:1b036408-a896-48e4-9c7d-806cd88a5228 ; LLM/generative acceleration @ref:message:70e329c4-c79d-415c-b548-f5eba09dcc26 ; domain applications @ref:message:fbb4f7bc-8776-4ad8-b359-26bd77515821 . The current date is 2026-08-23. Favor direct GitHub API/repository evidence over third-party indexes. The output must be fully populated, not prose-only.",
+  "bad_spawn_goal": "Produce the final answer for this task: identify exactly the top 100 public GitHub repositories where people actively develop CUDA kernels or closely adjacent kernel technology, ranked by exact GitHub stars observed 2026-08-23. Include direct CUDA C/C++ kernels, Triton/CUTLASS/CuTe kernels, GPU compiler/codegen stacks, core GPU libraries, communication/memory infrastructure, and profiling/debugging/benchmark tools. Exclude dependency-only wrappers/UIs, curated lists, merely incidental CUDA, forks, and archived repositories when enough active repositories exist. Use ALL grounded verified records in the recent task results, especially the 60-way fresh verification result immediately preceding this task and the prior provisional 57-record ranking plus follow-up addition pytorch/FBGEMM. Merge them, resolve canonical redirects, deduplicate case-insensitively, exclude archived=true and fork=true, and rank exact stars descending with canonical owner/name ascending as tie-breaker. You have permission to use the verified direct GitHub metadata and repository source URLs already present in those result messages. If needed, conduct targeted direct GitHub checks only to fill gaps, but do not replace exact verified counts with estimates. Output exactly four top-level fields: methodology string, cutoff_notes string, repos list of exactly 100 objects, audit_summary string. Every repo object must contain: rank (1..100), repository (canonical owner/name), url, stars integer, observed_date exactly 2026-08-23, description, category, qualifying_evidence, archived bool, fork bool, last_activity_date as YYYY-MM-DD, sources list of URLs. Ensure all 100 are unique, archived=false, fork=false, required fields populated, sources nonempty and include direct GitHub API plus code/docs, and stars monotonically non-increasing. Do not return a partial answer. Mechanically audit. Use these referenced results as primary evidence: provisional 57 ranking @ref:message:c57cd650-9e55-40da-b202-4979022461ed ; follow-up cutoff audit @ref:message:7d1a616e-c034-4ab5-8977-dfa93f1d50a3 ; fresh 60-repository verification is the immediately previous tool result in recent communications. Where old and new overlap, prefer the newest exact metadata. Some last_activity values include timestamps; reduce to date. The fresh for_each result provides 55+ records, almost all eligible; exclude AutoGPTQ and AutoAWQ because archived=true, ROCm/llvm-project because fork=true, NVIDIA/nvcomp because archived/ineligible, NAMD because not GitHub, and malformed CHAI-MAGMA. Include active eligible records. Rank the combined pool globally, not category-by-category.",
+  "prior_fail_in_context": true,
+  "root": "b775556c-e2be-4c61-99b1-81c5af7d5490",
+  "agent_id": "c5b891a1-5aa2-47be-a63b-426dd9a1b2f8",
+  "dump_id": "d0a64881dfea",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 20,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

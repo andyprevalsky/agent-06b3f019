@@ -447,6 +447,7 @@ their assertions or test counts:
 `bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/durable-evidence-links.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
+`bash scripts/tests/cooperative-cutover-monitor.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
@@ -458,8 +459,9 @@ their assertions or test counts:
 `bash scripts/tests/run-isolated-cloud-kill.test.sh`,
 `bash scripts/tests/run-seed-exit-code.test.sh`,
 `bash scripts/tests/run-public-tunnel-routing.test.sh`,
-`bash scripts/tests/setup-db-concurrency.test.sh`, and
-`bash scripts/tests/run-port-collision.test.sh`.
+`bash scripts/tests/setup-db-concurrency.test.sh`,
+`bash scripts/tests/run-port-collision.test.sh`, and
+`bash scripts/tests/run-cloud-benchmark-workers.test.sh`.
 
 This list is deliberately explicit, not a registry pointer: several of these
 suites assert that their own command still appears here, which is how a gate
@@ -1742,30 +1744,64 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
   AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"
   echo "✅ Agent deployment token: $AGENT_DEPLOYMENT_TOKEN"
 
-  # Do not wait for workflow completion yet: its final step deliberately holds
-  # the non-canceling production concurrency lock until this exact cutover
-  # reports a terminal commit status. Reaching that step proves deploy, fleet
-  # verification, and scale-down all completed while later deploys remain queued.
-  AGENT_DEPLOY_READY=""
-  for i in $(seq 1 120); do
+  # Cooperative cutover: deploy-agents.yml runs deploy-agents-cooperative-cutover.sh
+  # (overlap old+new gen fleets, flip pointer, drain up to 45m via continue_as_new
+  # handoff, force-migrate stragglers only after the SLO). Capture the pre-cutover
+  # generation queue so post-merge verification can report drain progress.
+  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+  cd "$DEPLOY_ROOT/back-end" && source .env
+  AGENT_SURFACE_HASH=$(python3 "$DEPLOY_ROOT/scripts/agent_workflow_surface_hash.py")
+  AGENT_OLD_POINTER=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null || echo "null")
+  AGENT_OLD_QUEUE=$(printf '%s' "$AGENT_OLD_POINTER" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  for (const l of s.split("\n").reverse()) {
+    const t=l.trim(); if (!t.startsWith("{")) continue;
+    try { const o=JSON.parse(t); process.stdout.write(String(o?.taskQueue||"")); return; } catch {}
+  }
+  process.stdout.write("");
+})')
+  AGENT_OLD_HASH=$(printf '%s' "$AGENT_OLD_POINTER" | node -e '
+let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+  for (const l of s.split("\n").reverse()) {
+    const t=l.trim(); if (!t.startsWith("{")) continue;
+    try { const o=JSON.parse(t); process.stdout.write(String(o?.surfaceHash||"")); return; } catch {}
+  }
+  process.stdout.write("");
+})')
+  if [ -n "$AGENT_OLD_HASH" ] && [ "$AGENT_OLD_HASH" != "$AGENT_SURFACE_HASH" ]; then
+    echo "Pre-cutover generation: hash=$AGENT_OLD_HASH queue=$AGENT_OLD_QUEUE"
+  else
+    AGENT_OLD_QUEUE=""
+    echo "Same-generation rolling deploy expected (hash=$AGENT_SURFACE_HASH)"
+  fi
+
+  python3 scripts/record_factory_event.py deploy stage-start cooperative-cutover
+  AGENT_CUTOVER_CONCLUSION=""
+  for i in $(seq 1 390); do  # up to ~65m @ 10s (45m drain SLO + build/overlap)
     AGENT_DEPLOY_STATE=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
-      --json status,conclusion,jobs \
-      --jq '[.status, (.conclusion // "none"), ([.jobs[].steps[]? | select(.name == "Hold production deploy lock until exact cutover completes")][0].status // "missing")] | join("|")')
-    IFS='|' read -r AGENT_DEPLOY_STATUS AGENT_DEPLOY_CONCLUSION AGENT_DEPLOY_HOLD_STATUS \
-      <<<"$AGENT_DEPLOY_STATE"
-    if [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ]; then
-      AGENT_DEPLOY_READY=1
-      break
+      --json status,conclusion \
+      --jq '[.status, (.conclusion // "none")] | join("|")')
+    IFS='|' read -r AGENT_DEPLOY_STATUS AGENT_CUTOVER_CONCLUSION <<<"$AGENT_DEPLOY_STATE"
+    if [ $((i % 6)) -eq 1 ]; then
+      echo "--- cooperative cutover handover progress (run $AGENT_DEPLOY_RUN_ID) ---"
+      npx tsx scripts/monitor-cooperative-cutover.ts \
+        --expected-hash "$AGENT_SURFACE_HASH" \
+        ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} || true
     fi
-    if [ "$AGENT_DEPLOY_STATUS" = "completed" ]; then
-      echo "❌ Exact deploy-agents run completed before cutover lock acquisition: $AGENT_DEPLOY_CONCLUSION"
-      exit 1
-    fi
-    sleep 5
+    case "$AGENT_DEPLOY_STATUS" in
+      completed)
+        case "$AGENT_CUTOVER_CONCLUSION" in
+          success) break ;;
+          *) echo "❌ deploy-agents cooperative cutover failed: $AGENT_CUTOVER_CONCLUSION"; exit 1 ;;
+        esac
+        ;;
+    esac
+    sleep 10
   done
-  [ "$AGENT_DEPLOY_READY" = "1" ] ||
-    { echo "❌ Exact deploy-agents run never reached the cutover lock"; exit 1; }
-  echo "✅ Exact candidate fleet deployed; production deploy lock is held"
+  [ "$AGENT_CUTOVER_CONCLUSION" = "success" ] ||
+    { echo "❌ deploy-agents cooperative cutover did not complete within 65m"; exit 1; }
+  python3 scripts/record_factory_event.py deploy stage-finish cooperative-cutover
+  echo "✅ deploy-agents cooperative cutover workflow completed"
 fi
 ```
 
@@ -1913,7 +1949,7 @@ python3 scripts/record_factory_event.py deploy production-finish backend-probes
 
 **Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
 
-## Step 13ab: Replace open workflows after an activation-gated agent deploy
+## Step 13ab: Verify cooperative generation cutover (handover monitor)
 
 Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. This is the canonical cutover
 condition shared with Step 13 and Step 13ac: shipped runtime changes and edits
@@ -1921,20 +1957,50 @@ to `.github/workflows/deploy-agents.yml` require cutover; test-only,
 benchmark-only, documentation-only, and history-ledger changes under `agents/`
 do not.
 
-Run this only after the exact `deploy-agents.yml` attempt reaches its serialized
-lock-hold step and the backend merged commit is live and healthy. The Fly workers
-are healthy-but-standby: they have not constructed production Temporal pollers
-and therefore cannot replay an old history. The command freezes the exact set of
-open root workflow IDs, then uses a bounded pool to seal **every** old generation
-before activating the exact merged worker SHA.
-It terminates each stale execution, appends the terminal
-`new code version deployed, retry this tool` result to unresolved tools, and
-starts a clean replacement from durable DB state. Active descendants are stopped
-with their root; the replacement LLM decides which child work to retry. It does
-not replay histories and does not wait for a natural continue-as-new boundary.
+Run this immediately after Step 13's `deploy-agents.yml` watch completes
+successfully. Step 13 already polled `monitor-cooperative-cutover.ts` during
+the CI run; this step is the **hard gate** that proves the handover finished
+cleanly: live pointer on the merged generation, old-generation queue drained
+(via cooperative `continue_as_new` handoff, not premature force-migrate).
 
 ```bash
 if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  set -e
+  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+  cd "$DEPLOY_ROOT/back-end" && source .env
+  AGENT_SURFACE_HASH=$(python3 "$DEPLOY_ROOT/scripts/agent_workflow_surface_hash.py")
+  AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
+
+  # Authoritative verify: pointer matches merged generation; old queue empty when known.
+  npx tsx scripts/monitor-cooperative-cutover.ts \
+    --expected-hash "$AGENT_SURFACE_HASH" \
+    ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} \
+    --verify
+
+  CUTOVER_STATUS=$(gh api "repos/{owner}/{repo}/commits/$DEPLOY_MERGED_SHA/status" \
+    --jq ".statuses[] | select(.context == \"$AGENT_CUTOVER_RELEASE_CONTEXT\") | .state" | head -1)
+  if [ "$CUTOVER_STATUS" != "success" ]; then
+    echo "⚠️ agent-cutover commit status=$CUTOVER_STATUS (continuing — monitor --verify is authoritative)"
+  else
+    echo "✅ agent-cutover commit status=success"
+  fi
+
+  python3 scripts/record_factory_event.py deploy production-finish fly
+fi
+```
+
+**Happy path (default):** CI's `deploy-agents-cooperative-cutover.sh` already
+overlapped fleets, flipped the pointer, waited up to 45 minutes for cooperative
+handoff, force-migrated any stragglers, and retired old-gen machines. Step 13ab
+must NOT re-run `migrate-open-agent-workflows.ts` when the monitor reports
+`cooperative_drain_complete` or `same_generation`.
+
+**Break-glass fallback** — only when Step 13's `deploy-agents.yml` run **failed**
+after the pointer flip but before drain completed. Do NOT use this on the happy
+path; it terminates workflows instead of waiting for activity-boundary handoff.
+
+```bash
+if [ "$AGENT_CUTOVER_REQUIRED" = "1" ] && [ "${AGENT_CUTOVER_CONCLUSION:-success}" != "success" ]; then
   set -e
   AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
   AGENT_CUTOVER_RELEASED=0
@@ -1951,57 +2017,37 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
     local exit_code=$?
     trap - EXIT
     if [ "$AGENT_CUTOVER_RELEASED" != "1" ]; then
-      release_agent_cutover_lock error "Production workflow cutover failed" || true
+      release_agent_cutover_lock error "Cooperative cutover fallback failed" || true
     fi
     exit "$exit_code"
   }
   trap release_agent_cutover_lock_on_exit EXIT
 
-  # Reconfirm this deploy's immutable merge commit before any production work.
   git fetch origin main
   git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
     { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
   cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-  # Self-driving CI is the primary cutover driver (deploy-agents.yml runs
-  # validate → flip pointer → migrate itself, so a bare `gh pr merge` can never
-  # strand the fleet). If CI already rolled over to this build's generation, the
-  # local drive below is redundant: short-circuit to a verify-only pass. This is
-  # the fallback path for when CI could not self-drive (e.g. cutover secrets
-  # absent). Both paths are idempotent, so double-driving is harmless.
   AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
   AGENT_LIVE_GENERATION=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})' || true)
   if [ "$AGENT_LIVE_GENERATION" = "$AGENT_SURFACE_HASH" ]; then
-    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying migration and skipping the local drive"
-    # deploy-agents.yml is live-at-boot (TEMPORAL_WORKER_REQUIRE_ACTIVATION=0).
-    # The hold step may still conclude failure if a prior cutover status was
-    # never posted (cloud agent GH tokens often lack statuses:write). Do NOT
-    # `gh run watch --exit-status` here — re-run the idempotent migrator instead
-    # and treat pointer+failed:0 as the cutover proof.
-    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-      TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
-      TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
-      WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
-      WORKFLOW_MIGRATION_CANARY_COUNT="${WORKFLOW_MIGRATION_CANARY_COUNT:-4}" \
-      npx tsx scripts/migrate-open-agent-workflows.ts --execute
-    release_agent_cutover_lock success "Cutover completed by self-driving CI" || true
+    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying drain via monitor"
+    npx tsx scripts/monitor-cooperative-cutover.ts \
+      --expected-hash "$AGENT_SURFACE_HASH" \
+      ${AGENT_OLD_QUEUE:+--old-queue "$AGENT_OLD_QUEUE"} \
+      --verify || {
+        echo "⏰ Cooperative drain incomplete — force-migrating stragglers (break-glass only)"
+        TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+          TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+          TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+          WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
+          npx tsx scripts/migrate-open-agent-workflows.ts --execute
+      }
+    release_agent_cutover_lock success "Cutover verified after CI partial failure" || true
     trap - EXIT
     python3 scripts/record_factory_event.py deploy production-finish fly
   else
-  # Live-at-boot workers (deploy-agents.yml sets REQUIRE_ACTIVATION=0) never
-  # poll navi-agent-candidate-* — validate-candidate-workflow-image.ts is
-  # obsolete under that model and will hang for its 180s query timeout. Skip
-  # it. Candidate readiness is proven by the Fly deploy + generation queue
-  # traffic after the pointer flip below. (Standby/REQUIRE_ACTIVATION=1 was
-  # retired after the 2026-07-26 stranded-production RCA.)
-  TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="navi-agent-candidate-${AGENT_DEPLOYMENT_TOKEN}"
-
-  # Render's `live` status means traffic has switched, not that the old
-  # instance is gone. It can retain the old process for 60s, then allow up to
-  # 300s of shutdown delay. That old backend predates immutable descendant
-  # workflow IDs, so wait the full bounded window before a tombstone can close
-  # an ambiguous child ID. Compute from the exact deploy's server timestamp so
-  # time already spent in health gates counts toward the drain.
+  # Render old-instance drain before any workflow tombstones (fallback path only).
   RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"
   case "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" in
     ''|*[!0-9]*) echo "❌ RENDER_OLD_INSTANCE_DRAIN_SECONDS must be an integer >= 375"; exit 1 ;;
@@ -2045,37 +2091,12 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
   done
   echo "✅ Old Render instance/request drain window elapsed"
 
-  # Live-at-boot: do NOT re-run verify-agent-candidate-fleet.sh /
-  # validate-candidate-workflow-image.ts (REQUIRE_ACTIVATION=1 + candidate queue).
-  # Those gates assume standby workers polling navi-agent-candidate-*; production
-  # workers boot onto navi-agent-tasks@<hash> immediately. Prove the hold is still
-  # held (or already released by self-driving CI), then flip + migrate.
-  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
-  cd "$DEPLOY_ROOT/back-end"
-  AGENT_DEPLOY_HOLD_STATUS=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
-    --json jobs \
-    --jq '[.jobs[].steps[]? | select(.name == "Hold production deploy lock until exact cutover completes")][0].status // "missing"')
-  if [ "$AGENT_DEPLOY_HOLD_STATUS" != "in_progress" ]; then
-    echo "⚠️ Exact production deploy lock status=$AGENT_DEPLOY_HOLD_STATUS (continuing under live-at-boot)"
-  fi
-
-  # Zero-downtime routing flip. Compute this build's replay-surface generation and
-  # point NEW agent workflows at its generation queue (`navi-agent-tasks@<hash>`)
-  # BEFORE respawning open workflows. Every replacement resolves its queue through
-  # the same pointer (providers/agentQueuePointer.ts, wired into
-  # startAgentWorkflowExecution), so respawns and all new traffic land on the
-  # just-activated generation while the old generation keeps serving until each
-  # workflow is migrated off it. The flip is atomic and instantly reversible
-  # (flip back to the previous generation = rollback, no redeploy).
-  AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
   AGENT_GENERATION_QUEUE="navi-agent-tasks@${AGENT_SURFACE_HASH}"
   echo "Flipping agent queue pointer to generation ${AGENT_GENERATION_QUEUE}"
   npx tsx scripts/set-agent-queue-pointer.ts \
     --queue "$AGENT_GENERATION_QUEUE" \
     --surface-hash "$AGENT_SURFACE_HASH" \
     --by "deploy-${DEPLOY_MERGED_SHA}"
-  # Wait past the pointer cache TTL so every backend instance routes new workflows
-  # to the new generation before we start draining the old one.
   sleep 6
 
   TEMPORAL_TASK_QUEUE=navi-agent-tasks \
@@ -2090,32 +2111,18 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
     WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY:-32}" \
     npx tsx scripts/migrate-open-agent-workflows.ts --execute
 
-  release_agent_cutover_lock success "Production workflow cutover completed" || true
+  release_agent_cutover_lock success "Production workflow cutover completed (fallback)" || true
   trap - EXIT
-  # Do not `gh run watch --exit-status`: under live-at-boot the hold step often
-  # concludes failure when statuses:write is unavailable to the cutover driver.
-  # Migration exit 0 + pointer match is the authoritative gate.
   python3 scripts/record_factory_event.py deploy production-finish fly
   fi
 fi
 ```
 
-Under live-at-boot (`TEMPORAL_WORKER_REQUIRE_ACTIVATION=0` in `deploy-agents.yml`),
-workers never poll `navi-agent-candidate-*`, so the old standby candidate-image
-gate is skipped. The migration command prepares every frozen workflow, then
-starts four status-stratified replacements serially and requires each to
-atomically persist its restored durable state and clear its generation-fenced
-claim (`durable READY`) before starting the bulk set.
-Any canary failure leaves the bulk set prepared but unstarted. The command must
-exit zero with `failed: 0` and `prepared: 0`. A changed workflow ID is a safe skip
-(another replacement won the race); any other failure blocks completion.
-Rerunning the command is safe: durable claims coalesce and expected-generation
-checks prevent a stale snapshot from replacing a newer workflow.
-The 375-second Render drain is a hard correctness gate, not a propagation
-sleep: `live` switches traffic before Render retires the old process, and an old
-in-flight create request used Temporal's reusable workflow-ID policy. The
-bounded drain guarantees every caller that can outlive a descendant tombstone
-uses the new reject-duplicate policy.
+Under cooperative cutover, workers drain at activity boundaries (SIGTERM +
+35m `kill_timeout`) and workflows hand off via `continue_as_new` at safe
+`run_agent` checkpoints. Force-migrate runs only after the 45-minute SLO
+(break-glass). The monitor script is the authoritative post-merge proof that
+routing flipped and the old generation drained without leaving stragglers.
 
 ## Step 13ac: Validate workflow replacement edge cases in production
 

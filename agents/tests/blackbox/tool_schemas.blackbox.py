@@ -294,6 +294,40 @@ def test_wait_for_tool_with_timestamp_only():
     assert t.condition is None
 
 
+def test_wait_for_july_timestamp_without_description_parses():
+    """July Fast Mode rows recorded timestamp waits without the later-required UI phrase.
+
+    Live smoke 3c487fdd failed 18 GPs on AgentAction ValidationError:
+    ``WaitForTool.description: Field required`` for
+    ``{"tool": "wait_for", "until_timestamp": "2026-07-03T17:38:30Z"}``.
+    Timestamp-only replay must still parse; condition-without-description must not.
+    """
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, WaitForTool, create_agent_action_model
+
+    july = {"tool": "wait_for", "until_timestamp": "2026-07-03T17:38:30Z"}
+    t = WaitForTool.model_validate(july)
+    assert t.tool == "wait_for"
+    assert t.until_timestamp == "2026-07-03T17:38:30Z"
+    assert t.condition is None
+    assert 3 <= len(t.description) <= 80
+
+    Model = create_agent_action_model(EXECUTE_PHASE_TOOLS)
+    parsed = Model.model_validate(
+        {
+            "reasoning": "",
+            "response": "",
+            "tool_calls": [july],
+        }
+    )
+    assert parsed.tool_calls[0].tool == "wait_for"
+    assert parsed.tool_calls[0].until_timestamp == "2026-07-03T17:38:30Z"
+
+    _assert_raises(
+        lambda: WaitForTool.model_validate({"tool": "wait_for", "condition": "When the user replies"}),
+        "description",
+    )
+
+
 def test_wait_for_tool_condition_requires_description():
     """Condition mode requires display copy from the original tool call."""
     from utils.tool_schemas import WaitForTool
@@ -951,6 +985,10 @@ async def run_all_tests():
     r.record("wait_for_mutually_exclusive", test_wait_for_tool_mutually_exclusive_raises)
     r.record("wait_for_neither", test_wait_for_tool_neither_raises)
     r.record("wait_for_with_timestamp", test_wait_for_tool_with_timestamp_only)
+    r.record(
+        "wait_for_july_timestamp_without_description",
+        test_wait_for_july_timestamp_without_description_parses,
+    )
     r.record("wait_for_condition_requires_description", test_wait_for_tool_condition_requires_description)
     r.record("wait_for_with_condition", test_wait_for_tool_with_condition_and_description)
     # WebFetchTool validation

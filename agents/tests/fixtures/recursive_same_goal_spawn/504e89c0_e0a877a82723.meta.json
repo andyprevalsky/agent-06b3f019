@@ -1,0 +1,29 @@
+{
+  "fixture_id": "504e89c0_e0a877a82723",
+  "baseline_status": "FAIL",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-terra-gpt",
+  "pool": "rose-1-lite",
+  "parent_goal": "Carry out this single DoorDash delivery order to completion. You have authenticated sessions available. Open the supplied URL https://www.doordash.com/products/essentia-purified-water-1-l-x-12-ct/urpc_7d4f66f6-fe6d-4a91-bed0-19e48b800f10 . Use saved DoorDash payment. Deliver one sealed Essentia water case/multipack immediately to Aman Gottumukkala, 88 Howard St, Apt 1413, San Francisco, CA 94105 US. Strongly prefer Essentia Purified Water 1L x 12. If unavailable, select a different sealed Essentia multipack only, never individual bottles. Keep default/recommended tip. Place the order and retrieve definitive final confirmation details: confirmation/order ID, final USD total, ETA, exact product and proof content. Do not ask user. Do not terminate at cart or review.",
+  "bad_spawn_goal": "DoorDash browser attempts timed out. Take ownership and fulfill the explicit purchase immediately using any available browser/authenticated DoorDash session. Place delivery order with saved payment for one sealed Essentia water multipack to Aman Gottumukkala, 88 Howard St Apt 1413, San Francisco CA 94105. Product target: Essentia Purified Water 1L x 12. If unavailable only use another sealed Essentia multipack, never individual bottles. Keep DoorDash default/recommended tip. Submit order to completion and obtain the post-checkout confirmation. Return ID, exact charged final total USD, stated ETA, product exact name, and confirmation proof. Do not request input and do not stop at checkout/review.",
+  "prior_fail_in_context": true,
+  "root": "504e89c0-2fae-4ae9-9e4d-7ac5f3ee5c56",
+  "agent_id": "bd7df389-f45b-4230-bbdb-edb5af349de8",
+  "dump_id": "e0a877a82723",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 9,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

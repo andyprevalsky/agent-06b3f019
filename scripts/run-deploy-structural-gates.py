@@ -59,8 +59,16 @@ GATES = (
         ("bash", "scripts/tests/durable-evidence-links.test.sh"),
     ),
     Gate(
+        "publish-evidence-browser-validation",
+        ("bash", "scripts/tests/publish_evidence_links_browser_validation.test.sh"),
+    ),
+    Gate(
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
+    ),
+    Gate(
+        "cooperative-cutover-monitor",
+        ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
     ),
     Gate(
         "agent-surface-hash",
@@ -96,6 +104,10 @@ GATES = (
     Gate(
         "run-port-collision",
         ("bash", "scripts/tests/run-port-collision.test.sh"),
+    ),
+    Gate(
+        "run-cloud-benchmark-workers",
+        ("bash", "scripts/tests/run-cloud-benchmark-workers.test.sh"),
     ),
 )
 

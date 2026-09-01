@@ -22,6 +22,13 @@ PROVIDER_ORDER = (
     "openrouter_model_1",
     "openrouter_model_2",
 )
+FAST_MODE_USAGE_MODELS = frozenset(
+    {
+        "fast-cache",
+        "fast-mode-scrape-passthrough",
+        "fast-mode-soft-complete",
+    }
+)
 
 
 def classify_model(model: str) -> tuple[str, str]:
@@ -73,6 +80,23 @@ def classify_usage_item(item: dict[str, Any]) -> tuple[str, str]:
             return classified
         return "claude_oauth_token", POOL_REGISTRY["rose-1-browser-use"].claude_auth_model
     return classify_model(model)
+
+
+def live_output_tokens(breakdown: dict[str, Any] | None) -> int:
+    """Count completion tokens streamed by live (non-Fast-Mode) models."""
+    total = 0
+    for row in (breakdown or {}).values():
+        if not isinstance(row, dict):
+            continue
+        models = row.get("models")
+        if isinstance(models, dict) and models:
+            for name, model_row in models.items():
+                if str(name) in FAST_MODE_USAGE_MODELS or not isinstance(model_row, dict):
+                    continue
+                total += int(model_row.get("output_tokens") or 0)
+            continue
+        total += int(row.get("output_tokens") or 0)
+    return total
 
 
 def _empty_metrics() -> dict[str, int | float]:

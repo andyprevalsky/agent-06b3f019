@@ -13,7 +13,7 @@ Usage:
     state = await workflow.execute_activity(
         query_parent_state_activity,
         args=[self.parent_workflow_id],
-        start_to_close_timeout=timedelta(seconds=10),
+        start_to_close_timeout=timedelta(seconds=60),
     )
 """
 

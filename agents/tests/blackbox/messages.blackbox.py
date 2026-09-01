@@ -273,6 +273,22 @@ async def test_poll_messages_happy_path():
     assert result[0]["role"] == "USER"
 
 
+async def test_poll_messages_accepts_temporal_iso_string():
+    """Adding a third activity arg must not crash when Temporal delivers last_checked as ISO."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.messages import poll_new_messages
+
+        result = await poll_new_messages(
+            agent_id="agent-test-1",
+            last_checked="2020-01-01T00:00:00Z",
+        )
+
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert result[0]["role"] == "USER"
+
+
 async def test_context_compaction_projection_keeps_checkpoint_tail():
     """Compaction checkpoints replace raw pre-checkpoint history for model context."""
     from helpers.context_compaction import (
@@ -389,6 +405,71 @@ async def test_poll_messages_projects_context_compaction_checkpoint():
     ]
     assert any((m.get("metadata") or {}).get("contextCompactionBoundary") for m in result)
     assert all(m.get("text") != "Very large raw tool output" for m in result)
+
+
+async def test_poll_messages_keeps_explore_chips_when_include_internal():
+    """Completion recovery needs subAgentId web_fetch bodies; default poll still drops them."""
+
+    fetch_body = (
+        "**Params Passed:**\n\n- **url**: https://www.youtube.com/@WesRoth\n\n"
+        "**Result:**\n\nWes Roth covers AI research papers and product launches "
+        "in long-form YouTube explainers. Last-90-day cadence is several videos "
+        "a week with hooks that pair a lab name and a concrete capability claim. "
+        "Audience promise is stay-current AI for builders."
+    )
+    thinking = {"role": "TOOL", "message": "", "timestamp": "2026-04-05T12:00:30Z",
+                "metadata": {"toolName": "spawn_agent", "title": "Explore agent thinking",
+                             "subAgentId": "explore-wes", "toolStatus": "FINISHED"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/agents/" in str(request.url) and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "agent": {"id": "gp-wes", "status": "ACTIVE"},
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Research the YouTube creator Wes Roth",
+                            "timestamp": "2026-04-05T12:00:00Z",
+                            "metadata": {"toolName": "spawn_agent", "title": "Exploring"},
+                        },
+                        thinking,
+                        {
+                            "role": "TOOL",
+                            "message": fetch_body,
+                            "timestamp": "2026-04-05T12:01:00Z",
+                            "metadata": {
+                                "toolName": "web_fetch",
+                                "toolStatus": "FINISHED",
+                                "subAgentId": "explore-wes",
+                                "taskId": "explore-wes",
+                            },
+                        },
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"error": "no mock"})
+
+    setup_mock_fn(handler)
+    epoch = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.messages import poll_new_messages
+
+        filtered = await poll_new_messages(agent_id="gp-wes", last_checked=epoch)
+        unfiltered = await poll_new_messages(
+            agent_id="gp-wes",
+            last_checked=epoch,
+            include_internal_subagent=True,
+        )
+
+    assert len(filtered) == 1
+    assert (filtered[0].get("metadata") or {}).get("toolName") == "spawn_agent"
+    assert all((m.get("metadata") or {}).get("subAgentId") is None for m in filtered)
+    assert len(unfiltered) == 2
+    assert any((m.get("metadata") or {}).get("toolName") == "web_fetch" for m in unfiltered)
+    assert all((m.get("metadata") or {}).get("title") != "Explore agent thinking" for m in unfiltered)
+    assert any(fetch_body in str(m.get("message") or "") for m in unfiltered)
 
 
 async def test_poll_messages_raises_on_error():
@@ -923,6 +1004,14 @@ async def run_all_tests():
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)
     await r.record_async("poll_messages_happy_path", test_poll_messages_happy_path)
+    await r.record_async(
+        "poll_messages_accepts_temporal_iso_string",
+        test_poll_messages_accepts_temporal_iso_string,
+    )
+    await r.record_async(
+        "poll_messages_keeps_explore_chips_when_include_internal",
+        test_poll_messages_keeps_explore_chips_when_include_internal,
+    )
     await r.record_async(
         "context_compaction_projection_keeps_checkpoint_tail", test_context_compaction_projection_keeps_checkpoint_tail
     )

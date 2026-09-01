@@ -3,7 +3,11 @@
  */
 
 import * as repo from './repo';
-import { findAgentAcrossRuns, findTreeAcrossRuns } from '../../providers/benchmarkHubStore';
+import {
+  findAgentAcrossRuns,
+  findAncestorsAcrossRuns,
+  findTreeAcrossRuns,
+} from '../../providers/benchmarkHubStore';
 
 // ---------------------------------------------------------------------------
 // List agents
@@ -256,9 +260,22 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
 // Get ancestors
 // ---------------------------------------------------------------------------
 
-/** Get ancestor chain for breadcrumb navigation. */
-export async function getAncestors(agentId: string) {
-  return { ancestors: await repo.findAncestors(agentId) };
+/**
+ * Live Agent CTE first (includes hub-publish skeletons: archived rows with
+ * parentAgentId so existing prod FE breadcrumbs work with no FE deploy).
+ * If the CTE is empty and archive reads are allowed, walk the hub tree.
+ *
+ *   GET /?agent-id=GP
+ *     → GET /api/agents/:id          (hub archive) parent_agent_id + parent_goal
+ *     → GET /api/agents/:id/ancestors (CTE skeletons or hub tree, root first)
+ *     → breadcrumb click → GET /api/agents/:parentId
+ */
+export async function getAncestors(agentId: string, allowBenchmarkArchive = false) {
+  const live = await repo.findAncestors(agentId);
+  if (live.length > 0 || !allowBenchmarkArchive) {
+    return { ancestors: live };
+  }
+  return { ancestors: await findAncestorsAcrossRuns(agentId) };
 }
 
 // ---------------------------------------------------------------------------

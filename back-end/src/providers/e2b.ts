@@ -7,7 +7,7 @@ import { createLogger } from './logger';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
-  shouldWriteFastModeCacheForUser,
+  resolveFastModeWriteEnabled,
 } from './codeAgentFastModeEnv';
 import { FilePointer, downloadFromStorage } from './storage';
 import { v4 as uuidv4 } from 'uuid';
@@ -23,6 +23,7 @@ import {
 } from './gptCredentials';
 import {
   buildCodeAgentSystemPrompt,
+  buildCodexHarnessSystemPrompt,
   CODE_AGENT_ATTACHMENTS_DIR,
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
@@ -90,6 +91,7 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
 const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
+const CODEX_ROSE_BRIDGE_PATH = '/home/user/rose-bridge.mjs';
 
 function findLocalClaudeCodeWsServer(): string | null {
   const candidates = [
@@ -128,6 +130,31 @@ async function overlayClaudeCodeWsServer(
     { timeoutMs: 10000 }
   );
   log.info(`Overlayed Claude Code ws-server from ${serverPath}`);
+}
+
+function findLocalCodexRoseBridge(): string | null {
+  const candidates = [
+    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'rose-bridge.mjs'),
+    join(process.cwd(), 'e2b-templates', 'codex-code', 'rose-bridge.mjs'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+async function overlayCodexRoseBridge(
+  sandbox: Awaited<ReturnType<typeof Sandbox.create>>
+): Promise<void> {
+  const bridgePath = findLocalCodexRoseBridge();
+  if (bridgePath === null) {
+    log.warn('Codex rose-bridge overlay not found; harness API calls may fail');
+    return;
+  }
+  const content = readFileSync(bridgePath);
+  await sandbox.files.write(CODEX_ROSE_BRIDGE_PATH, new Blob([content]));
+  await sandbox.commands.run(`chmod +x ${CODEX_ROSE_BRIDGE_PATH}`, { timeoutMs: 10000 });
+  log.info(`Overlayed Codex rose-bridge from ${bridgePath}`);
 }
 
 async function overlayCodexCodeWsServer(
@@ -172,8 +199,7 @@ export async function createClaudeCodeSession(
   }
 
   const taskId = uuidv4();
-  const fastModeWriteEnabled =
-    fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
+  const fastModeWriteEnabled = resolveFastModeWriteEnabled(fastModeCacheEnabled, userId);
   const codeAgentFastModeActive = shouldEnableClaudeCodeFastMode({
     openrouterApiKey: process.env.OPENROUTER_API_KEY,
     fastModeCacheEnabled,
@@ -480,7 +506,11 @@ export async function createCodexCodeSession(
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
+  fastModeCacheEnabled?: boolean,
+  harnessOptions?: {
+    harnessMode?: 'code' | 'rose';
+    roseApiBaseUrl?: string;
+  }
 ): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
@@ -494,16 +524,25 @@ export async function createCodexCodeSession(
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
   const model = process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
+  const harnessMode = harnessOptions?.harnessMode ?? 'code';
+  const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const runtimeFingerprint = [
     `template:${templateId}`,
     `wrapper:${fileHash(findLocalCodexCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl,
-    workDir,
-  });
+  const systemPrompt =
+    harnessMode === 'rose' && roseApiBaseUrl
+      ? buildCodexHarnessSystemPrompt({
+          roseApiBaseUrl,
+          roseUserId: userId,
+          anchorAgentId: agentId,
+        })
+      : buildCodeAgentSystemPrompt({
+          githubRepoUrl,
+          workDir,
+        });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
@@ -525,15 +564,25 @@ export async function createCodexCodeSession(
     ...authEnvs,
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    CODE_AGENT_HARNESS_MODE: harnessMode,
   };
+  if (harnessMode === 'rose' && roseApiBaseUrl) {
+    const apiKey = process.env.BACKEND_API_KEY ?? '';
+    if (!apiKey) {
+      throw new Error('BACKEND_API_KEY is required for Codex rose harness sessions');
+    }
+    envs.ROSE_API_BASE_URL = roseApiBaseUrl;
+    envs.ROSE_API_KEY = apiKey;
+    envs.ROSE_USER_ID = userId!;
+    envs.ROSE_ANCHOR_AGENT_ID = agentId;
+  }
   if (credentialMeta) {
     log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);
   } else {
     log.info(`Using OPENAI_API_KEY funded fallback for Codex Code agent ${agentId}`);
   }
 
-  const fastModeWriteEnabled =
-    fastModeCacheEnabled === true || shouldWriteFastModeCacheForUser(userId);
+  const fastModeWriteEnabled = resolveFastModeWriteEnabled(fastModeCacheEnabled, userId);
   const fastModeEnv = buildFastModeCodexEnv(
     goal,
     fastModeCacheEnabled === true,
@@ -597,6 +646,9 @@ export async function createCodexCodeSession(
 
   log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
   await overlayCodexCodeWsServer(sandbox);
+  if (harnessMode === 'rose') {
+    await overlayCodexRoseBridge(sandbox);
+  }
 
   const uploadedFiles: string[] = [];
   if (attachments && attachments.length > 0) {

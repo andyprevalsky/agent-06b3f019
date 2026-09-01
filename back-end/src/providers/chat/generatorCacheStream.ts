@@ -4,7 +4,7 @@ import { createLogger } from '../logger';
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
 
 const log = createLogger('GeneratorCacheStream');
-export const GENERATOR_CACHE_GRACE_MS = 25;
+export const GENERATOR_CACHE_HANG_MS = 5_000;
 
 interface GeneratorCacheStreamOptions {
   agentId: string;
@@ -15,8 +15,10 @@ interface GeneratorCacheStreamOptions {
 }
 
 /**
- * Give Fast Mode's optional remote cache a bounded head start, then race it
- * against live generation. No cache network call can gate provider startup.
+ * Fast Mode read waits for the cache lookup before starting Cerebras.
+ * A remote shared-cache hit (~1s) must not lose to a faster live first token
+ * (~500ms); that race recorded gemma-4-31b usage and broke zero-live replay.
+ * A hang timeout still starts live if the cache never resolves.
  */
 export function createGeneratorCacheStream(
   options: GeneratorCacheStreamOptions
@@ -44,7 +46,8 @@ export function createGeneratorCacheStream(
       const delta = chunk.choices[0]?.delta;
       return Boolean(delta?.content?.length || delta?.reasoning?.length);
     },
-    graceMs: GENERATOR_CACHE_GRACE_MS,
+    awaitCacheFirst: true,
+    hangTimeoutMs: GENERATOR_CACHE_HANG_MS,
     onCacheError: (error) =>
       log.warn('fast_cache.chat_generator_read_failed', {
         agentId: options.agentId,

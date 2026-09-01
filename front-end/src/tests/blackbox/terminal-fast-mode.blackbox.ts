@@ -6,10 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
+import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
 
 const mocks = vi.hoisted(() => {
   const authState = {
-    user: { id: '1f85ff25-6e29-4c1b-8739-f917bd101a30', phone: '+15555555555' },
+    user: { id: 'c49b4ce3-3489-499d-bfbd-846d04ba6275', phone: '+15555555555' },
     isAuthenticated: true,
     isAnonymous: false,
     isFullySignedIn: true,
@@ -107,7 +108,7 @@ function messageSendingArgs(overrides: Partial<Parameters<typeof useMessageSendi
 
 describe('useTerminalAgents Fast Mode bridge', () => {
   beforeEach(() => {
-    mocks.authState.user.id = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+    mocks.authState.user.id = ADMIN_ACCOUNTS[0]!.userId;
     mockSession();
     clearCaptures();
     server.use(
@@ -133,7 +134,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
   });
 
   it('defaults other allow-listed accounts on as well', async () => {
-    mocks.authState.user.id = '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9';
+    mocks.authState.user.id = ADMIN_ACCOUNTS[1]!.userId;
     const { result } = renderHook(() => useTerminalAgents('agents', vi.fn(), vi.fn()));
 
     await waitFor(() => expect(result.current.fastMode).toBe(true));

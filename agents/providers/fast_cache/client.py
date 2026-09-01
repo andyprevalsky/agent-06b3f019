@@ -55,6 +55,18 @@ _archive_read_semaphore: Optional[asyncio.Semaphore] = None
 _archive_read_semaphore_loop: Optional[asyncio.AbstractEventLoop] = None
 _prefetched_records: dict[str, tuple[CacheRecord, float]] = {}
 _PREFETCH_TTL_S = 5.0
+# get-position is a SQL LIKE per (goalHash, callSite, step). Fifty July GPs
+# replaying the same Huberman-class namespace were paying that RTT on every
+# inner explore/execute turn (~31 serial lookups × ~384ms). Memoize the
+# durable slot across the worker process so sibling agents share one fetch,
+# and slide a small prefetch window so the next steps are already local.
+_POSITION_MEMO_TTL_S = 1800.0
+_POSITION_PREFETCH_AHEAD = 8
+_POSITION_HTTP_MAX_IN_FLIGHT = int(os.environ.get("FAST_CACHE_POSITION_MAX_IN_FLIGHT", "16") or "16")
+_position_memo: dict[tuple[str, str, int], tuple[Optional[Any], Optional[str], float]] = {}
+_position_inflight: dict[tuple[str, str, int], asyncio.Future[tuple[Optional[Any], Optional[str]]]] = {}
+_position_http_sem: Optional[asyncio.Semaphore] = None
+_position_http_sem_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 class CacheRecord(TypedDict):
@@ -426,6 +438,136 @@ async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]
         raise RuntimeError(f"fast-cache get-first failed: {exc}") from exc
 
 
+def _position_memo_key(goal_hash: str, call_site: str, step: int) -> tuple[str, str, int]:
+    return (goal_hash, (call_site or "").strip(), int(step))
+
+
+def _position_http_semaphore() -> asyncio.Semaphore:
+    global _position_http_sem, _position_http_sem_loop
+    loop = asyncio.get_running_loop()
+    if _position_http_sem is None or _position_http_sem_loop is not loop:
+        _position_http_sem = asyncio.Semaphore(_POSITION_HTTP_MAX_IN_FLIGHT)
+        _position_http_sem_loop = loop
+    return _position_http_sem
+
+
+def _position_memo_get(
+    goal_hash: str, call_site: str, step: int
+) -> Optional[tuple[Optional[Any], Optional[str]]]:
+    entry = _position_memo.get(_position_memo_key(goal_hash, call_site, step))
+    if entry is None:
+        return None
+    value, key, expires_at = entry
+    if expires_at <= time.monotonic():
+        _position_memo.pop(_position_memo_key(goal_hash, call_site, step), None)
+        return None
+    return value, key
+
+
+def _position_memo_put(
+    goal_hash: str,
+    call_site: str,
+    step: int,
+    value: Optional[Any],
+    key: Optional[str],
+) -> None:
+    _position_memo[_position_memo_key(goal_hash, call_site, step)] = (
+        value,
+        key,
+        time.monotonic() + _POSITION_MEMO_TTL_S,
+    )
+
+
+def clear_position_memo() -> None:
+    """Test helper: drop process-local get-position memo + in-flight waits."""
+    _position_memo.clear()
+    _position_inflight.clear()
+
+
+def _schedule_position_prefetch(goal_hash: str, call_site: str, step: int) -> None:
+    """Fill the next few durable slots without blocking the current lookup."""
+    ahead = [
+        current
+        for current in range(int(step) + 1, int(step) + 1 + _POSITION_PREFETCH_AHEAD)
+        if _position_memo_get(goal_hash, call_site, current) is None
+        and _position_memo_key(goal_hash, call_site, current) not in _position_inflight
+    ]
+    if not ahead:
+        return
+
+    async def _prefetch() -> None:
+        await asyncio.gather(
+            *[_fetch_position_http(goal_hash, call_site, current) for current in ahead],
+            return_exceptions=True,
+        )
+
+    try:
+        asyncio.get_running_loop().create_task(_prefetch())
+    except RuntimeError:
+        return
+
+
+async def _fetch_position_http(
+    goal_hash: str,
+    call_site: str,
+    step: int,
+) -> tuple[Optional[Any], Optional[str]]:
+    """One get-position HTTP, single-flighted and memoized per durable slot."""
+    memo_key = _position_memo_key(goal_hash, call_site, step)
+    cached = _position_memo_get(goal_hash, call_site, step)
+    if cached is not None:
+        return cached
+    existing = _position_inflight.get(memo_key)
+    if existing is not None:
+        return await existing
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[tuple[Optional[Any], Optional[str]]] = loop.create_future()
+    _position_inflight[memo_key] = future
+    try:
+        async with _position_http_semaphore():
+            cached = _position_memo_get(goal_hash, call_site, step)
+            if cached is not None:
+                future.set_result(cached)
+                return cached
+            api_url, api_key = _backend()
+            body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
+            try:
+                resp = await _shared_client().post(
+                    f"{api_url}/api/fast-cache/get-position",
+                    headers=backend_api_headers(api_key),
+                    json=body,
+                    timeout=_GET_TIMEOUT_S,
+                )
+            except Exception as exc:
+                logger.warning("fast_cache.get_position_error", error=str(exc)[:300])
+                if not future.done():
+                    future.set_exception(exc)
+                raise
+            if resp.status_code != 200:
+                if resp.status_code in {404, 405}:
+                    result = (None, None)
+                    _position_memo_put(goal_hash, call_site, step, None, None)
+                    future.set_result(result)
+                    return result
+                logger.warning("fast_cache.get_position_failed", status=resp.status_code)
+                error = RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
+                if not future.done():
+                    future.set_exception(error)
+                raise error
+            data = resp.json()
+            if not data.get("hit"):
+                result = (None, None)
+            else:
+                result = (data.get("value"), data.get("key"))
+            _position_memo_put(goal_hash, call_site, step, result[0], result[1])
+            future.set_result(result)
+            return result
+    finally:
+        if _position_inflight.get(memo_key) is future:
+            _position_inflight.pop(memo_key, None)
+
+
 async def cache_get_position_fallback(
     goal_hash: str,
     call_site: str,
@@ -441,30 +583,22 @@ async def cache_get_position_fallback(
     fallback would replay another request's value for the same call site.
     Transport / non-404 errors raise so callers can set ``lookup_failed`` and
     skip synthetic passthroughs.
+
+    Hits (and clean misses) are memoized on the worker so 50-way Fast Mode
+    fan-out does not re-query the same July slot. The next few steps are
+    prefetched in the background so the sequential explore/execute loop
+    does not serialize on HTTP.
     """
     if step is None:
         return None, None
-    api_url, api_key = _backend()
-    body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
-    try:
-        resp = await _shared_client().post(
-            f"{api_url}/api/fast-cache/get-position",
-            headers=backend_api_headers(api_key),
-            json=body,
-            timeout=_GET_TIMEOUT_S,
-        )
-    except Exception as exc:
-        logger.warning("fast_cache.get_position_error", error=str(exc)[:300])
-        raise
-    if resp.status_code != 200:
-        if resp.status_code in {404, 405}:
-            return None, None
-        logger.warning("fast_cache.get_position_failed", status=resp.status_code)
-        raise RuntimeError(f"fast-cache get-position failed: {resp.status_code}")
-    data = resp.json()
-    if not data.get("hit"):
-        return None, None
-    return data.get("value"), data.get("key")
+    current = int(step)
+    cached = _position_memo_get(goal_hash, call_site, current)
+    if cached is not None:
+        _schedule_position_prefetch(goal_hash, call_site, current)
+        return cached
+    result = await _fetch_position_http(goal_hash, call_site, current)
+    _schedule_position_prefetch(goal_hash, call_site, current)
+    return result
 
 
 async def trajectory_prior_exists(

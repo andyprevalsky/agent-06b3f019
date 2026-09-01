@@ -107,6 +107,10 @@ require_text "$FORMAT" 'Oops! Page not found' \
   "approval FE links must not cite SPA NotFound paths like undeployed /open-agent"
 require_text "$FORMAT" 'python3 scripts/publish_evidence_links.py' \
   "approval Evidence must publish FE + LLM dumps via publish_evidence_links"
+require_text "$FORMAT" 'every `spawn_browser_agent` task on that agent to be terminated' \
+  "approval FE links must require browser agents terminated with recording attached"
+require_text "$RCA" 'every browser agent on the cited agent must be terminated with its recording attached' \
+  "/rca skill description must require FE browser terminate+recording validation"
 require_text "$FORMAT" '/opt/cursor/artifacts' \
   "approval LLM dumps must land under Cursor artifacts for multi-day reachability"
 require_text "$FORMAT" 'Never link `file://…/.context/rendered-llm-dumps/…`' \

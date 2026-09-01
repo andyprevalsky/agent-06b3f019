@@ -3344,14 +3344,31 @@ command -v npx >/dev/null 2>&1 || {
     echo "   Install Node.js or ensure nvm's bin dir is on PATH before run-bench-fleet." >&2
     exit 1
 }
-# Retry transient npx/tsx install races (ENOENT spawn sh under concurrent
-# controllers / npm cache contention) before failing closed on a missing dump.
+# Resolve a seed-dump runner that does not depend on a writable npm cache.
+# Hermetic fleet tests ship an empty package.json (no node_modules); live
+# coverage can race `npx --yes tsx` into ENOTEMPTY / `tsx: not found`.
+# Prefer repo-local tsx, then PATH tsx, then Node 22 type-stripping, then npx.
+_seed_dump_get() {
+    local token="$1" out="$2"
+    if [ -x "$ROOT_DIR/node_modules/.bin/tsx" ]; then
+        "$ROOT_DIR/node_modules/.bin/tsx" scripts/seed-dump-cache.ts get "$token" "$out"
+    elif [ -x "$ROOT_DIR/back-end/node_modules/.bin/tsx" ]; then
+        "$ROOT_DIR/back-end/node_modules/.bin/tsx" scripts/seed-dump-cache.ts get "$token" "$out"
+    elif command -v tsx >/dev/null 2>&1; then
+        tsx scripts/seed-dump-cache.ts get "$token" "$out"
+    elif node --experimental-strip-types -e 'export {}' >/dev/null 2>&1; then
+        node --experimental-strip-types scripts/seed-dump-cache.ts get "$token" "$out"
+    else
+        npx --yes tsx scripts/seed-dump-cache.ts get "$token" "$out"
+    fi
+}
+# Retry transient runner races before failing closed on a missing dump.
 _SEED_GUEST_OK=0
 for _seed_try in 1 2 3 4 5; do
     rm -f "$_SEED_GUEST_PROBE"
     if (
             cd "$ROOT_DIR/back-end" &&
-                npx --yes tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
+                _seed_dump_get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
         ) && [ -s "$_SEED_GUEST_PROBE" ]; then
         _SEED_GUEST_OK=1
         break

@@ -209,6 +209,19 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert "timedelta(minutes=browser_timeout_minutes)" in execute_source
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
 
+
+def test_browser_spawn_goal_uses_tool_call_goal_verbatim():
+    """spawn_browser_agent must use the tool-call goal as-is — no parent-goal injection."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    assert 'goal = tool_call.get("goal", "")' in source
+    assert "_browser_spawn_goal_from_parent" not in source
+    assert "BENCHMARK EXECUTION CONTRACT" not in source
+
+
 def test_transient_session_init_failure_classification():
     """RCA (agent 53feac08): the first two browser spawns died on Kernel's
     `400 Proxy is marked unavailable from the last health check` because
@@ -19025,6 +19038,10 @@ async def run_all_tests():
     r.record(
         "stateful_browser_activity_one_thirty_minute_attempt",
         test_stateful_browser_activity_has_one_thirty_minute_attempt,
+    )
+    r.record(
+        "browser_spawn_goal_uses_tool_call_goal_verbatim",
+        test_browser_spawn_goal_uses_tool_call_goal_verbatim,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)

@@ -1,0 +1,29 @@
+{
+  "fixture_id": "f0f03928_62e3b19b76da_e1",
+  "baseline_status": "PASS",
+  "route": "openrouter",
+  "actual_model": "google/gemini-3.5-flash",
+  "pool": "rose-1-lite",
+  "parent_goal": "Order an iron and something to iron a shirt on (ironing board or mat) via DoorDash for ASAP delivery to 88 Howard St, Apt 1413, San Francisco, CA 94105. Use the user's saved payment. Confirm total, delivery ETA, and order details.",
+  "bad_spawn_goal": "Order an iron and something to iron a shirt on (ironing board or mat) via DoorDash for ASAP delivery to 88 Howard St, Apt 1413, San Francisco, CA 94105. Use the user's saved payment method. Confirm total cost, delivery ETA, and list of ordered items. Log in using the authenticated DoorDash session. Once the order is placed, extract and return: the order ID, the total cost in USD, the delivery ETA, and the list of ordered items with their names and price.",
+  "prior_fail_in_context": true,
+  "root": "f0f03928-c3c0-4d0a-830f-c3183724dd00",
+  "agent_id": "f0f03928-c3c0-4d0a-830f-c3183724dd00",
+  "dump_id": "62e3b19b76da",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 14,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

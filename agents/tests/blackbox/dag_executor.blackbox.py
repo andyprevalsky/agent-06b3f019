@@ -1100,6 +1100,53 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
     assert sibling_terminal[0]["metadata"].get("canceled") is True
 
 
+def test_fan_in_synthesis_goal_detection():
+    from loop.dag_executor import is_fan_in_synthesis_goal
+
+    assert is_fan_in_synthesis_goal(
+        "Consolidate the complete evidence returned by tasks 0 through 4 into a final candidate universe."
+    )
+    assert is_fan_in_synthesis_goal("Merge ranked results and produce the final artifact")
+    assert not is_fan_in_synthesis_goal("Search GitHub for CUDA kernel repositories")
+    # Keyword hits alone are not enough for rewrite; still detectable as wording.
+    assert is_fan_in_synthesis_goal("Implement merge sort")
+    assert is_fan_in_synthesis_goal("Finalize the OAuth flow")
+
+
+def test_rewrite_recursive_gp_synthesis_task_to_reasoning():
+    from loop.dag_executor import DAGTask, maybe_rewrite_recursive_gp_synthesis_task
+
+    task = DAGTask(
+        index=6,
+        goal="Consolidate the complete evidence returned by tasks 0 through 4 into a final candidate universe.",
+        tool_name="spawn_general_purpose_agent",
+        depends_on=[0, 1, 2, 3, 4],
+    )
+    assert maybe_rewrite_recursive_gp_synthesis_task(task) is True
+    assert task.tool_name == "reasoning"
+
+    keep = DAGTask(
+        index=1,
+        goal="Search GitHub for CUDA kernel repositories with Triton examples",
+        tool_name="spawn_general_purpose_agent",
+        depends_on=[0],
+    )
+    assert maybe_rewrite_recursive_gp_synthesis_task(keep) is False
+    assert keep.tool_name == "spawn_general_purpose_agent"
+
+    # Negative controls: synthesis keywords without fan-in deps must NOT rewrite
+    # (preserve GP spawn + output_schema contract).
+    for goal in ("Implement merge sort", "Finalize the OAuth flow"):
+        false_pos = DAGTask(
+            index=2,
+            goal=goal,
+            tool_name="spawn_general_purpose_agent",
+            depends_on=[],
+        )
+        assert maybe_rewrite_recursive_gp_synthesis_task(false_pos) is False
+        assert false_pos.tool_name == "spawn_general_purpose_agent"
+
+
 async def run_all_tests():
     print("dag-executor blackbox tests:")
     r = BlackboxResult()
@@ -1122,6 +1169,8 @@ async def run_all_tests():
         "dag_foreach_alias_override_passes_spawn_agent_validation",
         test_dag_foreach_alias_override_passes_spawn_agent_validation,
     )
+    r.record("fan_in_synthesis_goal_detection", test_fan_in_synthesis_goal_detection)
+    r.record("rewrite_recursive_gp_synthesis_task_to_reasoning", test_rewrite_recursive_gp_synthesis_task_to_reasoning)
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
     r.record(
         "build_param_population_message_spawn",

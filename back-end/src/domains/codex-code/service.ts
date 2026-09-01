@@ -43,6 +43,8 @@ export interface CreateSessionParams {
   github_repo_url?: string;
   user_id: string;
   fast_mode_cache_enabled?: boolean;
+  harness_mode?: 'code' | 'rose';
+  rose_api_base_url?: string;
 }
 
 export interface CloseSessionParams {
@@ -125,7 +127,11 @@ export async function createSession(params: CreateSessionParams) {
     attachments,
     normalizedRepoUrl,
     effectiveUserId,
-    fastModeCacheEnabled
+    fastModeCacheEnabled,
+    {
+      harnessMode: params.harness_mode,
+      roseApiBaseUrl: params.rose_api_base_url,
+    }
   );
 
   return {

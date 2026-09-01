@@ -352,7 +352,9 @@ fi
 FLEET="$ROOT_DIR/scripts/run-bench-fleet"
 if grep -q 'CLOUDBENCH_GUEST_PG_MAJOR' "$FLEET" \
    && grep -q 'Missing canonical base fixture for cloud guests' "$FLEET" \
-   && grep -q 'seed-dump-cache.ts get' "$FLEET"; then
+   && grep -q 'seed-dump-cache.ts get' "$FLEET" \
+   && grep -q 'experimental-strip-types' "$FLEET" \
+   && grep -q 'node_modules/.bin/tsx' "$FLEET"; then
     PASS=$((PASS+1)); echo "  ✅ run-bench-fleet preflights the cloud-guest pg major seed dump"
 else
     FAIL=$((FAIL+1)); echo "  ❌ run-bench-fleet missing cloud-guest canonical seed-dump preflight"

@@ -654,6 +654,20 @@ if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
         "BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30"
     )
 fi
+# Guest-checkout tasks (e.g. Blue Bottle) must disable saved cookie/Steel auth on
+# the backend/worker stack — setting the flag only in run_benchmark's process leaves
+# cookie_bundle injection on and fails the guest-checkout semantic criterion.
+if (
+    cd "$REPO_DIR/agents"
+    python3 -c '
+import sys
+from benchmarks.spawn_contract import tasks_require_disabled_saved_browser_auth
+sys.exit(0 if tasks_require_disabled_saved_browser_auth(sys.argv[1:]) else 1)
+' "${BENCH_TASK_LIST[@]}"
+); then
+    log "guest-checkout task(s) detected — disabling saved browser auth on stack"
+    STACK_ENV+=("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true")
+fi
 if [ -n "$FRONTEND_SUPABASE_URL" ]; then
     STACK_ENV+=("VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL")
 fi
