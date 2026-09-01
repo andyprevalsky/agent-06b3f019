@@ -37,7 +37,7 @@ async function run(): Promise<void> {
   assert.equal(options.response_format?.json_schema.name, 'router_decision');
   assert.equal(options.response_format?.json_schema.strict, true);
 
-  assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 3_000);
+  assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 4_500);
   assert.deepEqual(
     parsePartialRouterDecisionJson(
       '{"reasoning":"closed explanation","action":"direct_answer","query":"","goal":"","mode":"plan"'

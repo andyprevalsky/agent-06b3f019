@@ -1,4 +1,4 @@
-export const DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS = 3_000;
+export const DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS = 4_500;
 
 export interface RouterCompletionDeadline {
   signal: AbortSignal;
