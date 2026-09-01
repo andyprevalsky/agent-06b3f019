@@ -21,13 +21,13 @@ import {
   raceProbeAbort,
   recoveryConfigKeyForSession,
   sameSiteNavigationUrl,
-} from './challengeRecoverySearchUtils';
+} from './challengeRecoveryShared';
 import type { BrowserProviderName } from './types';
 
 export {
   recoveryConfigKeyForSession,
   sameSiteNavigationUrl,
-} from './challengeRecoverySearchUtils';
+} from './challengeRecoveryShared';
 
 export {
   bestSpecificity,
@@ -104,9 +104,12 @@ export interface RecoveryCandidateSession {
 
 /** Close the Playwright validation CDP client without failing remote release. */
 async function closeValidationBrowser(session: RecoveryCandidateSession): Promise<void> {
-  const browser = session.validationBrowser as { close?: () => Promise<void> } | null | undefined;
-  if (browser == null || typeof browser.close !== 'function') return;
-  await browser.close().catch(() => {});
+  // Optional-chain: test doubles may omit `close`. Calling a missing method throws
+  // synchronously before `.catch()` attaches, which previously swallowed the error
+  // in release() and skipped releaseKernel/releaseSteel for partial-clear losers.
+  const close = session.validationBrowser.close?.bind(session.validationBrowser);
+  if (close === undefined) return;
+  await close().catch(() => {});
 }
 
 export interface CandidateProbeResult {

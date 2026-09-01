@@ -1,10 +1,9 @@
 /**
- * Pure helpers for challenge-recovery search/probe — split from
- * challengeRecovery.ts to stay under the max-lines budget.
+ * Shared helpers for challenge-recovery URL matching and session→config keys.
+ * Kept outside challengeRecovery.ts to stay under the max-lines budget.
  */
 
-/** Registrable host (strip leading www.) for same-site comparisons. */
-export function registrableHost(hostname: string | null | undefined): string {
+function registrableHost(hostname: string | null | undefined): string {
   const host = String(hostname || '')
     .toLowerCase()
     .replace(/^\.+|\.+$/g, '');

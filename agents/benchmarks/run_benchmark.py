@@ -1928,11 +1928,7 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
-    if (
-        task.success_on_payment_card_request
-        and PAYMENT_BOUNDARY_GOAL_MARKER not in goal
-        and task.name != "browser-hotel-booking"
-    ):
+    if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
         goal += payment_boundary_operational_suffix()
     return goal
 
@@ -4785,6 +4781,83 @@ def _early_fail_should_pause_agent(reason: Optional[str]) -> bool:
         return False
     normalized = reason.lower()
     return normalized.startswith("timeout after") or "tree stalled" in normalized
+
+
+_BROWSER_TERMINAL_ACTION_TYPES = frozenset(
+    {"task_complete", "session_paused", "write_lock_rejected"}
+)
+
+
+def _agent_messages_have_browser_terminal(messages: Optional[List[dict]]) -> bool:
+    """True when every open spawn_browser_agent task has a terminal action_type.
+
+    FE ``computeActiveBrowserPanels`` keeps a live chip open until it sees
+    ``task_complete`` / ``session_paused`` / ``write_lock_rejected``. A FINISHED
+    ``recording`` row alone does not close the panel — which is why timeout hub
+    archives historically showed active browser chips with recordings attached.
+    """
+    open_task_ids: set[str] = set()
+    terminal_task_ids: set[str] = set()
+    tool_call_scoped_terminal = False
+    for message in messages or []:
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent":
+            continue
+        action_type = metadata.get("action_type")
+        task_id = metadata.get("task_id")
+        if isinstance(task_id, str) and task_id:
+            if action_type in _BROWSER_TERMINAL_ACTION_TYPES:
+                terminal_task_ids.add(task_id)
+            elif action_type in {"browser", "session_starting", "session_init", "task_started"}:
+                open_task_ids.add(task_id)
+        elif action_type in _BROWSER_TERMINAL_ACTION_TYPES:
+            tool_call_scoped_terminal = True
+    if tool_call_scoped_terminal:
+        return True
+    if not open_task_ids:
+        return True
+    return open_task_ids.issubset(terminal_task_ids)
+
+
+async def _refresh_agent_after_pause_for_browser_terminal(
+    base_url: str,
+    agent_id: str,
+    data: dict,
+    *,
+    timeout_seconds: float = 60.0,
+    poll_interval_seconds: float = 2.0,
+) -> dict:
+    """Re-fetch agent messages after pause so hub archives include browser terminals.
+
+    Timeout/stall paths pause the agent *after* the poll snapshot. Cancel +
+    recording cleanup then post ``task_complete`` / ``session_paused`` and finalize
+    the recording asynchronously. Archiving the pre-pause snapshot leaves FE links
+    with an IN_PROGRESS browser chip forever.
+    """
+    if _agent_messages_have_browser_terminal(data.get("messages")):
+        return data
+    deadline = time.time() + timeout_seconds
+    latest = data
+    while time.time() < deadline:
+        await asyncio.sleep(poll_interval_seconds)
+        try:
+            latest = await get_agent(base_url, agent_id)
+        except Exception as refresh_error:
+            print(f"    ⚠ Browser-terminal refresh failed: {refresh_error}")
+            continue
+        if _agent_messages_have_browser_terminal(latest.get("messages")):
+            print(
+                f"    ✓ Browser terminal messages landed after pause "
+                f"({len(latest.get('messages') or [])} messages)"
+            )
+            return latest
+    print(
+        "    ⚠ Timed out waiting for browser terminal messages after pause; "
+        "archiving latest snapshot anyway"
+    )
+    return latest
 
 
 def _local_victoria_db_container() -> Optional[str]:
@@ -9835,6 +9908,9 @@ async def run_single_task(
             try:
                 if await pause_agent(base_url, agent_id):
                     print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
+                    data = await _refresh_agent_after_pause_for_browser_terminal(
+                        base_url, agent_id, data
+                    )
             except Exception as pause_error:
                 print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 

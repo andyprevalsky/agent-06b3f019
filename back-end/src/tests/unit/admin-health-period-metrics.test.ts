@@ -164,6 +164,9 @@ assert.deepStrictEqual(
 assert.strictEqual(parseTimeSlice(undefined), 'monthly');
 assert.strictEqual(parseTimeSlice('weekly'), 'weekly');
 
+// Pin pricedAt before SONNET_5_PRICE_CHANGE_AT (2026-09-01). Defaulting to
+// Date.now() made this assertion flip overnight when the sonnet-5 list price
+// stepped from $2/$10 to $3/$15.
 const cacheAwareCost = calculateTaskCostPerTask(
   [{ taskId: 'root-task' }],
   [
@@ -184,7 +187,8 @@ const cacheAwareCost = calculateTaskCostPerTask(
       tokensOut: 1_000_000,
     }),
     usage('spawned-child', { costCents: 1_000 }),
-  ]
+  ],
+  Date.parse('2026-08-15T00:00:00.000Z')
 );
 const providerCacheSemantics = calculateTaskCostPerTask(
   [{ taskId: 'provider-cache-semantics' }],

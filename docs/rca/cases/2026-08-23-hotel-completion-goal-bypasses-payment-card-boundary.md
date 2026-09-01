@@ -25,7 +25,7 @@ sources:
   - commit 605a4bdc1
   - fleet run 20260822_212328_browser-hotel-booking
 repro: cd agents/tests/blackbox && python benchmark.blackbox.py hotel_e6a95458_no_payment_card_boundary
-status: open
+status: fixed
 ---
 
 # RCA: completion-oriented spawn goal bypasses payment-card boundary
@@ -94,15 +94,12 @@ recorded failure_reason.
 
 ## Solution
 
-**Proposed (not yet implemented — awaiting approval):**
+**Implemented:**
 
-1. **Re-align harness goal injection for hotel:** remove the `browser-hotel-booking`
-   exemption in `_benchmark_goal_for_task` so `payment_boundary_operational_suffix()`
-   is appended again (harness-only; stays out of catalog prompt per prior feedback).
-2. **Pin spawn goal for payment-boundary benches (stronger):** pass catalog goal
-   through to `spawn_browser_agent` without root rewrite, or inject payment-boundary
-   marker into spawn args at harness level.
-3. Keep `_normalize_response_schema_for_goal` payment-boundary guard tied to the marker.
+1. Removed the `browser-hotel-booking` exemption in `_benchmark_goal_for_task` so
+   `payment_boundary_operational_suffix()` is appended again (harness-only; catalog
+   prompt unchanged).
+2. Kept `_normalize_response_schema_for_goal` payment-boundary guard tied to the marker.
 
 Outcome gate after fix: `scripts/run-bench --local browser-hotel-booking` must reach
 `payment_approval` (not `write_lock`, not phone pivot).

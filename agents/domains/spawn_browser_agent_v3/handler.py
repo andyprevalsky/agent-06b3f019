@@ -60,7 +60,6 @@ from utils.prompts import build_verifier_prompt
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
-    goal_allows_logged_out_cookie_commit,
     live_tab_looks_challenged,
     page_looks_challenged,
     recover_from_challenge,
@@ -3753,6 +3752,40 @@ async def _finalize_browser_diagnostics_for_fe(
     return metadata
 
 
+async def _emit_browser_task_terminal_for_fe(
+    *,
+    agent_id: str,
+    task_id: Optional[str],
+    tool_call_id: Optional[str],
+    browser_url: Optional[str],
+    title: str = "Browser Session Closed",
+    message: str = "Browser session closed",
+) -> None:
+    """Close the FE live browser chip after recording/session teardown.
+
+    ``computeActiveBrowserPanels`` keeps a panel open until it sees an explicit
+    terminal ``action_type`` (``task_complete`` / ``session_paused`` /
+    ``write_lock_rejected``). Finalizing a ``recording`` message alone does
+    **not** close the chip — timeout/cancel paths historically left hub
+    transcripts with FINISHED recordings and an IN_PROGRESS ``browser`` row,
+    so every FE link kept showing an active browser panel.
+    """
+    if not task_id:
+        return
+    with contextlib.suppress(Exception):
+        await save_browser_action_message(
+            agent_id=agent_id,
+            title=title,
+            task_id=task_id,
+            message=message,
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url or "",
+            action_type="task_complete",
+            tool_call_id=tool_call_id or str(uuid_module.uuid4()),
+            is_completion_message=True,
+        )
+
+
 def _schedule_browser_cleanup(
     *,
     agent_id: str,
@@ -3772,6 +3805,8 @@ def _schedule_browser_cleanup(
     playwright_browser: Optional[Any],
     playwright_instance: Optional[Any],
     playwright_driver_pid: Optional[int],
+    tool_call_id: Optional[str] = None,
+    emit_task_terminal: bool = True,
 ) -> asyncio.Task:
     async def _cleanup() -> None:
         logger.info("Browser cleanup started in background", agent_id=agent_id, task_id=task_id)
@@ -3831,6 +3866,18 @@ def _schedule_browser_cleanup(
                     browser_url=browser_url,
                     browser_session_metadata=browser_session_metadata,
                 )
+            # Recording finalize alone does not close the FE live chip. Emit a
+            # task_complete terminal so timeout/cancel cleanup cannot leave the
+            # panel stuck on an IN_PROGRESS browser row (hotel k=5 hub chips).
+            if emit_task_terminal:
+                await _emit_browser_task_terminal_for_fe(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    browser_url=browser_url,
+                    title="Browser Session Closed",
+                    message="Browser session closed after teardown",
+                )
             if dom_service:
                 with contextlib.suppress(Exception):
                     await dom_service.disconnect()
@@ -3847,6 +3894,15 @@ def _schedule_browser_cleanup(
                 task_id=task_id,
                 error=extract_error_message(exc),
             )
+            if emit_task_terminal:
+                await _emit_browser_task_terminal_for_fe(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    tool_call_id=tool_call_id,
+                    browser_url=browser_url,
+                    title="Browser Session Closed",
+                    message="Browser session closed after teardown error",
+                )
         finally:
             _clear_browser_activity_memory_buffers(
                 browser_recorder=browser_recorder,
@@ -5595,6 +5651,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             context=context,
         )
         return injected
+
+    # Pause-for-resume returns (write / payment / auth assistance) still run
+    # ``finally`` teardown, but must NOT emit task_complete — the browser task
+    # resumes in a later activity call and the FE chip must stay open.
+    browser_task_paused_for_resume = False
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -7820,6 +7881,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
+                browser_task_paused_for_resume = True
                 return {
                     "status": "awaiting_auth_assistance",
                     "request_id": request_id,
@@ -7844,13 +7906,25 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 }
 
             if action_name == "recover_from_challenge":
-                recovery_reason = unified_action.get("params", {}).get("reason", "")
+                recovery_params = unified_action.get("params", {}) or {}
+                recovery_reason = recovery_params.get("reason", "")
+                # Default true: preserve authenticated cookies unless the model
+                # explicitly opts into a fresh-cookie machine search.
+                if "auth_cookies_are_preserved" in recovery_params:
+                    auth_cookies_are_preserved = bool(
+                        recovery_params.get("auth_cookies_are_preserved")
+                    )
+                else:
+                    auth_cookies_are_preserved = True
+                allow_logged_out_cookie_commit = not auth_cookies_are_preserved
                 recovery_call_id = _browser_action_tool_call_id(llm_result)
-                logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
-
-                provider_exit_rejected = bool(
-                    unified_action.get("params", {}).get("provider_exit_rejected")
+                logger.info(
+                    "Browser agent requested staged challenge recovery",
+                    reason=recovery_reason,
+                    auth_cookies_are_preserved=auth_cookies_are_preserved,
                 )
+
+                provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
                 # If the live tab is already clean and this was not a hard
                 # provider-exit rejection, skip — avoids recovery loops the model
                 # invents from third-party network noise on an otherwise fine page.
@@ -7906,6 +7980,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "cookie_probe_wave": "Probing cookie variants",
                     "apply_cookie_fix": "Applying safe cookie recovery",
                     "preserve_auth_state": "Preserving auth; searching configs",
+                    "fresh_cookie_config_search": "Fresh-cookie config search",
                     "browser_config_search": "Searching browser configurations",
                     "live_verify": "Verifying live tab cleared challenge",
                 }
@@ -7947,7 +8022,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if lanes and isinstance(lanes[0], dict)
                         else recovery_storage_state
                     )
-                    preserve_auth = not goal_allows_logged_out_cookie_commit(goal)
+                    preserve_auth = auth_cookies_are_preserved
                     result = await recover_browser_challenge(
                         config,
                         task_id,
@@ -8028,9 +8103,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         progress=emit_recovery_progress,
                         provider_exit_rejected=provider_exit_rejected
                         or escalate_after_cookie_false_stable,
-                        allow_logged_out_cookie_commit=goal_allows_logged_out_cookie_commit(
-                            goal
-                        ),
+                        allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
                     )
                     if recovery.recovery == "cookies_sanitized":
                         cookie_recovery_successes += 1
@@ -8211,6 +8284,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             if bool(config_result.get("storage_state_preloaded"))
                             else "live tab verified clean"
                         )
+                        auth_cookie_note = (
+                            "authenticated cookies were preserved"
+                            if auth_cookies_are_preserved
+                            else "fresh-cookie recovery was allowed (auth cookies not required)"
+                        )
                         recovery_message = (
                             f"Recovered by selecting {config_key}; {verified_phrase}"
                             + (
@@ -8218,11 +8296,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 if blocked_resource_url
                                 else ""
                             )
-                            + "; signed-in state was preserved."
+                            + f"; {auth_cookie_note}."
                         )
                     else:
+                        auth_cookie_note = (
+                            "authenticated cookies were preserved"
+                            if auth_cookies_are_preserved
+                            else "fresh-cookie recovery was allowed (auth cookies not required)"
+                        )
                         recovery_message = (
-                            "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
+                            "Recovered by removing a proven non-auth cookie subset; "
+                            f"{auth_cookie_note}."
                         )
                     if current_url:
                         recovery_message = (
@@ -8987,6 +9071,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     cdp_url=cdp_url[:50] if cdp_url else None,
                 )
                 await browser_stream.finish_tools(status="FINISHED")
+                browser_task_paused_for_resume = True
                 return {
                     "status": "awaiting_write_approval",
                     "approval_type": approval_type,
@@ -9114,6 +9199,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         logger.warning(f"Failed to disconnect browser before payment card return: {e}")
 
                 await browser_stream.finish_tools(status="FINISHED")
+                browser_task_paused_for_resume = True
                 return {
                     "status": "awaiting_payment_card_approval",
                     "payment_request": payment_request,
@@ -9566,6 +9652,13 @@ Based on this feedback, I need to continue working on the task and address the i
             playwright_browser=playwright_browser,
             playwright_instance=playwright_instance,
             playwright_driver_pid=playwright_driver_pid,
+            tool_call_id=tool_call_id,
+            # Happy-path / error handlers already post task_complete before
+            # finally. CancelledError also posts one, but force-cancel and
+            # hub-archive races still need cleanup as the terminal safety net.
+            # Pause-for-resume returns must keep the FE chip open for the next
+            # activity call (write / payment / auth assistance).
+            emit_task_terminal=not browser_task_paused_for_resume,
         )
         playwright_browser = None
         playwright_instance = None
@@ -9763,6 +9856,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
                     was_cancelled = False
+                    # Prefer resume-state task_id when ActivityError wipes the
+                    # activity return value on cancel — otherwise session_paused
+                    # is posted without task_id and hub archives keep an open chip.
+                    known_task_id = (
+                        write_lock_resume_state.get("task_id")
+                        if isinstance(write_lock_resume_state, dict)
+                        else None
+                    )
                     await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
                     if workflow_instance.is_paused and not activity_handle.done():
                         logger.info("\U0001f534 Cancelling browser agent due to pause")
@@ -9781,6 +9882,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "status": "cancelled",
                             "message": "Browser agent cancelled by user",
                         }
+                        if known_task_id:
+                            result["task_id"] = known_task_id
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")
@@ -9791,6 +9894,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     if result:
                         if result.get("task_id"):
                             pause_metadata["task_id"] = result["task_id"]
+                        elif known_task_id:
+                            pause_metadata["task_id"] = known_task_id
                         if result.get("browser_url"):
                             pause_metadata["browser_url"] = result["browser_url"]
                         if result.get("session_id"):
