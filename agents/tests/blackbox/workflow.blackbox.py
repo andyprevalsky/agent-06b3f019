@@ -725,6 +725,12 @@ async def mock_send_direct_sms_activity(user_id: str, message: str) -> Dict:
     return {"success": True}
 
 
+@activity.defn(name="fetch_agent_queue_pointer")
+async def mock_fetch_agent_queue_pointer() -> Dict[str, Any]:
+    """Return the test worker queue so cooperative handoff stays idle in Temporal tests."""
+    return {"task_queue": TASK_QUEUE, "surface_hash": "testgen"}
+
+
 # Collect all mock activities for Worker registration
 MOCK_ACTIVITIES = [
     mock_get_model_context_window,
@@ -736,6 +742,7 @@ MOCK_ACTIVITIES = [
     mock_get_user_context,
     mock_get_user_system_name,
     mock_get_user_custom_system_prompt,
+    mock_fetch_agent_queue_pointer,
     mock_fetch_claude_max_token_activity,
     mock_fetch_compute_token_activity,
     mock_mark_compute_token_rate_limited_activity,
@@ -2005,6 +2012,12 @@ class _FakeWorkflowModule:
 
     def uuid4(self):
         return "00000000-0000-0000-0000-000000000001"
+
+    def info(self):
+        class _Info:
+            task_queue = "navi-agent-tasks@testgen"
+
+        return _Info()
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
@@ -3596,6 +3609,163 @@ async def test_workflow_paused_continue_as_new_preserves_deployment_state():
             assert resume_state["runtime_state"]["pending_children"] == ["child-1"]
         finally:
             _restore_workflow(original)
+
+
+async def test_workflow_generation_handoff_continue_as_new_onto_live_queue():
+    """Cooperative cutover moves the workflow onto the live generation queue."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-handoff"
+    wf.user_id = "user-1"
+    wf.goal = "hand off generations"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    fake = _FakeWorkflowModule()
+    continued: List[tuple] = []
+
+    def fake_continue_as_new(*, args, task_queue=None, _continued=continued):
+        _continued.append((args, task_queue))
+
+    async def wait_for_refresh():
+        return None
+
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        context = [{"role": "USER", "text": "keep going"}]
+        result = await wf._handle_incomplete(
+            {
+                "status": "generation_handoff",
+                "handoff_task_queue": "navi-agent-tasks@newgen",
+                "context": context,
+            },
+            phase="EXECUTE",
+        )
+        assert result["status"] == "generation_handoff"
+        assert len(continued) == 1
+        args, task_queue = continued[0]
+        assert task_queue == "navi-agent-tasks@newgen"
+        assert args[6] == context
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_paused_handoff_continue_as_new_onto_live_queue():
+    """Paused agents still hand off when the live pointer moves to a new generation."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-paused-handoff"
+    wf.user_id = "user-1"
+    wf.goal = "pause then hand off"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    wf.is_paused = True
+    fake = _FakeWorkflowModule()
+    continued: List[tuple] = []
+
+    async def fake_wait_for_unpause_or_handoff():
+        wf.is_paused = False
+        return "navi-agent-tasks@newgen"
+
+    def fake_continue_as_new(*, args, task_queue=None, _continued=continued):
+        _continued.append((args, task_queue))
+
+    async def wait_for_refresh():
+        return None
+
+    wf._wait_for_unpause_or_handoff = fake_wait_for_unpause_or_handoff
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        context = [{"role": "USER", "text": "paused work"}]
+        result = await wf._handle_incomplete(
+            {"status": "paused", "context": context},
+            phase="EXECUTE",
+        )
+        assert result["status"] == "paused"
+        assert len(continued) == 1
+        _args, task_queue = continued[0]
+        assert task_queue == "navi-agent-tasks@newgen"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_wait_for_unpause_or_handoff_returns_handoff_queue():
+    """Paused cold wait must return a handoff queue without unpausing first."""
+    wf = _bare_workflow_instance()
+    wf.is_paused = True
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_agent_queue_pointer"] = {
+        "task_queue": "navi-agent-tasks@newgen",
+        "surface_hash": "newgen",
+    }
+
+    async def fake_wait_condition(condition, timeout=None):
+        assert condition() is False
+
+    fake.wait_condition = fake_wait_condition
+    original = _patch_workflow(fake)
+    try:
+        handoff = await wf._wait_for_unpause_or_handoff()
+        assert handoff == "navi-agent-tasks@newgen"
+        assert wf.is_paused is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_generation_handoff_preserves_cost_limit_state():
+    """Cooperative handoff must carry COST_LIMIT_REACHED through continue_as_new."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-handoff-cost"
+    wf.user_id = "user-1"
+    wf.goal = "hand off while cost limited"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    wf.is_paused = True
+    wf._cost_limit_reached = True
+    wf._resume_prior_status = "COST_LIMIT_REACHED"
+    fake = _FakeWorkflowModule()
+    continued: List[tuple] = []
+
+    def fake_continue_as_new(*, args, task_queue=None, _continued=continued):
+        _continued.append((args, task_queue))
+
+    async def wait_for_refresh():
+        return None
+
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        context = [{"role": "USER", "text": "cost limited work"}]
+        result = await wf._handle_incomplete(
+            {
+                "status": "generation_handoff",
+                "handoff_task_queue": "navi-agent-tasks@newgen",
+                "context": context,
+            },
+            phase="EXECUTE",
+        )
+        assert result["status"] == "generation_handoff"
+        assert len(continued) == 1
+        args, task_queue = continued[0]
+        assert task_queue == "navi-agent-tasks@newgen"
+        resume_state = args[16]
+        assert resume_state["prior_status"] == "COST_LIMIT_REACHED"
+    finally:
+        _restore_workflow(original)
 
 
 async def test_workflow_context_overflow_uses_complete_continuation_contract():
@@ -6470,6 +6640,22 @@ async def run_all_tests():
     await r.record_async(
         "wf_paused_continuation_preserves_state",
         test_workflow_paused_continue_as_new_preserves_deployment_state,
+    )
+    await r.record_async(
+        "wf_generation_handoff_continue_as_new",
+        test_workflow_generation_handoff_continue_as_new_onto_live_queue,
+    )
+    await r.record_async(
+        "wf_paused_handoff_continue_as_new",
+        test_workflow_paused_handoff_continue_as_new_onto_live_queue,
+    )
+    await r.record_async(
+        "wf_wait_for_unpause_or_handoff",
+        test_workflow_wait_for_unpause_or_handoff_returns_handoff_queue,
+    )
+    await r.record_async(
+        "wf_generation_handoff_preserves_cost_limit",
+        test_workflow_generation_handoff_preserves_cost_limit_state,
     )
     await r.record_async(
         "wf_context_overflow_continuation_preserves_state",
