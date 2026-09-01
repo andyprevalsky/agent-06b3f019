@@ -15,7 +15,10 @@ import {
   getAutoCompactThreshold,
   shouldAutoCompactChat,
 } from '../../providers/chat/chatCompaction';
-import { loadChatModelMessages, type ChatMessage } from '../../providers/chat/initialContext';
+import {
+  loadChatModelMessages,
+  type ChatMessage,
+} from '../../providers/chat/initialContext';
 import { splitHeadMiddleTail } from '../../providers/chat/splitHeadMiddleTail';
 import {
   buildProdChatCompactionScenario,

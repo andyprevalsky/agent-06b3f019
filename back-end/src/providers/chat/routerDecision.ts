@@ -106,15 +106,6 @@ export function parsePartialRouterDecisionJson(json: string): RouterDecision | n
   return null;
 }
 
-export function tryParseCompleteRouterDecision(json: string): RouterDecision | null {
-  if (!json) return null;
-  try {
-    return parseRouterDecisionJson(json);
-  } catch {
-    return null;
-  }
-}
-
 /** Prefer a complete response before recovering an actionable partial one. */
 export function parseRouterDecisionAfterDeadline(
   finalizedJson: string,

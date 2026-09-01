@@ -15,7 +15,6 @@
  *     messages fulfilled -> Router and speculative Generator may run
  *     direct_answer       -> reuse exact initial message snapshot
  *     other action        -> refresh ordered messages after branch side effects
- *     web_search          -> append in-memory tool result when the handler already has it
  *     escalation branch   -> exit without any credential lookup
  */
 
@@ -59,7 +58,6 @@ interface ResolveGeneratorMessagesOptions {
   action: string;
   initialMessages: ChatMessage[];
   refreshMessages: () => Promise<ChatMessage[]>;
-  branchMessages?: ChatMessage[];
 }
 
 const defaultDependencies: InitialChatContextDependencies = {
@@ -109,7 +107,6 @@ export async function resolveGeneratorMessages(
   options: ResolveGeneratorMessagesOptions
 ): Promise<ChatMessage[]> {
   if (options.action === 'direct_answer') return options.initialMessages;
-  if (options.branchMessages) return [...options.initialMessages, ...options.branchMessages];
   return options.refreshMessages();
 }
 

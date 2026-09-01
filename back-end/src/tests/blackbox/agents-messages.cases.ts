@@ -377,10 +377,6 @@ test('GET /:id/status — happy path — schema validated', async () => {
   const body = assertSchema(StatusResponse, res.data, 'GET /:id/status');
   assert(body.agent_id === agentId, 'Agent ID mismatch');
   assert(body.status === 'ACTIVE', `Expected ACTIVE, got ${body.status}`);
-  assert(
-    body.temporal_workflow_id === null || typeof body.temporal_workflow_id === 'string',
-    'GET /:id/status must return temporal_workflow_id without loading messages'
-  );
 
   await deleteTestAgent(agentId, session.user.id);
 });

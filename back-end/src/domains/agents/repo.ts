@@ -129,7 +129,6 @@ export async function findAgentStatus(agentId: string) {
     select: {
       id: true,
       status: true,
-      temporalWorkflowId: true,
     },
   });
 }

@@ -11,7 +11,7 @@ import {
   type CompletionMessage,
   type CompletionOptions,
 } from '../rose';
-import { StructuredOutputAccumulator, structuredTextOrFallback } from '../rose/structuredOutput';
+import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
@@ -35,12 +35,15 @@ import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 import {
-  chatRouterCompletionTimeoutMs, createRouterCompletionDeadline,
+  chatRouterCompletionTimeoutMs,
+  createRouterCompletionDeadline,
   streamBeforeRouterCompletionDeadline,
 } from './routerCompletionDeadline';
 import {
-  isValidRouterCacheJson, parseRouterDecisionAfterDeadline,
-  parseRouterDecisionJson, tryParseCompleteRouterDecision, type RouterDecision,
+  isValidRouterCacheJson,
+  parseRouterDecisionAfterDeadline,
+  parseRouterDecisionJson,
+  type RouterDecision,
 } from './routerDecision';
 
 export { RouterDecisionSchema } from './routerDecision';
@@ -112,9 +115,20 @@ interface ChatMessage {
 const LLM_INLINE_THRESHOLD = 20 * 1024 * 1024;
 
 // File type helpers
-const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
+const IMAGE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+  'image/webp',
+]);
 const TEXT_MIME_TYPES = new Set([
-  'text/plain', 'text/csv', 'text/markdown', 'text/html', 'application/json', 'application/xml',
+  'text/plain',
+  'text/csv',
+  'text/markdown',
+  'text/html',
+  'application/json',
+  'application/xml',
 ]);
 
 // ============================================
@@ -465,7 +479,7 @@ export async function callRouterLlm(params: {
         finish_reason?: string;
       }
     | undefined;
-  let closedDecision: RouterDecision | null = null;
+  let deadlineDecision: RouterDecision | null = null;
 
   // Process stream chunks - stream every delta immediately
   for await (const chunk of streamBeforeRouterCompletionDeadline(stream, completionDeadline)) {
@@ -553,11 +567,6 @@ export async function callRouterLlm(params: {
       }
     }
 
-    if (!closedDecision) {
-      closedDecision = tryParseCompleteRouterDecision(accumulatedJson);
-      if (closedDecision) break;
-    }
-
     if (chunk.usage) {
       usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
       usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
@@ -578,16 +587,16 @@ export async function callRouterLlm(params: {
   }
 
   if (completionDeadline.expired()) {
-    closedDecision = parseRouterDecisionAfterDeadline(
-      structuredTextOrFallback(structuredOutput, accumulatedJson),
+    deadlineDecision = parseRouterDecisionAfterDeadline(
+      structuredOutput.finalText(),
       accumulatedJson
     );
-    if (!closedDecision) {
+    if (!deadlineDecision) {
       throw completionDeadline.signal.reason ?? new Error('Chat router completion expired');
     }
     log.warn('[RouterLLM] Completion deadline recovered a closed decision', {
       agentId: params.agentId,
-      action: closedDecision.action,
+      action: deadlineDecision.action,
       timeoutMs: completionTimeoutMs,
       chunksReceived: chunkCount,
       jsonLength: accumulatedJson.length,
@@ -595,9 +604,7 @@ export async function callRouterLlm(params: {
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = closedDecision
-    ? accumulatedJson
-    : structuredTextOrFallback(structuredOutput, accumulatedJson);
+  const fullJson = deadlineDecision ? accumulatedJson : structuredOutput.finalText();
 
   // Broadcast final "done" signal for reasoning stream
   await broadcastAssistantStream(
@@ -654,8 +661,8 @@ export async function callRouterLlm(params: {
   }
 
   let decision: RouterDecision;
-  if (closedDecision) {
-    decision = closedDecision;
+  if (deadlineDecision) {
+    decision = deadlineDecision;
   } else {
     try {
       decision = parseRouterDecisionJson(fullJson);
@@ -671,7 +678,7 @@ export async function callRouterLlm(params: {
   }
 
   const cacheGoal = fastMode.goal;
-  if (fcKey && !fcCacheWon && !completionDeadline.expired() && cacheGoal !== null && fastModeWrite) {
+  if (fcKey && !fcCacheWon && !deadlineDecision && cacheGoal !== null && fastModeWrite) {
     runCacheWriteInBackground(
       () =>
         cacheSet({

@@ -19,7 +19,7 @@
  *                             │                 └─ Cerebras Gemma-4-31B
  *                             ├─ direct_answer ──> reuse initial message snapshot
  *                             │    └─ Router-start Generator ──> buffered until commit
- *                             ├─ web_search ──> search + persist, generator uses in-memory tool result
+ *                             ├─ web_search/future writes ──> refresh messages
  *                             │    └─ closed action ──> abort/discard speculation
  *
  * Synchronous chat uses explicit phase routes and performs no OAuth credential
@@ -42,7 +42,6 @@ import {
   resolveGeneratorMessages,
   startInitialChatContext,
   loadChatModelMessages,
-  type ChatMessage,
 } from './initialContext';
 import {
   broadcastToolEvent,
@@ -130,7 +129,6 @@ export async function handleChatMessage(config: {
   }
 
   const { decision, webSearchToolCallId } = routerResponse;
-  let webSearchBranch: ChatMessage[] | undefined;
 
   if (decision.action !== 'direct_answer') {
     await speculativeGenerator.discard();
@@ -155,9 +153,8 @@ export async function handleChatMessage(config: {
       mode: decision.mode,
     });
 
-    // Persist ASSISTANT + Cloud Agent chip before Temporal start so the FE
-    // cannot miss the IN_PROGRESS row under 4-worker overlap. Prefetch the
-    // agent row only on this branch so direct/search paths do not add load.
+    // Persist ASSISTANT + Cloud Agent chip before Temporal start.
+    // Prefetch the agent row only on this branch so it overlaps those writes.
     const cloudAgentToolCallId = uuidv4();
     const escalationAgentPromise = prisma.agent.findUnique({
       where: { id: config.agentId },
@@ -257,49 +254,57 @@ export async function handleChatMessage(config: {
       decision.query.length > 80 ? `${decision.query.slice(0, 77)}...` : decision.query;
     const searchTitle = `🔍 Searching the web for ${displayQuery}`;
 
-    const fastModePromise = agentFastMode(config.agentId);
-    const persistInProgress = (async () => {
-      await createMessage({
-        agentId: config.agentId,
-        role: 'ASSISTANT',
-        text: decision.reasoning,
-      });
-      if (!webSearchToolCallId) {
-        await broadcastToolEvent(
-          config.agentId,
-          streamId,
-          toolCallId,
-          'web_search',
-          'IN_PROGRESS',
-          searchTitle
-        );
-      }
-      await createMessage({
-        agentId: config.agentId,
-        role: 'TOOL',
-        text: '',
-        skipDuplicateToolCheck: true,
-        metadata: {
-          title: searchTitle,
-          toolName: 'web_search',
-          toolCallId,
-          toolStatus: 'IN_PROGRESS',
-        },
-      });
-    })();
-    const fastMode = await fastModePromise;
+    // Insert ASSISTANT message with router's reasoning BEFORE tool execution
+    // This matches worker behavior where ASSISTANT message comes before tools
+    await createMessage({
+      agentId: config.agentId,
+      role: 'ASSISTANT',
+      text: decision.reasoning,
+    });
+
+    // If web_search wasn't detected early by router, broadcast IN_PROGRESS now
+    if (!webSearchToolCallId) {
+      await broadcastToolEvent(
+        config.agentId,
+        streamId,
+        toolCallId,
+        'web_search',
+        'IN_PROGRESS',
+        searchTitle
+      );
+    }
+
+    // Create IN_PROGRESS message in DB (matches worker behavior)
+    // createMessage() auto-broadcasts INSERT event to frontend
+    await createMessage({
+      agentId: config.agentId,
+      role: 'TOOL',
+      text: '',
+      skipDuplicateToolCheck: true,
+      metadata: {
+        title: searchTitle,
+        toolName: 'web_search',
+        toolCallId,
+        toolStatus: 'IN_PROGRESS',
+      },
+    });
+
+    // Execute search. Backend chat mode does not go through the Python
+    // web_search_activity, so it has to pass Fast Mode context explicitly.
+    const fastMode = await agentFastMode(config.agentId);
     const searchResult = await executeWebSearch(
       decision.query,
       fastMode.goal,
       fastMode.enabled,
       fastMode.writeEnabled
     );
-    const finishedText = `Web search: "${decision.query}"\n\n${searchResult.answer}\n\nSources: ${searchResult.sources.join(', ')}`;
-    await persistInProgress;
+
+    // Save tool result as TOOL message using shared helper
+    // createMessage() auto-broadcasts INSERT event to frontend
     await createMessage({
       agentId: config.agentId,
       role: 'TOOL',
-      text: finishedText,
+      text: `Web search: "${decision.query}"\n\n${searchResult.answer}\n\nSources: ${searchResult.sources.join(', ')}`,
       skipDuplicateToolCheck: true,
       metadata: {
         title: `Web search completed for ${displayQuery}`,
@@ -310,21 +315,6 @@ export async function handleChatMessage(config: {
         sources: searchResult.sources,
       },
     });
-    webSearchBranch = [
-      { role: 'ASSISTANT', text: decision.reasoning },
-      {
-        role: 'TOOL',
-        text: finishedText,
-        metadata: {
-          title: `Web search completed for ${displayQuery}`,
-          toolName: 'web_search',
-          toolCallId,
-          toolStatus: 'FINISHED',
-          query: decision.query,
-          sources: searchResult.sources,
-        },
-      },
-    ];
   }
 
   // ============================================
@@ -338,7 +328,6 @@ export async function handleChatMessage(config: {
     action: decision.action,
     initialMessages: messages,
     refreshMessages: async () => loadChatModelMessages(chatContextConfig),
-    branchMessages: webSearchBranch,
   });
 
   const earlyGeneratorResponse =
