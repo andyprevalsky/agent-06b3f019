@@ -440,6 +440,10 @@ require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'migrate-open-
   "cooperative cutover must force-migrate only after the drain SLO"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'count-open-workflows-on-queue.ts' \
   "cooperative cutover must poll open workflows on the old generation queue"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--image-label' \
+  "cutover build must tag the pushed image for registry.fly.io resolution"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'registry.fly.io' \
+  "cutover must construct image ref from app + image label (flyctl deploy has no --json)"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--build-only' \
   "surface-change cutover must build/push without replacing old-gen machines first"
 require_text "$ROOT/agents/fly.toml" 'kill_timeout = "35m"' \

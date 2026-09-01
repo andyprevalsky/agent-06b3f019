@@ -105,22 +105,22 @@ echo "Surface CHANGED ('${CURRENT_HASH:-<none>}' -> '$SURFACE_HASH') — overlap
 cd "$ROOT/agents"
 # Build+push only. Do NOT replace old-gen machines; they must keep serving the
 # old queue until agents hand off (or the 45m force-migrate fires).
-IMAGE_REF="$(
-  flyctl deploy --remote-only --build-only --push \
+IMAGE_LABEL="cutover-${SURFACE_HASH}-${DEPLOYMENT_TOKEN}"
+if ! flyctl deploy --remote-only --build-only --push \
+    --image-label "$IMAGE_LABEL" \
+    -a "$APP" \
     --env TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
     --env TEMPORAL_WORKER_SURFACE_HASH="$SURFACE_HASH" \
     --env TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
     --env TEMPORAL_WORKER_REQUIRE_ACTIVATION="0" \
-    --json | tee /tmp/fly-build.json | jq -r '.image // .ImageRef // empty'
-)"
-if [ -z "$IMAGE_REF" ]; then
-  # Older flyctl JSON shapes
-  IMAGE_REF="$(jq -r '.image // .ImageRef // .ref // empty' /tmp/fly-build.json)"
-fi
-if [ -z "$IMAGE_REF" ]; then
-  echo "❌ could not resolve image ref from fly build-only output" >&2
-  cat /tmp/fly-build.json >&2 || true
+    2>&1 | tee /tmp/fly-build.log; then
+  echo "❌ fly build-only deploy failed" >&2
   exit 1
+fi
+IMAGE_REF="registry.fly.io/${APP}:${IMAGE_LABEL}"
+if ! grep -q "$IMAGE_LABEL" /tmp/fly-build.log 2>/dev/null; then
+  # Best-effort: some flyctl versions omit the label in stdout; registry tag is canonical.
+  echo "⚠️  build log did not mention $IMAGE_LABEL — using $IMAGE_REF"
 fi
 echo "Built image: $IMAGE_REF"
 
@@ -141,10 +141,18 @@ echo "New-gen machines present=$EXISTING_NEW need_create=$NEED (min=$MIN)"
 for i in $(seq 1 "$NEED"); do
   NAME="gen-${SURFACE_HASH}-$(date +%s)-$i"
   echo "Cloning template $TEMPLATE_ID -> $NAME"
-  CLONE_JSON="$(flyctl machine clone "$TEMPLATE_ID" -a "$APP" --name "$NAME" --json)"
-  NEW_ID="$(printf '%s' "$CLONE_JSON" | jq -r '.id // empty')"
+  CLONE_OUT="$(flyctl machine clone "$TEMPLATE_ID" -a "$APP" --name "$NAME" 2>&1)" || {
+    echo "❌ machine clone failed: $CLONE_OUT" >&2
+    exit 1
+  }
+  NEW_ID="$(printf '%s\n' "$CLONE_OUT" \
+    | sed -nE 's/^[[:space:]]*Machine ([0-9a-f]+) has been created[.][.][.]$/\1/p' \
+    | tail -1)"
   if [ -z "$NEW_ID" ]; then
-    echo "❌ machine clone failed: $CLONE_JSON" >&2
+    NEW_ID="$(flyctl machines list -a "$APP" -j | jq -r --arg n "$NAME" '.[] | select(.name==$n) | .id' | head -1)"
+  fi
+  if [ -z "$NEW_ID" ]; then
+    echo "❌ machine clone failed (no id): $CLONE_OUT" >&2
     exit 1
   fi
   flyctl machine update "$NEW_ID" -a "$APP" --image "$IMAGE_REF" --yes \
@@ -160,7 +168,7 @@ deadline=$((SECONDS + 300))
 while [ "$SECONDS" -lt "$deadline" ]; do
   healthy=0
   for ID in $(machine_ids_for_hash "$SURFACE_HASH"); do
-    if flyctl machines status "$ID" -a "$APP" --json 2>/dev/null | jq -e '.state=="started"' >/dev/null; then
+    if flyctl machines list -a "$APP" -j | jq -e --arg id "$ID" '.[] | select(.id==$id and .state=="started")' >/dev/null; then
       healthy=$((healthy + 1))
     fi
   done
