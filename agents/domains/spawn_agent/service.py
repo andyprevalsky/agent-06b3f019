@@ -361,6 +361,7 @@ async def spawn_explore_agent_activity(
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
     from providers.fast_cache.client import resolve_agent_fast_mode
+    from tools.api_request import ApiRequestManager
     from tools.grep import GrepManager
     from tools.people_search import PeopleSearchManager
     from tools.web_fetch import WebFetchManager
@@ -659,6 +660,15 @@ async def spawn_explore_agent_activity(
                         )
                     ):
                         unavailable_sources_collected.append(normalized)
+        elif tool_name == "api_request":
+            manager = ApiRequestManager()
+            result = await manager.execute_tool(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
             if not attachment_texts and not has_usable_tool_evidence:
                 completion_no_evidence_rejects += 1
@@ -671,7 +681,7 @@ async def spawn_explore_agent_activity(
                     "error": True,
                     "message": (
                         "Completion rejected: no evidence tool has succeeded yet. "
-                        "Call web_search, people_search, web_fetch, or grep successfully before completing."
+                        "Call web_search, people_search, web_fetch, grep, or api_request successfully before completing."
                     ),
                 }
             return {"success": True, "message": "Completion accepted"}
