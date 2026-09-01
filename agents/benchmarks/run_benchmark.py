@@ -9646,6 +9646,7 @@ async def run_single_task(
 
     previous_active_task_name = os.environ.get("BENCHMARK_ACTIVE_TASK_NAME")
     previous_active_task_live_target = os.environ.get("BENCHMARK_ACTIVE_TASK_LIVE_TARGET")
+    previous_active_task_block_dom_patch = os.environ.get("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH")
     previous_disable_saved_browser_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
     os.environ["BENCHMARK_ACTIVE_TASK_NAME"] = task.name
     live_target = primary_live_target(task.environment)
@@ -9653,6 +9654,10 @@ async def run_single_task(
         os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = live_target
     else:
         os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
+    if getattr(task, "success_on_payment_card_request", False):
+        os.environ["BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH"] = "1"
+    else:
+        os.environ.pop("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH", None)
     if should_disable_saved_browser_auth(task):
         os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
         print("    🍪 Guest-checkout task: disabled saved browser auth material")
@@ -10373,6 +10378,10 @@ async def run_single_task(
             os.environ.pop("BENCHMARK_ACTIVE_TASK_LIVE_TARGET", None)
         else:
             os.environ["BENCHMARK_ACTIVE_TASK_LIVE_TARGET"] = previous_active_task_live_target
+        if previous_active_task_block_dom_patch is None:
+            os.environ.pop("BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH", None)
+        else:
+            os.environ["BENCHMARK_ACTIVE_TASK_BLOCK_DOM_PATCH"] = previous_active_task_block_dom_patch
         if previous_disable_saved_browser_auth is None:
             os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
         else:

@@ -26,8 +26,10 @@ import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 
 const API_BASE = 'http://localhost:3001/api';
-const ANDY_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
-const TAMY_ID = '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9';
+import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
+
+const ANDY_ID = ADMIN_ACCOUNTS[0]!.userId;
+const TAMY_ID = ADMIN_ACCOUNTS[1]!.userId;
 
 function session(token: string, userId: string) {
   return {

@@ -1406,10 +1406,12 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
-        from benchmarks.spawn_contract import active_benchmark_task, evaluate_dom_patch_blocked
+        from helpers.browser_spawn_contract import (
+            active_benchmark_blocks_dom_patch,
+            evaluate_dom_patch_blocked,
+        )
 
-        active_task = active_benchmark_task()
-        if active_task is not None and active_task.success_on_payment_card_request:
+        if active_benchmark_blocks_dom_patch():
             dom_patch_reason = evaluate_dom_patch_blocked(code)
             if dom_patch_reason:
                 await context.action_history.record_action(

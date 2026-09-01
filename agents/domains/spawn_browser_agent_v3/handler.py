@@ -3943,7 +3943,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     # answer browser actions using the parent's whole-agent output contract.
     # The tool-call namespace remains stable across write-lock resumes, whose
     # payload also restores the exact browser session id.
-    from benchmarks.spawn_contract import apply_active_task_spawn_contract
+    from helpers.browser_spawn_contract import apply_active_task_spawn_contract
 
     contracted = apply_active_task_spawn_contract({"start_url": start_url, "goal": goal})
     start_url = str(contracted.get("start_url") or start_url or "")
