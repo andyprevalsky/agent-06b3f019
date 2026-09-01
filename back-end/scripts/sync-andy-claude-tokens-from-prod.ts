@@ -22,6 +22,8 @@ import { createRetryableProbe } from './retryable-probe';
 export const ANDY_CLAUDE_SMOKE_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 export const ANDY_CLAUDE_SMOKE_PHONE_SUFFIX = '9729777432';
 export const ANDY_CLAUDE_SMOKE_EXPECTED_KEY_COUNT = 2;
+/** Both Claude Subscription rows on Andy's account (+19729777432) in prod/UI. */
+export const ANDY_CLAUDE_SMOKE_ACCOUNT_EMAILS = ['a@roselabs.ai', 'andy@hinavi.ai'] as const;
 
 const PROD_INTEGRATION_COLUMNS = {
   id: true,
@@ -57,7 +59,7 @@ export interface SyncAndyClaudeResult {
   expectedMinKeys: number;
   userId: string;
   phoneVerified: boolean;
-  integrationAccountIds: string[];
+  integrationAccountEmails: string[];
 }
 
 function normalizePhoneDigits(phone: string | null | undefined): string {
@@ -128,18 +130,19 @@ export async function syncAndyClaudeTokensFromProd(options?: {
     const where: Prisma.IntegrationWhereInput = {
       userId: ANDY_CLAUDE_SMOKE_USER_ID,
       name: 'claude_code',
-      status: 'CONNECTED',
     };
 
     const integrations: ProdIntegrationRow[] = (await remoteHasIntegrationAccountColumns())
       ? await remote.integration.findMany({
           where,
           select: PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT,
+          orderBy: [{ accountEmail: 'asc' }],
         })
       : (
           await remote.integration.findMany({
             where,
             select: PROD_INTEGRATION_COLUMNS,
+            orderBy: [{ createdAt: 'asc' }],
           })
         ).map((row) => ({ ...row, accountId: '', accountEmail: null }));
 
@@ -151,8 +154,18 @@ export async function syncAndyClaudeTokensFromProd(options?: {
     });
 
     if (credentialed.length === 0) {
-      throw new Error(
-        `No connected claude_code integrations with credentials found for Andy in production`
+      throw new Error(`No claude_code integrations with credentials found for Andy in production`);
+    }
+
+    const integrationAccountEmails = credentialed.map(
+      (integration) => integration.accountEmail ?? integration.accountId ?? '(default)'
+    );
+    const missingExpectedEmails = ANDY_CLAUDE_SMOKE_ACCOUNT_EMAILS.filter(
+      (email) => !integrationAccountEmails.includes(email)
+    );
+    if (missingExpectedEmails.length > 0) {
+      console.warn(
+        `  ⚠️  Andy Claude subscription missing prod key(s): ${missingExpectedEmails.join(', ')}`
       );
     }
 
@@ -160,6 +173,13 @@ export async function syncAndyClaudeTokensFromProd(options?: {
     if (credentialed.length < expectedMinKeys) {
       console.warn(
         `  ⚠️  Expected at least ${expectedMinKeys} Andy claude_code keys in prod; found ${credentialed.length}`
+      );
+    }
+
+    for (const integration of credentialed) {
+      const email = integration.accountEmail ?? integration.accountId ?? '(default)';
+      console.log(
+        `  ↳ prod claude_code ${email} status=${integration.status} pooling=${integration.poolingEnabled}`
       );
     }
 
@@ -176,13 +196,9 @@ export async function syncAndyClaudeTokensFromProd(options?: {
       console.log(`  🧹 Removed ${deleted.count} stale local Andy claude_code row(s)`);
     }
 
-    const integrationAccountIds = credentialed.map(
-      (integration) => integration.accountId || integration.accountEmail || '(default)'
-    );
-
     console.log(
       `  ✅ Synced ${syncedIds.length} Andy claude_code key(s) from prod ` +
-        `(accounts: ${integrationAccountIds.join(', ')})`
+        `(accounts: ${integrationAccountEmails.join(', ')})`
     );
 
     return {
@@ -190,7 +206,7 @@ export async function syncAndyClaudeTokensFromProd(options?: {
       expectedMinKeys,
       userId: ANDY_CLAUDE_SMOKE_USER_ID,
       phoneVerified,
-      integrationAccountIds,
+      integrationAccountEmails,
     };
   } finally {
     await Promise.allSettled([remote.$disconnect(), local.$disconnect()]);
