@@ -5539,7 +5539,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # recovery on this task, later recoveries still re-verify that URL.
     require_payment_cdn = False
     payment_cdn_verify_url = ""
-    pending_provider_exit_recovery = False
     # Payment auto-fill on cross-origin handoff (live host ≠ session origin).
     # Do NOT pin/refuse navigation — that trapped merchant → third-party order
     # flows (e.g. bluebottlecoffee.com → order.online) after challenge recovery.
@@ -7434,7 +7433,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 browser_network_recorder.pop_provider_exit_rejection() if browser_network_recorder is not None else None
             )
             if provider_exit_rejection is not None:
-                pending_provider_exit_recovery = True
                 await _feed_provider_exit_detected_back(
                     provider_exit_rejection=provider_exit_rejection,
                     unified_action=unified_action,
@@ -7575,101 +7573,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         steps_taken=iteration,
                         total_steps=MAX_ITERATIONS,
                         extra_metadata={"auth_guard_state": guard_state},
-                    )
-                    await browser_stream.finish_tools(status="ERROR")
-                    continue
-                # CAPTCHA / bot walls are not sign-in blockers. browser-hotel-booking
-                # misrouted Expedia "Bot or Not?" into auth_assistance after
-                # recover_from_challenge falsely skipped as clean; refuse the
-                # handoff while the live document still looks challenged (LLM).
-                auth_guard_classifier_usages: list = []
-                auth_guard_page_challenged = False
-                if input_page is not None:
-                    auth_guard_dom_tree = None
-                    with contextlib.suppress(Exception):
-                        auth_guard_state = await dom_service.get_browser_state(
-                            include_screenshot=False
-                        )
-                        auth_guard_dom_tree = str(auth_guard_state.get("dom_tree") or "") or None
-                    auth_guard_page_challenged = await live_tab_looks_challenged(
-                        input_page,
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        claude_token=token_state.access_token,
-                        claude_token_source=token_state.source,
-                        claude_token_pool_id=token_state.pool_token_id,
-                        gpt_token=gpt_token,
-                        gpt_account_id=gpt_account_id,
-                        gpt_token_source=gpt_token_source,
-                        gpt_token_pool_id=gpt_token_pool_id,
-                        usage_collector=auth_guard_classifier_usages,
-                        agent_dom_tree=auth_guard_dom_tree,
-                        network_recorder=browser_network_recorder,
-                    )
-                for classifier_usage in auth_guard_classifier_usages:
-                    if not isinstance(classifier_usage, dict):
-                        continue
-                    c_in = int(classifier_usage.get("prompt_tokens") or 0)
-                    c_out = int(classifier_usage.get("completion_tokens") or 0)
-                    total_input_tokens += c_in
-                    total_output_tokens += c_out
-                    accumulate_model_usage(
-                        usage_by_model,
-                        classifier_usage.get("actual_model") or "rose-labs/rose-1-mini",
-                        c_in,
-                        c_out,
-                        cache_read_input_tokens=int(
-                            classifier_usage.get("cache_read_input_tokens") or 0
-                        ),
-                        cache_creation_input_tokens=int(
-                            classifier_usage.get("cache_creation_input_tokens") or 0
-                        ),
-                        from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
-                    )
-                if auth_guard_page_challenged:
-                    challenge_guard_reason = (
-                        "Current page is a bot challenge/CAPTCHA, not an authentication "
-                        "blocker. Call recover_from_challenge instead of "
-                        "request_user_assistance_for_authentication."
-                    )
-                    logger.info(
-                        "Blocked auth assistance while challenge interstitial is visible",
-                        base_site=base_site,
-                        current_url=current_url,
-                    )
-                    blocked_result = {
-                        "success": False,
-                        "error": challenge_guard_reason,
-                        "recovery_action": "auth_assistance_blocked_challenged_page",
-                    }
-                    await action_history.record_action(
-                        dom_service=dom_service,
-                        action="request_user_assistance_for_authentication",
-                        thinking=thinking,
-                        params={},
-                        result=blocked_result,
-                    )
-                    _append_browser_turn_messages(
-                        browser_turn_messages,
-                        unified_action=unified_action,
-                        result=blocked_result,
-                        tool_call_id=tool_call_id_action,
-                    )
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Authentication assistance blocked — challenge page",
-                        task_id=task_id,
-                        message=challenge_guard_reason,
-                        status=MessageStatus.FINISHED,
-                        browser_url=browser_url,
-                        action_type="request_user_assistance_for_authentication",
-                        tool_call_id=tool_call_id_action,
-                        steps_taken=iteration,
-                        total_steps=MAX_ITERATIONS,
-                        extra_metadata={
-                            "recovery_action": "auth_assistance_blocked_challenged_page",
-                            "current_url": current_url,
-                        },
                     )
                     await browser_stream.finish_tools(status="ERROR")
                     continue
@@ -7978,9 +7881,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
 
                 provider_exit_rejected = bool(recovery_params.get("provider_exit_rejected"))
-                if pending_provider_exit_recovery:
-                    provider_exit_rejected = True
-                    pending_provider_exit_recovery = False
                 # If the live tab is already clean and this was not a hard
                 # provider-exit rejection, skip — avoids recovery loops the model
                 # invents from third-party network noise on an otherwise fine page.

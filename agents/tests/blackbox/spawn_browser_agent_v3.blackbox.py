@@ -18534,7 +18534,9 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     assert "await _restore_rotation_storage_state(" in recovery_branch
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     assert "_feed_provider_exit_detected_back" in activity_source
-    assert "pending_provider_exit_recovery" in activity_source
+    assert "provider_exit_monitoring_enabled()" in inspect.getsource(
+        __import__("domains.spawn_browser_agent_v3.recording", fromlist=["recording"])
+    )
     assert "Replacing browser action with provider-exit recovery" not in activity_source
     assert '"provider_exit_rejected": True' not in activity_source.split(
         'if action_name == "recover_from_challenge":', 1

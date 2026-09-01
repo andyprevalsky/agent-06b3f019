@@ -46,19 +46,17 @@ Return challenged=true when ANY of these hold:
 - Navigation failed into a block page even if some marketing text leaked into the DOM
 - Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
 - The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
-- A blocked third-party resource cited in the recovery reason (payment script/CDN, required widget) is still missing, status=0, blocked/ORB/failed, or non-2xx in network evidence
 
 Return challenged=false ONLY when ALL of these hold:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
 - AND if an agent recovery reason is provided, that specific failure mode is cleared in network + DOM evidence
-- AND any cited blocked third-party resource shows a successful load in the provided network evidence
 
 Critical anti-pattern (do NOT do this):
 - Do NOT return challenged=false just because the screenshot looks like the real product site.
-- A painted / partially hydrated UI is common while payment CDNs, challenge widgets, or cited third-party scripts are still blocked. Screenshot appearance alone never clears a recovery reason that cites a blocked third-party resource — you must check network metadata for that resource.
+- A painted / partially hydrated UI may still be blocked — weigh DOM and network evidence, not screenshot alone.
 
 Evidence priority when a recovery reason is present:
-1) Network metadata for the cited failure / blocked resource
+1) Network metadata for the cited failure
 2) DOM evidence that the failure mode cleared
 3) Screenshot as supporting visual context only
 
@@ -69,10 +67,9 @@ class ChallengePageClassification(BaseModel):
     challenged: bool = Field(
         description=(
             "True when the page is still challenged/unusable for the task "
-            "(including uncleared recovery soft-blocks or cited blocked third-party "
-            "resources). False only when the real destination UI is usable AND any "
-            "recovery reason / cited blocked resource is cleared in network+DOM "
-            "evidence — not merely because the screenshot looks fine."
+            "(including uncleared recovery soft-blocks). False only when the real "
+            "destination UI is usable AND any recovery reason is cleared in "
+            "network+DOM evidence — not merely because the screenshot looks fine."
         )
     )
     reason: str = Field(description="One short sentence explaining the challenged/clean decision.")
@@ -531,15 +528,8 @@ def build_challenge_classifier_messages(context: Dict[str, Any]) -> List[Dict[st
     recovery_lines: List[str] = []
     if recovery_reason:
         recovery_lines = [
-            "CRITICAL recovery constraint (must be cleared for challenged=false):",
+            "Agent recovery reason (for context):",
             str(recovery_reason),
-            (
-                "If this reason cites a blocked third-party URL (payment script/CDN/widget), "
-                "inspect network metadata for that host/URL. Missing, status=0, blocked/ORB/"
-                "failed, or non-2xx ⇒ challenged=true — even when the screenshot looks like "
-                "a normal product page."
-            ),
-            "Do not clear just because the HTML shell or screenshot looks fine.",
             "",
         ]
     text_block = "\n".join(
@@ -557,8 +547,7 @@ def build_challenge_classifier_messages(context: Dict[str, Any]) -> List[Dict[st
             context.get("cleaned_dom") or "(empty)",
             "",
             (
-                "Screenshot follows as visual context only. Classify challenged true/false — "
-                "screenshot alone cannot clear the recovery constraint above."
+                "Screenshot follows as visual context only. Classify challenged true/false."
                 if recovery_reason
                 else "Classify challenged true/false for this page state."
             ),

@@ -304,12 +304,14 @@ function testSameSiteNavigationUrl(): void {
   assert.equal(sameSiteNavigationUrl(kabuki, ''), null);
 }
 
-function testClassifierMessagesSurfaceBlockedResourceConstraintForLlm(): void {
-  // No deterministic regex hard-gate — the model must see an explicit recovery
-  // constraint + anti-screenshot-overfit instructions (23:40 DoorDash false clean).
+function testClassifierMessagesSurfaceRecoveryReasonWithoutHardCdnPin(): void {
+  // The model must still see the recovery reason and anti-screenshot-overfit
+  // instructions without hard-pinned CDN wording in the user message block.
   assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /Critical anti-pattern/i);
-  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /Screenshot appearance alone never clears/i);
-  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /blocked third-party resource/i);
+  assert.match(
+    CHALLENGE_LLM_SYSTEM_PROMPT,
+    /Do NOT return challenged=false just because the screenshot looks like the real product site/i
+  );
 
   const reason =
     'Checkout payment widget never mounted.\n' +
@@ -332,10 +334,9 @@ function testClassifierMessagesSurfaceBlockedResourceConstraintForLlm(): void {
           .filter((part) => part.type === 'text')
           .map((part) => part.text || '')
           .join('\n');
-  assert.match(text, /CRITICAL recovery constraint/i);
+  assert.match(text, /Agent recovery reason \(for context\):/i);
   assert.match(text, /https:\/\/js\.stripe\.com\/v3\//);
-  assert.match(text, /even when the screenshot looks like a normal product page/i);
-  assert.match(text, /screenshot alone cannot clear the recovery constraint/i);
+  assert.match(text, /visual context only/i);
 }
 
 function testChallengeLlmClassifierCostRouting(): void {
@@ -392,7 +393,7 @@ async function main(): Promise<void> {
   await testUnavailableLearnedConfigFallsBackToDeploymentDefault();
   testRecoveryRequestSchema();
   testSameSiteNavigationUrl();
-  testClassifierMessagesSurfaceBlockedResourceConstraintForLlm();
+  testClassifierMessagesSurfaceRecoveryReasonWithoutHardCdnPin();
   testChallengeLlmClassifierCostRouting();
   process.stdout.write('PASS staged browser challenge recovery part2\n');
 }

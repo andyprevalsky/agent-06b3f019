@@ -123,7 +123,7 @@ def test_classifier_messages_include_network_block_and_recovery_reason():
     text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
     assert "status=429" in text or "429" in text
     assert "Network metadata" in text
-    assert "CRITICAL recovery constraint" in text
+    assert "Agent recovery reason (for context):" in text
     assert "Offers Loading" in text
     assert "truncated" in text.lower()
     assert "DOM tree" in text
@@ -140,11 +140,11 @@ def test_soft_block_gate_forces_challenged_when_429_remains():
     )
 
 
-def test_classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource():
+def test_classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn_pin():
     """23:40 failure mode: screenshot looked fine while js.stripe.com stayed blocked.
 
-    No deterministic regex hard-gate — the LLM must be instructed hard enough that
-    a painted product UI cannot clear a recovery reason citing a blocked third-party.
+    The classifier must still see the recovery reason and anti-screenshot-overfit
+    instructions without hard-pinned CDN wording in the user message block.
     """
     reason = (
         "Checkout payment widget never mounted.\n"
@@ -154,7 +154,6 @@ def test_classifier_prompt_and_messages_force_network_check_for_cited_blocked_re
     assert "screenshot looks like the real product site" in CHALLENGE_LLM_SYSTEM_PROMPT.lower() or (
         "screenshot appearance alone never" in CHALLENGE_LLM_SYSTEM_PROMPT.lower()
     )
-    assert "blocked third-party" in CHALLENGE_LLM_SYSTEM_PROMPT.lower()
     assert "Evidence priority" in CHALLENGE_LLM_SYSTEM_PROMPT or "Evidence priority" in CHALLENGE_LLM_SYSTEM_PROMPT
 
     msgs = build_challenge_classifier_messages(
@@ -171,10 +170,9 @@ def test_classifier_prompt_and_messages_force_network_check_for_cited_blocked_re
     system = next(m for m in msgs if m.get("role") == "system")["content"]
     user = next(m for m in msgs if m.get("role") == "user")
     text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
-    assert "CRITICAL recovery constraint" in text
+    assert "Agent recovery reason (for context):" in text
     assert "https://js.stripe.com/v3/" in text
-    assert "even when the screenshot looks like" in text.lower() or "even when the screenshot" in text.lower()
-    assert "screenshot alone cannot clear" in text.lower() or "visual context only" in text.lower()
+    assert "visual context only" in text.lower()
     assert "network metadata" in text.lower()
     # System prompt must override screenshot-as-ground-truth overweighting.
     assert "do not return challenged=false just because the screenshot" in system.lower()
@@ -260,8 +258,8 @@ async def run_all_tests() -> bool:
         test_soft_block_gate_forces_challenged_when_429_remains,
     )
     result.record(
-        "classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource",
-        test_classifier_prompt_and_messages_force_network_check_for_cited_blocked_resource,
+        "classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn_pin",
+        test_classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn_pin,
     )
     result.record(
         "select_network_entries_pins_cited_hosts",

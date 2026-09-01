@@ -2095,13 +2095,13 @@ def browser_network_recording_enabled() -> bool:
 
 
 def provider_exit_monitoring_enabled() -> bool:
-    """Keep the lightweight rejection signal active outside local recordings."""
+    """Provider-exit auto-rejection is off by default; opt in via env for tests."""
     value = os.getenv("BROWSER_AGENT_PROVIDER_EXIT_MONITORING", "").strip().lower()
     if value in TRUE_VALUES:
         return True
     if value in FALSE_VALUES:
         return False
-    return True
+    return False
 
 
 _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
@@ -3318,7 +3318,8 @@ class BrowserNetworkRecorder:
         rejected_generations = getattr(self, "_rejected_network_generations", set())
         document_url = str(source.get("document_url") or "")
         if (
-            entry_generation == current_generation
+            provider_exit_monitoring_enabled()
+            and entry_generation == current_generation
             and entry_generation not in rejected_generations
             and _is_critical_resource_block(
                 str(source.get("url") or ""),
@@ -3423,7 +3424,8 @@ class BrowserNetworkRecorder:
                 with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
                     payload = json.loads(body_bytes.decode("utf-8"))
                     if (
-                        generation == current_generation
+                        provider_exit_monitoring_enabled()
+                        and generation == current_generation
                         and generation not in rejected_generations
                         and _contains_actionable_fingerprint_poison_detection(payload)
                     ):
@@ -3445,7 +3447,8 @@ class BrowserNetworkRecorder:
                             browser_generation=generation,
                         )
             if (
-                generation == current_generation
+                provider_exit_monitoring_enabled()
+                and generation == current_generation
                 and generation not in rejected_generations
                 and _is_api_challenge_html_response(
                     status=entry.get("status"),
