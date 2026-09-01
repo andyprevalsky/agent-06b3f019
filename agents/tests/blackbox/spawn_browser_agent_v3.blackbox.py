@@ -12814,6 +12814,86 @@ def test_write_lock_purchase_button_excludes_buynow_dom_identifiers():
     assert is_purchase_button("buynow-email-si\nBuy Now")
 
 
+def test_cart_completeness_detects_one_item_cart_on_multi_item_manifest():
+    """c27b4f28 repro helper: one Kodiak item vs full Safeway manifest must be blocked."""
+    from domains.spawn_browser_agent_v3.cart_completeness import (
+        estimate_required_line_item_minimum,
+        should_block_purchase_for_incomplete_cart,
+    )
+
+    manifest_goal = (
+        "SAFEWAY MANIFEST: 93/7 lean ground beef about 2.5 lb; "
+        "plain chicken breast about 3 lb; seven 42g protein shakes; "
+        "Kodiak Power Cakes mix; sweet potatoes 4.5-5 lb; plain rice 2 lb; "
+        "PB2 Original; coconut aminos; produce; spices. Complete checkout."
+    )
+    minimum = estimate_required_line_item_minimum(manifest_goal)
+    assert minimum is not None
+    assert minimum >= 8
+
+    blocked = should_block_purchase_for_incomplete_cart(
+        manifest_goal,
+        observed_cart_item_count=1,
+    )
+    assert blocked is True
+
+    full_manifest = (
+        "Execute grocery purchase. SAFEWAY MANIFEST: "
+        + "; ".join(
+            [
+                "93/7 lean ground beef about 2.5 lb",
+                "plain chicken breast about 3 lb",
+                "plain raw salmon fillets about 1.2 lb",
+                "liquid egg whites at least 700g",
+                "1 dozen large eggs",
+                "seven 42g protein shakes",
+                "Fage Total 0% plain Greek yogurt",
+                "cheddar cheese 8oz",
+                "part-skim mozzarella 8oz",
+                "Kodiak Power Cakes mix",
+                "sweet potatoes 4.5-5 lb",
+                "plain dry unsalted rice 2 lb",
+                "PB2 Original",
+                "coconut aminos",
+                "no-salt-added crushed tomatoes",
+                "broccoli florets",
+                "zucchini about 2 lb",
+                "carrots 2 lb",
+                "bell peppers 3ct",
+                "green beans 1 lb",
+                "8 limes",
+                "frozen mixed berries 2 lb",
+                "6 bananas",
+                "4 apples",
+                "Valentina Original hot sauce",
+                "lime sparkling water case",
+            ]
+        )
+        + ". Complete checkout."
+    )
+    blocked = should_block_purchase_for_incomplete_cart(
+        full_manifest,
+        recent_browser_text="Order Summary (11 items)",
+    )
+    assert blocked is True
+
+
+def test_handler_integrates_cart_completeness_before_purchase_write_lock():
+    """Purchase write-lock must consult cart completeness before approval."""
+    from pathlib import Path
+
+    handler_source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    needs_write_idx = handler_source.index('"needs_write_approval"')
+    preceding = handler_source[max(0, needs_write_idx - 4000) : needs_write_idx]
+    assert (
+        "should_block_purchase_for_incomplete_cart" in preceding
+        or "cart_completeness" in preceding
+    ), (
+        "handler.py returns needs_write_approval for purchase clicks without consulting "
+        "cart_completeness (c27b4f28: 1-item Kodiak checkout reached write-lock approval)"
+    )
+
+
 def test_click_write_lock_eligible_only_buttons_and_form_submits():
     """Plain inputs never raise click write locks — only buttons / form submits.
 
@@ -19981,6 +20061,14 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_excludes_buynow_dom_identifiers",
         test_write_lock_purchase_button_excludes_buynow_dom_identifiers,
+    )
+    r.record(
+        "cart_completeness_detects_incomplete_grocery_cart",
+        test_cart_completeness_detects_one_item_cart_on_multi_item_manifest,
+    )
+    r.record(
+        "handler_cart_completeness_before_purchase_write_lock",
+        test_handler_integrates_cart_completeness_before_purchase_write_lock,
     )
     r.record(
         "click_write_lock_eligible_only_buttons_and_form_submits",

@@ -9005,6 +9005,50 @@ Based on this feedback, I need to continue working on the task and address the i
             ):
                 result["credential_ref"] = minted_credential_ref
 
+            if result.get("status") == "needs_write_approval":
+                approval_type = result.get("approval_type", "unknown")
+                if approval_type == "purchase":
+                    from domains.spawn_browser_agent_v3.cart_completeness import (
+                        estimate_required_line_item_minimum,
+                        extract_observed_cart_item_count,
+                        should_block_purchase_for_incomplete_cart,
+                    )
+
+                    cart_signal_text = str(result.get("element_text") or "")
+                    try:
+                        quick_state = await asyncio.wait_for(
+                            dom_service.get_browser_state(include_screenshot=False),
+                            timeout=15,
+                        )
+                        page_text = quick_state.get("text") or quick_state.get("page_text") or ""
+                        cart_signal_text = f"{cart_signal_text}\n{page_text}"
+                    except Exception:
+                        pass
+                    if should_block_purchase_for_incomplete_cart(
+                        task_prompt,
+                        recent_browser_text=cart_signal_text,
+                    ):
+                        observed = extract_observed_cart_item_count(cart_signal_text)
+                        minimum = estimate_required_line_item_minimum(task_prompt)
+                        threshold = max(3, int((minimum or 0) * 0.5))
+                        logger.info(
+                            "Cart completeness gate blocked premature purchase write-lock",
+                            observed=observed,
+                            threshold=threshold,
+                            minimum_required=minimum,
+                            url=current_url,
+                        )
+                        result = {
+                            "success": False,
+                            "error": (
+                                f"Purchase approval deferred: cart shows {observed or 'too few'} items; "
+                                f"grocery manifest requires at least {threshold} line items before checkout. "
+                                "Continue adding required manifest items."
+                            ),
+                            "cart_completeness_blocked": True,
+                            "current_url": current_url,
+                        }
+
             _append_browser_turn_messages(
                 browser_turn_messages,
                 unified_action=unified_action,
