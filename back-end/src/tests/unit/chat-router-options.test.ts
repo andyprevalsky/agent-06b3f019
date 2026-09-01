@@ -98,6 +98,24 @@ async function run(): Promise<void> {
   assert.equal(deadline.expired(), true, 'the completion deadline must abort a trickling stream');
   deadline.dispose();
 
+  const deferred = createRouterCompletionDeadline(20, { deferred: true });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(deferred.expired(), false, 'deferred deadline must not tick before live starts');
+  deferred.start();
+  await new Promise<void>((resolve) => deferred.signal.addEventListener('abort', () => resolve()));
+  assert.equal(deferred.expired(), true, 'deferred deadline must abort after start()');
+  deferred.dispose();
+
+  const disposedBeforeStart = createRouterCompletionDeadline(5, { deferred: true });
+  disposedBeforeStart.dispose();
+  disposedBeforeStart.start();
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(
+    disposedBeforeStart.expired(),
+    false,
+    'dispose() before start() must leave a deferred deadline inert'
+  );
+
   let iteratorClosed = false;
   const uncooperativeStream: AsyncIterable<string> = {
     [Symbol.asyncIterator]() {

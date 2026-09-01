@@ -53,6 +53,10 @@ function testRetryableHelper(): void {
     isRetryableEmptyStructuredOutput(new Error('Router LLM returned no content')),
     true
   );
+  assert.equal(
+    isRetryableEmptyStructuredOutput(new Error('Chat router completion exceeded 3000ms')),
+    true
+  );
   assert.equal(isRetryableEmptyStructuredOutput(new Error('pool timeout')), false);
 }
 
@@ -78,6 +82,18 @@ function testRouterAndLifecycleWireTheFallback(): void {
   assert.ok(
     lifecycle.includes('Chat handler retry after empty structured output'),
     'retry must be logged'
+  );
+  assert.ok(
+    lifecycle.includes('isRetryableEmptyStructuredOutput(err)'),
+    'chat start must consult the retryable helper before FAILING'
+  );
+  assert.ok(
+    router.includes('deferred: true'),
+    'router 3s deadline must start after cache miss, not before awaitCacheFirst'
+  );
+  assert.ok(
+    router.includes('armDeadlineOnLive(completionDeadline'),
+    'live router stream must arm the deferred completion deadline'
   );
 }
 
