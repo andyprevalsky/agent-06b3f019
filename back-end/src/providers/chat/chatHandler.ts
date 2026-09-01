@@ -26,6 +26,7 @@
  * lookup or rotation. A later Temporal workflow retains its requested-model auth path.
  */
 
+import type { Prisma } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
 import { startAgentWorkflowExecution, type TemporalWorkflowExecutionRef } from '../temporal';
@@ -446,7 +447,7 @@ async function startTemporalWorkflowForChat(
   userId: string,
   goal: string,
   startPhase: 'plan' | 'execute' = 'plan',
-  prefetchedAgent?: Awaited<ReturnType<typeof prisma.agent.findUnique>> | null
+  prefetchedAgent?: Prisma.AgentGetPayload<{ include: { verifier: true } }> | null
 ): Promise<boolean> {
   const agent =
     prefetchedAgent ??

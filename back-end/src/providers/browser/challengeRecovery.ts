@@ -60,19 +60,11 @@ import {
   type ConfigSearchDependencies,
   type LaneConfigSearchOptions,
 } from './challengeRecoveryLaneSearch';
-import {
-  buildPreferredBrowserConfig,
-  closeValidationBrowser,
-  raceProbeAbort,
-  recoveryConfigKeyForSession,
-  sameSiteNavigationUrl,
-} from './challengeRecoverySupport';
+import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
 
 export {
   buildPreferredBrowserConfig,
   compatiblePreferredBrowserConfig,
-  recoveryConfigKeyForSession,
-  sameSiteNavigationUrl,
   type PreferredBrowserConfig,
 } from './challengeRecoverySupport';
 
