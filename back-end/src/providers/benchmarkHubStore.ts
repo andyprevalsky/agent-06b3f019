@@ -261,7 +261,7 @@ export async function putRun(
     const tree = canonicalAgentTree(logs?.tree);
     for (const id of Object.keys(tree)) {
       if (!childIdToRun.has(id)) childIdToRun.set(id, runId);
-      agentRunMissCache.delete(id);
+      rememberHubRun(id, runId);
     }
   }
   return storedSummary;
