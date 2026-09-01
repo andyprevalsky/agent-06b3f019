@@ -17,6 +17,8 @@ and persists ToolUsage rows.
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
@@ -74,6 +76,49 @@ class ChallengePageClassification(BaseModel):
         )
     )
     reason: str = Field(description="One short sentence explaining the challenged/clean decision.")
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
+_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
+
+
+def _parse_challenge_classification(content: str) -> ChallengePageClassification:
+    """Parse classifier JSON, tolerating markdown fences and leading prose."""
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("empty classifier response")
+
+    candidates = [text]
+    fence_match = _JSON_FENCE_RE.search(text)
+    if fence_match:
+        candidates.insert(0, fence_match.group(1).strip())
+    for match in _JSON_OBJECT_RE.finditer(text):
+        candidates.append(match.group(0).strip())
+
+    seen: set[str] = set()
+    last_error: Exception | None = None
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return ChallengePageClassification.model_validate_json(candidate)
+        except Exception as exc:
+            last_error = exc
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(payload, dict) and "challenged" in payload:
+                return ChallengePageClassification.model_validate(payload)
+
+    lowered = text.lower()
+    if '"challenged": false' in lowered or "'challenged': false" in lowered:
+        return ChallengePageClassification(challenged=False, reason="parsed from partial classifier text")
+    if '"challenged": true' in lowered or "'challenged': true" in lowered:
+        return ChallengePageClassification(challenged=True, reason="parsed from partial classifier text")
+
+    raise ValueError(f"unable to parse classifier JSON: {last_error}")
 
 
 async def wait_for_dom_settled(page: Any, timeout_ms: float = CHALLENGE_LLM_SETTLE_MS) -> None:
@@ -592,7 +637,7 @@ async def classify_challenge_with_llm(
             messages=build_challenge_classifier_messages(context),
             model=CHALLENGE_LLM_MODEL,
             temperature=0,
-            max_tokens=200,
+            max_tokens=256,
             response_model=ChallengePageClassification,
             claude_token=claude_token,
             claude_token_source=claude_token_source,
@@ -619,7 +664,7 @@ async def classify_challenge_with_llm(
             "from_fast_cache": bool(usage.get("from_fast_cache")),
             "call_site": CHALLENGE_LLM_CALL_SITE,
         }
-        parsed = ChallengePageClassification.model_validate_json(content)
+        parsed = _parse_challenge_classification(content)
         logger.info(
             "Challenge LLM classifier result",
             challenged=parsed.challenged,

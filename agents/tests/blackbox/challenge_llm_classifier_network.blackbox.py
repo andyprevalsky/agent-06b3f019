@@ -219,6 +219,23 @@ def test_select_network_entries_pins_cited_hosts():
     assert selected[0]["url"].startswith("https://js.stripe.com")
 
 
+def test_parse_challenge_classification_tolerates_prose_prefix():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        _parse_challenge_classification,
+    )
+
+    parsed = _parse_challenge_classification(
+        'Here is the JSON requested:\n{"challenged": false, "reason": "Stripe loaded"}'
+    )
+    assert parsed.challenged is False
+    assert "Stripe" in parsed.reason
+
+    parsed = _parse_challenge_classification(
+        "```json\n{\"challenged\": true, \"reason\": \"Turnstile still visible\"}\n```"
+    )
+    assert parsed.challenged is True
+
+
 async def run_all_tests() -> bool:
     print("challenge-llm-classifier-network blackbox tests:")
     result = BlackboxResult()
@@ -249,6 +266,10 @@ async def run_all_tests() -> bool:
     result.record(
         "select_network_entries_pins_cited_hosts",
         test_select_network_entries_pins_cited_hosts,
+    )
+    result.record(
+        "parse_challenge_classification_tolerates_prose_prefix",
+        test_parse_challenge_classification_tolerates_prose_prefix,
     )
     await result.record_async(
         "network_entries_override_prefers_explicit_status_rows",
