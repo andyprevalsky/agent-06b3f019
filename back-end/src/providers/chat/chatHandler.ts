@@ -81,10 +81,6 @@ export async function handleChatMessage(config: {
   });
 
   const phaseModels = selectChatPhaseModels(config.model);
-  const escalationAgentPromise = prisma.agent.findUnique({
-    where: { id: config.agentId },
-    include: { verifier: true },
-  });
 
   const initialContext = startInitialChatContext({
     agentId: config.agentId,
@@ -159,27 +155,32 @@ export async function handleChatMessage(config: {
       mode: decision.mode,
     });
 
+    // Persist ASSISTANT + Cloud Agent chip before Temporal start so the FE
+    // cannot miss the IN_PROGRESS row under 4-worker overlap. Prefetch the
+    // agent row only on this branch so direct/search paths do not add load.
     const cloudAgentToolCallId = uuidv4();
-    const persistStartMessages = (async () => {
-      await createMessage({
-        agentId: config.agentId,
-        role: 'ASSISTANT',
-        text: decision.reasoning,
-      });
-      await createMessage({
-        agentId: config.agentId,
-        role: 'TOOL',
-        text: '',
-        skipDuplicateToolCheck: true,
-        metadata: {
-          toolCallId: cloudAgentToolCallId,
-          toolName: CLOUD_AGENT_TOOL_NAME,
-          toolStatus: 'IN_PROGRESS',
-          title: CREATING_CLOUD_AGENT_TITLE,
-          startPhase: decision.mode,
-        },
-      });
-    })();
+    const escalationAgentPromise = prisma.agent.findUnique({
+      where: { id: config.agentId },
+      include: { verifier: true },
+    });
+    await createMessage({
+      agentId: config.agentId,
+      role: 'ASSISTANT',
+      text: decision.reasoning,
+    });
+    await createMessage({
+      agentId: config.agentId,
+      role: 'TOOL',
+      text: '',
+      skipDuplicateToolCheck: true,
+      metadata: {
+        toolCallId: cloudAgentToolCallId,
+        toolName: CLOUD_AGENT_TOOL_NAME,
+        toolStatus: 'IN_PROGRESS',
+        title: CREATING_CLOUD_AGENT_TITLE,
+        startPhase: decision.mode,
+      },
+    });
 
     let started: boolean;
     try {
@@ -190,9 +191,7 @@ export async function handleChatMessage(config: {
         decision.mode,
         await escalationAgentPromise
       );
-      await persistStartMessages;
     } catch (error) {
-      await persistStartMessages.catch(() => undefined);
       // Pre-acceptance failures only: startTemporalWorkflowForChat swallows
       // post-acceptance broadcast errors and returns true after acceptance.
       // Always rethrow after terminalizing so we never claim `complete` while an

@@ -6,7 +6,6 @@ import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
 import {
   createRouterCompletionDeadline,
   DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-  ROUTER_SOFT_RECOVERY_MS,
   streamBeforeRouterCompletionDeadline,
 } from '../../providers/chat/routerCompletionDeadline';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
@@ -40,7 +39,6 @@ async function run(): Promise<void> {
   assert.equal(options.response_format?.json_schema.strict, true);
 
   assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 4_500);
-  assert.equal(ROUTER_SOFT_RECOVERY_MS, 3_000);
   assert.deepEqual(
     parsePartialRouterDecisionJson(
       '{"reasoning":"closed explanation","action":"direct_answer","query":"","goal":"","mode":"plan"'

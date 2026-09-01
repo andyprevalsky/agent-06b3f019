@@ -84,8 +84,8 @@ function testRouterAndLifecycleWireTheFallback(): void {
     'router must leave the stream only after a complete JSON decision'
   );
   assert.ok(
-    router.includes('ROUTER_SOFT_RECOVERY_MS'),
-    'after 3s the router may recover a closed partial decision without aborting live'
+    !router.includes('ROUTER_SOFT_RECOVERY_MS'),
+    'must not recover a partial decision before the 4.5s deadline'
   );
 }
 
