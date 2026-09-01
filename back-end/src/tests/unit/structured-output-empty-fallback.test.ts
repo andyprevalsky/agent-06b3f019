@@ -55,7 +55,8 @@ function testRetryableHelper(): void {
   );
   assert.equal(
     isRetryableEmptyStructuredOutput(new Error('Chat router completion exceeded 3000ms')),
-    true
+    false,
+    'retrying a 3s router deadline under 4-worker overlap adds another live call'
   );
   assert.equal(isRetryableEmptyStructuredOutput(new Error('pool timeout')), false);
 }
@@ -94,6 +95,10 @@ function testRouterAndLifecycleWireTheFallback(): void {
   assert.ok(
     router.includes('armDeadlineOnLive(completionDeadline'),
     'live router stream must arm the deferred completion deadline'
+  );
+  assert.ok(
+    router.includes('parsePartialRouterDecisionJson(accumulatedJson)'),
+    'router must commit a closed decision before the provider stream finishes'
   );
 }
 

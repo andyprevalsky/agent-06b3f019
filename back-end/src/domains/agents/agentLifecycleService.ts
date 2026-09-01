@@ -34,8 +34,7 @@ export function isRetryableEmptyStructuredOutput(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
     message.includes('Expected one structured output item') ||
-    message.includes('Router LLM returned no content') ||
-    message.includes('Chat router completion exceeded')
+    message.includes('Router LLM returned no content')
   );
 }
 

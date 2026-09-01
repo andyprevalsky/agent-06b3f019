@@ -40,6 +40,7 @@ import {
 } from './routerCompletionDeadline';
 import {
   isValidRouterCacheJson,
+  parsePartialRouterDecisionJson,
   parseRouterDecisionAfterDeadline,
   parseRouterDecisionJson,
   type RouterDecision,
@@ -114,20 +115,9 @@ interface ChatMessage {
 const LLM_INLINE_THRESHOLD = 20 * 1024 * 1024;
 
 // File type helpers
-const IMAGE_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/jpg',
-  'image/gif',
-  'image/webp',
-]);
+const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp']);
 const TEXT_MIME_TYPES = new Set([
-  'text/plain',
-  'text/csv',
-  'text/markdown',
-  'text/html',
-  'application/json',
-  'application/xml',
+  'text/plain', 'text/csv', 'text/markdown', 'text/html', 'application/json', 'application/xml',
 ]);
 
 // ============================================
@@ -479,7 +469,7 @@ export async function callRouterLlm(params: {
         finish_reason?: string;
       }
     | undefined;
-  let deadlineDecision: RouterDecision | null = null;
+  let closedDecision: RouterDecision | null = null;
 
   // Process stream chunks - stream every delta immediately
   for await (const chunk of streamBeforeRouterCompletionDeadline(stream, completionDeadline)) {
@@ -567,6 +557,11 @@ export async function callRouterLlm(params: {
       }
     }
 
+    if (!closedDecision) {
+      closedDecision = parsePartialRouterDecisionJson(accumulatedJson);
+      if (closedDecision) break;
+    }
+
     if (chunk.usage) {
       usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
       usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
@@ -587,16 +582,16 @@ export async function callRouterLlm(params: {
   }
 
   if (completionDeadline.expired()) {
-    deadlineDecision = parseRouterDecisionAfterDeadline(
+    closedDecision = parseRouterDecisionAfterDeadline(
       structuredTextOrFallback(structuredOutput, accumulatedJson),
       accumulatedJson
     );
-    if (!deadlineDecision) {
+    if (!closedDecision) {
       throw completionDeadline.signal.reason ?? new Error('Chat router completion expired');
     }
     log.warn('[RouterLLM] Completion deadline recovered a closed decision', {
       agentId: params.agentId,
-      action: deadlineDecision.action,
+      action: closedDecision.action,
       timeoutMs: completionTimeoutMs,
       chunksReceived: chunkCount,
       jsonLength: accumulatedJson.length,
@@ -604,7 +599,7 @@ export async function callRouterLlm(params: {
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = deadlineDecision
+  const fullJson = closedDecision
     ? accumulatedJson
     : structuredTextOrFallback(structuredOutput, accumulatedJson);
 
@@ -663,8 +658,8 @@ export async function callRouterLlm(params: {
   }
 
   let decision: RouterDecision;
-  if (deadlineDecision) {
-    decision = deadlineDecision;
+  if (closedDecision) {
+    decision = closedDecision;
   } else {
     try {
       decision = parseRouterDecisionJson(fullJson);
@@ -680,7 +675,7 @@ export async function callRouterLlm(params: {
   }
 
   const cacheGoal = fastMode.goal;
-  if (fcKey && !fcCacheWon && !deadlineDecision && cacheGoal !== null && fastModeWrite) {
+  if (fcKey && !fcCacheWon && !completionDeadline.expired() && cacheGoal !== null && fastModeWrite) {
     runCacheWriteInBackground(
       () =>
         cacheSet({
