@@ -5534,8 +5534,9 @@ async def test_resume_browser_session_rate_limited():
 
 
 def test_challenge_recovery_uses_cross_recovery_config_blacklist():
-    """Dead configs from prior promotes are passed to recover_browser_challenge and
-    cleared only when the backend reports blacklist_expired (catalog exhausted)."""
+    """Dead configs from prior probe failures OR post-promote failures are passed to
+    recover_browser_challenge / cookie probes, and cleared only when the backend
+    reports blacklist_expired (catalog exhausted)."""
     from pathlib import Path
 
     source = Path("/workspace/agents/domains/spawn_browser_agent_v3/handler.py").read_text()
@@ -5545,6 +5546,15 @@ def test_challenge_recovery_uses_cross_recovery_config_blacklist():
     assert 'result.get("blacklist_expired")' in source
     assert "dead_browser_config_keys.clear()" in source
     assert "dead_browser_config_keys.add(last_promoted_browser_config_key)" in source
+    # Probe failures (not only post-promote) must enter the dead set.
+    assert 'result.get("failed_config_keys")' in source
+    assert "dead_browser_config_keys.add(key)" in source
+    # Cookie-variant ephemeral probes must also skip dead configs.
+    assert "blocked_config_keys=sorted(dead_browser_config_keys)" in source
+
+    repo = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
+    assert 'failed_config_keys' in repo
+    assert 'blocked_config_keys' in repo
 
 
 def test_challenge_recovery_never_live_verifies_after_atomic_promote():

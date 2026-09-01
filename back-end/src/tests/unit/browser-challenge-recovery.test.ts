@@ -668,6 +668,18 @@ function testProbeAppliesFingerprintBeforeNavigationAndPassesToolParityInputs():
   assert.match(searchSource, /applyConfigBlacklist/);
   assert.match(searchSource, /blacklist_expired/);
   assert.match(searchSource, /fingerprintInjection/);
+  assert.match(searchSource, /failed_config_keys/);
+  assert.match(searchSource, /failedConfigKeys\.add/);
+  assert.match(searchSource, /ChallengeConfigSearchExhaustedError/);
+
+  const cookieStart = source.indexOf('export async function probeCookieVariant');
+  assert.ok(cookieStart >= 0);
+  const cookieSource = source.slice(
+    cookieStart,
+    source.indexOf('export async function', cookieStart + 1)
+  );
+  assert.match(cookieSource, /blockedConfigKeys/);
+  assert.match(cookieSource, /applyConfigBlacklist/);
 }
 
 async function main(): Promise<void> {

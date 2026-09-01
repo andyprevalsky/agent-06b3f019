@@ -93,9 +93,9 @@ export const recoverChallengeSchema = z.object({
    */
   preserve_auth: z.boolean().optional(),
   /**
-   * Cross-recovery blacklist of config keys that already failed after promote.
-   * Backend excludes them unless the blacklist covers the whole catalog (then
-   * it expires and the full catalog is retried).
+   * Cross-recovery blacklist of config keys that already failed a probe or
+   * failed again after promote. Backend excludes them unless the blacklist
+   * covers the whole catalog (then it expires and the full catalog is retried).
    */
   blocked_config_keys: z.array(z.string().min(1).max(64)).max(32).optional(),
 });
@@ -111,6 +111,7 @@ export const probeCookieVariantSchema = z.object({
   user_agent: z.string().max(2048).optional(),
   recovery_reason: z.string().max(4000).optional(),
   blocked_resource_url: z.string().url().max(8192).optional(),
+  blocked_config_keys: z.array(z.string().min(1).max(64)).max(32).optional(),
 });
 
 export const injectLocalStorageSchema = z.object({

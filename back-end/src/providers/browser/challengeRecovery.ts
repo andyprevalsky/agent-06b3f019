@@ -459,6 +459,16 @@ const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependen
  * Used by the agent cookie-probe wave so isolation experiments never open
  * ``new_context`` windows on the live debug desktop.
  */
+export class ChallengeConfigSearchExhaustedError extends Error {
+  readonly failedConfigKeys: string[];
+
+  constructor(message: string, failedConfigKeys: string[]) {
+    super(message);
+    this.name = 'ChallengeConfigSearchExhaustedError';
+    this.failedConfigKeys = [...failedConfigKeys];
+  }
+}
+
 export async function probeCookieVariant(
   input: {
     taskId: string;
@@ -468,6 +478,8 @@ export async function probeCookieVariant(
     userAgent?: string;
     blockedResourceUrl?: string;
     recoveryReason?: string | null;
+    /** Skip configs that already failed for this agent until catalog exhaust. */
+    blockedConfigKeys?: string[];
   },
   dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
 ): Promise<{ clean: boolean; configKey: string; latencyMs: number }> {
@@ -498,7 +510,8 @@ export async function probeCookieVariant(
     requirePaymentCdn: false,
   });
   const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
-  const config = configs[0];
+  const cookieBlacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
+  const config = cookieBlacklist.configs[0];
   if (!config) {
     throw new Error('No ephemeral browser config available for cookie-variant probe');
   }
@@ -653,6 +666,8 @@ export async function searchAndPromoteBrowserConfig(
     agentId: billing.agentId,
   });
 
+  const failedConfigKeys = new Set<string>();
+
   const searchDependencies: ConfigSearchDependencies = {
     create: async (config, signal) => {
       if (signal.aborted) {
@@ -690,7 +705,7 @@ export async function searchAndPromoteBrowserConfig(
       if (signal.aborted) {
         throw new Error('lane_aborted');
       }
-      return dependencies.probe(
+      const probe = await dependencies.probe(
         session,
         input.targetUrl,
         lane.storageState,
@@ -706,6 +721,10 @@ export async function searchAndPromoteBrowserConfig(
         billing,
         signal
       );
+      if (!(probe.stablePasses === probe.attempts && probe.attempts > 0)) {
+        failedConfigKeys.add(config.key);
+      }
+      return probe;
     },
     promote: async ({ config, session }) => {
       const updated = await prisma.$transaction(async (tx) => {
@@ -751,10 +770,16 @@ export async function searchAndPromoteBrowserConfig(
     },
   };
 
-  const winner = await runLaneConfigSearch(searchableConfigs, lanes, searchDependencies, {
-    avoidConfigKey: sessionAvoidConfigKey,
-    blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
-  });
+  let winner: Awaited<ReturnType<typeof runLaneConfigSearch>>;
+  try {
+    winner = await runLaneConfigSearch(searchableConfigs, lanes, searchDependencies, {
+      avoidConfigKey: sessionAvoidConfigKey,
+      blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ChallengeConfigSearchExhaustedError(message, [...failedConfigKeys]);
+  }
   const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [
     ...(winner.probe.classifierLlmUsage ?? []),
   ];
@@ -772,6 +797,7 @@ export async function searchAndPromoteBrowserConfig(
     config_key: winner.config.key,
     storage_state_preloaded: true,
     blacklist_expired: blacklist.blacklistExpired,
+    failed_config_keys: [...failedConfigKeys],
     recovery_action:
       winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
     recovery_message: `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,

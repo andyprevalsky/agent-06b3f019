@@ -586,6 +586,21 @@ async def recover_browser_challenge(
         return response.json()
     if response.status_code == 429:
         return {"rate_limited": True, "status_code": 429}
+    if response.status_code == 503:
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        failed = data.get("failed_config_keys") or []
+        return {
+            "success": False,
+            "error": data.get("message") or data.get("error") or response.text,
+            "failed_config_keys": list(failed) if isinstance(failed, list) else [],
+            "blacklist_expired": bool(data.get("blacklist_expired")),
+            "status_code": 503,
+        }
     raise Exception(f"Failed to recover from browser challenge: {response.text}")
 
 
@@ -598,6 +613,7 @@ async def probe_cookie_variant_ephemeral(
     user_agent: str = "",
     recovery_reason: str = "",
     blocked_resource_url: str = "",
+    blocked_config_keys: Optional[List[str]] = None,
 ) -> bool:
     """Probe one cookie variant on an ephemeral Kernel/Steel session (not live desktop)."""
     payload: Dict[str, Any] = {
@@ -611,6 +627,8 @@ async def probe_cookie_variant_ephemeral(
         payload["recovery_reason"] = recovery_reason
     if blocked_resource_url:
         payload["blocked_resource_url"] = blocked_resource_url
+    if blocked_config_keys:
+        payload["blocked_config_keys"] = list(blocked_config_keys)
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/probe-cookie-variant",

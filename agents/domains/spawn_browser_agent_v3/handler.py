@@ -5403,9 +5403,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # document GET looks clean — cookie-stage recovery then false-succeeds forever.
     # After one cookies_sanitized result, escalate subsequent recoveries to config search.
     cookie_recovery_successes = 0
-    # Configs that cleared ephemeral probes but failed again on the live task.
-    # Excluded on later recoveries until the catalog is fully exhausted (backend
-    # expires the blacklist and returns blacklist_expired=true).
+    # Configs that failed an ephemeral probe OR failed again after promote.
+    # Never re-probed until the catalog is fully exhausted (backend returns
+    # blacklist_expired=true and we clear this set).
     dead_browser_config_keys: set[str] = set()
     last_promoted_browser_config_key: str | None = None
     # Sticky hard filter: once a critical third-party resource block triggered
@@ -7966,8 +7966,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     if result.get("rate_limited"):
                         raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
+                    for failed_key in result.get("failed_config_keys") or []:
+                        key = str(failed_key or "").strip()
+                        if key:
+                            dead_browser_config_keys.add(key)
                     if result.get("blacklist_expired"):
                         dead_browser_config_keys.clear()
+                    if result.get("success") is False:
+                        raise RuntimeError(
+                            str(result.get("error") or "Browser challenge recovery failed")
+                        )
                     return result
 
                 challenge_classifier_usages: list = []
@@ -8014,6 +8022,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             user_agent=user_agent,
                             recovery_reason=str(recovery_reason or "") or "",
                             blocked_resource_url=blocked_resource_url,
+                            blocked_config_keys=sorted(dead_browser_config_keys),
                         )
 
                     recovery = await recover_from_challenge(
