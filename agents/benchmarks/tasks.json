@@ -34,7 +34,7 @@
     "group": "pre-deploy",
     "fast_cache": "on",
     "enforce_declared_evaluators": true,
-    "description": "July OAi mass-agent Fast Mode recreation. T1–T10 are named static_check + single_turn_llm_judge rows (not one collapsed judge). R1–R5 are the other pre-deploy smokes (spawn-sub-agents and siblings), not new evaluator types.",
+    "description": "July OAi mass-agent Fast Mode recreation. T1\u2013T10 are named static_check + single_turn_llm_judge rows (not one collapsed judge). R1\u2013R5 are the other pre-deploy smokes (spawn-sub-agents and siblings), not new evaluator types.",
     "environment": {
       "mode": "hybrid",
       "db_fixtures": [],
@@ -44,7 +44,7 @@
         "FAST_MODE_CACHE_DATABASE_URL"
       ],
       "live_targets": [],
-      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content/T9 are static_check. T1/T3–T6 and T7-schema are single_turn_llm_judge. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content/T9 are static_check. T1/T3\u2013T6 and T7-schema are single_turn_llm_judge. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
     },
     "evaluators": [
       {
@@ -116,7 +116,7 @@
         "criteria": [
           "T1: Andy Prevalsky is the principal user (not Aman Gottumukkala). July cache field names like opportunities_for_aman do not fail."
         ],
-        "judge_prompt": "This is a Fast Mode mass-agent research tree, not an ecommerce purchase. Score 1.0 if the root goal, first-level GP goals, and completion card are for Andy Prevalsky / Andy's and Aman Gottumukkala is not the principal user/owner. July replay may keep historical schema keys such as opportunities_for_aman or opportunities_for_aman in cached GP output_schema — that is not Aman-as-principal and must not fail T1. FAIL only if the root goal or completion card presents Aman as the user. Use benchmark_state.tree mentions_andy/mentions_aman plus the completion card. Unsupported assistant claims are not proof."
+        "judge_prompt": "This is a Fast Mode mass-agent research tree, not an ecommerce purchase. Score 1.0 if the root goal, first-level GP goals, and completion card are for Andy Prevalsky / Andy's and Aman Gottumukkala is not the principal user/owner. July replay may keep historical schema keys such as opportunities_for_aman or opportunities_for_aman in cached GP output_schema \u2014 that is not Aman-as-principal and must not fail T1. FAIL only if the root goal or completion card presents Aman as the user. Use benchmark_state.tree mentions_andy/mentions_aman plus the completion card. Unsupported assistant claims are not proof."
       },
       {
         "id": "t2-fifty-first-level-gps",
@@ -137,7 +137,7 @@
         "criteria": [
           "T3: Every explore child plays a full multi-turn research trajectory and ends with the real explore summary, not Thinking... or Research started."
         ],
-        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. Compact evidence omits messages[] arrays — use typed tool_counts / explore_spawn_count / research_tool_count / first_level_gps. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL if first-level GPs have no explore spawns and no research tools. FAIL stub-only traj-end/cold nodes (has_traj_end_stub true). FAIL explore chips that replay research tools but never post a user-facing spawn_agent FINISHED summary (Research started. / Thinking... only). Unsupported assistant claims are not proof."
+        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row \u2014 that still counts. Compact evidence omits messages[] arrays \u2014 use typed tool_counts / explore_spawn_count / research_tool_count / first_level_gps. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL if first-level GPs have no explore spawns and no research tools. FAIL stub-only traj-end/cold nodes (has_traj_end_stub true). FAIL explore chips that replay research tools but never post a user-facing spawn_agent FINISHED summary (Research started. / Thinking... only). Unsupported assistant claims are not proof."
       },
       {
         "id": "t4-full-july-gp-trajectories",
@@ -145,7 +145,7 @@
         "criteria": [
           "T4: Every first-level GP plays a full July-class trajectory"
         ],
-        "judge_prompt": "Score 1.0 only if every first-level general-purpose child replays a full July-class creator-analysis trajectory. Compact evidence omits messages[] arrays — use typed first_level_gps / message_count / tool_counts / research_tool_count / explore_spawn_count. PASS a GP when message_count >= 12 or research_tool_count >= 3 or explore_spawn_count >= 1. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL a GP with no research tools, no explore spawn, and message_count <= 12. FAIL traj-end/cold stubs as the only work (has_traj_end_stub true). Unsupported assistant claims are not proof."
+        "judge_prompt": "Score 1.0 only if every first-level general-purpose child replays a full July-class creator-analysis trajectory. Compact evidence omits messages[] arrays \u2014 use typed first_level_gps / message_count / tool_counts / research_tool_count / explore_spawn_count. PASS a GP when message_count >= 12 or research_tool_count >= 3 or explore_spawn_count >= 1. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL a GP with no research tools, no explore spawn, and message_count <= 12. FAIL traj-end/cold stubs as the only work (has_traj_end_stub true). Unsupported assistant claims are not proof."
       },
       {
         "id": "t5-zero-live-spend",
@@ -153,7 +153,7 @@
         "criteria": [
           "T5: $0 spent and 0 tokens streamed from non-fast-cache"
         ],
-        "judge_prompt": "Score 1.0 only when typed benchmark_state.usage proves honest Fast Mode replay: cost_cents is 0, cache_creation_input_tokens is 0, and live_output_tokens is 0 (tokens streamed from non-fast-cache). cache_read_input_tokens > 0 with those zeros is Fast Mode replay evidence — do not require a from_fast_cache field on each GP. FAIL if any first-level GP is stub-only (has_traj_end_stub true). Do not trust assistant claims of $0."
+        "judge_prompt": "Score 1.0 only when typed benchmark_state.usage proves honest Fast Mode replay: cost_cents is 0, cache_creation_input_tokens is 0, and live_output_tokens is 0 (tokens streamed from non-fast-cache). cache_read_input_tokens > 0 with those zeros is Fast Mode replay evidence \u2014 do not require a from_fast_cache field on each GP. FAIL if any first-level GP is stub-only (has_traj_end_stub true). Do not trust assistant claims of $0."
       },
       {
         "id": "t6-no-nested-gps",
@@ -1972,7 +1972,7 @@
     "name": "browser-doordash-food-plan-grocery-order",
     "title": "DoorDash Food-Plan Grocery Order",
     "description": "Reproduces prod premature-checkout failure: cart must match the prod-derived weekly manifest at checkout, not a single-item or partial basket.",
-    "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout — a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it.",
+    "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout \u2014 a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it.",
     "timeout_seconds": 1800,
     "is_chat_mode": false,
     "expected_tools": [
@@ -2045,7 +2045,7 @@
           "Checkout or write-lock evidence is not a single-SKU order (for example only Kodiak mix)",
           "Safeway is the primary store, delivery uses the saved Palo Alto address, and terminal state is write-lock or checkout with the manifest-aligned basket"
         ],
-        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full prod-derived weekly grocery manifest. Pass only when grounded cart, write-lock itemization, or checkout summary proves every required manifest line is present with manifest-valid quantities or an explicitly allowed substitution/omission documented in the trajectory. Compare item names, brands, and constraints against the canonical manifest checklist supplied above — a large item count or high subtotal alone is insufficient if required manifest lines are missing or wrong. Fail if any required manifest line is missing without allowed fallback, if P0 label constraints are violated, if prohibited items appear, if Shop your list chrome is mistaken for cart contents, or if checkout is for exactly one item."
+        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full prod-derived weekly grocery manifest. Pass only when grounded cart, write-lock itemization, or checkout summary proves every required manifest line is present with manifest-valid quantities or an explicitly allowed substitution/omission documented in the trajectory. Compare item names, brands, and constraints against the canonical manifest checklist supplied above \u2014 a large item count or high subtotal alone is insufficient if required manifest lines are missing or wrong. Fail if any required manifest line is missing without allowed fallback, if P0 label constraints are violated, if prohibited items appear, if Shop your list chrome is mistaken for cart contents, or if checkout is for exactly one item."
       },
       {
         "id": "doordash-food-plan-runtime",
@@ -2070,7 +2070,10 @@
     "source": [
       "agent:c27b4f28-994b-467f-afc6-b4082d0155c1",
       "rca:2026-08-22-write-lock-rejected-never-closed-browser-status-chip"
-    ]
+    ],
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "on"
   },
   {
     "name": "browser-alchemy-springs-sauna",
@@ -5331,116 +5334,5 @@
     "bench": "rose-bench",
     "group": "rose-bench",
     "runner": "agent"
-  },
-  {
-    "name": "browser-doordash-food-plan-grocery-order",
-    "title": "DoorDash Food-Plan Grocery Order",
-    "description": "Reproduces prod premature-checkout failure: cart must match the prod-derived weekly manifest at checkout, not a single-item or partial basket.",
-    "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout \u2014 a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it.",
-    "timeout_seconds": 1800,
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
-    "tags": [
-      "browser",
-      "auth",
-      "ecommerce",
-      "grocery",
-      "doordash",
-      "food-plan"
-    ],
-    "group": "daily",
-    "price_limit_cents": 300,
-    "requires_browser_agent": true,
-    "requires_claude_code": false,
-    "attachment": null,
-    "approval_handling": "ignore",
-    "expected_approval_count": 1,
-    "expected_attention_kind": "write_lock",
-    "expected_tool_counts": {
-      "spawn_browser_agent": 1
-    },
-    "tool_count_scope": "root",
-    "start_phase": "execute",
-    "status": "ready",
-    "runner": "agent",
-    "bench": "rose-bench",
-    "pinned_facts": {
-      "manifest_source": "doordash-food-plan-grocery-fixture.json",
-      "store": "Safeway",
-      "platform": "DoorDash",
-      "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1",
-      "prod_user_id": "5824c58c-7f11-4c92-8f81-33eb3c324a2f"
-    },
-    "environment": {
-      "mode": "live",
-      "db_fixtures": [],
-      "base_images": [
-        "base:victoria-prod-sync-v1"
-      ],
-      "services": [
-        "doordash.com",
-        "write_lock"
-      ],
-      "secrets": [
-        "KERNEL_API_KEY",
-        "STEEL_API_KEY"
-      ],
-      "live_targets": [
-        "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
-      ],
-      "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex.",
-      "live_fixtures": [
-        "live-aman-food-plan-identity"
-      ],
-      "live_cookie_domains": [
-        "doordash.com"
-      ],
-      "required_injectable_cookie_domains": [
-        "doordash.com"
-      ]
-    },
-    "evaluators": [
-      {
-        "id": "doordash-food-plan-cart-completeness",
-        "method": "single_turn_llm_judge",
-        "criteria": [
-          "Grounded cart or write-lock itemization includes every required Safeway manifest line from the canonical checklist (proteins, eggs/egg whites, 42g Elite shakes, dairy, Kodiak mix, sweet potatoes, rice, PB2 or allowed tahini fallback, produce, pantry spices/oils, condiments such as Valentina and coconut aminos, Creami inputs, and lime sparkling water) with quantities that satisfy the manifest",
-          "Any missing Safeway line is only absent when the trajectory documents manifest-allowed omission (for example no wrap under 250 mg sodium) or an allowed substitution that still satisfies the line's P0/P1 label constraints",
-          "If 99 Ranch is used, it contains only the Asian pantry manifest lines (plain noodles without seasoning packets, gochugaru, whole Sichuan peppercorns, sesame oil) and does not duplicate Safeway items",
-          "P0 constraints are satisfied in grounded evidence: 93/7 or leaner beef, 42 g protein shakes, no-salt-added tomatoes, unsalted/plain rice, zero-cal butter spray, coconut aminos not soy sauce, no seasoning-packet noodles, and no prohibited items (taco packets, Buldak, chili crisp, diet soda, etc.)",
-          "Checkout or write-lock evidence is not a single-SKU order (for example only Kodiak mix)",
-          "Safeway is the primary store, delivery uses the saved Palo Alto address, and terminal state is write-lock or checkout with the manifest-aligned basket"
-        ],
-        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full prod-derived weekly grocery manifest. Pass only when grounded cart, write-lock itemization, or checkout summary proves every required manifest line is present with manifest-valid quantities or an explicitly allowed substitution/omission documented in the trajectory. Compare item names, brands, and constraints against the canonical manifest checklist supplied above \u2014 a large item count or high subtotal alone is insufficient if required manifest lines are missing or wrong. Fail if any required manifest line is missing without allowed fallback, if P0 label constraints are violated, if prohibited items appear, if Shop your list chrome is mistaken for cart contents, or if checkout is for exactly one item."
-      },
-      {
-        "id": "doordash-food-plan-runtime",
-        "method": "static_check",
-        "criteria": [
-          "No tool call fails",
-          "Exactly one browser-agent session is used"
-        ],
-        "checks": [
-          {
-            "type": "no_tool_failures"
-          },
-          {
-            "type": "browser_agent_session_count",
-            "min": 1,
-            "max": 1
-          }
-        ]
-      }
-    ],
-    "enforce_declared_evaluators": true,
-    "source": [
-      "agent:c27b4f28-994b-467f-afc6-b4082d0155c1",
-      "rca:2026-08-22-write-lock-rejected-never-closed-browser-status-chip"
-    ],
-    "world_surface": "live",
-    "fast_cache": "off",
-    "anti_bot": "on"
   }
 ]
