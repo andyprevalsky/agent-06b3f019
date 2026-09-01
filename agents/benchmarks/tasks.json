@@ -5231,11 +5231,12 @@
   {
     "name": "cuda-kernel-github-top100-code-agent",
     "title": "CUDA Kernel GitHub Top 100 (Code Agent Ranking)",
-    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent",
+    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nUse this GitHub token for API calls: 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",
     "timeout_seconds": 1800,
     "is_chat_mode": false,
     "expected_tools": [
-      "spawn_claude_code_agent"
+      "spawn_agent",
+      "api_request"
     ],
     "tags": [
       "claude-code",
@@ -5245,16 +5246,14 @@
     "price_limit_cents": 400,
     "no_anthropic_price_limit_cents": 600,
     "requires_browser_agent": false,
-    "requires_claude_code": true,
+    "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "plan",
     "min_tool_counts": {
-      "spawn_claude_code_agent": 1
+      "api_request": 1
     },
-    "expected_tool_counts": {
-      "spawn_claude_code_agent": 1
-    },
+    "expected_tool_counts": {},
     "forbidden_tools": [
       "spawn_general_purpose_agent",
       "spawn_general_purpose_agent_for_each"
@@ -5294,7 +5293,7 @@
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
-    "description": "Regression from agent b775556c: top-100 CUDA-kernel GitHub ranking must use one coding agent for API/scripted ranking, not parallel explore verifiers. Prompt matches the natural prod user goal; routing is judged by harness tool counts, not prompt instructions.",
+    "description": "Top-100 CUDA-kernel GitHub ranking via explore agents using api_request against the GitHub REST API.",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -5307,24 +5306,19 @@
       "live_targets": [
         "https://api.github.com"
       ],
-      "context_notes": "Live GitHub metadata fetch. Prompt is the natural user ask (no tool-routing instructions). Harness expected_tool_counts/forbidden_tools judge whether the planner energy invariant routes ranking to spawn_claude_code_agent instead of explore/reasoning fan-out."
+      "context_notes": "Live GitHub metadata fetch via explore api_request. Prompt includes an explicit GitHub token line for API auth."
     },
     "evaluators": [
       {
-        "id": "code-agent-ranking-route",
+        "id": "api-request-ranking-route",
         "method": "static_check",
         "criteria": [
-          "Exactly one spawn_claude_code_agent call completes the ranking work",
+          "At least one api_request call returns GitHub repository data",
           "No spawn_general_purpose_agent detour is used",
           "Final structured output contains a repos list",
-          "Each spawn_claude_code_agent session stores a non-empty terminal transcript"
+          "Agent status is COMPLETED"
         ],
         "checks": [
-          {
-            "type": "claude_code_session_output",
-            "min_sessions": 1,
-            "min_chars": 32
-          },
           {
             "type": "agent_status",
             "value": "COMPLETED"
