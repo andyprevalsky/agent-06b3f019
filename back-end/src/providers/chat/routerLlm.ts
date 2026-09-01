@@ -35,16 +35,12 @@ import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 import {
-  chatRouterCompletionTimeoutMs,
-  createRouterCompletionDeadline,
+  chatRouterCompletionTimeoutMs, createRouterCompletionDeadline, ROUTER_SOFT_RECOVERY_MS,
   streamBeforeRouterCompletionDeadline,
 } from './routerCompletionDeadline';
 import {
-  isValidRouterCacheJson,
-  parseRouterDecisionAfterDeadline,
-  parseRouterDecisionJson,
-  tryParseCompleteRouterDecision,
-  type RouterDecision,
+  isValidRouterCacheJson, parsePartialRouterDecisionJson, parseRouterDecisionAfterDeadline,
+  parseRouterDecisionJson, tryParseCompleteRouterDecision, type RouterDecision,
 } from './routerDecision';
 
 export { RouterDecisionSchema } from './routerDecision';
@@ -373,6 +369,7 @@ export async function callRouterLlm(params: {
   }
 
   const completionTimeoutMs = chatRouterCompletionTimeoutMs();
+  const routerStartedAt = Date.now();
   const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs);
   const createLiveStream = (abortSignal?: AbortSignal) =>
     createStreamingCompletion(
@@ -558,7 +555,11 @@ export async function callRouterLlm(params: {
     }
 
     if (!closedDecision) {
-      closedDecision = tryParseCompleteRouterDecision(accumulatedJson);
+      closedDecision =
+        tryParseCompleteRouterDecision(accumulatedJson) ??
+        (Date.now() - routerStartedAt >= ROUTER_SOFT_RECOVERY_MS
+          ? parsePartialRouterDecisionJson(accumulatedJson)
+          : null);
       if (closedDecision) break;
     }
 

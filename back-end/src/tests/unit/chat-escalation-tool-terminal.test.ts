@@ -32,6 +32,14 @@ assert.ok(
   'escalation must catch failures from startTemporalWorkflowForChat'
 );
 assert.ok(
+  handler.includes('escalationAgentPromise = prisma.agent.findUnique'),
+  'escalation must prefetch the agent row before the router returns'
+);
+assert.ok(
+  escalationBranch.includes('await persistStartMessages'),
+  'Temporal start must overlap Cloud Agent tool persistence'
+);
+assert.ok(
   escalationBranch.includes('finishRejectedCloudAgentTool'),
   'escalation must terminalize the Cloud Agent tool on failure'
 );

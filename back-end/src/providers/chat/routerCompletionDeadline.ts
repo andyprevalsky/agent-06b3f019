@@ -1,6 +1,8 @@
 // Must stay under the 5s chat-lifecycle ratchet and above 4-worker unique-token
 // live time. 3000ms aborted recoveries and FAILED the agent (90s warmups).
 export const DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS = 4_500;
+/** After this much wall time, accept a closed partial decision without aborting live. */
+export const ROUTER_SOFT_RECOVERY_MS = 3_000;
 
 export interface RouterCompletionDeadline {
   signal: AbortSignal;
