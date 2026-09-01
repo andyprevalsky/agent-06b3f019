@@ -139,7 +139,12 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     ],
                     start_to_close_timeout=timedelta(minutes=50),
                     heartbeat_timeout=timedelta(minutes=5),
-                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                    # WAIT so pause cancel receives the activity's cancelled
+                    # result (includes task_id). TRY_CANCEL races the workflow
+                    # ahead of cleanup and posts task_complete without task_id,
+                    # leaving ClaudeCodeChip stuck on "Spinning up..." on the
+                    # durable hub FE (agent 094f1085 / task 1d92a4db).
+                    cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
@@ -177,6 +182,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         cancel_metadata["task_id"] = result["task_id"]
                     if result.get("code_provider"):
                         cancel_metadata["code_provider"] = result["code_provider"]
+                if not cancel_metadata.get("task_id"):
+                    # Last resort: still emit task_complete so routing stays on
+                    # ClaudeCodeChip, but log — FE recovers task_id from siblings.
+                    logger.warning(
+                        "[ClaudeCode] Cancel without task_id; chip may need FE sibling recovery",
+                        agent_id=agent_id,
+                    )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Claude Code Session Cancelled",

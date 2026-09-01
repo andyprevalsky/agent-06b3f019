@@ -2259,6 +2259,7 @@ class _FakeCCWorkflow:
 
     class ActivityCancellationType:
         TRY_CANCEL = "TRY_CANCEL"
+        WAIT_CANCELLATION_COMPLETED = "WAIT_CANCELLATION_COMPLETED"
 
     def __init__(self, activity_handle):
         self._handle = activity_handle

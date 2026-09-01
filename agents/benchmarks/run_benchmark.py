@@ -9022,6 +9022,86 @@ def _claude_code_sessions_with_transcripts(
     ]
 
 
+def _claude_code_started_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a claude_code_started (or equivalent) chip anchor."""
+    started: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        action_type = metadata.get("action_type")
+        if action_type in {"claude_code_started", "task_started"} or (
+            metadata.get("toolName") == "spawn_claude_code_agent"
+            and metadata.get("ws_url")
+        ):
+            started.add(task_id)
+    return started
+
+
+def _claude_code_terminal_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a chip-terminal task_complete/session_cancelled."""
+    terminal: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        if metadata.get("action_type") in {"task_complete", "session_cancelled"}:
+            terminal.add(task_id)
+    return terminal
+
+
+async def _await_claude_code_chip_terminality(
+    base_url: str,
+    agent_id: str,
+    data: dict,
+    *,
+    timeout_seconds: float = 45.0,
+) -> dict:
+    """After pause, wait until Claude Code chips have task_complete+task_id in-transcript.
+
+    Pause cancel is async (activity cleanup posts Session Cancelled). Collecting
+    logs immediately freezes the durable hub FE on "Spinning up..." because the
+    archive misses the terminal message (hub agent 094f1085 had 87 msgs without
+    cancel; local agent had 89 with Session Cancelled + task_id).
+    """
+    latest = data
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        messages = latest.get("messages") or []
+        started = _claude_code_started_task_ids(messages)
+        if not started:
+            return latest
+        terminal = _claude_code_terminal_task_ids(messages)
+        if started <= terminal:
+            print(
+                f"    ✓ Claude Code chip terminality settled "
+                f"({len(terminal)}/{len(started)} task_complete+task_id)"
+            )
+            return latest
+        if time.monotonic() >= deadline:
+            missing = sorted(started - terminal)
+            print(
+                f"    ⚠ Claude Code cancel messages incomplete before log collection; "
+                f"missing task_id(s): {missing[:5]}"
+            )
+            return latest
+        await asyncio.sleep(1.5)
+        try:
+            latest = await get_agent(base_url, agent_id)
+        except Exception as refresh_error:
+            print(f"    ⚠ post-pause agent refresh failed: {refresh_error}")
+
+
 async def _hydrate_claude_code_sessions(data: dict) -> None:
     """Fetch Claude Code sessions (root + tree) for transcript static checks.
 
@@ -9779,6 +9859,9 @@ async def run_single_task(
             try:
                 if await pause_agent(base_url, agent_id):
                     print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
+                    # Wait for Session Cancelled (task_complete+task_id) before
+                    # freezing the transcript into the durable hub archive.
+                    data = await _await_claude_code_chip_terminality(base_url, agent_id, data)
             except Exception as pause_error:
                 print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 
