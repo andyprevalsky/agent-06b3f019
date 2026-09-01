@@ -12,7 +12,17 @@ import type {
 } from './challengeLlmClassifier';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
+import {
+  raceProbeAbort,
+  recoveryConfigKeyForSession,
+  sameSiteNavigationUrl,
+} from './challengeRecoveryShared';
 import type { BrowserProviderName } from './types';
+
+export {
+  recoveryConfigKeyForSession,
+  sameSiteNavigationUrl,
+} from './challengeRecoveryShared';
 
 export {
   bestSpecificity,
@@ -239,7 +249,7 @@ export async function probeCandidateBrowser(
   } finally {
     // Closing this CDP client leaves the remote default context (including any
     // solver-refreshed challenge cookies) alive for atomic promotion.
-    await session.validationBrowser.close().catch(() => {});
+    await closeValidationBrowser(session);
   }
   if (signal?.aborted) {
     throw new Error('lane_aborted');
@@ -533,7 +543,7 @@ export async function searchAndPromoteBrowserConfig(
       }
     },
     release: async (_config, session) => {
-      await closeValidationBrowser(session);
+      await closeValidationBrowser(session).catch(() => {});
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },

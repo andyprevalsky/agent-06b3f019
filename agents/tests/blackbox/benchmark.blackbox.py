@@ -1428,13 +1428,75 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
     poll_index = source.index("await poll_agent(")
     cleanup_index = source.index("ensure_payment_lifecycle_cleanup", poll_index)
     pause_index = source.index("pause_agent(base_url, agent_id)", poll_index)
+    refresh_index = source.index("_refresh_agent_after_pause_for_browser_terminal", poll_index)
 
     assert "_early_fail_should_pause_agent" in source[poll_index:cleanup_index]
     assert pause_index < cleanup_index
+    # Hub FE chips stay open without task_complete/session_paused — refresh the
+    # transcript after pause so archives include the terminal before upload.
+    assert pause_index < refresh_index < cleanup_index
     assert bench._early_fail_should_pause_agent("Timeout after 900s (dynamic cap=900s)")
     assert bench._early_fail_should_pause_agent("Tree stalled after 240s")
     assert not bench._early_fail_should_pause_agent(None)
     assert not bench._early_fail_should_pause_agent("Expected validated payment-card request")
+
+
+def test_agent_messages_have_browser_terminal_requires_explicit_close():
+    """FINISHED recording alone must not count as a browser-panel terminal.
+
+    FE computeActiveBrowserPanels ignores recording/network_recording cleanup
+    rows. Hotel k=5 hub archives (2026-08-31) had FINISHED recordings with an
+    IN_PROGRESS browser row and no task_complete — every FE link kept an active
+    chip. The archive refresh helper must wait for an explicit terminal.
+    """
+    import benchmarks.run_benchmark as bench
+
+    task_id = "task-hotel-1"
+    open_only = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "browser",
+                "toolStatus": "IN_PROGRESS",
+                "task_id": task_id,
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "recording",
+                "toolStatus": "FINISHED",
+                "task_id": task_id,
+                "recording_view_url": "https://kernel.example/replay",
+            }
+        },
+    ]
+    assert not bench._agent_messages_have_browser_terminal(open_only)
+
+    with_terminal = open_only + [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "task_complete",
+                "toolStatus": "FINISHED",
+                "task_id": task_id,
+            }
+        }
+    ]
+    assert bench._agent_messages_have_browser_terminal(with_terminal)
+
+    tool_call_scoped = [
+        {
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "action_type": "session_paused",
+                "toolStatus": "ERROR",
+                "toolCallId": "tool-1",
+            }
+        }
+    ]
+    assert bench._agent_messages_have_browser_terminal(tool_call_scoped)
+    assert bench._agent_messages_have_browser_terminal([])
 
 
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
@@ -2771,8 +2833,9 @@ async def test_required_declared_evaluator_controls_pass_fail():
     calls = []
     original_call = bench._call_declared_llm_judge
 
-    async def fake_call(task_arg, evaluator_arg, data_arg):
+    async def fake_call(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
         calls.append((task_arg.name, evaluator_arg["id"], data_arg["agent"]["agent_id"]))
+        assert evidence is not None
         return next(scores)
 
     try:
@@ -2793,6 +2856,45 @@ async def test_required_declared_evaluator_controls_pass_fail():
         ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
         ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
     ]
+
+
+def test_declared_evaluator_evidence_includes_payment_approval_metadata():
+    """Single-turn judges must see payment-request metadata, not a stripped title-only view."""
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    evidence = _declared_evaluator_evidence(
+        {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "message": "",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolStatus": "FINISHED",
+                        "action_type": "request_payment_card",
+                        "title": "Payment card requested ($8.75)",
+                        "requestUserApproval": {
+                            "requestPaymentCard": {
+                                "merchant": "Blue Bottle Coffee",
+                                "pickupLocation": "Blue Bottle Coffee Ferry Building",
+                                "pickupTime": "Today, 2:30 PM",
+                            }
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    payment_rows = [
+        item
+        for item in evidence
+        if item.get("metadata", {}).get("action_type") == "request_payment_card"
+    ]
+    assert len(payment_rows) == 1
+    approval = payment_rows[0]["metadata"]["requestUserApproval"]["requestPaymentCard"]
+    assert approval["pickupLocation"] == "Blue Bottle Coffee Ferry Building"
+    assert approval["pickupTime"] == "Today, 2:30 PM"
 
 
 def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
@@ -4501,87 +4603,323 @@ def test_explore_completion_summary_fails_thinking_only_chip():
     )
 
 
-def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
-    """The incident benchmark owns deterministic summary and SMS regressions."""
+def test_blue_bottle_catalog_stops_at_unresolved_payment_card_request():
+    """Blue Bottle guest checkout stops at an unresolved payment-card request."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-blue-bottle-challenge-recovery")
-    evaluator = next(item for item in task.evaluators if item["id"] == "blue_bottle_completion_delivery")
-    checks = {check["type"]: check for check in evaluator["checks"]}
-
-    assert evaluator["method"] == "static_check"
-    assert checks["completion_summary_length"]["min_chars"] == 81
-    assert checks["completion_sms_event"] == {
-        "type": "completion_sms_event",
-        "expected_count": 1,
-        "allow_skipped_reasons": ["benchmark_agent"],
-        "require_output_payload": True,
-        "require_rendered_message": True,
-        "max_lines": 8,
+    assert task.prompt == (
+        "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee "
+        "at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. "
+        "Confirm order total and pickup time."
+    )
+    assert task.group == "daily"
+    assert "ecommerce" in task.tags
+    assert "antibot" in task.tags
+    assert task.approval_handling == "ignore"
+    assert task.expected_approval_count == 1
+    assert task.expected_attention_kind == "payment_approval"
+    assert task.success_on_payment_card_request is True
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert task.max_steps == {"browser": 100}
+    assert task.timeout_seconds == 1200
+    assert task.environment["services"] == ["order.online", "payment_approval"]
+    assert task.environment.get("live_fixtures", []) == []
+    assert "guest checkout" in task.environment["context_notes"].lower()
+    assert "payment-card" in task.environment["context_notes"].lower()
+    assert "completion sms" in task.environment["context_notes"].lower()
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "approval_request_count",
+        "approval_request_details",
     }
-
-
-async def test_declared_evaluator_hydrates_completion_sms_receipt():
-    """The benchmark boundary reads the provider receipt before static grading."""
-    from dataclasses import replace
-
-    import benchmarks.run_benchmark as bench
-    from benchmarks.benchmark_tasks import get_task_by_name
-
-    summary = "Blue Bottle pickup was prepared through checkout without placing the order." + ("!" * 20)
-    outputs = [{"key": "pickup_time", "label": "Pickup Time", "value": "7:41 AM"}]
-    static_evaluator = next(
-        item
-        for item in get_task_by_name("browser-blue-bottle-challenge-recovery").evaluators
-        if item["id"] == "blue_bottle_completion_delivery"
+    approval_check = next(
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
-    task = replace(
-        get_task_by_name("browser-blue-bottle-challenge-recovery"),
-        evaluators=[static_evaluator],
+    assert approval_check["required_strings"] == ["Blue Bottle"]
+    assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "payment-card" in runtime_criteria
+    assert "unresolved" in runtime_criteria
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in (
+        "vanilla bean",
+        "almond or oat milk",
+        "ferry building",
+        "guest checkout",
+        "payment-card",
+        "not placed",
+        "completion sms",
+    ):
+        assert requirement in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("approval of the payment", "order confirmation", "completion sms", "entered card details"):
+        assert failure in judge_prompt
+    assert "pending payment approval itself is valid grounding" in judge_prompt
+
+
+def _load_blue_bottle_k5_fixture(agent_id: str) -> dict:
+    import json
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2] / f"benchmarks/fixtures/blue_bottle_k5/trial_{agent_id[:8]}.json"
     )
+    return json.loads(fixture_path.read_text())
+
+
+def _blue_bottle_k5_eval_data(fixture: dict) -> dict:
     data = {
-        "agent": {"agent_id": "root-blue-bottle", "status": "COMPLETED"},
+        "agent": {"agent_id": fixture["agent_id"], "status": fixture["status"]},
+        "messages": fixture["messages"],
+        "_benchmark": fixture["benchmark_state"],
+    }
+    if fixture.get("tree"):
+        data["_semantic_evaluator_tree"] = fixture["tree"]
+    return data
+
+
+async def _assert_blue_bottle_tree_proof_semantics_passes():
+    """Prove tree-aware evidence: payment facts live only on the browser sub-agent."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _call_declared_llm_judge,
+        _run_declared_static_check,
+    )
+
+    fixture_path = (
+        Path(__file__).resolve().parents[2] / "benchmarks/fixtures/blue_bottle_k5/trial_tree_proof.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    data = _blue_bottle_k5_eval_data(fixture)
+    static, semantics = task.evaluators[0], task.evaluators[1]
+
+    static_passed, static_reason = _run_declared_static_check(task, static, data)
+    assert static_passed is True, static_reason
+
+    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    single_score = float(single_turn.get("score") or 0)
+    assert single_score >= 1.0, (
+        f"Expected tree-aware single-turn judge to pass; got score={single_score}: "
+        f"{single_turn.get('reasoning')}"
+    )
+
+
+async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
+    """Replay k=5 payment-boundary runs with real judges: static and single-turn both pass."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _call_declared_llm_judge,
+        _run_declared_static_check,
+    )
+
+    fixture = _load_blue_bottle_k5_fixture(agent_id)
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    data = _blue_bottle_k5_eval_data(fixture)
+    static, semantics = task.evaluators[0], task.evaluators[1]
+
+    static_passed, static_reason = _run_declared_static_check(task, static, data)
+    assert static_passed is True, static_reason
+
+    single_turn = await _call_declared_llm_judge(task, semantics, data)
+    single_score = float(single_turn.get("score") or 0)
+    assert single_score >= 1.0, (
+        f"Expected single-turn judge to pass for {agent_id}; got score={single_score}: "
+        f"{single_turn.get('reasoning')}"
+    )
+
+
+async def test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics():
+    await _assert_blue_bottle_k5_replay_single_turn_passes(
+        "b217afca-6595-4eb5-bfd1-9688c2c9826a",
+    )
+
+
+async def test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics():
+    await _assert_blue_bottle_k5_replay_single_turn_passes(
+        "52d717ea-c5be-4bfe-b146-5efd535628ad",
+    )
+
+
+async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
+    await _assert_blue_bottle_k5_replay_single_turn_passes(
+        "7d282652-2c5b-4dd3-b8c8-461929a37bf8",
+    )
+
+
+async def test_blue_bottle_tree_proof_passes_with_subagent_evidence():
+    await _assert_blue_bottle_tree_proof_semantics_passes()
+
+
+def test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal():
+    """k=5 timeouts burned budget on marketing detours; goals may still say complete payment."""
+    import os
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.spawn_contract import (
+        apply_browser_spawn_live_target,
+        should_disable_saved_browser_auth,
+        with_active_benchmark_task,
+    )
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    assert should_disable_saved_browser_auth(task) is True
+
+    planner_goal = (
+        "Place a pickup order immediately from Blue Bottle Coffee at the Ferry Building in San Francisco, "
+        "using guest checkout. Complete payment and submit the order, using available agent payment capabilities. "
+        "Do not stop at the cart. Return the confirmed order confirmation ID."
+    )
+    patched = apply_browser_spawn_live_target(
+        task,
+        {
+            "goal": planner_goal,
+            "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
+        },
+    )
+    assert patched["start_url"] == task.environment["live_targets"][0]
+    assert patched["goal"] == planner_goal
+
+    with with_active_benchmark_task(task.name):
+        assert os.environ["BENCHMARK_ACTIVE_TASK_NAME"] == task.name
+        from benchmarks.spawn_contract import apply_active_task_spawn_contract
+
+        env_patched = apply_active_task_spawn_contract(
+            {
+                "goal": planner_goal,
+                "start_url": "https://bluebottlecoffee.com/us/eng/cafes/ferry-building",
+            }
+        )
+        assert env_patched["start_url"] == task.environment["live_targets"][0]
+        assert env_patched["goal"] == planner_goal
+
+
+def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.spawn_contract import evaluate_dom_patch_blocked, with_active_benchmark_task
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    patch_code = (
+        "(() => { const el = document.querySelector('[data-testid=milk]'); "
+        "el.textContent = 'Oat (Default)'; return 'patched'; })()"
+    )
+    with with_active_benchmark_task(task.name):
+        reason = evaluate_dom_patch_blocked(patch_code)
+    assert reason is not None
+    assert "DOM mutation" in reason
+
+    benign = "(() => document.querySelectorAll('button').length)()"
+    assert evaluate_dom_patch_blocked(benign) is None
+
+
+def test_blue_bottle_k5_timeout_4021f047_fails_payment_contract():
+    """k=5 trial 4 timed out with 51 system/auth actions and 0 payment approvals."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    auth_churn_terminal = {
+        "agent": {"status": "ACTIVE"},
         "messages": [
             {
                 "role": "TOOL",
                 "metadata": {
-                    "toolName": "completion_summary",
+                    "toolName": "browser_session_auth",
                     "toolStatus": "FINISHED",
-                    "completionSummary": {"summary": summary, "outputs": outputs},
+                    "title": "Browser session credential applied",
                 },
-            }
+                "message": "Applied saved browser session credential.",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "IN_PROGRESS",
+                    "action_type": "system",
+                    "title": "Auth/session setup",
+                },
+                "message": "",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "goto",
+                    "title": "Navigated → https://bluebottlecoffee.com",
+                },
+                "message": "",
+            },
         ],
+        "_benchmark": {
+            "approvals_triggered": 0,
+            "attention_request_kind_seen": None,
+            "expected_attention_kind_seen": None,
+        },
     }
-    path = "provider/sms/notify/completion-root-blue-bottle.json.gz.enc"
-    original_paths = bench.archive_artifact_paths
-    original_read = bench.read_archive_json
-    try:
-        bench.archive_artifact_paths = lambda agent_id: [path]
-        bench.read_archive_json = lambda agent_id, artifact_path: {
-            "status_code": 200,
-            "request": {
-                "event_type": "completion",
-                "agent_id": "root-blue-bottle",
-                "payload": {"summary": summary, "outputs": outputs},
-            },
-            "response": {
-                "success": True,
-                "skipped": True,
-                "reason": "benchmark_agent",
-                "messagePreview": (
-                    f"Done: {summary}\nPickup Time: 7:41 AM\nView agent: https://roselabs.ai/?agent-id=root-blue-bottle"
-                ),
-            },
-        }
-        passed, reason, results = await bench._run_declared_evaluators(task, data)
-    finally:
-        bench.archive_artifact_paths = original_paths
-        bench.read_archive_json = original_read
+    passed, reason = evaluate_task(task, auth_churn_terminal, approvals_triggered=0)
+    assert passed is False
+    assert "payment" in (reason or "").lower()
 
-    assert passed is True
-    assert reason is None
-    assert results[0]["passed"] is True
-    assert data["_benchmark"]["completion_sms_events"][0]["path"] == path
+
+def test_blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract():
+    """k=5 trial 5 timed out after evaluate/network-request modifier hunting."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    modifier_hunt_terminal = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "evaluate",
+                    "title": "evaluate...",
+                },
+                "message": "Executed JS, result: patched",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "read_network_requests",
+                    "title": "Read network requests",
+                },
+                "message": "",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "task_complete",
+                    "title": "Browser automation complete",
+                },
+                "message": "Could not ground oat milk on the live menu.",
+            },
+        ],
+        "_benchmark": {
+            "approvals_triggered": 0,
+            "attention_request_kind_seen": None,
+            "expected_attention_kind_seen": None,
+        },
+    }
+    passed, reason = evaluate_task(task, modifier_hunt_terminal, approvals_triggered=0)
+    assert passed is False
+    assert "payment" in (reason or "").lower()
+
 
 def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
     """DoorDash stages checkout then stops at an unresolved place-order write lock."""
@@ -5438,10 +5776,11 @@ async def test_toast_semantic_receipt_values_are_decided_by_llm_judge():
     )
     original_call = bench._call_declared_llm_judge
 
-    async def fake_call(task_arg, evaluator_arg, data_arg):
+    async def fake_call(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
         assert task_arg.name == "browser-toast-nopa-write-lock"
         assert evaluator_arg["id"] == "toast-order-semantics"
         assert data_arg["_benchmark"]["attention_requests_seen"][0]["metadata"]["requestPaymentCard"]
+        assert evidence is not None
         return next(decisions)
 
     try:
@@ -6115,9 +6454,10 @@ def test_benchmark_goal_injects_payment_boundary_operational_suffix():
 
     hotel = get_task_by_name("browser-hotel-booking")
     hotel_goal = bench._benchmark_goal_for_task(hotel, "http://localhost:3201")
-    assert PAYMENT_BOUNDARY_GOAL_MARKER not in hotel_goal
-    assert "request_payment_card" not in hotel_goal.lower()
-    assert "do not instruct the browser to submit payment" not in hotel_goal.lower()
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in hotel_goal
+    assert "request_payment_card" in hotel_goal.lower()
+    assert "do not instruct the browser to submit payment" in hotel_goal.lower()
+    assert "Complete the purchase" not in hotel_goal
 
     event_ticket = get_task_by_name("browser-event-ticket")
     goal = bench._benchmark_goal_for_task(event_ticket, "http://localhost:3201")
@@ -6149,13 +6489,20 @@ def test_hotel_double_spawn_run_artifact_fails_exact_tool_count():
 
 
 def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
-    """Replay e6a95458: completion-oriented spawn goal ends on phone write_lock, not payment_approval."""
+    """Replay e6a95458: historical completion-oriented spawn ends on phone write_lock.
+
+    The live harness goal now injects the payment-boundary operational suffix
+    (steer toward request_payment_card, never submit payment). The fixture spawn
+    goal still reflects the pre-suffix completion schema that stalled on
+    write_lock / payment_approval without ever calling request_payment_card.
+    """
     import json
     from pathlib import Path
 
     import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import evaluate_task
+    from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
 
     run_path = (
         Path(__file__).resolve().parents[1]
@@ -6171,7 +6518,8 @@ def test_hotel_e6a95458_run_artifact_never_reaches_payment_card_boundary():
     task = get_task_by_name("browser-hotel-booking")
     harness_goal = bench._benchmark_goal_for_task(task, "http://localhost:3201")
     assert "Complete the purchase" not in harness_goal
-    assert "request_payment_card" not in harness_goal.lower()
+    assert PAYMENT_BOUNDARY_GOAL_MARKER in harness_goal
+    assert "request_payment_card" in harness_goal.lower()
 
     spawn_goal = None
     spawn_schema_fields: list[str] = []
@@ -13746,12 +14094,13 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
         "browser-imax-group-tickets",
         "browser-amazon-return",
         "browser-1015-eventim-request-card",
+        "browser-blue-bottle-challenge-recovery",
     }
     tasks = validate_catalog()
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 12
+    assert len(ecommerce) == 13
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -13760,7 +14109,10 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
     for name in expected_names:
         loaded = get_task_by_name(name)
         assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
-        assert loaded.environment["live_fixtures"] == ["live"]
+        if name == "browser-blue-bottle-challenge-recovery":
+            assert loaded.environment.get("live_fixtures", []) == []
+        else:
+            assert loaded.environment["live_fixtures"] == ["live"]
 
 
 def test_browser_search_single_result_tasks_use_browser_only():
@@ -14670,6 +15022,7 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         "browser-1015-eventim-request-card",
     }
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
+    assert "ecommerce" in by_name["browser-blue-bottle-challenge-recovery"].tags
     assert "ticketing" in by_name["browser-1015-eventim-request-card"].tags
     assert all(task.tags.count("antibot") == 1 for task in tasks)
     all_tags = {tag for task in all_tasks() for tag in task.tags}
@@ -16397,6 +16750,10 @@ async def run_all_tests():
         test_required_declared_evaluator_controls_pass_fail,
     )
     r.record(
+        "declared_evaluator_evidence_includes_payment_approval_metadata",
+        test_declared_evaluator_evidence_includes_payment_approval_metadata,
+    )
+    r.record(
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
@@ -16513,12 +16870,40 @@ async def run_all_tests():
         test_explore_completion_summary_fails_thinking_only_chip,
     )
     r.record(
-        "blue_bottle_completion_delivery_contract",
-        test_blue_bottle_catalog_enforces_summary_and_completion_sms,
+        "blue_bottle_payment_card_request_contract",
+        test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
     )
     await r.record_async(
-        "blue_bottle_completion_sms_receipt_hydration",
-        test_declared_evaluator_hydrates_completion_sms_receipt,
+        "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+        test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics,
+    )
+    await r.record_async(
+        "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+        test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics,
+    )
+    await r.record_async(
+        "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+        test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
+    )
+    await r.record_async(
+        "blue_bottle_tree_proof_passes_with_subagent_evidence",
+        test_blue_bottle_tree_proof_passes_with_subagent_evidence,
+    )
+    r.record(
+        "blue_bottle_spawn_contract_seeds_live_target",
+        test_blue_bottle_spawn_contract_seeds_live_target_without_rewriting_goal,
+    )
+    r.record(
+        "blue_bottle_spawn_contract_blocks_dom_patch_evaluate",
+        test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate,
+    )
+    r.record(
+        "blue_bottle_k5_timeout_4021f047_fails_payment_contract",
+        test_blue_bottle_k5_timeout_4021f047_fails_payment_contract,
+    )
+    r.record(
+        "blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract",
+        test_blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
@@ -16750,6 +17135,10 @@ async def run_all_tests():
     r.record(
         "timeout_early_fail_pauses_before_payment_cleanup",
         test_timeout_early_fail_pauses_agent_before_payment_cleanup,
+    )
+    r.record(
+        "agent_messages_have_browser_terminal_requires_explicit_close",
+        test_agent_messages_have_browser_terminal_requires_explicit_close,
     )
     r.record(
         "production_payment_abandonment_two_step_trajectory",

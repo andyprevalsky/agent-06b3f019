@@ -8,9 +8,12 @@
  */
 
 import { createHash } from './crypto';
-import { shouldWriteFastModeCacheForUser } from './fastCacheAccountPolicy';
+import {
+  shouldWriteFastModeCacheForUser,
+  resolveFastModeWriteEnabled,
+} from './fastCacheAccountPolicy';
 
-export { shouldWriteFastModeCacheForUser };
+export { shouldWriteFastModeCacheForUser, resolveFastModeWriteEnabled };
 
 export interface CodeAgentTraceInput {
   goal: string;

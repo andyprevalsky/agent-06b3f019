@@ -6,6 +6,10 @@ Spawns real agents against prod or localhost, polls for completion, evaluates pa
 
 `tasks.json` is the single canonical benchmark catalog (see CLAUDE.md "Eval Suite"). Each entry carries the additive eval contract — `status` (`ready` | `incomplete`), `runner` (`agent`), `bench` (`pipeline-e2e` harness plumbing | `rose-bench` harness-independent capability), `description`, `environment`, `evaluators[]`, `source` — validated by `long_horizon.py:validate_catalog()`. Idea kernels live in `long_horizon_ideas.json`.
 
+**How evaluators pass/fail** (Layer 1 harness contract → Layer 2 `evaluators[]`,
+tree-aware semantic evidence, Blue Bottle worked example): see the `/benchmark`
+skill at `.claude/commands/benchmark.md` → **Evaluators**.
+
 ```bash
 # THE full-suite entrypoint: every ready benchmark eval
 python benchmarks/run_eval_suite.py --port 3001
