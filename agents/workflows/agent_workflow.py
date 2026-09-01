@@ -27,9 +27,11 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 with workflow.unsafe.imports_passed_through():
     from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/general_purpose/explore
     from domains.wait_for.service import pending_timestamp_wait_to_resume
+    from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
         check_user_usage,
         fetch_agent_config,
+        fetch_agent_queue_pointer,
         finalize_workflow_replacement_bootstrap,
         generate_completion_summary,
         get_model_context_window,
@@ -1496,6 +1498,7 @@ class AgentWorkflow:
                 wait_for_messages=self._wait_for_messages,
                 on_context_overflow=self._handle_context_overflow,
                 check_credits=self._check_credits,
+                check_generation_handoff=self._check_generation_handoff,
                 post_message=self._post_message,
                 poll_messages=self._poll_messages,
                 execute_tool=self._execute_tool,
@@ -1682,6 +1685,7 @@ class AgentWorkflow:
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,
+                check_generation_handoff=self._check_generation_handoff,
             post_message=self._post_message,
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
@@ -2127,6 +2131,32 @@ class AgentWorkflow:
         preceding _check_paused. The loop then returns status='aborted' instead of
         waiting forever on a parent that will never resume it."""
         return self._orphaned
+
+
+    async def _check_generation_handoff(self) -> Optional[str]:
+        """Return live task queue when this execution should hand off generations.
+
+        Safe checkpoint: called only at the top of a run_agent iteration, after any
+        prior LLM/tool/browser activity completed. Returns None when we are already
+        on the live generation (or the pointer cannot be read).
+        """
+        try:
+            pointer = await workflow.execute_activity(
+                fetch_agent_queue_pointer,
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Generation pointer check failed (continuing): {e}")
+            return None
+        live_queue = (pointer or {}).get("task_queue")
+        current_queue = workflow.info().task_queue
+        if should_handoff_to_generation(current_queue, live_queue):
+            workflow.logger.info(
+                f"Generation handoff required: current={current_queue} live={live_queue}"
+            )
+            return live_queue
+        return None
 
     async def _check_credits(self) -> None:
         """Check user credits. Sets is_paused=True if depleted."""
@@ -3870,6 +3900,23 @@ class AgentWorkflow:
             await self._wait_for_response_schema_refresh()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
             workflow.continue_as_new(args=self._continuation_args(result.get("context")))
+            return result
+
+        if result["status"] == "generation_handoff":
+            # Cooperative cutover: current tools/LLM finished; move to the live
+            # generation queue before the next LLM call. Do NOT terminate.
+            handoff_queue = result.get("handoff_task_queue")
+            if not isinstance(handoff_queue, str) or not handoff_queue.strip():
+                workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")
+                return result
+            await self._wait_for_response_schema_refresh()
+            workflow.logger.info(
+                f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
+            )
+            workflow.continue_as_new(
+                args=self._continuation_args(result.get("context")),
+                task_queue=handoff_queue.strip(),
+            )
             return result
 
         if result["status"] == "aborted":
