@@ -22,8 +22,8 @@ tags:
 sources:
   - agent 3a7c0315-f363-4775-946b-2b02e8f4695b
   - PR #1197
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_write_lock_purchase_button_detects_fulfillment_mode_order_controls (to be cemented with fix)
-status: open
+repro: agents/tests/blackbox/write_lock_purchase.blackbox.py + agents/tests/fixtures/write_lock_purchase_corpus.json
+status: fixed
 ---
 
 ## Problem
@@ -66,14 +66,12 @@ Searches run: `write lock`, `spent money without asking`, `write_lock`,
 
 ## Solution
 
-Pending approval. Proposed generalizable fix: in `is_purchase_button`, before
-phrase matching, also match against a variant of each signal with
-fulfillment-mode whole-word modifiers stripped (`pickup`, `pick-up`,
-`delivery`, `shipping`, `to-go`/`togo`, `takeout`/`take-out`, …) so
-`Place Pickup Order` collapses to the existing `place order` phrase. Keep
-consent-prose and DOM-id exclusions unchanged. Cement in blackbox next to
-`test_write_lock_purchase_button_detects_order_controls`. 10k-agent: O(1)
-extra substring work per click label; no shared state.
+`is_purchase_button` now matches against fulfillment-collapsed forms (`&`→`and`,
+pickup/delivery/shipping/… stripped) plus a small base phrase list (order and
+pay, purchase now, buy it now, …) and BNPL informational exclusions. Cemented
+by `agents/tests/fixtures/write_lock_purchase_corpus.json` (100 TP / 100 issue /
+100 TN) and `write_lock_purchase.blackbox.py` with generative + anti-reward-hack
+checks. 10k-agent: O(1) per click label; no shared state.
 
 ## Human feedback
 

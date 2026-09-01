@@ -201,18 +201,28 @@ MARKETING_OPT_IN_PATTERNS = (
 # These are matched as full phrases to avoid false positives (e.g. "place" alone)
 PURCHASE_BUTTON_PHRASES = [
     "buy now",
+    "buy it now",
+    "buy with prime",
     "place your order",
     "place order",
+    "complete your purchase",
+    "complete your order",
     "complete purchase",
     "complete order",
+    "confirm your purchase",
     "confirm order",
     "confirm purchase",
     "confirm and pay",
+    "submit your order",
     "submit order",
     "pay now",
     "proceed to pay",
     "checkout now",
     "complete checkout",
+    "order and pay",
+    "purchase now",
+    "finish order",
+    "finish and pay",
 ]
 
 # Return/refund confirmation phrases are a separate irreversible gate from purchase.
@@ -239,11 +249,57 @@ PURCHASE_CONSENT_PROSE_PATTERNS = [
     "acknowledge our",
 ]
 
+# Buy-Now-Pay-Later / informational finance chrome contains "buy now" but is not
+# a charge commit. Match on whitespace-stripped forms.
+PURCHASE_INFORMATIONAL_EXCLUSION_PATTERNS = [
+    "buynowpaylater",
+    "paylater",
+    "learnaboutbuy",
+]
+
+# Fulfillment / routing words merchants insert between purchase verbs
+# ("Place Pickup Order", "Complete Delivery Purchase"). Transparent for matching
+# so the existing place/complete/confirm/submit + order/purchase phrases still hit.
+# Deliberately does NOT include "now" or "your" — those are part of base phrases
+# like "pay now" / "place your order".
+_PURCHASE_FULFILLMENT_TRANSPARENT_RE = re.compile(
+    r"\b(?:"
+    r"pick[\s-]?up|delivery|shipping|take[\s-]?out|to[\s-]?go|"
+    r"curbside|drive[\s-]?thru|same[\s-]?day|express|priority|asap|"
+    r"for\s+pickup|for\s+delivery"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def normalize_write_lock_text(text: str) -> str:
     """Normalize text for write-lock phrase matching."""
     return re.sub(r"\s+", "", text or "").lower()
 
+
+def _purchase_signal_match_forms(signal: str) -> list[str]:
+    """Return normalized forms of a click signal for purchase phrase matching.
+
+    Form 0: raw whitespace-stripped label (legacy).
+    Form 1: ``&`` → ``and``, fulfillment-mode words removed, then whitespace-stripped
+    so ``Place Pickup Order`` / ``Confirm & Pay`` collapse onto base phrases.
+    """
+    spaced = re.sub(r"\s+", " ", (signal or "").lower()).strip()
+    if not spaced:
+        return []
+    spaced = spaced.replace("&", " and ")
+    forms = [normalize_write_lock_text(spaced)]
+    collapsed = _PURCHASE_FULFILLMENT_TRANSPARENT_RE.sub(" ", spaced)
+    collapsed = re.sub(r"\s+", " ", collapsed).strip()
+    collapsed_norm = normalize_write_lock_text(collapsed)
+    if collapsed_norm and collapsed_norm not in forms:
+        forms.append(collapsed_norm)
+    return forms
+
+
+def _is_purchase_informational_exclusion(normalized: str) -> bool:
+    """True when the label is BNPL / learn-more chrome, not a charge commit."""
+    return any(pattern in normalized for pattern in PURCHASE_INFORMATIONAL_EXCLUSION_PATTERNS)
 
 _DOM_IDENTIFIER_SIGNAL = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
@@ -471,20 +527,28 @@ def is_purchase_button(element_text: str) -> bool:
                 f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label"
             )
             continue
-        text_lower = normalize_write_lock_text(signal)
-        if not text_lower:
+        match_forms = _purchase_signal_match_forms(signal)
+        if not match_forms:
             continue
+        # Consent / BNPL exclusions apply to every match form of this signal.
         if any(
-            normalize_write_lock_text(pattern) in text_lower
+            normalize_write_lock_text(pattern) in form
+            for form in match_forms
             for pattern in PURCHASE_CONSENT_PROSE_PATTERNS
         ):
             logger.debug(
                 f"Element signal '{signal[:80]}' matched purchase consent-prose exclusion"
             )
             continue
+        if any(_is_purchase_informational_exclusion(form) for form in match_forms):
+            logger.debug(
+                f"Element signal '{signal[:80]}' matched purchase informational exclusion"
+            )
+            continue
 
         for phrase in PURCHASE_BUTTON_PHRASES:
-            if normalize_write_lock_text(phrase) in text_lower:
+            phrase_norm = normalize_write_lock_text(phrase)
+            if any(phrase_norm in form for form in match_forms):
                 logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
                 return True
 
