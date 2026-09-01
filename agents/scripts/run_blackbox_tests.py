@@ -37,7 +37,13 @@ sys.path.insert(0, str(TESTS_DIR))
 
 # Single source of truth, shared with agents/conftest.py so the pytest suites
 # and the blackbox runner start from the same deterministic environment.
+from dotenv import load_dotenv  # noqa: E402
+
 from tests.env_defaults import apply_test_env_defaults  # noqa: E402
+
+# Real credentials from agents/.env must win over test placeholders. Cloud deploy
+# shells often omit injected secrets, so load dotenv before setdefault defaults.
+load_dotenv(AGENTS_ROOT / ".env", override=False)
 
 
 def generate_run_id() -> str:
