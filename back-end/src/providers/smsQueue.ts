@@ -9,6 +9,7 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { logTruncate } from '../utils/log';
 import { archiveJson } from './traceArchive';
+import { buildMockSurgeSendResult, shouldMockBenchmarkSmsSend } from './smsTransportMock';
 
 const log = createLogger('SMS');
 
@@ -89,6 +90,34 @@ export async function sendSms(
   error?: string;
   definitiveFailure?: boolean;
 }> {
+  const requestBody = {
+    to: phoneNumber,
+    body: message,
+    settings: SURGE_MESSAGE_SETTINGS,
+  };
+
+  const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${phoneNumber}:${message}`;
+  if (await shouldMockBenchmarkSmsSend(options.archiveRootAgentId)) {
+    const mocked = await buildMockSurgeSendResult({
+      phoneNumber,
+      message,
+      seed: mockSeed,
+    });
+    await archiveSmsTransportBoundary({
+      rootAgentId: options.archiveRootAgentId,
+      requestBody,
+      response: { id: mocked.messageSid, mocked: true },
+      statusCode: 200,
+      success: true,
+      context: {
+        ...(options.archiveContext ?? {}),
+        message_id: mocked.messageSid,
+        benchmark_transport_mock: true,
+      },
+    });
+    return { success: true, messageSid: mocked.messageSid };
+  }
+
   const apiKey = process.env.SURGE_API_KEY;
   const accountId = process.env.SURGE_ACCOUNT_ID;
 
@@ -96,12 +125,6 @@ export async function sendSms(
     log.error('Surge credentials not configured');
     return { success: false, error: 'Surge not configured', definitiveFailure: true };
   }
-
-  const requestBody = {
-    to: phoneNumber,
-    body: message,
-    settings: SURGE_MESSAGE_SETTINGS,
-  };
 
   try {
     const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {
@@ -176,6 +199,35 @@ export async function sendMms(
   mediaUrl: string,
   options: SmsArchiveOptions = {}
 ): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+  const requestBody = {
+    to: phoneNumber,
+    body: message,
+    attachments: [{ url: mediaUrl }],
+    settings: SURGE_MESSAGE_SETTINGS,
+  };
+
+  const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${phoneNumber}:${message}:${mediaUrl}`;
+  if (await shouldMockBenchmarkSmsSend(options.archiveRootAgentId)) {
+    const mocked = await buildMockSurgeSendResult({
+      phoneNumber,
+      message,
+      seed: mockSeed,
+    });
+    await archiveSmsTransportBoundary({
+      rootAgentId: options.archiveRootAgentId,
+      requestBody,
+      response: { id: mocked.messageSid, mocked: true, attachments: [{ url: mediaUrl }] },
+      statusCode: 200,
+      success: true,
+      context: {
+        ...(options.archiveContext ?? {}),
+        message_id: mocked.messageSid,
+        benchmark_transport_mock: true,
+      },
+    });
+    return { success: true, messageSid: mocked.messageSid };
+  }
+
   const apiKey = process.env.SURGE_API_KEY;
   const accountId = process.env.SURGE_ACCOUNT_ID;
 
@@ -183,13 +235,6 @@ export async function sendMms(
     log.error('Surge credentials not configured');
     return { success: false, error: 'Surge not configured' };
   }
-
-  const requestBody = {
-    to: phoneNumber,
-    body: message,
-    attachments: [{ url: mediaUrl }],
-    settings: SURGE_MESSAGE_SETTINGS,
-  };
 
   try {
     const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {

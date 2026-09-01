@@ -61,7 +61,8 @@ function buildBatchItem(
   body: CreateAgentBody,
   userId: string,
   meta: ResolvedMetadata,
-  verifierType: string
+  verifierType: string,
+  isBenchmark = false
 ): BatchCreateAgentParams {
   const agentId = body.agent_id!;
   return {
@@ -89,6 +90,7 @@ function buildBatchItem(
       : {}),
     ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     verifierType,
+    ...(isBenchmark ? { isBenchmark: true } : {}),
     ...(body.attachments !== undefined
       ? { attachments: body.attachments as Array<Record<string, unknown>> }
       : {}),
@@ -268,6 +270,14 @@ async function applyExecutionModeInheritanceForBatch(bodies: CreateAgentBody[]):
   }
 }
 
+function benchmarkFlagForBatchBody(
+  body: CreateAgentBody,
+  parentById: Map<string, Awaited<ReturnType<typeof repo.findExecutionModeFlagsByIds>>[number]>
+): boolean {
+  if (body.parent_agent_id === undefined) return false;
+  return parentById.get(body.parent_agent_id)?.isBenchmark === true;
+}
+
 export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<BatchAgentResult[]> {
   const { bodies, userId, isInternal, clientIP } = args;
   const verifierType = 'FLOAT_LLM_JUDGE';
@@ -303,7 +313,20 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     (body) => existingById.get(body.agent_id!)?.temporalWorkflowStartPending === true
   );
   const metaMap = await resolveAllMetadata(newBodies, clientIP, userId);
-  const newItems = newBodies.map((b) => buildBatchItem(b, userId, metaMap.get(b)!, verifierType));
+  const parentIds = Array.from(
+    new Set(newBodies.map((body) => body.parent_agent_id).filter((id): id is string => id !== undefined))
+  );
+  const parents = await repo.findExecutionModeFlagsByIds(parentIds);
+  const parentById = new Map(parents.map((parent) => [parent.id, parent]));
+  const newItems = newBodies.map((b) =>
+    buildBatchItem(
+      b,
+      userId,
+      metaMap.get(b)!,
+      verifierType,
+      benchmarkFlagForBatchBody(b, parentById)
+    )
+  );
 
   if (newItems.length > 0) {
     // Phase 1: atomic create. Rolls back on any error.

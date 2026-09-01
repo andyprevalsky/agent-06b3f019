@@ -1,7 +1,5 @@
-import { logTruncate } from '../../utils/log';
 import { sendSms, getUserPhone } from '../../providers/smsQueue';
 import { createLogger } from '../../providers/logger';
-import { SURGE_API_KEY, SURGE_ACCOUNT_ID } from './config';
 import {
   claimToolSideEffect,
   markToolSideEffectFailed,
@@ -60,42 +58,19 @@ export class SurgeApiError extends Error {
  * Send an SMS via the Surge API.
  */
 export async function sendViaSurge(phoneNumber: string, message: string): Promise<SurgeSendResult> {
-  const apiKey = SURGE_API_KEY;
-  const accountId = SURGE_ACCOUNT_ID;
-
-  if (apiKey === undefined || apiKey === '' || accountId === undefined || accountId === '') {
-    log.error('Surge credentials not configured');
-    throw new SurgeNotConfiguredError();
-  }
-
-  const response = await fetch(`https://api.surge.app/accounts/${accountId}/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      to: phoneNumber,
-      body: message,
-    }),
+  const result = await sendSms(phoneNumber, message, {
+    archiveContext: { source: 'send-sms-api' },
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    log.error('Surge API error', { status: response.status, body: logTruncate(errorText) });
-    throw new SurgeApiError(response.status, errorText);
+  if (!result.success) {
+    if (result.error === 'Surge not configured') {
+      throw new SurgeNotConfiguredError();
+    }
+    throw new SurgeApiError(502, result.error ?? 'Surge send failed');
   }
-
-  const result = (await response.json()) as { id: string; [key: string]: unknown };
-
-  log.info('SMS sent via Surge', {
-    messageId: result.id,
-    phone: phoneNumber.substring(0, 4) + '****',
-  });
 
   return {
     success: true,
-    message_id: result.id,
+    message_id: result.messageSid ?? 'unknown',
     phone_number: phoneNumber,
     provider: 'surge',
   };

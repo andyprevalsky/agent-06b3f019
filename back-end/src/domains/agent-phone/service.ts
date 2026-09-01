@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import { listInboundMessagesForNumber, sendAgentPhoneMessage } from '../../providers/agentPhone';
 import {
+  buildMockAgentPhoneSendResult,
+  isLocalBenchmarkAgentPhoneMockEnabled,
+  shouldMockBenchmarkSmsSend,
+} from '../../providers/smsTransportMock';
+import {
   claimToolSideEffect,
   markToolSideEffectFailed,
   markToolSideEffectSucceeded,
@@ -116,13 +121,21 @@ export async function sendOutboundAgentPhoneMessage(params: {
   }
 
   try {
-    const receipt = await sendAgentPhoneMessage({
-      agentId: identity.phoneProviderAgentId,
-      numberId: identity.phoneProviderNumberId,
-      fromNumber: identity.phone,
-      toNumber: phoneNumber,
-      body: message,
-    });
+    const mockSeed = `${agentId}:${idempotencyKey}:${phoneNumber}:${message}`;
+    const receipt =
+      isLocalBenchmarkAgentPhoneMockEnabled() || (await shouldMockBenchmarkSmsSend(agentId))
+        ? buildMockAgentPhoneSendResult({
+            fromNumber: identity.phone ?? '+10000000000',
+            toNumber: phoneNumber,
+            seed: mockSeed,
+          })
+        : await sendAgentPhoneMessage({
+            agentId: identity.phoneProviderAgentId,
+            numberId: identity.phoneProviderNumberId,
+            fromNumber: identity.phone,
+            toNumber: phoneNumber,
+            body: message,
+          });
     const response = {
       success: true,
       status: receipt.status,
