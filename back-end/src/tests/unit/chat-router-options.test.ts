@@ -12,6 +12,7 @@ import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import {
   parsePartialRouterDecisionJson,
   parseRouterDecisionAfterDeadline,
+  tryParseCompleteRouterDecision,
 } from '../../providers/chat/routerDecision';
 
 async function run(): Promise<void> {
@@ -93,10 +94,30 @@ async function run(): Promise<void> {
     'deadline recovery must fall back to complete fields from a partial response'
   );
 
+  assert.deepEqual(
+    tryParseCompleteRouterDecision(
+      '{"reasoning":"done","action":"direct_answer"}'
+    ),
+    { action: 'direct_answer', reasoning: 'done' }
+  );
+  assert.equal(
+    tryParseCompleteRouterDecision('{"reasoning":"truncated","action":"direct_answer"'),
+    null,
+    'early-exit must wait for a fully closed router JSON object'
+  );
+
   const deadline = createRouterCompletionDeadline(5);
   await new Promise<void>((resolve) => deadline.signal.addEventListener('abort', () => resolve()));
   assert.equal(deadline.expired(), true, 'the completion deadline must abort a trickling stream');
   deadline.dispose();
+
+  const deferred = createRouterCompletionDeadline(20, { deferred: true });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(deferred.expired(), false, 'deferred deadline must not tick before live starts');
+  deferred.start();
+  await new Promise<void>((resolve) => deferred.signal.addEventListener('abort', () => resolve()));
+  assert.equal(deferred.expired(), true, 'deferred deadline must abort after start()');
+  deferred.dispose();
 
   let iteratorClosed = false;
   const uncooperativeStream: AsyncIterable<string> = {

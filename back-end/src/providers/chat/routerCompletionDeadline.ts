@@ -1,9 +1,12 @@
+// Must stay under the 5s chat-lifecycle ratchet and above 4-worker unique-token
+// live time. 3000ms aborted recoveries and FAILED the agent (90s warmups).
 export const DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS = 4_500;
 
 export interface RouterCompletionDeadline {
   signal: AbortSignal;
   expired(): boolean;
   dispose(): void;
+  start(): void;
 }
 
 export function chatRouterCompletionTimeoutMs(): number {
@@ -13,17 +16,42 @@ export function chatRouterCompletionTimeoutMs(): number {
     : DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
 }
 
-export function createRouterCompletionDeadline(timeoutMs: number): RouterCompletionDeadline {
+export function createRouterCompletionDeadline(
+  timeoutMs: number,
+  options?: { deferred?: boolean }
+): RouterCompletionDeadline {
   const controller = new AbortController();
   let didExpire = false;
-  const timer = setTimeout(() => {
-    didExpire = true;
-    controller.abort(new Error(`Chat router completion exceeded ${timeoutMs}ms`));
-  }, timeoutMs);
+  let started = false;
+  let disposed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const start = (): void => {
+    if (started || disposed) return;
+    started = true;
+    timer = setTimeout(() => {
+      didExpire = true;
+      controller.abort(new Error(`Chat router completion exceeded ${timeoutMs}ms`));
+    }, timeoutMs);
+  };
+  if (options?.deferred !== true) start();
   return {
     signal: controller.signal,
     expired: () => didExpire,
-    dispose: () => clearTimeout(timer),
+    dispose: () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    },
+    start,
+  };
+}
+
+export function armDeadlineOnLive<T>(
+  deadline: RouterCompletionDeadline,
+  createLive: (abortSignal?: AbortSignal) => T
+): (abortSignal?: AbortSignal) => T {
+  return (abortSignal) => {
+    deadline.start();
+    return createLive(abortSignal);
   };
 }
 
