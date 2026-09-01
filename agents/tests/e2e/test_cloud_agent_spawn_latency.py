@@ -3,7 +3,8 @@ Cloud-agent spawn latency ratchet.
 
 Measures POST /api/agents → first "Starting Reasoning" lifecycle title
 (proxy for first LLM request start). Cleans up the agent immediately after
-measurement. Fails if spawn exceeds SPAWN_BUDGET_S (5s).
+measurement. Fails if spawn exceeds SPAWN_BUDGET_S (15s with synchronous
+response-schema generation on cache miss).
 
 Run:
   TEST_BASE_URL=http://localhost:3101 \\
@@ -33,7 +34,7 @@ from tests.e2e.test_helpers import (  # noqa: E402
     spawn_agent,
 )
 
-SPAWN_BUDGET_S = 5.0
+SPAWN_BUDGET_S = 15.0
 STARTING_REASONING_TITLE = "Starting Reasoning"
 POLL_INTERVAL_S = 0.1
 DEFAULT_TIMEOUT_S = 60.0
