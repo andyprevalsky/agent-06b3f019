@@ -874,6 +874,7 @@ def test_cloud_box_gets_the_web_search_fixture_contract():
     surge_at = run_sh.index("BLACKBOX_TEST_FAKE_SURGE")
     assert abs(fixture_at - surge_at) < 1200
     assert "BLACKBOX_TEST_FAKE_AGENTPHONE" in run_sh
+    assert "BLACKBOX_TEST_FAKE_WHATSAPP" in run_sh
 
     warm_driver = (REPO_ROOT_FOR_TEST / "scripts" / "cloudbench-run.sh").read_text()
     assert (
