@@ -62,7 +62,7 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
-import { syncAndyClaudeTokensFromProd } from '../../scripts/sync-andy-claude-tokens-from-prod';
+import { syncAndyClaudeTokensFromProd } from '../../../scripts/sync-andy-claude-tokens-from-prod';
 import { prisma } from '../../providers/database';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
