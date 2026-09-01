@@ -610,7 +610,8 @@ async def test_handler_explore_happy_path():
     statuses = [e.status for e in events]
     assert MessageStatus.IN_PROGRESS in statuses
     assert fake.activity_calls[0]["name"] == "fetch_local_data_summary"
-    assert fake.start_activity_calls[0]["args"][-1] == "local"
+    assert fake.start_activity_calls[0]["args"][-2] == "local"
+    assert fake.start_activity_calls[0]["args"][-1] is False
     assert MessageStatus.FINISHED in statuses
     # FINISHED event carries result + usage
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
@@ -656,8 +657,10 @@ async def test_handler_explore_reuses_cached_local_data_summary():
     fetches = [call for call in fake.activity_calls if call["name"] == "fetch_local_data_summary"]
     assert len(fetches) == 1
     assert wf._cached_local_data_summary == "local-once"
-    assert fake.start_activity_calls[0]["args"][-1] == "local-once"
-    assert fake.start_activity_calls[1]["args"][-1] == "local-once"
+    assert fake.start_activity_calls[0]["args"][-2] == "local-once"
+    assert fake.start_activity_calls[1]["args"][-2] == "local-once"
+    assert fake.start_activity_calls[0]["args"][-1] is False
+    assert fake.start_activity_calls[1]["args"][-1] is False
     assert any(event.status == MessageStatus.FINISHED for event in first)
     assert any(event.status == MessageStatus.FINISHED for event in second)
 
@@ -682,6 +685,73 @@ async def test_handler_explore_uses_lite_pool_independent_of_parent_model():
 
     assert len(fake.start_activity_calls) == 1
     assert fake.start_activity_calls[0]["args"][3] == EXPLORE_DEFAULT_MODEL
+
+
+async def test_handler_explore_passes_canonical_oai_demo_flag():
+    """Handler and activity share one mass-agent class, not the child goal.
+
+    Explore children use short research strings. Classifying the activity from
+    those (or from an independently resolved Fast Mode root) disagrees with
+    `_spawn_explore`'s `is_oai_demo_mass_agent_task` depth / wrap-up gate.
+    """
+    import inspect
+
+    from domains.spawn_agent.config import (
+        OAI_DEMO_CHILD_GOAL_PREFIX,
+        is_oai_demo_goal,
+        resolve_explore_depth,
+    )
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    short_goal = "Research Andrew Huberman last 90 days"
+    assert not is_oai_demo_goal(short_goal)
+
+    fn = inspect.unwrap(spawn_explore_agent_activity)
+    params = list(inspect.signature(fn).parameters)
+    assert params[-1] == "oai_demo"
+    assert inspect.signature(fn).parameters["oai_demo"].default is None
+
+    demo_wf = _FakeWFInstance(goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman")
+    demo_wf.fast_mode_cache_enabled = True
+    live_wf = _FakeWFInstance(goal="Order a Vanilla Bean Shakerato from Blue Bottle")
+    live_wf.fast_mode_cache_enabled = True
+
+    demo_fake = _FakeSpawnWF()
+    live_fake = _FakeSpawnWF()
+    restore_demo = _patch_spawn_workflow(demo_fake)
+    try:
+        await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=demo_wf,
+                tool_call={"type": "explore", "goal": short_goal, "depth": "quick"},
+                tool_call_id="tc-demo-class",
+            )
+        )
+    finally:
+        restore_demo()
+    restore_live = _patch_spawn_workflow(live_fake)
+    try:
+        await _collect(
+            SpawnAgentManager().execute_tool(
+                workflow_instance=live_wf,
+                tool_call={"type": "explore", "goal": short_goal, "depth": "quick"},
+                tool_call_id="tc-live-class",
+            )
+        )
+    finally:
+        restore_live()
+
+    demo_args = demo_fake.start_activity_calls[0]["args"]
+    live_args = live_fake.start_activity_calls[0]["args"]
+    assert len(demo_args) == len(params)
+    assert demo_args[2] == short_goal
+    assert demo_args[-1] is True
+    assert live_args[-1] is False
+    assert demo_args[13] == resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=True)
+    assert live_args[13] == resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=False)
+    assert demo_args[13] == "deep"
+    assert live_args[13] == "quick"
 
 
 async def test_handler_explore_gates_off_skips_fetch():
@@ -3001,6 +3071,103 @@ async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completio
     assert completion_results[1]["success"] is True
 
 
+async def test_spawn_explore_agent_activity_explicit_oai_demo_wraps_cancel_on_live_goal():
+    """Passed True must wrap up even when the explore goal looks live."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "live evidence"})
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Blue Bottle"}, "tc-live")
+        raise asyncio.CancelledError()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a-live-flag",
+            user_id="u-7",
+            goal="Order a Vanilla Bean Shakerato and waffle from Blue Bottle",
+            model="rose-1-lite",
+            task_id="explicit-demo-cancel",
+            init_tool_call_id="tc-explicit-demo",
+            oai_demo=True,
+        )
+
+    assert result["status"] == "completed"
+    assert "live evidence" in result["result"]
+
+
+async def test_spawn_explore_agent_activity_explicit_live_reraises_cancel_on_demo_goal():
+    """Passed False must re-raise even when the explore goal matches a demo prefix."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "demo evidence"})
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Huberman"}, "tc-demo")
+        raise asyncio.CancelledError()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="a-demo-flag",
+            user_id="u-7",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman",
+            model="rose-1-lite",
+            task_id="explicit-live-cancel",
+            init_tool_call_id="tc-explicit-live",
+            oai_demo=False,
+        )
+
+
+async def test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class():
+    """A Fast Mode demo root must not promote a live explore when the flag is omitted."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "live evidence"})
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Blue Bottle"}, "tc-live")
+        raise asyncio.CancelledError()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            new=AsyncMock(return_value=(True, "Order socks", True, None, OAI_DEMO_ROOT_GOAL_PREFIX)),
+        ),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="a-resolver-leak",
+            user_id="u-7",
+            goal="Order a Vanilla Bean Shakerato and waffle from Blue Bottle",
+            model="rose-1-lite",
+            task_id="resolver-class-leak",
+            init_tool_call_id="tc-resolver-leak",
+        )
+
+
 async def test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_demo():
     """Live explores must not accept a second evidence-free completion."""
     from unittest.mock import patch
@@ -3943,6 +4110,10 @@ async def run_all_tests():
         "handler_explore_uses_lite_pool",
         test_handler_explore_uses_lite_pool_independent_of_parent_model,
     )
+    await r.record_async(
+        "handler_explore_passes_canonical_oai_demo_flag",
+        test_handler_explore_passes_canonical_oai_demo_flag,
+    )
     await r.record_async("handler_explore_gates_off", test_handler_explore_gates_off_skips_fetch)
     await r.record_async("handler_explore_capture", test_handler_explore_capture_tool_results)
     await r.record_async("handler_explore_failed_result", test_handler_explore_failed_result_yields_error)
@@ -4091,6 +4262,18 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_reraises_cancel_outside_demo",
         test_spawn_explore_agent_activity_reraises_cancel_outside_demo,
+    )
+    await r.record_async(
+        "explore_activity_explicit_oai_demo_wraps_cancel_on_live_goal",
+        test_spawn_explore_agent_activity_explicit_oai_demo_wraps_cancel_on_live_goal,
+    )
+    await r.record_async(
+        "explore_activity_explicit_live_reraises_cancel_on_demo_goal",
+        test_spawn_explore_agent_activity_explicit_live_reraises_cancel_on_demo_goal,
+    )
+    await r.record_async(
+        "explore_activity_ignores_fast_mode_root_for_class",
+        test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class,
     )
     await r.record_async(
         "explore_activity_rejects_completion_until_evidence_succeeds",
