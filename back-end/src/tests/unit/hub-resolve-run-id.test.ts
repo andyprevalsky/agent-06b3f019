@@ -13,7 +13,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { resolveHubRunIdFromIndexes } from '../../providers/benchmarkHubStore';
+import {
+  __resetHubResolutionCachesForTest,
+  agentIdsFromHubBundle,
+  applyHubRunToResolutionCaches,
+  forgetHubRunFromResolutionCaches,
+  peekHubResolutionForTest,
+  resolveHubRunIdFromIndexes,
+} from '../../providers/benchmarkHubStore';
 
 let passed = 0;
 const failures: string[] = [];
@@ -75,7 +82,7 @@ test('child ids resolve from the child index after it is built', () => {
 });
 
 test('findAgentAcrossRuns does not scan every bundle on the request path', () => {
-  const src = readFileSync(join(process.cwd(), 'src/providers/benchmarkHubStore.ts'), 'utf8');
+  const src = readFileSync(join(process.cwd(), 'src/providers/benchmarkHubLookup.ts'), 'utf8');
   const start = src.indexOf('export async function findAgentAcrossRuns');
   assert.ok(start >= 0);
   const body = src.slice(start, src.indexOf('export function ancestorsFromHubTree'));
@@ -94,6 +101,75 @@ test('GET /ancestors does not walk the hub archive on an empty live CTE', () => 
     false,
     'ancestors hub walk re-opens the official 4w create race'
   );
+});
+
+test('pointer-route blackbox uses the isolated TEST_BASE_URL first', () => {
+  const src = readFileSync(
+    join(process.cwd(), 'src/tests/blackbox/agent-queue-pointer-route.blackbox.ts'),
+    'utf8'
+  );
+  assert.match(src, /TEST_BASE_URL/);
+  assert.ok(
+    src.indexOf('TEST_BASE_URL') < src.indexOf('BACKEND_URL'),
+    'dotenv BACKEND_URL=3001 must not win over the coverage backend'
+  );
+});
+
+test('hub resolution caches prefer the newest upload and drop deleted runs', () => {
+  __resetHubResolutionCachesForTest();
+  const bundle = {
+    tasks: [
+      {
+        agent_id: 'root-agent',
+        logs: { tree: { 'gp-child': { parent_agent_id: 'root-agent' } } },
+      },
+    ],
+  };
+  assert.deepEqual(agentIdsFromHubBundle(bundle).sort(), ['gp-child', 'root-agent']);
+  applyHubRunToResolutionCaches('run-old', ['gp-child']);
+  assert.equal(peekHubResolutionForTest('gp-child').cachedRunId, 'run-old');
+  applyHubRunToResolutionCaches('run-new', ['gp-child']);
+  assert.equal(peekHubResolutionForTest('gp-child').cachedRunId, 'run-new');
+  const afterUpload = resolveHubRunIdFromIndexes(
+    'gp-child',
+    [
+      {
+        run_id: 'run-new',
+        timestamp: '2026-09-01T00:00:00Z',
+        suite: null,
+        live: false,
+        tasks: [
+          {
+            name: 'mass-agent',
+            passed: true,
+            status: 'passed',
+            agent_id: 'root-agent',
+            duration_seconds: 1,
+            cost_cents: 0,
+            world_model_mode: null,
+            fast_mode: true,
+            tree_agent_count: 2,
+            failure_reason: null,
+          },
+        ],
+      },
+    ],
+    new Map([['gp-child', 'run-new']])
+  );
+  assert.deepEqual(afterUpload, { kind: 'hit', runId: 'run-new' });
+  forgetHubRunFromResolutionCaches('run-new', ['gp-child']);
+  const afterDelete = resolveHubRunIdFromIndexes('gp-child', [], new Map());
+  assert.deepEqual(afterDelete, { kind: 'miss' });
+  __resetHubResolutionCachesForTest();
+});
+
+test('findAgentAcrossRuns ignores resolution hits whose run left the index', () => {
+  const src = readFileSync(join(process.cwd(), 'src/providers/benchmarkHubLookup.ts'), 'utf8');
+  const start = src.indexOf('export async function findAgentAcrossRuns');
+  const body = src.slice(start, src.indexOf('export function ancestorsFromHubTree'));
+  assert.match(body, /indexedRunIds\.has/);
+  assert.match(src, /forgetHubRunFromResolutionCaches/);
+  assert.match(src, /applyHubRunToResolutionCaches/);
 });
 
 if (failures.length > 0) {

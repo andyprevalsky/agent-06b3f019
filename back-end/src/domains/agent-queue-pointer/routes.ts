@@ -6,11 +6,8 @@
  */
 import { Router } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
-import {
-  getCurrentAgentQueue,
-  readAgentQueuePointer,
-} from '../../providers/agentQueuePointer';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { getAgentQueuePointerPayload } from './service';
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
@@ -26,14 +23,7 @@ router.get(
       return;
     }
 
-    const row = await readAgentQueuePointer();
-    const taskQueue = row?.taskQueue ?? (await getCurrentAgentQueue());
-    res.json({
-      taskQueue,
-      surfaceHash: row?.surfaceHash ?? null,
-      updatedBy: row?.updatedBy ?? null,
-      updatedAt: row?.updatedAt ?? null,
-    });
+    res.json(await getAgentQueuePointerPayload());
   })
 );
 

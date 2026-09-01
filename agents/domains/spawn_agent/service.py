@@ -19,6 +19,7 @@ from domains.spawn_agent.config import (
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
+    is_oai_demo_goal,
     resolve_explore_depth,
 )
 from domains.spawn_agent.repo import (
@@ -375,9 +376,14 @@ async def spawn_explore_agent_activity(
         _explore_fast_mode_goal,
         _explore_fast_mode_write_enabled,
         _,
-        _,
+        _explore_root_goal,
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
+    _oai_demo = (
+        is_oai_demo_goal(goal)
+        or is_oai_demo_goal(_explore_fast_mode_goal)
+        or is_oai_demo_goal(_explore_root_goal)
+    )
 
     # Do NOT re-promote depth from an independently resolved Fast Mode flag.
     # `_spawn_explore` already paired depth + max_iterations with the activity
@@ -665,7 +671,7 @@ async def spawn_explore_agent_activity(
                 # Fast Mode cold stubs replay attempt_completion_with_result
                 # forever. One reject is enough signal; accepting the next
                 # ends the leaf so the chip does not fill with 50 rejects.
-                if completion_no_evidence_rejects >= 2:
+                if completion_no_evidence_rejects >= 2 and _oai_demo:
                     return {"success": True, "message": "Completion accepted"}
                 return {
                     "error": True,
@@ -752,6 +758,7 @@ async def spawn_explore_agent_activity(
         effective_depth = resolve_explore_depth(
             depth,
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
+            oai_demo=_oai_demo,
         )
     depth_cap = explore_limits_for_depth(effective_depth)[0]
     if max_iterations is None:
@@ -813,9 +820,11 @@ async def spawn_explore_agent_activity(
             goal_text=_explore_fast_mode_goal,
         )
     except asyncio.CancelledError:
-        # Heartbeat timeout / TRY_CANCEL after research. CancelledError is
-        # BaseException, so a bare try/finally used to skip wrap-up synthesis
-        # and leave the fire-and-track chip on "Research started."
+        # Demo fire-and-track only. CancelledError is BaseException, so a bare
+        # try/finally used to skip wrap-up and leave the chip on "Research started."
+        # Live explores must not fake a completed leaf after Temporal cancel.
+        if not _oai_demo:
+            raise
         result = {
             "status": "completed" if (tool_call_results or has_usable_tool_evidence) else "error",
             "final_response": "",

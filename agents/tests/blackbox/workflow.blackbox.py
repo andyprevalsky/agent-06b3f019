@@ -3937,11 +3937,13 @@ async def test_workflow_handle_incomplete_max_iterations():
 
 
 async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
-    """Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
+    """Demo Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
-    wf.goal = "g"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
     wf.parent_workflow_id = None
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
@@ -3974,6 +3976,49 @@ async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
         )
         assert result["status"] == "completed"
         assert events == ["refresh", "complete"]
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_handle_incomplete_max_iterations_fast_mode_fails_outside_demo():
+    """Live Fast Mode hitting the step cap must still FAIL."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.goal = "Order a Vanilla Bean Shakerato from Blue Bottle"
+    wf.parent_workflow_id = None
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        async def mark_complete(*_args, **_kwargs):
+            events.append("complete")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
+        wf._mark_complete = mark_complete
+        result = await wf._handle_incomplete(
+            {
+                "status": "max_iterations",
+                "context": [],
+                "verifier_progress": 1.0,
+                "verifier_reasoning": (
+                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient"
+                ),
+            },
+            phase="EXECUTE",
+        )
+        assert result["status"] == "failed"
+        assert result["reason"] == "max_iterations"
+        assert events == ["refresh", "failed"]
     finally:
         _restore_workflow(original)
 
@@ -6895,9 +6940,12 @@ async def test_workflow_query_parent_state_skips_throttle_when_paused_by_parent(
 
 
 async def test_workflow_fast_mode_post_message_does_not_block_loop():
-    """Fast Mode replay must not await each post_message activity."""
+    """Demo Fast Mode replay must not await each post_message activity."""
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+
     wf = _bare_workflow_instance()
     wf.agent_id = "fm-child"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
     blocker = asyncio.Event()
@@ -6919,16 +6967,17 @@ async def test_workflow_fast_mode_post_message_does_not_block_loop():
 
 
 async def test_workflow_post_message_throttles_tree_updates():
-    """Per-message tree broadcasts under 50-way fan-out must coalesce."""
+    """Per-message tree broadcasts under 50-way demo fan-out must coalesce."""
     from datetime import timedelta
 
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
     from workflows.agent_workflow import _TREE_STATE_EMIT_MIN_INTERVAL
 
     wf = _bare_workflow_instance()
     wf.agent_id = "child-1"
     wf.bus_id = "bus-1"
     wf.parent_agent_id = "root-1"
-    wf.goal = "analyze"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
@@ -6944,6 +6993,24 @@ async def test_workflow_post_message_throttles_tree_updates():
         tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
         assert len(tree_calls) == 3
         assert _TREE_STATE_EMIT_MIN_INTERVAL == timedelta(seconds=3)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
+    """Live Fast Mode trees must keep per-message tree broadcasts."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-1"
+    wf.bus_id = "bus-1"
+    wf.parent_agent_id = "root-1"
+    wf.goal = "Order a Vanilla Bean Shakerato from Blue Bottle"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._post_message("first", "ASSISTANT", {"toolCallId": "tc-1"})
+        await wf._post_message("second", "TOOL", {"toolCallId": "tc-1"})
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 2
     finally:
         _restore_workflow(original)
 
@@ -7198,6 +7265,10 @@ async def run_all_tests():
         "wf_handle_incomplete_max_iterations_fast_mode_completes",
         test_workflow_handle_incomplete_max_iterations_fast_mode_completes,
     )
+    await r.record_async(
+        "wf_handle_incomplete_max_iterations_fast_mode_fails_outside_demo",
+        test_workflow_handle_incomplete_max_iterations_fast_mode_fails_outside_demo,
+    )
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
     await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)
@@ -7380,6 +7451,10 @@ async def run_all_tests():
         test_workflow_query_parent_state_skips_throttle_when_paused_by_parent,
     )
     await r.record_async("wf_post_message_throttles_tree", test_workflow_post_message_throttles_tree_updates)
+    await r.record_async(
+        "wf_post_message_no_throttle_outside_demo",
+        test_workflow_post_message_does_not_throttle_tree_outside_demo,
+    )
     await r.record_async(
         "wf_fast_mode_post_message_nonblocking",
         test_workflow_fast_mode_post_message_does_not_block_loop,

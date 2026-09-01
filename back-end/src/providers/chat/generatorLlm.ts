@@ -517,17 +517,15 @@ async function callGeneratorLlmCore(
       })
     );
 
-  // Fast Mode read awaits the cache lookup before Cerebras. A 25ms hedge lets
-  // a remote shared-cache hit lose to a faster live first token and records
-  // gemma usage on an otherwise $0 replay.
+  // Demo Fast Mode only: wait for cache before Cerebras so a remote hit cannot lose to live.
   let stream: AsyncIterable<CompletionChunk>;
   if (fcKey && fastModeRead) {
-    const cacheKey = fcKey;
     stream = createGeneratorCacheStream({
       agentId: params.agentId,
-      cacheKey,
+      cacheKey: fcKey,
       createLive: (abortSignal) => createLiveStream(abortSignal),
       createCached: syntheticChatStream,
+      goal: fastMode.goal,
       onWinner: (winner) => {
         fcCacheWon = winner === 'cache';
       },
@@ -540,12 +538,12 @@ async function callGeneratorLlmCore(
   }
 
   // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
-  let isClaude = false;
-  let isGpt = false;
+  let isClaude = false,
+    isGpt = false;
 
   // Track reasoning and JSON content separately (like agent worker)
-  let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
-  let accumulatedJson = ''; // From delta.content (JSON structure)
+  let accumulatedReasoning = '', // From delta.reasoning (thinking models)
+    accumulatedJson = ''; // From delta.content (JSON structure)
   const structuredOutput = new StructuredOutputAccumulator();
   let sequence = 1;
   let lastStreamedText = ''; // What we've sent to FE so far

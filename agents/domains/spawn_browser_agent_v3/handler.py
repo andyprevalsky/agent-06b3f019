@@ -69,8 +69,8 @@ from .challenge_recovery import (
 from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
-    ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
-    ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
+    browser_start_to_close_timeout_minutes,
+    skip_browser_network_recording,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_MAX_RECOVERIES,
@@ -6197,8 +6197,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # Instagram navigations flood the recorder and stall the activity
             # for tens of minutes while every LLM decision was already a cache
             # hit (verify19 Huberman hang).
-            if fast_mode_cache_enabled:
+            if skip_browser_network_recording(fast_mode=fast_mode_cache_enabled, goal=goal):
                 return None
+            if fast_mode_cache_enabled:
+                from providers.fast_cache.client import soft_complete_allowed_for_agent
+
+                if await soft_complete_allowed_for_agent(agent_id, goal):
+                    return None
             if not recording_output_dir:
                 return None
             recorder = await BrowserNetworkRecorder.create(
@@ -9841,10 +9846,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
                 ):
                     fm_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-                    browser_timeout_minutes = (
-                        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
-                        if fm_enabled
-                        else ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+                    browser_timeout_minutes = browser_start_to_close_timeout_minutes(
+                        fast_mode=fm_enabled,
+                        goal=goal,
+                        workflow_instance=workflow_instance,
                     )
                     activity_handle = workflow.start_activity(
                         spawn_browser_agent_activity_v3,

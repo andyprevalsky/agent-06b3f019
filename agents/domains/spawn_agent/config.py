@@ -41,15 +41,17 @@ def resolve_explore_depth(
     requested_depth: str | None,
     *,
     fast_mode_cache_enabled: bool = False,
+    oai_demo: bool = False,
 ) -> str:
     """Pick explore thoroughness for a spawn.
 
-    Under Fast Mode, always use EXPLORE_FAST_MODE_DEPTH: July OAi-demo explore
-    caches often reach attempt_completion at turn ~26–36, so both the live
-    default (quick=5) and an explicit medium=20 abort mid-replay. Outside Fast
-    Mode, explicit medium/deep win; otherwise the live default applies.
+    Under Fast Mode on test-mass-agent-run-0 only, use EXPLORE_FAST_MODE_DEPTH:
+    July OAi-demo explore caches often reach attempt_completion at turn ~26–36,
+    so both the live default (quick=5) and an explicit medium=20 abort mid-replay.
+    Other Fast Mode trees keep the requested/live depth. Outside Fast Mode,
+    explicit medium/deep win; otherwise the live default applies.
     """
-    if fast_mode_cache_enabled:
+    if fast_mode_cache_enabled and oai_demo:
         return EXPLORE_FAST_MODE_DEPTH
     if requested_depth in EXPLORE_DEPTH_LIMITS:
         return requested_depth
@@ -88,18 +90,23 @@ OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist sec
 OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
 
 
+def is_oai_demo_goal(text: str | None) -> bool:
+    """True only for test-mass-agent-run-0 root, child-window, or for_each prefix."""
+    blob = str(text or "")
+    return (
+        OAI_DEMO_ROOT_GOAL_PREFIX in blob
+        or OAI_DEMO_CHILD_WINDOW in blob
+        or OAI_DEMO_CHILD_GOAL_PREFIX in blob
+    )
+
+
 def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
     """True only for the mass-agent-0 root or its per-creator for_each children."""
     chunks = (
         getattr(workflow_instance, "fast_cache_goal", None) or "",
         getattr(workflow_instance, "goal", None) or "",
     )
-    text = "\n".join(str(chunk) for chunk in chunks)
-    return (
-        OAI_DEMO_ROOT_GOAL_PREFIX in text
-        or OAI_DEMO_CHILD_WINDOW in text
-        or OAI_DEMO_CHILD_GOAL_PREFIX in text
-    )
+    return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
 
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0

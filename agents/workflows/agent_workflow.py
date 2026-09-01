@@ -25,6 +25,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from domains.spawn_agent.config import is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
         spawn_agent,
@@ -2778,7 +2779,11 @@ class AgentWorkflow:
             # bottleneck: each July GP step blocked on a 30s write. Start the
             # write and keep looping; flush before terminal status so the
             # transcript is durable when COMPLETED lands.
-            if self.fast_mode_cache_enabled and not self._is_finished:
+            if (
+                self.fast_mode_cache_enabled
+                and not self._is_finished
+                and is_oai_demo_mass_agent_task(self)
+            ):
                 handle = workflow.start_activity(
                     post_agent_message,
                     args=[self.agent_id, text, role, metadata],
@@ -4314,6 +4319,7 @@ class AgentWorkflow:
         if (
             not explicit_status
             and self.message_count != 1
+            and is_oai_demo_mass_agent_task(self)
             and self._last_tree_state_emit_at is not None
             and (now - self._last_tree_state_emit_at) < _TREE_STATE_EMIT_MIN_INTERVAL
         ):
@@ -4428,9 +4434,13 @@ class AgentWorkflow:
             await self._wait_for_response_schema_refresh()
             verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
             verifier_reasoning = str(result.get("verifier_reasoning") or "")
-            fm_trajectory_complete = bool(getattr(self, "fast_mode_cache_enabled", False)) and (
-                verifier_progress >= 1.0
-                or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+            fm_trajectory_complete = (
+                bool(getattr(self, "fast_mode_cache_enabled", False))
+                and is_oai_demo_mass_agent_task(self)
+                and (
+                    verifier_progress >= 1.0
+                    or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+                )
             )
             if fm_trajectory_complete:
                 # Fast Mode replay hit the step cap after the verifier already
@@ -4898,7 +4908,9 @@ class AgentWorkflow:
             summary = summary_result.get("summary", "")
             transcript = await self._completion_transcript(context)
             structured_response = self._coalesce_structured_response(transcript, structured_response)
-            if is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200:
+            if is_oai_demo_mass_agent_task(self) and (
+                is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200
+            ):
                 recovered = card_summary_from_evidence(transcript, structured_response)
                 if (
                     recovered

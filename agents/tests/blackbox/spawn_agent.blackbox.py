@@ -94,6 +94,16 @@ def test_is_oai_demo_mass_agent_task_only_matches_catalog_task():
     assert not is_oai_demo_mass_agent_task(_Goal("Order me 1 rocky fish sandwich"))
 
 
+def test_is_oai_demo_goal_rejects_live_purchase_prompts():
+    from domains.spawn_agent.config import is_oai_demo_goal
+
+    assert is_oai_demo_goal(
+        "I'm building a personal brand for health, longevity, technology, founder journey [x]"  # pragma: allowlist secret
+    )
+    assert not is_oai_demo_goal("Order a Vanilla Bean Shakerato and waffle from Blue Bottle")
+    assert not is_oai_demo_goal("Buy socks")
+
+
 def test_validate_spawn_missing_type():
     """Missing type raises."""
     from domains.spawn_agent.service import validate_spawn_params
@@ -2828,14 +2838,16 @@ async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_ev
 
 
 async def test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancelled():
-    """Heartbeat/cancel after research must still return a user-facing wrap-up.
+    """Demo cancel after research must still return a user-facing wrap-up.
 
     Explore 44c81111 had tool_call_results in-memory when Temporal cancelled
     the activity. CancelledError is BaseException, so synthesis after
     run_agent never ran and the parent chip stayed at Research started.
+    Live explores re-raise; this wrap-up is demo-only.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     evidence = (
@@ -2864,7 +2876,7 @@ async def test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancel
         result = await spawn_explore_agent_activity(
             agent_id="a-attia",
             user_id="u-7",
-            goal="Do 3 quick web searches about Peter Attia MD",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX}: Peter Attia. Do 3 quick web searches.",
             model="rose-1-lite",
             task_id="44c81111-1238-43f0-8b06-a1a20cc902b7",
             init_tool_call_id="tc-oai-timeout-44c81111",
@@ -2882,6 +2894,35 @@ async def test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancel
     ]
     assert wrap_posts, save_calls
     assert any(len(str(call.get("message") or "")) >= 200 for call in wrap_posts)
+
+
+async def test_spawn_explore_agent_activity_reraises_cancel_outside_demo():
+    """Live Temporal cancel must not fake a completed explore wrap-up."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": "live evidence"})
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Blue Bottle"}, "tc-live")
+        raise asyncio.CancelledError()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="a-live",
+            user_id="u-7",
+            goal="Order a Vanilla Bean Shakerato and waffle from Blue Bottle",
+            model="rose-1-lite",
+            task_id="live-cancel",
+            init_tool_call_id="tc-live-cancel",
+        )
 
 
 async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds():
@@ -2921,7 +2962,47 @@ async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_su
 
 
 async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completion():
-    """A Fast Mode completion stub must not reject-loop the explore chip."""
+    """A demo Fast Mode completion stub must not reject-loop the explore chip."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    completion_results = []
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        completion_results.append(
+            await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1")
+        )
+        completion_results.append(
+            await execute_tool("attempt_completion_with_result", {"result": "again"}, "tc2")
+        )
+        return {
+            "status": "completed",
+            "final_response": "ended without evidence",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman",
+            model="m",
+        )
+
+    assert completion_results[0]["error"] is True
+    assert "no evidence tool has succeeded" in completion_results[0]["message"]
+    assert completion_results[1]["success"] is True
+
+
+async def test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_demo():
+    """Live explores must not accept a second evidence-free completion."""
     from unittest.mock import patch
 
     from domains.spawn_agent.service import spawn_explore_agent_activity
@@ -2947,11 +3028,16 @@ async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completio
         patch("temporalio.activity.heartbeat"),
         patch("loop.run_agent.run_agent", new=fake_run_agent),
     ):
-        await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research X", model="m")
+        await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Order a Vanilla Bean Shakerato from Blue Bottle",
+            model="m",
+        )
 
     assert completion_results[0]["error"] is True
-    assert "no evidence tool has succeeded" in completion_results[0]["message"]
-    assert completion_results[1]["success"] is True
+    assert completion_results[1]["error"] is True
+    assert "no evidence tool has succeeded" in completion_results[1]["message"]
 
 
 async def test_spawn_explore_agent_activity_error_status_returned():
@@ -3827,6 +3913,7 @@ async def run_all_tests():
     r.record("validate_explore_happy", test_validate_spawn_explore_happy)
     # resolve_start_phase
     r.record("is_oai_demo_mass_agent_task_scoped", test_is_oai_demo_mass_agent_task_only_matches_catalog_task)
+    r.record("is_oai_demo_goal_rejects_live_purchase", test_is_oai_demo_goal_rejects_live_purchase_prompts)
     r.record("resolve_phase_default", test_resolve_start_phase_default)
     r.record("resolve_phase_execute", test_resolve_start_phase_execute)
     r.record("resolve_phase_invalid", test_resolve_start_phase_invalid_defaults_plan)
@@ -4002,12 +4089,20 @@ async def run_all_tests():
         test_spawn_explore_agent_activity_returns_wrapup_when_run_agent_cancelled,
     )
     await r.record_async(
+        "explore_activity_reraises_cancel_outside_demo",
+        test_spawn_explore_agent_activity_reraises_cancel_outside_demo,
+    )
+    await r.record_async(
         "explore_activity_rejects_completion_until_evidence_succeeds",
         test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds,
     )
     await r.record_async(
         "explore_activity_accepts_second_no_evidence_completion",
         test_spawn_explore_agent_activity_accepts_second_no_evidence_completion,
+    )
+    await r.record_async(
+        "explore_activity_keeps_rejecting_no_evidence_outside_demo",
+        test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_demo,
     )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
     await r.record_async(
