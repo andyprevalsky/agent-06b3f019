@@ -253,15 +253,15 @@ export async function putRun(
     tasks: storedSummary.tasks.length,
   });
   await slotHubAncestorSkeletonsFromBundle(bundle);
-  if (childIdToRun !== null) {
-    const tasks = Array.isArray(bundle.tasks) ? bundle.tasks : [];
-    for (const task of tasks) {
-      const logs = (task as { logs?: { tree?: unknown } }).logs;
-      const tree = canonicalAgentTree(logs?.tree);
-      for (const id of Object.keys(tree)) {
-        if (!childIdToRun.has(id)) childIdToRun.set(id, runId);
-        agentRunMissCache.delete(id);
-      }
+  if (childIdToRun === null) {
+    childIdToRun = new Map();
+  }
+  for (const task of tasks) {
+    const logs = (task as { logs?: { tree?: unknown } }).logs;
+    const tree = canonicalAgentTree(logs?.tree);
+    for (const id of Object.keys(tree)) {
+      if (!childIdToRun.has(id)) childIdToRun.set(id, runId);
+      agentRunMissCache.delete(id);
     }
   }
   return storedSummary;
