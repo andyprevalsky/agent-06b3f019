@@ -2999,16 +2999,18 @@ def test_declared_evaluator_evidence_compacts_mass_agent_tree():
                 "message_count": 1,
             }
         )
+    fat_root_messages = [
+        {
+            "role": "TOOL",
+            "text": huge,
+            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED", "title": f"GP-{index}"},
+        }
+        for index in range(130)
+    ]
     evidence = _declared_evaluator_evidence(
         {
             "agent": {"agent_id": "root", "status": "COMPLETED"},
-            "messages": [
-                {
-                    "role": "TOOL",
-                    "text": huge,
-                    "metadata": {"toolName": "web_search", "toolStatus": "FINISHED", "title": "Searched"},
-                }
-            ],
+            "messages": fat_root_messages,
             "cost_cents": 0,
             "tokens_out": 0,
             "cache_creation_input_tokens": 0,
@@ -3100,6 +3102,14 @@ async def test_mass_agent_single_turn_judge_does_not_upgrade_to_agentic():
     data = {
         "agent": {"agent_id": "root", "status": "COMPLETED"},
         "messages": [
+            {
+                "role": "TOOL",
+                "text": huge,
+                "metadata": {"toolName": "web_search", "toolStatus": "FINISHED", "title": f"GP-{index}"},
+            }
+            for index in range(130)
+        ]
+        + [
             {
                 "role": "TOOL",
                 "text": "Task Complete",

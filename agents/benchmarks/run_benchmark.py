@@ -8673,11 +8673,14 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     Payment-approval metadata and root transcripts come from the tree-aware
     single-turn builder. ``benchmark_state`` is the compact T-row view so
     mass-agent trees cannot 413 the judge with 35MB child bodies. When the
-    hydrated child transcripts still blow the single-turn budget, drop them
-    and keep root rows + compact typed state — T-row judges are written for
-    that compact view, not the agentic Codex fallback.
+    hydrated child transcripts still blow the single-turn budget, drop them.
+    When the remaining root tail (120 × 12k GP rows) is still over budget,
+    keep only the completion card + compact typed state — T-row judges are
+    written for that compact view, not the agentic Codex fallback.
     """
     from benchmarks.semantic_evaluator_evidence import (
+        SINGLE_TURN_TEXT_CAP,
+        _append_completion_card,
         build_single_turn_evidence,
         single_turn_evidence_exceeds_budget,
     )
@@ -8688,7 +8691,15 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
-    return _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
+    evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
+    if not single_turn_evidence_exceeds_budget(evidence):
+        return evidence
+    compact_only: list[dict] = []
+    _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
+    evidence = _apply_compact_benchmark_state(compact_only, compact_state)
+    if not single_turn_evidence_exceeds_budget(evidence):
+        return evidence
+    return [{"benchmark_state": compact_state}]
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
