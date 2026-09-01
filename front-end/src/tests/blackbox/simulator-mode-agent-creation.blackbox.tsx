@@ -13,6 +13,7 @@ vi.mock('@amplitude/analytics-browser', () => ({ track: vi.fn() }));
 
 import { useMessageSending } from '@/features/terminal/hooks/useMessageSending';
 import { ADMIN_USER_IDS } from '@/lib/adminAccounts';
+import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 
 describe('Simulator mode agent creation', () => {
   it.each(ADMIN_USER_IDS)(
@@ -47,11 +48,18 @@ describe('Simulator mode agent creation', () => {
       });
 
       expect(api.createAgent).toHaveBeenCalledOnce();
-      expect(api.createAgent.mock.calls[0]?.[0]).toMatchObject({
+      const createPayload = api.createAgent.mock.calls[0]?.[0];
+      expect(createPayload).toMatchObject({
         source: 'MAC_APP',
-        fast_mode_cache_enabled: false,
         world_model_mode: 'simulate',
       });
+      if (FAST_MODE_USER_IDS.includes(userId)) {
+        // Simulator forces Fast Mode off; allowlisted accounts still send the field.
+        expect(createPayload).toMatchObject({ fast_mode_cache_enabled: false });
+      } else {
+        // Legacy admin ids keep Simulator, but Fast Mode is current-identity only.
+        expect(createPayload).not.toHaveProperty('fast_mode_cache_enabled');
+      }
     },
   );
 });

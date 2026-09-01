@@ -10,6 +10,7 @@ import {
   compatiblePreferredBrowserConfig,
   sameSiteNavigationUrl,
 } from '../../providers/browser/challengeRecovery';
+import { closeValidationBrowser } from '../../providers/browser/challengeRecoverySupport';
 import {
   challengeClassifierCostCents,
   CHALLENGE_LLM_MODEL,
@@ -325,8 +326,30 @@ function testChallengeLlmClassifierCostRouting(): void {
   assert.equal(free, 0, 'direct compute-token classifier usage is $0');
 }
 
+async function testCloseValidationBrowserNeverBlocksRelease(): Promise<void> {
+  await closeValidationBrowser({ validationBrowser: {} });
+  await closeValidationBrowser({ validationBrowser: null });
+  await closeValidationBrowser({
+    validationBrowser: {
+      close: async () => {
+        throw new Error('cdp already gone');
+      },
+    },
+  });
+  let closed = false;
+  await closeValidationBrowser({
+    validationBrowser: {
+      close: async () => {
+        closed = true;
+      },
+    },
+  });
+  assert.equal(closed, true);
+}
+
 async function main(): Promise<void> {
   testPreferredConfigCompatibility();
+  await testCloseValidationBrowserNeverBlocksRelease();
   await testLearnedConfigSeedsTheNextSession();
   await testLearnedSteelFixedConfigSeedsTheNextSession();
   await testIncompatibleLearnedConfigFallsBackWithoutLeakingGeo();

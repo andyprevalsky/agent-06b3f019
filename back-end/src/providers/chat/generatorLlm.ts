@@ -517,8 +517,9 @@ async function callGeneratorLlmCore(
       })
     );
 
-  // Fast Mode's remote cache is optional. Give it a 25ms head start, then race
-  // it against Cerebras so a slow cache lookup can never gate first tokens.
+  // Fast Mode read awaits the cache lookup before Cerebras. A 25ms hedge lets
+  // a remote shared-cache hit lose to a faster live first token and records
+  // gemma usage on an otherwise $0 replay.
   let stream: AsyncIterable<CompletionChunk>;
   if (fcKey && fastModeRead) {
     const cacheKey = fcKey;

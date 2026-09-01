@@ -5,6 +5,7 @@
  * cards.
  */
 import { useMemo } from 'react';
+import { userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../../hooks';
 import type { ToolMessageData } from './types';
 
@@ -37,7 +38,7 @@ export function useToolData({
         toolName: 'thought',
         title: 'Thought',
         status: 'FINISHED',
-        message: message.text,
+        message: userFacingMessageText(message.text),
       };
     }
 
@@ -70,7 +71,7 @@ export function useToolData({
       toolName,
       title,
       status: toolStatus,
-      message: hideToolMessage ? '' : message.text,
+      message: hideToolMessage ? '' : userFacingMessageText(message.text),
       error: Boolean(metadata.error),
       progressComplete: metadata.progressComplete as number | undefined,
       actionMetadata,

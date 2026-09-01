@@ -7,7 +7,7 @@ on:
       frontend_url:
         description: Frontend URL to verify
         required: false
-        default: https://roselabs.ai
+        default: https://www.roselabs.ai
       backend_url:
         description: Backend URL to verify
         required: false
@@ -63,7 +63,7 @@ jobs:
       - name: Run all semantic frontend tests
         env:
           BACKEND_URL: ${{ inputs.backend_url || 'https://navi-j9a9.onrender.com' }}
-          FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://roselabs.ai' }}
+          FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://www.roselabs.ai' }}
           SEMANTIC_GREP_INVERT: chat full-lifecycle latency
           SEMANTIC_WORKERS: 4
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -122,7 +122,7 @@ jobs:
       - name: Run five samples across every chat lifecycle
         env:
           BACKEND_URL: ${{ inputs.backend_url || 'https://navi-j9a9.onrender.com' }}
-          FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://roselabs.ai' }}
+          FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://www.roselabs.ai' }}
           SEMANTIC_WORKERS: 1
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

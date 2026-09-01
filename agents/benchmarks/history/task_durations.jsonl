@@ -2906,6 +2906,12 @@
 {"task": "browser-event-ticket", "duration_seconds": 278.7, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "3da459d3-93bf-473d-8c30-f2189f5c9060"}
 {"task": "browser-event-ticket", "duration_seconds": 324.8, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "15249c47-08bf-4b0d-bc20-75cf664f6f4c"}
 {"task": "browser-event-ticket", "duration_seconds": 344.9, "cost_cents": 0.0, "timestamp": "2026-08-22T04:54:12.350251+00:00", "agent_id": "96136f5f-e807-4651-bed2-67dba3845aba"}
+{"task": "parallel-tool-calls", "duration_seconds": 139.2, "cost_cents": 10.0, "timestamp": "2026-08-30T18:02:11.868404+00:00", "agent_id": "c8331840-fddd-4d13-b1b6-7192e42a549e"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 244.6, "cost_cents": 8.0, "timestamp": "2026-08-30T18:02:11.868404+00:00", "agent_id": "305f67b6-a6c9-478d-aa68-eb78eed94c39"}
+{"task": "spawn-sub-agents", "duration_seconds": 158.3, "cost_cents": 1.0, "timestamp": "2026-08-30T18:02:11.868404+00:00", "agent_id": "0ea7c6e7-f251-43e4-8ddf-5a0ab07f078d"}
+{"task": "claude-code-agent", "duration_seconds": 48.6, "cost_cents": 2.0, "timestamp": "2026-08-30T18:02:11.868404+00:00", "agent_id": "f44b7b9a-7a05-449e-89eb-617b484d457b"}
+{"task": "chat-mode", "duration_seconds": 13.2, "cost_cents": 0.0, "timestamp": "2026-08-30T18:02:11.868404+00:00", "agent_id": "de35f9e0-eecc-411b-886e-50827c8e50a3"}
+{"task": "browser-smoke", "duration_seconds": 54.1, "cost_cents": 0.0, "timestamp": "2026-08-30T18:02:11.868404+00:00", "agent_id": "2231ab2c-d20e-4d27-a103-442813f3852c"}
 {"task": "parallel-tool-calls", "duration_seconds": 87.9, "cost_cents": 25.0, "timestamp": "2026-08-26T06:22:02.739968+00:00", "agent_id": "2a7a4735-dfa2-4a1e-8fe4-0d244c28bbaa"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 184.3, "cost_cents": 43.0, "timestamp": "2026-08-26T06:22:02.739968+00:00", "agent_id": "ca68fd03-a42d-43de-ab1d-a1902f4388ba"}
 {"task": "spawn-sub-agents", "duration_seconds": 93.1, "cost_cents": 13.0, "timestamp": "2026-08-26T06:22:02.739968+00:00", "agent_id": "01671439-1b65-4dd4-b769-6e86f027df00"}

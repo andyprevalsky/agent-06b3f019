@@ -10,14 +10,16 @@ import type {
   ChallengeClassifierBilling,
   ChallengeClassifierLlmUsage,
 } from './challengeLlmClassifier';
-import {
-  createKernelRecoverySession,
-  releaseKernelRemoteSession,
-  type KernelRecoveryProxySpecificity,
-} from './kernel';
-import type { KernelProxyType } from './kernelProxy';
+import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
+import {
+  raceProbeAbort,
+  recoveryConfigKeyForSession,
+  sameSiteNavigationUrl,
+} from './challengeRecoveryShared';
 import type { BrowserProviderName } from './types';
+
+export { recoveryConfigKeyForSession, sameSiteNavigationUrl } from './challengeRecoveryShared';
 
 export {
   bestSpecificity,
@@ -58,6 +60,13 @@ import {
   type ConfigSearchDependencies,
   type LaneConfigSearchOptions,
 } from './challengeRecoveryLaneSearch';
+import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
+
+export {
+  buildPreferredBrowserConfig,
+  compatiblePreferredBrowserConfig,
+  type PreferredBrowserConfig,
+} from './challengeRecoverySupport';
 
 export {
   orderConfigsForLane,
@@ -68,17 +77,6 @@ export {
 };
 
 const log = createLogger('BrowserChallengeRecovery');
-
-export interface PreferredBrowserConfig {
-  version: 1;
-  provider: BrowserProviderName;
-  proxyMode: string;
-  kernelProxyType?: KernelProxyType;
-  kernelSpecificity?: KernelRecoveryProxySpecificity;
-  steelProxyMode?: 'managed' | 'fixed';
-  proxyLocation: ProxyGeoLocation;
-  learnedAt: string;
-}
 
 export interface RecoveryCandidateSession {
   provider: BrowserProviderName;
@@ -112,32 +110,6 @@ export interface CandidateProbeResult {
   settledUrl?: string;
 }
 
-function registrableHost(hostname: string | null | undefined): string {
-  const host = String(hostname || '')
-    .toLowerCase()
-    .replace(/^\.+|\.+$/g, '');
-  return host.startsWith('www.') ? host.slice(4) : host;
-}
-
-/** Same-site settled URL for follow-up probe / resume navigations. */
-export function sameSiteNavigationUrl(
-  targetUrl: string,
-  settledUrl: string | null | undefined
-): string | null {
-  const settled = String(settledUrl || '').trim();
-  if (!settled.startsWith('http://') && !settled.startsWith('https://')) return null;
-  let targetHost = '';
-  let settledHost = '';
-  try {
-    targetHost = registrableHost(new URL(targetUrl).hostname);
-    settledHost = registrableHost(new URL(settled).hostname);
-  } catch {
-    return null;
-  }
-  if (!targetHost || !settledHost || targetHost !== settledHost) return null;
-  return settled;
-}
-
 export interface SuccessfulRecoveryCandidate {
   config: BrowserRecoveryConfig;
   session: RecoveryCandidateSession;
@@ -155,35 +127,6 @@ export interface BrowserConfigSearchRuntimeDependencies {
 export interface RecoveryStorageLane {
   key: string;
   storageState: Record<string, unknown>;
-}
-
-/** Map a live session's provider + proxyTier back to a recovery candidate key. */
-export function recoveryConfigKeyForSession(
-  provider: string | null | undefined,
-  proxyTier: string | null | undefined
-): string | undefined {
-  const tier = (proxyTier || '').trim().toLowerCase();
-  if ((provider || '').toLowerCase() === 'steel') {
-    if (tier === 'fixed') return 'steel_fixed';
-    if (tier === 'managed' || tier === '') return 'steel_managed';
-    return undefined;
-  }
-  if ((provider || '').toLowerCase() === 'kernel') {
-    if (tier === 'none') return 'kernel_direct';
-    if (tier.startsWith('isp')) return 'kernel_isp';
-    if (tier.startsWith('mobile')) return 'kernel_mobile';
-    if (tier.includes('residential_state') || tier === 'residential_state') {
-      return 'kernel_residential_state';
-    }
-    if (tier.includes('residential_city') || tier === 'residential_city') {
-      return 'kernel_residential_city';
-    }
-    if (tier.includes('residential_country') || tier === 'residential_country') {
-      return 'kernel_residential_country';
-    }
-    if (tier.startsWith('residential')) return 'kernel_residential_city';
-  }
-  return undefined;
 }
 
 export async function probeCandidateBrowser(
@@ -204,7 +147,8 @@ export async function probeCandidateBrowser(
     /** Test-only solver override (avoids live LLM in unit probes). */
     waitForSolver?: typeof waitForProviderSolver;
   } = {},
-  billing: ChallengeClassifierBilling = {}
+  billing: ChallengeClassifierBilling = {},
+  signal?: AbortSignal
 ): Promise<CandidateProbeResult> {
   const started = Date.now();
   let stablePasses = 0;
@@ -225,29 +169,45 @@ export async function probeCandidateBrowser(
   const solve = logContext.waitForSolver ?? waitForProviderSolver;
   let settledUrl: string | undefined;
   try {
+    if (signal?.aborted) {
+      throw new Error('lane_aborted');
+    }
     const context = session.validationBrowser.contexts()[0];
     if (context === undefined) {
       throw new Error(`Recovery candidate ${session.sessionId} has no default browser context`);
     }
     const cookies = Array.isArray(storageState.cookies) ? (storageState.cookies as Cookie[]) : [];
-    if (cookies.length > 0) await context.addCookies(cookies);
+    if (cookies.length > 0) await raceProbeAbort(context.addCookies(cookies), signal);
     const origins = Array.isArray(storageState.origins) ? storageState.origins : [];
     if (origins.length > 0) {
-      await context.addInitScript(recoveryOriginStorageScript(storageState));
+      await raceProbeAbort(
+        context.addInitScript(recoveryOriginStorageScript(storageState)),
+        signal
+      );
     }
-    const page = context.pages()[0] ?? (await context.newPage());
-    const response = await page
-      .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-      .catch(() => null);
+    const page = context.pages()[0] ?? (await raceProbeAbort(context.newPage(), signal));
+    if (signal?.aborted) {
+      throw new Error('lane_aborted');
+    }
+    const response = await raceProbeAbort(
+      page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => null),
+      signal
+    );
     if (origins.length > 0) {
-      await page.evaluate(async () => {
-        const recoveryGlobal = globalThis as typeof globalThis & {
-          __naviRestoreRecoveryStorage?: () => Promise<void>;
-        };
-        await recoveryGlobal.__naviRestoreRecoveryStorage?.();
-      });
+      await raceProbeAbort(
+        page.evaluate(async () => {
+          const recoveryGlobal = globalThis as typeof globalThis & {
+            __naviRestoreRecoveryStorage?: () => Promise<void>;
+          };
+          await recoveryGlobal.__naviRestoreRecoveryStorage?.();
+        }),
+        signal
+      );
     }
-    const attempt = await solve(page, response, billing, { recoveryReason });
+    const attempt = await raceProbeAbort(
+      solve(page, response, billing, { recoveryReason }),
+      signal
+    );
     if (attempt.usage) classifierLlmUsage.push(attempt.usage);
     if (!attempt.clean) {
       log.info('Challenge recovery candidate probe attempt still challenged', {
@@ -278,7 +238,10 @@ export async function probeCandidateBrowser(
   } finally {
     // Closing this CDP client leaves the remote default context (including any
     // solver-refreshed challenge cookies) alive for atomic promotion.
-    await session.validationBrowser.close().catch(() => {});
+    await closeValidationBrowser(session);
+  }
+  if (signal?.aborted) {
+    throw new Error('lane_aborted');
   }
   return {
     stablePasses,
@@ -290,40 +253,6 @@ export async function probeCandidateBrowser(
     classifierLlmUsage,
     ...(settledUrl ? { settledUrl } : {}),
   };
-}
-
-export function buildPreferredBrowserConfig(
-  config: BrowserRecoveryConfig,
-  proxyLocation: ProxyGeoLocation
-): PreferredBrowserConfig {
-  return {
-    version: 1,
-    provider: config.provider,
-    proxyMode: config.proxyMode,
-    ...(config.kernelProxyType ? { kernelProxyType: config.kernelProxyType } : {}),
-    ...(config.kernelSpecificity ? { kernelSpecificity: config.kernelSpecificity } : {}),
-    ...(config.steelProxyMode ? { steelProxyMode: config.steelProxyMode } : {}),
-    proxyLocation,
-    learnedAt: new Date().toISOString(),
-  };
-}
-
-export function compatiblePreferredBrowserConfig(
-  raw: unknown,
-  requestedLocation: ProxyGeoLocation
-): PreferredBrowserConfig | null {
-  if (typeof raw !== 'object' || raw === null) return null;
-  const candidate = raw as Partial<PreferredBrowserConfig>;
-  if (candidate.version !== 1 || !['kernel', 'steel'].includes(String(candidate.provider))) {
-    return null;
-  }
-  const learnedLocation = candidate.proxyLocation;
-  if (!learnedLocation || learnedLocation.country !== requestedLocation.country) return null;
-  if (learnedLocation.state && learnedLocation.state !== requestedLocation.state) return null;
-  if (learnedLocation.city && learnedLocation.city !== requestedLocation.city) return null;
-  if (candidate.provider === 'kernel' && !candidate.kernelProxyType) return null;
-  if (candidate.provider === 'steel' && !candidate.steelProxyMode) return null;
-  return candidate as PreferredBrowserConfig;
 }
 
 const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependencies = {
@@ -513,7 +442,10 @@ export async function searchAndPromoteBrowserConfig(
   });
 
   const searchDependencies: ConfigSearchDependencies = {
-    create: async (config) => {
+    create: async (config, signal) => {
+      if (signal.aborted) {
+        throw new Error('lane_aborted');
+      }
       if (config.provider === 'kernel') {
         const session = config.omitManagedProxy
           ? await dependencies.createKernel(current.agentId, proxyLocation, {
@@ -523,6 +455,11 @@ export async function searchAndPromoteBrowserConfig(
               type: config.kernelProxyType ?? 'residential',
               specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
             });
+        if (signal.aborted) {
+          await closeValidationBrowser(session);
+          await dependencies.releaseKernel(session.sessionId).catch(() => {});
+          throw new Error('lane_aborted');
+        }
         return { provider: 'kernel', ...session };
       }
       const session = await dependencies.createSteel({
@@ -530,10 +467,18 @@ export async function searchAndPromoteBrowserConfig(
         proxyMode: config.steelProxyMode ?? 'managed',
         userAgent: input.userAgent,
       });
+      if (signal.aborted) {
+        await closeValidationBrowser(session);
+        await dependencies.releaseSteel(session.sessionId).catch(() => {});
+        throw new Error('lane_aborted');
+      }
       return { provider: 'steel', ...session };
     },
-    probe: async (config, session, lane) =>
-      dependencies.probe(
+    probe: async (config, session, lane, signal) => {
+      if (signal.aborted) {
+        throw new Error('lane_aborted');
+      }
+      return dependencies.probe(
         session,
         input.targetUrl,
         lane.storageState,
@@ -545,8 +490,10 @@ export async function searchAndPromoteBrowserConfig(
           blockedResourceUrl: input.blockedResourceUrl,
           recoveryReason: input.recoveryReason,
         },
-        billing
-      ),
+        billing,
+        signal
+      );
+    },
     promote: async ({ config, session }) => {
       const updated = await prisma.$transaction(async (tx) => {
         const replaced = await tx.browserSession.updateMany({
@@ -585,6 +532,7 @@ export async function searchAndPromoteBrowserConfig(
       }
     },
     release: async (_config, session) => {
+      await closeValidationBrowser(session).catch(() => {});
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },

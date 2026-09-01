@@ -50,7 +50,7 @@ export { RouterDecisionSchema } from './routerDecision';
 export type { RouterDecision } from './routerDecision';
 
 const log = createLogger('RouterLLM');
-const ROUTER_CACHE_GRACE_MS = 25;
+const ROUTER_CACHE_HANG_MS = 5_000;
 
 // ============================================
 // Router Response with streaming metadata
@@ -424,7 +424,8 @@ export async function callRouterLlm(params: {
         const delta = chunk.choices[0]?.delta;
         return Boolean(delta?.content?.length || delta?.reasoning?.length);
       },
-      graceMs: ROUTER_CACHE_GRACE_MS,
+      awaitCacheFirst: true,
+      hangTimeoutMs: ROUTER_CACHE_HANG_MS,
       onCacheError: (error) =>
         log.warn('fast_cache.chat_router_read_failed', {
           agentId: params.agentId,

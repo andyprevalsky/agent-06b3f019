@@ -872,6 +872,18 @@ describe('api.ts', () => {
       expect(ancestors[0].id).toBe('p1');
     });
 
+    it('fetchAncestors normalizes agent_id rows to id', async () => {
+      server.use(
+        http.get(`${API_BASE}/agents/:agentId/ancestors`, () =>
+          HttpResponse.json({
+            ancestors: [{ agent_id: 'root', goal: 'root goal' }],
+          }),
+        ),
+      );
+      const ancestors = await fetchAncestors('a');
+      expect(ancestors).toEqual([{ id: 'root', goal: 'root goal' }]);
+    });
+
     it('fetchAncestors throws on failure', async () => {
       server.use(
         http.get(`${API_BASE}/agents/:agentId/ancestors`, () =>

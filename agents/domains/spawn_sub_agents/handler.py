@@ -143,8 +143,8 @@ class SpawnSubAgentManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title="Sub-agent complete",
                     message=(
-                        "Fast Mode cache trajectory already gathered this research; "
-                        "skipping nested general-purpose spawn so this sub-agent handles it."
+                        "Research already gathered; skipping nested general-purpose "
+                        "spawn so this sub-agent handles it."
                     ),
                     status=MessageStatus.FINISHED,
                     metadata={"skippedNestedSpawn": True},
@@ -156,8 +156,7 @@ class SpawnSubAgentManager(ToolManager):
                     type=EventType.POST_MESSAGE,
                     title="Sub-agent complete" if fm else "❌ Sub-agent failed",
                     message=(
-                        "Fast Mode cache trajectory already completed at max nesting depth; "
-                        "skipping further spawn."
+                        "Maximum nesting depth reached; skipping further spawn."
                         if fm
                         else f"Cannot spawn sub-agent: maximum nesting depth ({MAX_DEPTH}) reached."
                     ),

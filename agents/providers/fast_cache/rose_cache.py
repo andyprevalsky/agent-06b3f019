@@ -62,6 +62,12 @@ def _cache_replay_usage(original: Dict[str, Any]) -> Dict[str, Any]:
     usage["prompt_tokens"] = 0
     usage["cache_read_input_tokens"] = replay_read
     usage["cache_creation_input_tokens"] = 0
+    # Replay never streams tokens from a provider. Leaving the stored
+    # completion/output counters in place made benchmark live_output_tokens
+    # count July Fast Mode hits as live spend.
+    usage["completion_tokens"] = 0
+    usage["tokens_out"] = 0
+    usage["total_tokens"] = 0
     usage["from_fast_cache"] = True
     return usage
 
@@ -134,7 +140,7 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     yield SimpleNamespace(
         kind="metadata",
         data={
-            "actual_model": stored.get("actual_model", "unknown"),
+            "actual_model": "fast-cache",
             "pool_name": stored.get("pool_name", ""),
             "request_id": stored.get("request_id", ""),
             "from_fast_cache": True,
@@ -471,6 +477,23 @@ _JULY_GP_RESEARCH_TOOLS = frozenset(
 )
 
 
+def is_july_explore_site(ctx: Any, call_site: str) -> bool:
+    """True for test-mass-agent-run-0 GP-spawned explore goals.
+
+    Those explores must replay web_search/web_fetch, never a first-step
+    attempt_completion_with_result stub (that reject-loops in the chip).
+    """
+    if (call_site or "").strip() != "explore_agent":
+        return False
+    from domains.spawn_agent.oai_demo_july import (
+        extract_oai_demo_creator_name,
+        july_explore_goal_hash_for_goal,
+    )
+
+    goal = getattr(ctx, "goal", None) or ""
+    return bool(july_explore_goal_hash_for_goal(goal) or extract_oai_demo_creator_name(goal))
+
+
 def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
     """True for test-mass-agent-run-0 per-creator execute/plan loops.
 
@@ -491,6 +514,25 @@ def _payload_tool_name(stored: Any) -> str:
     tool_calls = stored.get("tool_calls") or []
     if tool_calls and isinstance(tool_calls[0], dict):
         return str(tool_calls[0].get("name") or "").strip()
+    return ""
+
+
+def _july_explore_completion_result(stored: Any) -> str:
+    """Return the user-facing attempt_completion result text, if any."""
+    if not isinstance(stored, dict):
+        return ""
+    tool_calls = stored.get("tool_calls") or []
+    if not tool_calls or not isinstance(tool_calls[0], dict):
+        return ""
+    raw = tool_calls[0].get("arguments") or ""
+    if isinstance(raw, dict):
+        return str(raw.get("result") or "").strip()
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if isinstance(parsed, dict):
+        return str(parsed.get("result") or "").strip()
     return ""
 
 
@@ -538,6 +580,91 @@ async def july_gp_position_retry(ctx: Any, call_site: str) -> tuple[Any, Any]:
     return await july_gp_resolve_execute(ctx, call_site)
 
 
+_JULY_EXPLORE_RESEARCH_TOOLS = frozenset({"web_search", "web_fetch", "grep", "people_search"})
+
+
+def _july_explore_accept_payload(
+    stored: Any, prior_tool: str, *, start_step: int = 1
+) -> bool:
+    if stored is None:
+        return False
+    name = _payload_tool_name(stored)
+    if name in {"attempt_completion", "attempt_completion_with_result"}:
+        # Skip only the p:1 cold stub. After research iterations, base_step is
+        # already past 1 and the last cached row is the real explore summary —
+        # prior_tool resets to "" on each resolve, so a last-step completion
+        # used to be skipped the same way as p:1 and the chip ended on Thinking...
+        if prior_tool in _JULY_EXPLORE_RESEARCH_TOOLS:
+            return True
+        try:
+            return int(start_step) > 1
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+async def july_explore_resolve(
+    ctx: Any,
+    call_site: str,
+    stored: Any = None,
+    hit_key: Any = None,
+) -> tuple[Any, Any]:
+    """Replay a GP explore from its own hash, then the July explore namespace.
+
+    Cold templated prompts (creator X (rank N)) miss their unique hash and used
+    to emit attempt_completion_with_result, which the explore leaf rejects
+    until max iterations. Fall forward to the July explore_agent rows.
+    """
+    if (call_site or "").strip() != "explore_agent":
+        return stored, hit_key
+    from domains.spawn_agent.oai_demo_july import july_explore_goal_hash_for_goal
+
+    hashes = [ctx.goal_hash]
+    alt = july_explore_goal_hash_for_goal(getattr(ctx, "goal", None) or "")
+    if alt and alt not in hashes:
+        hashes.append(alt)
+    step = getattr(ctx, "base_step", None)
+    start = 1 if step is None or int(step) < 1 else int(step)
+    for goal_hash in hashes:
+        prior_tool = ""
+        for current in range(start, start + 16):
+            if stored is not None and goal_hash == ctx.goal_hash and current == start:
+                cand, key = stored, hit_key
+            else:
+                cand, key = await cache_client.cache_get_position_fallback(
+                    goal_hash, call_site, current
+                )
+            if cand is None:
+                continue
+            if _july_explore_accept_payload(cand, prior_tool, start_step=start):
+                return cand, key
+            prior_tool = _payload_tool_name(cand)
+    # Trajectory exhausted after research. Recover the last long completion
+    # so the chip gets the real wrap-up instead of a soft-complete stub.
+    for goal_hash in hashes:
+        recovered = None
+        recovered_key = None
+        for current in range(1, start + 16):
+            cand, key = await cache_client.cache_get_position_fallback(
+                goal_hash, call_site, current
+            )
+            if cand is None:
+                continue
+            name = _payload_tool_name(cand)
+            if name not in {"attempt_completion", "attempt_completion_with_result"}:
+                continue
+            text = _july_explore_completion_result(cand)
+            lowered = text.lower()
+            if len(text) < 200:
+                continue
+            if "fast mode" in lowered or "cached trajectory" in lowered:
+                continue
+            recovered, recovered_key = cand, key
+        if recovered is not None:
+            return recovered, recovered_key
+    return None, None
+
+
 async def cached_complete(
     rose_client: Any,
     *,
@@ -572,6 +699,7 @@ async def cached_complete(
                     ctx.base_step,
                 )
             stored, hit_key = await july_gp_resolve_execute(ctx, call_site, stored, hit_key)
+            stored, hit_key = await july_explore_resolve(ctx, call_site, stored, hit_key)
         except Exception as exc:  # cache read failures degrade to live
             logger.warning("fast_cache.get_error", key=key, error=str(exc))
             stored, hit_key = None, None
@@ -652,6 +780,7 @@ async def cached_complete(
                 soft is not None
                 and ctx.soft_complete_allowed
                 and not is_july_gp_execute_site(ctx, call_site)
+                and not is_july_explore_site(ctx, call_site)
             ):
                 logger.info(
                     "llm.cache.replay",

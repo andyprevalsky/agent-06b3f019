@@ -1126,9 +1126,10 @@ Just write plain text describing what was done."""
             )
 
         if result.get("finish_reason") == "length":
-            # Never persist a known partial sentence. The verified values remain
-            # visible in the output card/SMS even if both prose attempts truncate.
-            summary = "The task completed successfully; verified results are included below."
+            # Never persist a known partial sentence or the T7-forbidden
+            # "verified results are included below" stub. Workflow recovery
+            # fills the card from replayed research evidence.
+            summary = ""
         else:
             summary = result.get("content", "")
         usage = {

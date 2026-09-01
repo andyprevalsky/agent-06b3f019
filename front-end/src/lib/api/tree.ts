@@ -33,5 +33,11 @@ export async function fetchAncestors(agentId: string): Promise<AncestorNode[]> {
   }
 
   const data = await response.json();
-  return data.ancestors;
+  const rows = Array.isArray(data.ancestors) ? data.ancestors : [];
+  return rows
+    .map((row: { id?: string; agent_id?: string; goal?: string }) => ({
+      id: row.id || row.agent_id || '',
+      goal: row.goal ?? '',
+    }))
+    .filter((row: AncestorNode) => row.id.length > 0);
 }

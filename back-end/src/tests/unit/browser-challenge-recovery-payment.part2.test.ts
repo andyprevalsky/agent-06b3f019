@@ -82,7 +82,7 @@ async function testRequirePaymentCdnNoLongerRejectsCfOnlyWinners(): Promise<void
   const winner = await runParallelBrowserConfigSearch(
     configs,
     {
-      create: async (config) => fakeSession(config),
+      create: async (config, _signal) => fakeSession(config),
       probe: async () => ({
         stablePasses: 2,
         attempts: 2,
@@ -110,8 +110,8 @@ async function testRequirePaymentCdnPromotesCdnWinner(): Promise<void> {
   const winner = await runParallelBrowserConfigSearch(
     configs,
     {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => ({
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, _signal) => ({
         stablePasses: 2,
         attempts: 2,
         latencyMs: config.key === 'steel_managed' ? 9000 : 10,

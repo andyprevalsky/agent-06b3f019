@@ -52,19 +52,30 @@ fi
 if [[ "$PROD_MODE" -eq 1 ]]; then
   # ── Production mode ──────────────────────────────────────────────────
   export BACKEND_URL="${BACKEND_URL:-https://navi-j9a9.onrender.com}"
-  export FRONTEND_URL="${FRONTEND_URL:-https://roselabs.ai}"
+  # Prefer www — apex `roselabs.ai` 307s to www, and some runners flake on the
+  # apex probe (no AAAA / Happy-Eyeballs). Keep accepting either host.
+  export FRONTEND_URL="${FRONTEND_URL:-https://www.roselabs.ai}"
   export SEMANTIC_PROD=1
 
   echo "=== Semantic tests: PRODUCTION mode ==="
   echo "  Backend:  $BACKEND_URL"
   echo "  Frontend: $FRONTEND_URL"
 
-  # Health checks against prod
-  if ! curl -sf "$BACKEND_URL/health" > /dev/null 2>&1; then
+  # Health checks against prod. Force IPv4 + follow redirects + short retries so
+  # a single transient DNS/TLS blip cannot false-fail the production gate.
+  if ! curl -4 -sf --max-time 20 "$BACKEND_URL/health" > /dev/null 2>&1; then
     echo "FAIL: Prod backend not healthy at $BACKEND_URL/health" >&2
     exit 1
   fi
-  if ! curl -sf -o /dev/null -w '' "$FRONTEND_URL" 2>&1; then
+  FE_PROBE_OK=""
+  for _fe_try in 1 2 3 4 5; do
+    if curl -4 -sfL --max-time 20 -o /dev/null "$FRONTEND_URL" 2>/dev/null; then
+      FE_PROBE_OK=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "$FE_PROBE_OK" ]]; then
     echo "FAIL: Prod frontend not accessible at $FRONTEND_URL" >&2
     exit 1
   fi

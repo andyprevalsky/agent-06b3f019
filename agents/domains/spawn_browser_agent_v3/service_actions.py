@@ -695,6 +695,7 @@ class _ActionContext:
     browser_network_recorder: Optional[Any]
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
+    prefetched_browser_state: Optional[Dict[str, Any]] = None
 
 
 async def _refuse_navigation(
@@ -808,7 +809,14 @@ _INTERACTION_ACTIONS = {
     "upload_file",
 }
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
-_INSPECTION_ACTIONS = {"read_logs", "read_network_requests", "evaluate", "extract", "screenshot"}
+_INSPECTION_ACTIONS = {
+    "read_browser_state",
+    "read_logs",
+    "read_network_requests",
+    "evaluate",
+    "extract",
+    "screenshot",
+}
 _TERMINAL_ACTIONS = {
     "request_payment_card",
     "done",
@@ -851,6 +859,38 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
         "payment_request": context.params,
         "current_url": context.current_url,
     }
+
+
+async def _execute_read_browser_state(context: _ActionContext) -> Dict[str, Any]:
+    from providers.rose.browser_use import format_browser_state_for_tool
+
+    # Reuse the loop's just-fetched observe_page_state when present — no browser
+    # action ran between that fetch and this tool, so a second full DOM walk is
+    # pure duplicate cost.
+    state = context.prefetched_browser_state
+    if not isinstance(state, dict) or not state:
+        state = await context.dom_service.get_browser_state(include_screenshot=False)
+    formatted_state = format_browser_state_for_tool(state)
+    result = {
+        "success": True,
+        "message": "Browser state captured.",
+        "formatted_state": formatted_state,
+        "url": state.get("url", ""),
+        "title": state.get("title", ""),
+        "viewport": state.get("viewport"),
+        "scroll_position": state.get("scroll_position"),
+        "page_stats": state.get("page_stats"),
+        "tabs": state.get("tabs"),
+        "dom_tree": state.get("dom_tree", ""),
+    }
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="read_browser_state",
+        thinking=context.thinking,
+        params={},
+        result={"success": True, "url": result["url"], "title": result["title"]},
+    )
+    return result
 
 
 async def _execute_read_logs_action(context: _ActionContext) -> Dict[str, Any]:
@@ -1358,12 +1398,30 @@ async def classify_evaluate_cdp_stall(
 
 
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "read_browser_state":
+        return await _execute_read_browser_state(context)
     if context.action_name == "read_logs":
         return await _execute_read_logs_action(context)
     if context.action_name == "read_network_requests":
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
+        from helpers.browser_spawn_contract import (
+            active_benchmark_blocks_dom_patch,
+            evaluate_dom_patch_blocked,
+        )
+
+        if active_benchmark_blocks_dom_patch():
+            dom_patch_reason = evaluate_dom_patch_blocked(code)
+            if dom_patch_reason:
+                await context.action_history.record_action(
+                    dom_service=context.dom_service,
+                    action="evaluate",
+                    thinking=context.thinking,
+                    params={"code": code},
+                    result={"success": False, "error": dom_patch_reason},
+                )
+                return {"success": False, "error": dom_patch_reason}
         timeout_s = normalize_evaluate_timeout_seconds(context.params.get("timeout"))
         fingerprint = _evaluate_code_fingerprint(code)
         logger.info(
@@ -1445,14 +1503,16 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
     if context.action_name == "extract":
         return {"success": False, "error": "extract is disabled. Use evaluate to read DOM/page content directly."}
-    return await _execute_screenshot(
-        session=context.session,
-        dom_service=context.dom_service,
-        action_history=context.action_history,
-        thinking=context.thinking,
-        session_id=context.session_id,
-        config=context.config,
-    )
+    if context.action_name == "screenshot":
+        return await _execute_screenshot(
+            session=context.session,
+            dom_service=context.dom_service,
+            action_history=context.action_history,
+            thinking=context.thinking,
+            session_id=context.session_id,
+            config=context.config,
+        )
+    return {"success": False, "error": f"Unknown inspection action: {context.action_name}"}
 
 
 async def _execute_terminal_action(context: _ActionContext) -> Dict[str, Any]:
@@ -1510,6 +1570,7 @@ async def execute_action(
     prepare_credentials_for_url: Optional[
         Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
     ] = None,
+    prefetched_browser_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1575,6 +1636,7 @@ async def execute_action(
             browser_network_recorder=browser_network_recorder,
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
+            prefetched_browser_state=prefetched_browser_state,
         )
         if action_name in _INTERACTION_ACTIONS:
             return await _execute_interaction_action(context)

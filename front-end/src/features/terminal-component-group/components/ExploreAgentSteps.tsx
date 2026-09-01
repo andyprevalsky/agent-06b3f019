@@ -1,6 +1,7 @@
 import { ChevronRight, Globe, Lightbulb } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
+import { userFacingMessageText } from '@/lib/userFacingMessage';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 
 import type { ExploreStep } from '../types';
@@ -29,14 +30,15 @@ function StepRow({
   onToggleStep: (index: number, event: React.MouseEvent) => void;
 }) {
   const thinking = isThinkingStep(step);
-  const hasContent = !!step.message?.trim();
+  const visibleMessage = userFacingMessageText(step.message || '');
+  const hasContent = !!visibleMessage.trim();
   const StepIcon = getStepIcon(step);
   if (thinking) {
     return (
       <div className="flex items-start gap-1.5 text-[11px] text-muted-foreground/60 py-0.5 px-1 -mx-1">
         <Lightbulb className="h-3 w-3 flex-shrink-0 text-amber-400/70 mt-0.5" />
         <span className="italic min-w-0 flex-1 break-words">
-          {step.message?.trim() || 'Thinking...'}
+          {visibleMessage.trim() || 'Thinking...'}
         </span>
       </div>
     );
@@ -63,7 +65,7 @@ function StepRow({
       </div>
       {isStepExpanded && hasContent && (
         <div className="ml-4 mt-0.5 mb-1 text-[11px] text-muted-foreground/50 whitespace-pre-wrap break-words max-h-[150px] overflow-y-auto border-l border-border/30 pl-2">
-          {step.message}
+          {visibleMessage}
         </div>
       )}
     </div>

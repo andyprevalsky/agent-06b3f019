@@ -51,7 +51,11 @@ export function useTerminalAgents(
   const agentList = useAgentList(canSubmitGoals);
   const modals = useTerminalModals();
   const loading = useLoadingNetwork(ctx.selectedAgentId, ctx.isLoadingAgent, ctx.agent?.status);
-  const ancestors = useAncestors(ctx.selectedAgentId);
+  const ancestors = useAncestors(
+    ctx.selectedAgentId,
+    ctx.agent?.parent_agent_id,
+    ctx.agent?.parent_goal,
+  );
 
   const { actions, messaging } = useAgentOps({
     auth,

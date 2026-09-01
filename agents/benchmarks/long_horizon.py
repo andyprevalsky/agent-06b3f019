@@ -34,7 +34,7 @@ from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
 
 CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
-RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge"}
+RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
 RUNTIME_STATIC_CHECK_TYPES = {
     "agent_status",
     "approval_request_count",
@@ -44,11 +44,16 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "browser_agent_session_count",
     "completion_sms_event",
     "completion_summary_length",
+    "first_level_gp_count",
+    "root_deliverable_markers",
+    "tree_agent_status",
     "expected_gate",
     "expected_payment_receipt",
     "no_browser_agent_failures",
     "no_tool_failures",
     "claude_code_session_output",
+    "explore_research_not_reject_loop",
+    "explore_completion_summary",
     # runner="sms" — trajectory checks over the literal outbound text thread.
     # Implemented in benchmarks/sms_runner.py:run_sms_static_check.
     "sms_no_forbidden_phrases",
@@ -234,6 +239,22 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
                 raise ValueError(f"{item_id}: min_steps keys must be non-empty agent-class strings")
             if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
                 raise ValueError(f"{item_id}: min_steps.{agent_class} must be a positive integer")
+    max_steps = raw.get("max_steps")
+    if max_steps is not None:
+        if not isinstance(max_steps, dict) or not max_steps:
+            raise ValueError(f"{item_id}: max_steps must be a non-empty object keyed by agent class")
+        for agent_class, maximum in max_steps.items():
+            if not isinstance(agent_class, str) or not agent_class.strip():
+                raise ValueError(f"{item_id}: max_steps keys must be non-empty agent-class strings")
+            if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
+                raise ValueError(f"{item_id}: max_steps.{agent_class} must be a positive integer")
+        if min_steps and isinstance(min_steps, dict):
+            for agent_class, maximum in max_steps.items():
+                minimum = min_steps.get(agent_class)
+                if isinstance(minimum, int) and maximum < minimum:
+                    raise ValueError(
+                        f"{item_id}: max_steps.{agent_class}={maximum} must be >= min_steps.{agent_class}={minimum}"
+                    )
     expected_attention_kinds = raw.get("expected_attention_kinds")
     if expected_attention_kinds is not None:
         _require_string_list(raw, "expected_attention_kinds", item_id)

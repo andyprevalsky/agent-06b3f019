@@ -2123,10 +2123,14 @@ def test_hit_replays_without_calling_rose(mem):
         assert tc.data["name"] == "set_plan"
         meta = next(c for c in chunks if c.kind == "metadata")
         assert meta.data.get("from_fast_cache") is True
+        assert meta.data.get("actual_model") == "fast-cache"
         usage = next(c for c in chunks if c.kind == "usage")
         assert usage.data["prompt_tokens"] == 0
         assert usage.data["cache_read_input_tokens"] == 10
         assert usage.data["cache_creation_input_tokens"] == 0
+        assert usage.data["completion_tokens"] == 0
+        assert usage.data["tokens_out"] == 0
+        assert usage.data["total_tokens"] == 0
 
     asyncio.run(body())
 
@@ -2259,6 +2263,17 @@ def test_goal_hash_collapses_run_local_message_refs():
     assert normalize.goal_hash(base) == normalize.sha256(base)[:16]
 
 
+def test_write_through_disabled_by_isolated_shared_cache_flag(monkeypatch):
+    """Isolated July-cache smokes must not write through Andy/Tamy into prod."""
+    from providers.fast_cache.context import write_through_enabled_for_user
+
+    monkeypatch.delenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", raising=False)
+    assert write_through_enabled_for_user("1f85ff25-6e29-4c1b-8739-f917bd101a30") is True
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+    assert write_through_enabled_for_user("1f85ff25-6e29-4c1b-8739-f917bd101a30") is False
+    assert write_through_enabled_for_user("43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9") is False
+
+
 def test_oai_demo_root_goal_hash_constant():
     assert normalize.OAI_DEMO_ROOT_GOAL_HASH == "4ae3193053ac1d8f"
 
@@ -2282,6 +2297,43 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     from domains.spawn_agent.oai_demo_july import JULY_GP_GOAL_HASHES
 
     assert normalize.goal_hash(andy_goal) == JULY_GP_GOAL_HASHES["Eric Topol"]
+    sahil = andy_goal.replace("Dr. Eric Topol", "Sahil Bloom")
+    assert normalize.goal_hash(sahil) == JULY_GP_GOAL_HASHES["Sahil Bloom"] == "3fd2fec61970ac83"
+    # Smoke7 leftovers remapped onto Austin/checkout namespaces (270-step
+    # clones). Those hashes must not be reused for creator-analysis children.
+    austin_or_checkout = {
+        "d5ca1a36cddc02e8",
+        "a40f6dd9ace06b6c",
+        "115e7be730aed584",
+        "1f60137116da569c",
+        "8cac2a39243299c3",
+    }
+    leftover_creators = (
+        "Bryan Johnson",
+        "Tim Ferriss",
+        "Dave Asprey",
+        "Gary Brecka",
+        "Andrew Wilkinson",
+        "Max Lugavere",
+        "Molly Maloof",
+        "Lex Fridman",
+        "Siim Land",
+        "Nick Norwitz",
+        "Steven Bartlett",
+        "Mark Hyman",
+        "David Sinclair",
+        "Casey Means",
+        "Matt Kaeberlein",
+        "Rowan Cheung",
+        "Naval Ravikant",
+        "Sam Parr",
+        "Matt D'Avella",
+    )
+    for name in leftover_creators:
+        child = andy_goal.replace("Dr. Eric Topol", name)
+        hashed = normalize.goal_hash(child)
+        assert hashed == JULY_GP_GOAL_HASHES[name]
+        assert hashed not in austin_or_checkout, name
     kayla = (
         "You are analyzing ONE creator for Andy Prevalsky. "  # pragma: allowlist secret
         f"Last 90 days: {window}. "  # pragma: allowlist secret
@@ -2291,6 +2343,110 @@ def test_oai_demo_andy_child_goal_hashes_to_july_aman_namespace():
     other_andy = "Find the current professional profile of Andy Prevalsky, founder of Rose Labs."
     other_aman = other_andy.replace("Andy Prevalsky", "Aman Gottumukkala")
     assert normalize.goal_hash(other_andy) != normalize.goal_hash(other_aman)
+
+
+def test_position_fallback_memos_and_single_flights_http(monkeypatch):
+    """Sibling Fast Mode agents must share one get-position HTTP per durable slot."""
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    posts: list[int] = []
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"hit": True, "value": {"tool_calls": [{"name": "web_search"}]}, "key": "k-1"}
+
+    class _Client:
+        async def post(self, *args, **kwargs):
+            del args
+            posts.append(int((kwargs.get("json") or {}).get("step") or 0))
+            await asyncio.sleep(0)
+            return _Resp()
+
+    monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "key"))
+    monkeypatch.setattr(cache_client, "_shared_client", lambda: _Client())
+
+    async def body():
+        first, second = await asyncio.gather(
+            cache_client.cache_get_position_fallback("hash-a", "explore_agent", 1),
+            cache_client.cache_get_position_fallback("hash-a", "explore_agent", 1),
+        )
+        third = await cache_client.cache_get_position_fallback("hash-a", "explore_agent", 1)
+        assert first == second == third
+        assert first[1] == "k-1"
+        assert posts.count(1) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
+def test_position_fallback_prefetches_upcoming_steps(monkeypatch):
+    """A hit should prefetch the next few steps so the sequential loop is local."""
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    seen: list[int] = []
+
+    class _Resp:
+        def __init__(self, step: int):
+            self.status_code = 200
+            self._step = step
+
+        def json(self):
+            return {"hit": True, "value": {"step": self._step}, "key": f"k-{self._step}"}
+
+    class _Client:
+        async def post(self, *args, **kwargs):
+            del args
+            step = int((kwargs.get("json") or {}).get("step") or 0)
+            seen.append(step)
+            await asyncio.sleep(0)
+            return _Resp(step)
+
+    monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "key"))
+    monkeypatch.setattr(cache_client, "_shared_client", lambda: _Client())
+
+    async def body():
+        value, key = await cache_client.cache_get_position_fallback("hash-b", "execute_loop", 3)
+        assert key == "k-3"
+        assert value == {"step": 3}
+        for _ in range(40):
+            if {3, 4, 5, 6, 7, 8, 9, 10, 11}.issubset(set(seen)):
+                break
+            await asyncio.sleep(0)
+        assert 3 in seen
+        assert {4, 5, 6, 7, 8, 9, 10, 11}.issubset(set(seen))
+        replay = await cache_client.cache_get_position_fallback("hash-b", "execute_loop", 4)
+        assert replay == ({"step": 4}, "k-4")
+        assert seen.count(4) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
+def test_cache_replay_usage_zeros_live_output_tokens():
+    """Replay must not report stored completion tokens as live streamed output."""
+    usage = rose_cache._cache_replay_usage(
+        {
+            "prompt_tokens": 40,
+            "completion_tokens": 250,
+            "tokens_out": 250,
+            "total_tokens": 290,
+            "cache_read_input_tokens": 10,
+            "cache_creation_input_tokens": 8,
+            "actual_model": "claude-fable-5",
+        }
+    )
+    assert usage["prompt_tokens"] == 0
+    assert usage["cache_creation_input_tokens"] == 0
+    assert usage["cache_read_input_tokens"] == 40
+    assert usage["completion_tokens"] == 0
+    assert usage["tokens_out"] == 0
+    assert usage["total_tokens"] == 0
+    assert usage["from_fast_cache"] is True
 
 
 def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():
@@ -2907,6 +3063,312 @@ def test_rose_client_july_gp_execute_retry_replays_not_stub(mem, monkeypatch):
         )
         assert live_calls["n"] == 0
         assert calls["n"] >= 2
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+
+    asyncio.run(body())
+
+
+def _july_explore_molly_goal() -> str:
+    return (
+        "Research public web/platform information for creator Molly Maloof (rank 19) "  # pragma: allowlist secret
+        "for Andy Prevalsky's personal brand research in health, longevity, technology, "  # pragma: allowlist secret
+        "and founder journey. Starting URLs: https://www.youtube.com/@drmollymaloof"
+    )
+
+
+def _july_explore_casey_goal() -> str:
+    return (
+        "Research public web/platform information for Casey Means for Andy "  # pragma: allowlist secret
+        "Prevalsky's personal brand research in health, longevity, and founder journey."  # pragma: allowlist secret
+    )
+
+
+def test_extract_oai_demo_creator_from_rank_template_and_free_text():
+    from domains.spawn_agent.oai_demo_july import (
+        extract_oai_demo_creator_name,
+        july_explore_goal_hash_for_goal,
+    )
+
+    assert extract_oai_demo_creator_name(_july_explore_molly_goal()) == "Molly Maloof"
+    assert extract_oai_demo_creator_name(_july_explore_casey_goal()) == "Casey Means"
+    assert july_explore_goal_hash_for_goal(_july_explore_molly_goal()) == "1e80caff3f0e8008"
+    assert july_explore_goal_hash_for_goal(_july_explore_casey_goal()) == "0931c308d4db5d54"
+    assert extract_oai_demo_creator_name(_soft_complete_bench_goal()) is None
+
+
+def test_july_explore_falls_back_to_july_hash_and_replays_web_search(mem, monkeypatch):
+    """Cold templated GP explore prompts must replay July web_search, not complete."""
+    july_hash = "1e80caff3f0e8008"
+
+    async def by_hash(goal_hash, call_site, step=None):
+        del call_site
+        if goal_hash == july_hash and step is not None and int(step) >= 1:
+            return _july_web_search_payload(), f"fastmode:v42:llm:{july_hash}:explore_agent:p:{step}"
+        return None, None
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", by_hash)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_explore_molly_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+        assert not any(
+            c.kind == "tool_call"
+            and c.data.get("name") in {"attempt_completion", "attempt_completion_with_result"}
+            for c in chunks
+        )
+
+    asyncio.run(body())
+
+
+def test_july_explore_skips_first_step_attempt_completion(mem, monkeypatch):
+    """July explore p:1 completion must not reject-loop the chip."""
+    stub = {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-lite",
+        "request_id": "july-explore-p1-stub",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_early_complete",
+                "name": "attempt_completion_with_result",
+                "arguments": '{"result":"Fast Mode cache trajectory ended for this agent."}',
+            }
+        ],
+        "usage": {"from_fast_cache": True},
+    }
+    july_hash = "1e80caff3f0e8008"
+
+    async def p1_stub_then_search(goal_hash, call_site, step=None):
+        del call_site
+        if goal_hash != july_hash or step is None:
+            return None, None
+        if int(step) <= 1:
+            return stub, f"fastmode:v42:llm:{july_hash}:explore_agent:p:1:c:x"
+        return _july_web_search_payload(), f"fastmode:v42:llm:{july_hash}:explore_agent:p:{step}:c:x"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", p1_stub_then_search)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_explore_molly_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "web_search"
+
+    asyncio.run(body())
+
+
+def test_july_explore_replays_last_step_completion_summary(mem, monkeypatch):
+    """After research, the last cached attempt_completion is the explore wrap-up."""
+    summary = (
+        "Nick Norwitz posts ~4x/week on YouTube and Substack. "
+        "Top hooks are mechanism-first metabolic explainers with June 2026 "
+        "Stay Curious view proxies from @nicknorwitzPhD."
+    )
+    completion = {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-lite",
+        "request_id": "july-explore-last-complete",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_last_complete",
+                "name": "attempt_completion_with_result",
+                "arguments": json.dumps({"result": summary}),
+            }
+        ],
+        "usage": {"from_fast_cache": True},
+    }
+    july_hash = "1e80caff3f0e8008"
+
+    async def research_then_complete(goal_hash, call_site, step=None):
+        del call_site
+        if goal_hash != july_hash or step is None:
+            return None, None
+        if int(step) >= 5:
+            return completion, f"fastmode:v42:llm:{july_hash}:explore_agent:p:{step}:c:x"
+        return _july_web_search_payload(), f"fastmode:v42:llm:{july_hash}:explore_agent:p:{step}:c:x"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", research_then_complete)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_explore_molly_goal(),
+                base_step=5,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion_with_result"
+        assert "Stay Curious" in str(tc.data.get("arguments") or "")
+
+    asyncio.run(body())
+
+
+def test_july_explore_recovers_last_completion_when_step_exhausted(mem, monkeypatch):
+    """Past the last cached row, replay the real wrap-up instead of a stub."""
+    summary = (
+        "Nick Norwitz posts about four times a week on YouTube and Substack. "
+        "Top hooks are mechanism-first metabolic explainers with June 2026 "
+        "Stay Curious view proxies from the nicknorwitzPhD channel, plus "
+        "Instagram cadence and newsletter takeaways for a new personal brand."  # pragma: allowlist secret
+    )
+    completion = {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-lite",
+        "request_id": "july-explore-recovered-complete",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_recovered_complete",
+                "name": "attempt_completion_with_result",
+                "arguments": json.dumps({"result": summary}),
+            }
+        ],
+        "usage": {"from_fast_cache": True},
+    }
+    july_hash = "1e80caff3f0e8008"
+
+    async def exhausted_after_complete(goal_hash, call_site, step=None):
+        del call_site
+        if goal_hash != july_hash or step is None:
+            return None, None
+        n = int(step)
+        if n == 5:
+            return completion, f"fastmode:v42:llm:{july_hash}:explore_agent:p:5:c:x"
+        if n < 5:
+            return _july_web_search_payload(), f"fastmode:v42:llm:{july_hash}:explore_agent:p:{n}:c:x"
+        return None, None
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", exhausted_after_complete)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_explore_molly_goal(),
+                base_step=8,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 0
+        tc = next(c for c in chunks if c.kind == "tool_call")
+        assert tc.data["name"] == "attempt_completion_with_result"
+        assert "Stay Curious" in str(tc.data.get("arguments") or "")
+
+    asyncio.run(body())
+
+
+def test_july_explore_miss_does_not_cold_passthrough(mem):
+    """Known July explore namespaces must not emit attempt_completion_with_result."""
+
+    async def molly_goes_live():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_explore_molly_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite")
+        )
+        assert rose.calls == 1
+        assert not any(
+            c.kind == "tool_call" and c.data.get("name") == "attempt_completion_with_result"
+            for c in chunks
+        )
+
+    asyncio.run(molly_goes_live())
+
+
+def test_rose_client_july_explore_fallback_replays_web_search(mem, monkeypatch):
+    """Production RoseClient.complete must fall back to the July explore namespace."""
+    from providers.rose.client import RoseClient
+
+    july_hash = "1e80caff3f0e8008"
+
+    async def by_hash(goal_hash, call_site, step=None):
+        del call_site
+        if goal_hash == july_hash and step is not None and int(step) >= 1:
+            return _july_web_search_payload(), f"fastmode:v42:llm:{july_hash}:explore_agent:p:{step}"
+        return None, None
+
+    monkeypatch.setattr("providers.fast_cache.client.cache_get_position_fallback", by_hash)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", by_hash)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_explore_molly_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**kwargs):
+            del kwargs
+            live_calls["n"] += 1
+            for c in _full_stream():
+                yield c
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "go"}],
+                call_site="explore_agent",
+                agent_id="agent-july-explore",
+                dump_context=False,
+            )
+        )
+        assert live_calls["n"] == 0
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "web_search"
 

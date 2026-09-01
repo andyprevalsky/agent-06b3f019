@@ -10,6 +10,7 @@ stripped by the normalizer.
 from __future__ import annotations
 
 import contextvars
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -98,4 +99,7 @@ def is_enabled() -> bool:
 
 
 def write_through_enabled_for_user(user_id: Optional[str]) -> bool:
+    flag = os.environ.get("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return False
     return bool(user_id) and user_id in WRITE_THROUGH_USER_IDS

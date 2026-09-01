@@ -18,6 +18,8 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
+from helpers.llm import _safe_heartbeat
+
 from domains.spawn_claude_code_agent.config import (
     E2B_COST_CENTS_PER_SECOND,
     ECHO_SUPPRESS_S,
@@ -724,7 +726,7 @@ async def _run_agentic_loop(  # noqa: C901
         on_connection_change=on_connection_change,
         on_stdin_error=on_stdin_error,
         on_event=on_event,
-        heartbeat_fn=lambda msg: activity.heartbeat(msg),
+        heartbeat_fn=lambda msg: _safe_heartbeat(msg),
     )
 
     if not await ws_client.connect():
@@ -742,7 +744,7 @@ async def _run_agentic_loop(  # noqa: C901
     try:
         while exit_code is None and not attempt_completion:
             elapsed = safe_time() - loop_start
-            activity.heartbeat(f"Monitoring Claude Code ({int(elapsed)}s)")
+            _safe_heartbeat(f"Monitoring Claude Code ({int(elapsed)}s)")
 
             if elapsed > MAX_RUNTIME_S:
                 logger.warning("[ClaudeCode] Max runtime exceeded", agent_id=agent_id, task_id=task_id, elapsed=elapsed)
@@ -1653,7 +1655,7 @@ async def spawn_claude_code_activity(  # noqa: C901
     terminal = TerminalFilter(cols=200, rows=500)
 
     try:
-        activity.heartbeat("Creating E2B sandbox with Claude Code")
+        _safe_heartbeat("Creating E2B sandbox with Claude Code")
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
         # 1. Create E2B session via back-end API
@@ -1723,7 +1725,7 @@ async def spawn_claude_code_activity(  # noqa: C901
         action_summary.append(f"Started task: {goal[:100]}")
 
         # 3. WebSocket-based agentic loop
-        activity.heartbeat("Connecting to Claude Code WebSocket")
+        _safe_heartbeat("Connecting to Claude Code WebSocket")
 
         model_pricing = await get_model_pricing_with_fallback(model)
 

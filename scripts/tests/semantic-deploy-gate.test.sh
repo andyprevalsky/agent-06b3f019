@@ -111,6 +111,10 @@ fi
 require_text "$RUNNER" 'node scripts/generate-prod-test-session.mjs' "production semantics must not install backend dependencies only to generate auth"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
+require_text "$RUNNER" 'FRONTEND_URL="${FRONTEND_URL:-https://www.roselabs.ai}"' "prod semantic default frontend must be www (apex 307s and flakes on some runners)"
+require_text "$RUNNER" 'curl -4 -sfL --max-time 20 -o /dev/null "$FRONTEND_URL"' "prod frontend probe must force IPv4, follow redirects, and bound wait"
+require_text "$WORKFLOW" "default: https://www.roselabs.ai" "workflow_dispatch frontend default must match the hardened www probe"
+require_text "$DEPLOY_COMMAND" "-f frontend_url=https://www.roselabs.ai" "/deploy production semantic dispatch must target www"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 1" "latency ratchet must avoid renderer contention"
 require_text "$WORKFLOW" "--prod chat-lifecycle-latency" "production gate must run the lifecycle ratchet"
@@ -189,7 +193,27 @@ require_text "$ROOT_DIR/agents/benchmarks/run_benchmark.py" 'resolve_hub_upload_
 require_text "$ROOT_DIR/agents/benchmarks/hub_upload.py" 'def resolve_hub_upload_url(' "hub_upload must expose localhost-aware Hub URL resolution"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_COMPUTE_TOKEN_TYPE=claude' "local predeploy smoke must pin one provider for repeatable cache measurement"
 require_text "$RUN_PREDEPLOY_LOCAL" 'unset FAST_MODE_CACHE_DATABASE_URL' "local predeploy smoke must reject an inherited remote fast-cache database"
+require_text "$RUN_PREDEPLOY_LOCAL" 'grep -E '\''^DATABASE_URL='\''' "local predeploy must derive the shared July cache from prod DATABASE_URL when FAST_MODE_CACHE_DATABASE_URL is missing"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_USE_LOCAL=1 \' "local predeploy smoke must isolate fast-cache schema startup from the production pooler"
+require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1' "local predeploy must disable Andy write-through when the July cache is shared"
+require_text "$RUN_PREDEPLOY_LOCAL" 'run_smoke_batch shared' "local predeploy must isolate fast_cache:on smoke onto the shared July cache batch"
+require_text "$ROOT_DIR/agents/benchmarks/tasks.json" '"name": "test-mass-agent-run-0"' "OAi mass-agent bench must remain in the catalog"
+MASS_AGENT_SMOKE="$(
+  python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" <<'PY'
+import json
+import sys
+
+tasks = json.load(open(sys.argv[1]))
+for task in tasks:
+    if task.get("name") == "test-mass-agent-run-0":
+        tags = task.get("tags") or []
+        print("1" if "smoke" in tags and task.get("group") == "pre-deploy" else "0")
+        break
+else:
+    print("0")
+PY
+)"
+[ "$MASS_AGENT_SMOKE" = "1" ] || fail "test-mass-agent-run-0 must stay tagged smoke + group pre-deploy so /deploy runs it"
 require_text "$RUN_PREDEPLOY_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "cloud predeploy smoke must request the narrow Claude Code cache-ratchet skip"
 require_text "$RUN_BENCH_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}' "cloud benchmark controller must pass the Claude Code cache-ratchet skip into benchmark machines"
 require_text "$CLOUDBENCH_RUN" 'STACK_ENV+=("BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY")' "cloud benchmark stack must inherit the Claude Code cache-ratchet skip"

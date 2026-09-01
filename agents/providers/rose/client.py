@@ -605,9 +605,13 @@ class RoseClient:
                         call_site,
                         ctx.base_step,
                     )
+                from providers.fast_cache.rose_cache import july_explore_resolve
                 from providers.fast_cache.rose_cache import july_gp_resolve_execute
 
                 stored, hit_key = await july_gp_resolve_execute(
+                    ctx, call_site, stored, hit_key
+                )
+                stored, hit_key = await july_explore_resolve(
                     ctx, call_site, stored, hit_key
                 )
             except Exception as exc:
@@ -697,12 +701,14 @@ class RoseClient:
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
                 # Known July GP execute namespaces start at p:1 — do not stub them
                 # as cold when the first get-position flakes.
+                from providers.fast_cache.rose_cache import is_july_explore_site
                 from providers.fast_cache.rose_cache import is_july_gp_execute_site
 
                 if (
                     soft is not None
                     and ctx.soft_complete_allowed
                     and not is_july_gp_execute_site(ctx, call_site)
+                    and not is_july_explore_site(ctx, call_site)
                 ):
                     logger.info(
                         "llm.cache.replay",

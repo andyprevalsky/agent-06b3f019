@@ -1,6 +1,12 @@
 /**
  * Delayed cache/live hedge state flow:
  *
+ * awaitCacheFirst (Fast Mode read — shared/remote cache must not lose to Cerebras):
+ *   cache hit ────────────────────────> CACHE (live never starts)
+ *   cache miss/error ─────────────────> LIVE
+ *   hangTimeout ──────────────────────> LIVE
+ *
+ * default 25ms UX hedge:
  *                         cache hit ───────────────> CACHE (live never starts)
  *                        /
  *   lookup + 25ms grace ─┼─ miss/error ───────────> LIVE
@@ -21,6 +27,8 @@ interface DelayedCacheStreamHedgeOptions<TCache, TChunk> {
   createCached: (value: TCache) => AsyncIterable<TChunk>;
   isLiveCommitChunk: (chunk: TChunk) => boolean;
   graceMs?: number;
+  awaitCacheFirst?: boolean;
+  hangTimeoutMs?: number;
   onCacheError?: (error: unknown) => void;
   onWinner?: (winner: HedgeWinner) => void;
 }
@@ -28,6 +36,7 @@ interface DelayedCacheStreamHedgeOptions<TCache, TChunk> {
 type CacheOutcome<T> = { kind: 'cache'; result: CacheLookupResult<T> } | { kind: 'cache-error' };
 
 const DEFAULT_GRACE_MS = 25;
+const DEFAULT_HANG_TIMEOUT_MS = 5_000;
 
 function closeLive<T>(controller: AbortController, iterator?: AsyncIterator<T>): void {
   controller.abort(new Error('cache won delayed stream hedge'));
@@ -55,6 +64,25 @@ export function delayedCacheStreamHedge<TCache, TChunk>(
       options.onWinner?.(candidate);
       return true;
     };
+
+    if (options.awaitCacheFirst === true) {
+      let hangTimer: ReturnType<typeof setTimeout> | undefined;
+      const hangElapsed = new Promise<{ kind: 'hang' }>((resolve) => {
+        hangTimer = setTimeout(
+          () => resolve({ kind: 'hang' }),
+          options.hangTimeoutMs ?? DEFAULT_HANG_TIMEOUT_MS
+        );
+      });
+      const initial = await Promise.race([cacheOutcome, hangElapsed]);
+      if (hangTimer) clearTimeout(hangTimer);
+      if (initial.kind === 'cache' && initial.result.hit && lockWinner('cache')) {
+        yield* options.createCached(initial.result.value);
+        return;
+      }
+      lockWinner('live');
+      yield* await options.createLive(new AbortController().signal);
+      return;
+    }
 
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
     const graceElapsed = new Promise<{ kind: 'grace' }>((resolve) => {

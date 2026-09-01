@@ -116,7 +116,7 @@ async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear()
   let maxActiveCreates = 0;
 
   const winner = await runLaneConfigSearch(configs, [{ key: 'auth_kept', storageState: {} }], {
-    create: async (config) => {
+    create: async (config, _signal) => {
       activeCreates += 1;
       maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -124,7 +124,7 @@ async function testLaneSearchTriesConfigsSequentiallyAndPromotesFirstFullClear()
       activeCreates -= 1;
       return fakeSession(config);
     },
-    probe: async (config, _session, lane) => {
+    probe: async (config, _session, lane, _signal) => {
       assert.strictEqual(lane.key, 'auth_kept');
       probed.push(config.key);
       // First config fails; second fully clears — sequential, no partial promote.
@@ -159,8 +159,8 @@ async function testParallelCookieLanesFirstFullClearWins(): Promise<void> {
       { key: 'stripped', storageState: { cookies: [] } },
     ],
     {
-      create: async (config) => fakeSession(config),
-      probe: async (config, _session, lane) => {
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, lane, _signal) => {
         probedLanes.push(`${lane.key}:${config.key}`);
         await new Promise((resolve) => setTimeout(resolve, lane.key === 'stripped' ? 1 : 30));
         if (lane.key === 'stripped') {
@@ -191,8 +191,8 @@ async function testLaneSearchReturnsBeforeSlowSiblingFinishes(): Promise<void> {
       { key: 'stripped', storageState: {} },
     ],
     {
-      create: async (config) => fakeSession(config),
-      probe: async (_config, _session, lane) => {
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (_config, _session, lane, _signal) => {
         if (lane.key === 'stripped') {
           return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
         }
@@ -215,8 +215,13 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
   const released: string[] = [];
   await assert.rejects(
     runLaneConfigSearch(configs, [{ key: 'default', storageState: {} }], {
-      create: async (config) => fakeSession(config),
-      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true }),
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (_config, _session, _lane, _signal) => ({
+        stablePasses: 0,
+        attempts: 2,
+        latencyMs: 1,
+        paymentCdnOk: true,
+      }),
       promote: async () => assert.fail('zero-pass candidate must never be promoted'),
       release: async (config) => {
         released.push(config.key);
@@ -232,8 +237,8 @@ async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
   const promoted: string[] = [];
   await assert.rejects(
     runLaneConfigSearch(configs, [{ key: 'default', storageState: {} }], {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => ({
+      create: async (config, _signal) => fakeSession(config),
+      probe: async (config, _session, _lane, _signal) => ({
         stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
         attempts: 2,
         latencyMs: 1,
@@ -247,6 +252,178 @@ async function testPartialStableCandidateIsNeverPromoted(): Promise<void> {
     /No stable browser configuration/
   );
   assert.deepStrictEqual(promoted, []);
+}
+
+async function testLateCreateAfterAbortIsReleased(): Promise<void> {
+  /** When a sibling lane wins, in-flight create must still be released if it
+   * resolves after abort — otherwise CDP sessions leak. */
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
+  const releasedSessionIds: string[] = [];
+  let slowCreateStarted = false;
+  let releaseSlowCreate: (() => void) | undefined;
+  const slowCreateGate = new Promise<void>((resolve) => {
+    releaseSlowCreate = resolve;
+  });
+
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: {} },
+      { key: 'stripped', storageState: {} },
+    ],
+    {
+      create: async (config, _signal) => {
+        if (!slowCreateStarted) {
+          slowCreateStarted = true;
+          await slowCreateGate;
+          return {
+            ...fakeSession(config),
+            sessionId: `session-${config.key}-late`,
+          };
+        }
+        return fakeSession(config);
+      },
+      probe: async (_config, _session, lane, _signal) => {
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+      },
+      promote: async () => undefined,
+      release: async (_config, session) => {
+        releasedSessionIds.push(session.sessionId);
+      },
+    }
+  );
+
+  assert.strictEqual(winner.config.key, configs[0]!.key);
+  releaseSlowCreate!();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(
+    releasedSessionIds.includes(`session-${configs[0]!.key}-late`),
+    `late create after abort must be released (got ${JSON.stringify(releasedSessionIds)})`
+  );
+}
+
+async function testAbortedProbeDoesNotDoubleRelease(): Promise<void> {
+  /** Sibling win clears activeSessions via abort listener; the losing probe's
+   * catch must not release the same remote session a second time. */
+  const configs = browserRecoveryCandidates({ country: 'US' }).slice(0, 1);
+  const releaseCounts = new Map<string, number>();
+  let releaseSlowProbe: (() => void) | undefined;
+  const slowProbeGate = new Promise<void>((resolve) => {
+    releaseSlowProbe = resolve;
+  });
+
+  const winner = await runLaneConfigSearch(
+    configs,
+    [
+      { key: 'auth_kept', storageState: {} },
+      { key: 'stripped', storageState: {} },
+    ],
+    {
+      create: async (config, _signal) => ({
+        ...fakeSession(config),
+        sessionId: `session-${config.key}`,
+      }),
+      probe: async (_config, _session, lane, _signal) => {
+        if (lane.key === 'stripped') {
+          return { stablePasses: 2, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+        }
+        await slowProbeGate;
+        return { stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: true };
+      },
+      promote: async () => undefined,
+      release: async (_config, session) => {
+        releaseCounts.set(session.sessionId, (releaseCounts.get(session.sessionId) ?? 0) + 1);
+      },
+    }
+  );
+
+  assert.strictEqual(winner.config.key, configs[0]!.key);
+  releaseSlowProbe!();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const authKeptReleases = releaseCounts.get(`session-${configs[0]!.key}`) ?? 0;
+  assert.strictEqual(
+    authKeptReleases,
+    1,
+    `aborted probe must release auth_kept session once (got ${authKeptReleases})`
+  );
+}
+
+async function testProbeCandidateBrowserSettlesOnAbort(): Promise<void> {
+  /** Default probe must observe AbortSignal and settle promptly mid-solver. */
+  const { probeCandidateBrowser } = await import('../../providers/browser/challengeRecovery');
+  const abort = new AbortController();
+  let solveStarted = false;
+  let releaseSolve: (() => void) | undefined;
+  const solveGate = new Promise<void>((resolve) => {
+    releaseSolve = resolve;
+  });
+  const closed: string[] = [];
+  const session: RecoveryCandidateSession = {
+    ...fakeSession(browserRecoveryCandidates({ country: 'US' })[0]!),
+    validationBrowser: {
+      contexts: () => [
+        {
+          addCookies: async () => undefined,
+          addInitScript: async () => undefined,
+          pages: () => [
+            {
+              goto: async () => null,
+              url: () => 'https://example.com/',
+              evaluate: async () => undefined,
+            },
+          ],
+          newPage: async () => {
+            throw new Error('newPage should not be needed');
+          },
+        },
+      ],
+      close: async () => {
+        closed.push('closed');
+      },
+    } as unknown as Browser,
+  };
+
+  let solverEntered!: () => void;
+  const solverStarted = new Promise<void>((resolve) => {
+    solverEntered = resolve;
+  });
+  const probePromise = probeCandidateBrowser(
+    session,
+    'https://example.com/',
+    {},
+    {
+      waitForSolver: async () => {
+        solveStarted = true;
+        solverEntered();
+        await solveGate;
+        return {
+          clean: true,
+          reason: 'ok',
+          title: 'Example',
+          usage: null,
+        };
+      },
+    },
+    {},
+    abort.signal
+  );
+
+  await solverStarted;
+  assert.ok(solveStarted, 'solver must start before abort');
+  const started = Date.now();
+  abort.abort();
+  await assert.rejects(probePromise, (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.strictEqual(error.message, 'lane_aborted');
+    return true;
+  });
+  assert.ok(Date.now() - started < 500, 'aborted probe must settle promptly');
+  assert.deepStrictEqual(closed, ['closed']);
+  releaseSolve?.();
 }
 
 function testOrderConfigsForLane(): void {
@@ -450,6 +627,9 @@ async function main(): Promise<void> {
   await testLaneSearchReturnsBeforeSlowSiblingFinishes();
   await testNoStableCandidateCleansEverything();
   await testPartialStableCandidateIsNeverPromoted();
+  await testLateCreateAfterAbortIsReleased();
+  await testAbortedProbeDoesNotDoubleRelease();
+  await testProbeCandidateBrowserSettlesOnAbort();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.

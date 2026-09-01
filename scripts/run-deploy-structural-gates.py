@@ -63,6 +63,10 @@ GATES = (
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
     ),
     Gate(
+        "cooperative-cutover-monitor",
+        ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
+    ),
+    Gate(
         "agent-surface-hash",
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
@@ -96,6 +100,10 @@ GATES = (
     Gate(
         "run-port-collision",
         ("bash", "scripts/tests/run-port-collision.test.sh"),
+    ),
+    Gate(
+        "run-cloud-benchmark-workers",
+        ("bash", "scripts/tests/run-cloud-benchmark-workers.test.sh"),
     ),
 )
 

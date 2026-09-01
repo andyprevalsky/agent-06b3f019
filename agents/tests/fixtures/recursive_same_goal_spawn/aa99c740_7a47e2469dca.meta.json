@@ -1,0 +1,29 @@
+{
+  "fixture_id": "aa99c740_7a47e2469dca",
+  "baseline_status": "FAIL",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-terra-gpt",
+  "pool": "rose-1-lite",
+  "parent_goal": "Download the YouTube video at https://www.youtube.com/watch?v=JVm7ij7WcCU as a video file (prefer MP4). Use permitted tools/services and return the downloaded video as a file_pointer. Verify the file plays/is nonempty. This is for the user who supplied the URL.",
+  "bad_spawn_goal": "Download the YouTube video https://www.youtube.com/watch?v=JVm7ij7WcCU as an MP4 video file using permitted tools/services. Verify it is nonempty and playable (e.g. ffprobe). Return the downloaded file as a file_pointer and the exact source video title. This is user-authorized download of a URL they supplied.",
+  "prior_fail_in_context": false,
+  "root": "aa99c740-c1a2-4764-a450-7a6a5b36c192",
+  "agent_id": "1419cccb-7242-4460-b9c8-74c1dd4d3af9",
+  "dump_id": "7a47e2469dca",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 5,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}
