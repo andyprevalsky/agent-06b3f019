@@ -8370,7 +8370,20 @@ def _compact_messages_for_judge(messages: list, *, limit: int = 80, text_chars: 
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         evidence_metadata = {
             key: metadata[key]
-            for key in ("action_type", "toolName", "toolStatus", "agentType", "title", "url")
+            for key in (
+                "action_type",
+                "toolName",
+                "toolStatus",
+                "agentType",
+                "title",
+                "url",
+                "requestUserApproval",
+                "toolCallId",
+                "subAgentId",
+                "task_id",
+                "browser_url",
+                "browser_session_metadata",
+            )
             if key in metadata
         }
         compacted.append(
@@ -8645,37 +8658,22 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
 
 
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
-    """Build a bounded evidence-only context for a declared LLM judge."""
-    evidence: list[dict] = []
-    evidence.extend(_compact_messages_for_judge(data.get("messages") or [], limit=80, text_chars=400))
-    # The frontend renders completionSummary metadata as the root agent's final
-    # answer card, while its backing TOOL message normally has empty text. Give
-    # the semantic judge the same summary + outputs as one normalized assistant
-    # row; omit tool usage and cost metadata that are not part of that answer.
-    summaries = _final_completion_summaries(data)
-    if summaries:
-        completion = summaries[-1]
-        outputs = completion.get("outputs")
-        payload = {
-            "summary": str(completion.get("summary") or "")[:12000],
-            "outputs": outputs[:100] if isinstance(outputs, list) else [],
-        }
-        evidence.append(
-            {
-                "role": "ASSISTANT",
-                "text": json.dumps(payload, default=str),
-                "metadata": {"evidence_type": "final_completion"},
-            }
-        )
-    for item in _root_assemble_deliverables(data):
-        evidence.append(
-            {
-                "role": "ASSISTANT",
-                "text": item["text"][:8000],
-                "metadata": {"evidence_type": "assemble_deliverable", "chars": item["chars"]},
-            }
-        )
-    evidence.append({"benchmark_state": _compact_benchmark_state_for_judge(data)})
+    """Build a bounded evidence-only context for a declared LLM judge.
+
+    Message rows come from the tree-aware single-turn builder (payment-approval
+    metadata, sub-agent transcripts). ``benchmark_state`` is the compact T-row
+    view so mass-agent trees cannot 413 the judge with 35MB child bodies.
+    """
+    from benchmarks.semantic_evaluator_evidence import build_single_turn_evidence
+
+    evidence = build_single_turn_evidence(data)
+    compact_state = _compact_benchmark_state_for_judge(data)
+    for row in evidence:
+        if isinstance(row, dict) and "benchmark_state" in row:
+            row["benchmark_state"] = compact_state
+            break
+    else:
+        evidence.append({"benchmark_state": compact_state})
     return evidence
 
 
@@ -10126,27 +10124,13 @@ async def _run_declared_evaluators(
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
                 from benchmarks.semantic_evaluator_evidence import (
-                    build_single_turn_evidence,
                     single_turn_evidence_exceeds_budget,
                 )
 
-                evidence = build_single_turn_evidence(data)
-                compact_state = _compact_benchmark_state_for_judge(data)
-                for row in evidence:
-                    if isinstance(row, dict) and "benchmark_state" in row:
-                        row["benchmark_state"] = compact_state
-                        break
-                else:
-                    evidence.append({"benchmark_state": compact_state})
+                evidence = _declared_evaluator_evidence(data)
                 if single_turn_evidence_exceeds_budget(evidence):
-                    compact_only = _declared_evaluator_evidence(data)
-                    if not single_turn_evidence_exceeds_budget(compact_only):
-                        judged = await _call_declared_llm_judge(
-                            task, evaluator, data, evidence=compact_only
-                        )
-                    else:
-                        judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
-                        evidence_mode = "agentic_llm_judge"
+                    judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
+                    evidence_mode = "agentic_llm_judge"
                 else:
                     judged = await _call_declared_llm_judge(task, evaluator, data, evidence=evidence)
                 score = float(judged.get("score", 0.0))
