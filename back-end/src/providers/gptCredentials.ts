@@ -1,3 +1,8 @@
+import {
+  isIntegrationAuthFailureReason,
+  markConnectionNeedsReconnectFromIntegrationFailure,
+  syncConnectionAfterIntegrationAuthFailure,
+} from '../domains/compute-grants/integrationConnectionSync';
 import { prisma } from './database';
 import { decryptCredentialEnvelope } from './claudeCredentials';
 import { createLogger } from './logger';
@@ -196,16 +201,20 @@ export async function markGptPoolTokenRateLimited(
   poolTokenId: string,
   options?: { rateLimitedUntil?: string | Date | null; failureReason?: string | null }
 ): Promise<void> {
-  if (options?.failureReason === 'auth_error') {
+  if (isIntegrationAuthFailureReason(options?.failureReason)) {
     await prisma.integration.update({
       where: { id: poolTokenId },
       data: {
         poolingEnabled: false,
         rateLimitedUntil: null,
-        failureReason: 'auth_error',
+        failureReason: options.failureReason,
       },
     });
-    log.info(`GPT pool token ${poolTokenId} disabled after auth_error`);
+    log.info(`GPT pool token ${poolTokenId} disabled after ${options.failureReason}`);
+    await syncConnectionAfterIntegrationAuthFailure({
+      integrationId: poolTokenId,
+      failureReason: options.failureReason,
+    });
     return;
   }
 
@@ -302,25 +311,54 @@ export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
 
 export async function markGptUserTokenRateLimited(
   userId: string,
-  options?: { rateLimitedUntil?: string | Date | null; failureReason?: string | null }
+  options?: {
+    rateLimitedUntil?: string | Date | null;
+    failureReason?: string | null;
+    accountId?: string | null;
+    integrationId?: string | null;
+  }
 ): Promise<void> {
-  if (options?.failureReason === 'auth_error') {
-    await prisma.integration.updateMany({
-      where: { userId, name: 'gpt_code', status: 'CONNECTED' },
+  if (isIntegrationAuthFailureReason(options?.failureReason)) {
+    const scopedWhere = {
+      userId,
+      name: 'gpt_code' as const,
+      status: 'CONNECTED' as const,
+      ...(options?.integrationId ? { id: options.integrationId } : {}),
+      ...(options?.accountId ? { accountId: options.accountId } : {}),
+    };
+    const updated = await prisma.integration.updateMany({
+      where: scopedWhere,
       data: {
         status: 'EXPIRED',
         isActive: false,
         rateLimitedUntil: null,
-        failureReason: 'auth_error',
+        failureReason: options.failureReason,
       },
     });
-    log.info(`GPT user token for ${userId} disabled after auth_error`);
+    log.info(`GPT user token for ${userId} disabled after ${options.failureReason}`, {
+      updated: updated.count,
+      accountId: options?.accountId ?? null,
+      integrationId: options?.integrationId ?? null,
+    });
+    await markConnectionNeedsReconnectFromIntegrationFailure({
+      userId,
+      integrationName: 'gpt_code',
+      accountId: options?.accountId,
+      failureReason: options.failureReason,
+    });
     return;
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
   const { count } = await prisma.integration.updateMany({
-    where: { userId, name: 'gpt_code', status: 'CONNECTED', ...notAlreadyBackedOffLonger(until) },
+    where: {
+      userId,
+      name: 'gpt_code',
+      status: 'CONNECTED',
+      ...(options?.integrationId ? { id: options.integrationId } : {}),
+      ...(options?.accountId ? { accountId: options.accountId } : {}),
+      ...notAlreadyBackedOffLonger(until),
+    },
     data: { rateLimitedUntil: until },
   });
   if (count === 0) {

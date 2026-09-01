@@ -578,10 +578,18 @@ export async function markComputeTokenUnavailable(
   }
 
   if (token.type === 'claude') {
-    await markUserTokenRateLimited(token.userId, options);
+    await markUserTokenRateLimited(token.userId, {
+      ...options,
+      accountId: token.accountId,
+      integrationId: token.source === 'pool' ? token.poolTokenId : undefined,
+    });
     return;
   }
-  await markGptUserTokenRateLimited(token.userId, options);
+  await markGptUserTokenRateLimited(token.userId, {
+    ...options,
+    accountId: token.accountId,
+    integrationId: token.source === 'pool' ? token.poolTokenId : undefined,
+  });
 }
 
 // ── Shared Anthropic API-key cooldown ──────────────────────────────────────

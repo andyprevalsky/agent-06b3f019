@@ -13,6 +13,10 @@
  * browser dependencies.
  */
 
+import {
+  clearConnectionNeedsReconnectFromIntegrationRecovery,
+  reconcileConnectionStatesFromIntegrations,
+} from './integrationConnectionSync';
 import { createLogger } from '../../providers/logger';
 import { ComputeGrantReminter, type GrantMinter } from '../../providers/computeGrantRemint';
 import { registerGrantRecovery, type GrantRecoveryHook } from '../../providers/rose/grantRecovery';
@@ -130,6 +134,7 @@ export async function listConnectedAccounts(
   userId: string,
   provider?: string
 ): Promise<ConnectedAccountDto[]> {
+  await reconcileConnectionStatesFromIntegrations(userId);
   const rows = await listConnections(userId, provider);
   return rows.map((r) => ({
     provider: r.provider,
