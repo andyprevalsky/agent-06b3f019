@@ -17,6 +17,10 @@ const batchSource = readFileSync(
   'utf8'
 );
 const smsQueueSource = readFileSync(resolve(repoRoot, 'back-end/src/providers/smsQueue.ts'), 'utf8');
+const whatsappCloudSource = readFileSync(
+  resolve(repoRoot, 'back-end/src/providers/whatsappCloud.ts'),
+  'utf8'
+);
 const runSh = readFileSync(resolve(repoRoot, 'scripts/run.sh'), 'utf8');
 
 requireText(
@@ -26,6 +30,12 @@ requireText(
 );
 requireText(batchSource, 'benchmarkFlagForBatchBody', 'batch spawn must inherit benchmark flag from parent');
 requireText(smsQueueSource, 'shouldMockBenchmarkSmsSend', 'Surge transport must consult benchmark SMS mock gate');
+requireText(
+  whatsappCloudSource,
+  'shouldMockBenchmarkWhatsAppSend',
+  'WhatsApp transport must consult benchmark WhatsApp mock gate'
+);
 requireText(runSh, 'BLACKBOX_TEST_FAKE_AGENTPHONE', 'benchmark stacks must fake AgentPhone sends');
+requireText(runSh, 'BLACKBOX_TEST_FAKE_WHATSAPP', 'benchmark stacks must fake WhatsApp sends');
 
-console.log('benchmark-sms-guards: 4 passed, 0 failed');
+console.log('benchmark-sms-guards: 5 passed, 0 failed');

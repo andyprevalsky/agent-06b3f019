@@ -32,7 +32,10 @@ export async function maybeDispatchGateSms(
   if (phone === null || phone === '') return undefined;
   const body = renderGateSms(gate);
   try {
-    await sendSms(phone, body);
+    await sendSms(phone, body, {
+      archiveRootAgentId: data.agentId,
+      archiveContext: { source: 'attention-gate-sms', user_id: data.userId },
+    });
   } catch (error) {
     log.error('Failed to dispatch gate SMS', { agent_id: data.agentId, error: errMsg(error) });
   }

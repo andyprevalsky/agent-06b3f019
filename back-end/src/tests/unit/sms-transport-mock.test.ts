@@ -4,20 +4,26 @@ import { createHash } from 'node:crypto';
 import {
   buildMockAgentPhoneSendResult,
   buildMockSurgeSendResult,
+  buildMockWhatsAppSendResult,
   isLocalBenchmarkAgentPhoneMockEnabled,
   isLocalBenchmarkSmsTransportMockEnabled,
+  isLocalBenchmarkWhatsAppTransportMockEnabled,
   mockAgentPhoneMessageId,
   mockSurgeMessageId,
+  mockWhatsAppMessageId,
 } from '../../providers/smsTransportMock';
 
 async function run() {
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
   const oldFakeAgentPhone = process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
+  const oldFakeWhatsApp = process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
 
   delete process.env.BLACKBOX_TEST_FAKE_SURGE;
   delete process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
+  delete process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
   assert.equal(isLocalBenchmarkSmsTransportMockEnabled(), false);
   assert.equal(isLocalBenchmarkAgentPhoneMockEnabled(), false);
+  assert.equal(isLocalBenchmarkWhatsAppTransportMockEnabled(), false);
 
   process.env.BLACKBOX_TEST_FAKE_SURGE = '1';
   assert.equal(isLocalBenchmarkSmsTransportMockEnabled(), true);
@@ -25,12 +31,18 @@ async function run() {
   process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = '1';
   assert.equal(isLocalBenchmarkAgentPhoneMockEnabled(), true);
 
+  process.env.BLACKBOX_TEST_FAKE_WHATSAPP = '1';
+  assert.equal(isLocalBenchmarkWhatsAppTransportMockEnabled(), true);
+
   const surgeId = mockSurgeMessageId('seed-a');
   assert.match(surgeId, /^msg_01[0-9a-f]{26}$/);
   assert.equal(mockSurgeMessageId('seed-a'), surgeId);
 
   const agentPhoneId = mockAgentPhoneMessageId('seed-b');
   assert.match(agentPhoneId, /^ap_msg_[0-9a-f]{12}$/);
+
+  const whatsappId = mockWhatsAppMessageId('seed-c');
+  assert.match(whatsappId, /^wamid\.[0-9a-f]{16}$/);
 
   const mockSurge = await buildMockSurgeSendResult({
     phoneNumber: '+19729777432',
@@ -51,6 +63,13 @@ async function run() {
   assert.equal(mockAgentPhone.channel, 'sms');
   assert.equal(mockAgentPhone.id, mockAgentPhoneMessageId('agent-phone-send'));
 
+  const mockWhatsApp = await buildMockWhatsAppSendResult({
+    phoneNumber: '+19729777432',
+    seed: 'whatsapp-send',
+  });
+  assert.equal(mockWhatsApp.success, true);
+  assert.equal(mockWhatsApp.messageSid, mockWhatsAppMessageId('whatsapp-send'));
+
   // Shape mirrors captured supervisor provider ids (msg_01…).
   assert.equal(
     mockSurgeMessageId('fixture').slice(0, 7),
@@ -61,8 +80,10 @@ async function run() {
   else process.env.BLACKBOX_TEST_FAKE_SURGE = oldFakeSurge;
   if (oldFakeAgentPhone === undefined) delete process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
   else process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = oldFakeAgentPhone;
+  if (oldFakeWhatsApp === undefined) delete process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
+  else process.env.BLACKBOX_TEST_FAKE_WHATSAPP = oldFakeWhatsApp;
 
-  console.log('sms-transport-mock: 8 passed, 0 failed');
+  console.log('sms-transport-mock: 11 passed, 0 failed');
 }
 
 run().catch((error) => {
