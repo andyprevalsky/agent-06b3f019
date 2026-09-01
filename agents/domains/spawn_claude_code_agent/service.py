@@ -266,7 +266,7 @@ def format_code_events_transcript(
             status = str(event.get("status") or "").strip()
             text = event.get("text") or event.get("content") or event.get("result")
             if isinstance(text, str) and text.strip():
-                prefix = "failed — " if status.lower() in {"failed", "error"} else ""
+                prefix = "failed - " if status.lower() in {"failed", "error"} else ""
                 lines.append(f"[{provider} result] {prefix}{text.strip()[:800]}")
             elif status:
                 lines.append(f"[{provider} result] {status}")
