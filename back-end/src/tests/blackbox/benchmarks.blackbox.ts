@@ -313,6 +313,15 @@ async function testPreview_disabledOutsideBenchmark() {
   }
 }
 
+async function testClaudeSessionPreview_disabledOutsideBenchmark() {
+  const response = await fetch(`${BASE_URL}/api/benchmarks/claude-code-session-preview/not-real`);
+  if (response.status !== 404) {
+    throw new Error(
+      `Expected Claude session preview to be hidden outside benchmark mode, got ${response.status}`
+    );
+  }
+}
+
 // ==================== ERROR SURFACE INVARIANT ====================
 
 async function testList_postMethodNotAllowed() {
@@ -587,6 +596,10 @@ async function runAll() {
         {
           name: 'agent preview hidden outside benchmark mode',
           fn: testPreview_disabledOutsideBenchmark,
+        },
+        {
+          name: 'claude session preview hidden outside benchmark mode',
+          fn: testClaudeSessionPreview_disabledOutsideBenchmark,
         },
       ],
     },

@@ -48,9 +48,23 @@ vi.mock('@/lib/supabase', () => ({
 
 // Agent context — drive ClaudeCodeChip messages deterministically.
 const messagesRef: { current: unknown[] } = { current: [] };
+const agentRef: { current: { status?: string } | null } = { current: null };
 vi.mock('@/features/agent-context', () => ({
-  useAgentContext: () => ({ messages: messagesRef.current }),
+  useAgentContext: () => ({ messages: messagesRef.current, agent: agentRef.current }),
 }));
+
+const fetchCodeAgentSessionMock = vi.fn<
+  (taskId: string, codeProvider?: string) => Promise<{ output?: string; status?: string } | null>
+>();
+vi.mock('@/features/terminal-component-group/api', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/features/terminal-component-group/api')>();
+  return {
+    ...actual,
+    fetchCodeAgentSession: (taskId: string, codeProvider?: string) =>
+      fetchCodeAgentSessionMock(taskId, codeProvider),
+  };
+});
 
 // Agent tree — drive SubAgentTree node map deterministically.
 const treeRef: { current: Map<string, unknown> } = { current: new Map() };
@@ -79,11 +93,16 @@ describe('ClaudeCodeChip', () => {
 
   beforeEach(() => {
     messagesRef.current = [];
+    agentRef.current = null;
+    fetchCodeAgentSessionMock.mockReset();
+    fetchCodeAgentSessionMock.mockResolvedValue(null);
     globalThis.WebSocket = originalWebSocket;
   });
 
   afterEach(() => {
     messagesRef.current = [];
+    agentRef.current = null;
+    fetchCodeAgentSessionMock.mockReset();
     globalThis.WebSocket = originalWebSocket;
   });
 
@@ -373,6 +392,59 @@ describe('ClaudeCodeChip', () => {
     renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
     expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
     expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
+  it('closes spinning chip when ClaudeCodeSession is CLOSED without task_complete', async () => {
+    fetchCodeAgentSessionMock.mockResolvedValue({
+      status: 'CLOSED',
+      output: '[Claude tool] Bash · ls\n',
+    });
+    agentRef.current = { status: 'FAILED' };
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-closed',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-closed',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (30s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-closed" />);
+    expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+      expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+    });
+  });
+
+  it('marks closed session successful when root agent status is COMPLETED', async () => {
+    fetchCodeAgentSessionMock.mockResolvedValue({ status: 'CLOSED', output: '[Claude] done\n' });
+    agentRef.current = { status: 'COMPLETED' };
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-closed-ok',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-closed-ok" />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Claude Code Completed Successfully')).toBeInTheDocument();
+    });
   });
 
   it('keeps cancel terminal after a late agent_observation heartbeat', () => {

@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useAgentContext, type Message, type ResponseSchemaField } from '../hooks';
+import { fetchCodeAgentSession } from '../api';
 import { type ChipState, type CodeProvider } from '../types';
 import {
   useClaudeCodeWebSocket,
@@ -158,6 +159,47 @@ export function useClaudeCodeChipState(
   }, [initialCodeProvider, messages, taskId]);
 }
 
+/**
+ * Durable FE fallback: seeded/partial transcripts may lack task_complete even
+ * though ClaudeCodeSession is CLOSED (local DB drift, root filter edge cases).
+ * Poll session status so historical agents never spin forever.
+ */
+function useClosedSessionTerminality(
+  taskId: string,
+  codeProvider: CodeProvider,
+  messageComplete: boolean,
+): { isComplete: boolean; isSuccess: boolean } | null {
+  const { agent } = useAgentContext();
+  const [sessionTerminal, setSessionTerminal] = useState<{
+    isComplete: boolean;
+    isSuccess: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (messageComplete || taskId === 'pending') {
+      setSessionTerminal(null);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const data = await fetchCodeAgentSession(taskId, codeProvider);
+      if (cancelled || !data?.status) return;
+      if (data.status.toUpperCase() !== 'CLOSED') return;
+
+      const agentStatus = agent?.status;
+      const success = agentStatus === 'COMPLETED';
+      setSessionTerminal({ isComplete: true, isSuccess: success });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agent?.status, codeProvider, messageComplete, taskId]);
+
+  return sessionTerminal;
+}
+
 export interface ClaudeCodeChipVM extends ChipDerived {
   chipState: ChipState;
   isExpanded: boolean;
@@ -182,7 +224,14 @@ export function useClaudeCodeChip(
 
   const { terminalRef, outputBufferRef, mount } = useTerminalManager();
   const derived = useClaudeCodeChipState(taskId, initialCodeProvider);
-  const { isComplete, isSuccess, isVerifying } = derived;
+  const sessionFallback = useClosedSessionTerminality(
+    taskId,
+    derived.codeProvider,
+    derived.isComplete,
+  );
+  const isComplete = derived.isComplete || sessionFallback?.isComplete === true;
+  const isSuccess = derived.isComplete ? derived.isSuccess : (sessionFallback?.isSuccess ?? false);
+  const { isVerifying } = derived;
   const initialChipState: ChipState = isComplete
     ? isSuccess
       ? 'completed'
@@ -227,8 +276,7 @@ export function useClaudeCodeChip(
   useSavedOutputFetch({
     taskId,
     codeProvider: derived.codeProvider,
-    shouldFetch:
-      (isExpanded || isFullscreen) && (chipState === 'completed' || chipState === 'failed'),
+    shouldFetch: isComplete && taskId !== 'pending',
     terminalRef,
     outputBufferRef,
     onOutputLoaded: setTerminalTranscript,

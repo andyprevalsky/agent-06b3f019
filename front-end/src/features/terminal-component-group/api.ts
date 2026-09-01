@@ -6,25 +6,41 @@
  * the API boundary so cross-cutting changes to the client are isolated here.
  */
 
+import { benchmarkAgentPreviewEnabled } from '@/lib/api/agents';
 import { getSession, getStoredSession } from '@/lib/supabase';
 import { API_URL, API_BASE_WITH_PATH } from './config';
 import type { CodeProvider, UsageData } from './types';
 
 export interface ClaudeCodeSessionResponse {
   output?: string;
+  status?: string;
+  closed_at?: string | null;
 }
 
 /**
  * Fetch the saved terminal output for a code-agent session. Best-effort:
  * returns null on any failure (auth missing, network, non-OK response).
  */
+async function fetchBenchmarkCodeAgentSessionPreview(
+  taskId: string,
+  codeProvider: CodeProvider,
+): Promise<ClaudeCodeSessionResponse | null> {
+  if (!benchmarkAgentPreviewEnabled() || codeProvider !== 'claude') return null;
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/benchmarks/claude-code-session-preview/${taskId}`);
+  if (!response.ok) return null;
+  return (await response.json()) as ClaudeCodeSessionResponse;
+}
+
 export async function fetchCodeAgentSession(
   taskId: string,
   codeProvider: CodeProvider = 'claude',
 ): Promise<ClaudeCodeSessionResponse | null> {
   try {
     const token = getSession()?.access_token;
-    if (!token) return null;
+    if (!token) {
+      return fetchBenchmarkCodeAgentSessionPreview(taskId, codeProvider);
+    }
 
     const sessionPath = codeProvider === 'codex' ? 'codex-code-session' : 'claude-code-session';
     const response = await fetch(`${API_URL}/api/${sessionPath}/${taskId}`, {
@@ -34,10 +50,12 @@ export async function fetchCodeAgentSession(
       },
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      return fetchBenchmarkCodeAgentSessionPreview(taskId, codeProvider);
+    }
     return (await response.json()) as ClaudeCodeSessionResponse;
   } catch {
-    return null;
+    return fetchBenchmarkCodeAgentSessionPreview(taskId, codeProvider);
   }
 }
 
