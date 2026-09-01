@@ -3698,6 +3698,76 @@ async def test_workflow_paused_handoff_continue_as_new_onto_live_queue():
         _restore_workflow(original)
 
 
+async def test_workflow_wait_for_unpause_or_handoff_returns_handoff_queue():
+    """Paused cold wait must return a handoff queue without unpausing first."""
+    wf = _bare_workflow_instance()
+    wf.is_paused = True
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["fetch_agent_queue_pointer"] = {
+        "task_queue": "navi-agent-tasks@newgen",
+        "surface_hash": "newgen",
+    }
+
+    async def fake_wait_condition(condition, timeout=None):
+        assert condition() is False
+
+    fake.wait_condition = fake_wait_condition
+    original = _patch_workflow(fake)
+    try:
+        handoff = await wf._wait_for_unpause_or_handoff()
+        assert handoff == "navi-agent-tasks@newgen"
+        assert wf.is_paused is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_generation_handoff_preserves_cost_limit_state():
+    """Cooperative handoff must carry COST_LIMIT_REACHED through continue_as_new."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-handoff-cost"
+    wf.user_id = "user-1"
+    wf.goal = "hand off while cost limited"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    wf.is_paused = True
+    wf._cost_limit_reached = True
+    wf._resume_prior_status = "COST_LIMIT_REACHED"
+    fake = _FakeWorkflowModule()
+    continued: List[tuple] = []
+
+    def fake_continue_as_new(*, args, task_queue=None, _continued=continued):
+        _continued.append((args, task_queue))
+
+    async def wait_for_refresh():
+        return None
+
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        context = [{"role": "USER", "text": "cost limited work"}]
+        result = await wf._handle_incomplete(
+            {
+                "status": "generation_handoff",
+                "handoff_task_queue": "navi-agent-tasks@newgen",
+                "context": context,
+            },
+            phase="EXECUTE",
+        )
+        assert result["status"] == "generation_handoff"
+        assert len(continued) == 1
+        args, task_queue = continued[0]
+        assert task_queue == "navi-agent-tasks@newgen"
+        resume_state = args[16]
+        assert resume_state["prior_status"] == "COST_LIMIT_REACHED"
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_context_overflow_uses_complete_continuation_contract():
     """Context compaction carries the same runtime snapshot as pause/resume."""
     wf = _bare_workflow_instance()
@@ -6578,6 +6648,14 @@ async def run_all_tests():
     await r.record_async(
         "wf_paused_handoff_continue_as_new",
         test_workflow_paused_handoff_continue_as_new_onto_live_queue,
+    )
+    await r.record_async(
+        "wf_wait_for_unpause_or_handoff",
+        test_workflow_wait_for_unpause_or_handoff_returns_handoff_queue,
+    )
+    await r.record_async(
+        "wf_generation_handoff_preserves_cost_limit",
+        test_workflow_generation_handoff_preserves_cost_limit_state,
     )
     await r.record_async(
         "wf_context_overflow_continuation_preserves_state",
