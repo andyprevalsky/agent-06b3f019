@@ -30,13 +30,13 @@ async function main(): Promise<void> {
   );
   assert.match(
     generatorSource,
-    /awaitCacheFirst:\s*isOaiDemoGoal\(fastMode\.goal\)/,
-    'only the OAi demo Fast Mode read waits for cache before Cerebras'
+    /goal:\s*fastMode\.goal/,
+    'the generator must pass the Fast Mode goal into the shared cache stream'
   );
   assert.match(
     hedgeSource,
-    /awaitCacheFirst:\s*options\.awaitCacheFirst === true/,
-    'the shared hedge must honor the caller demo gate'
+    /awaitCacheFirst:\s*isOaiDemoGoal\(options\.goal\)/,
+    'only the OAi demo Fast Mode read waits for cache before Cerebras'
   );
   assert.match(
     hedgeSource,
