@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { listInboundMessagesForNumber, sendAgentPhoneMessage } from '../../providers/agentPhone';
 import {
   buildMockAgentPhoneSendResult,
-  isLocalBenchmarkAgentPhoneMockEnabled,
   shouldMockBenchmarkSmsSend,
 } from '../../providers/smsTransportMock';
 import {
@@ -100,8 +99,7 @@ async function deliverAgentPhoneOutbound(params: {
   identity: NonNullable<Awaited<ReturnType<typeof repo.findAgentIdentityForMessages>>>;
 }) {
   const mockSeed = `${params.agentId}:${params.idempotencyKey}:${params.phoneNumber}:${params.message}`;
-  return isLocalBenchmarkAgentPhoneMockEnabled() ||
-    (await shouldMockBenchmarkSmsSend(params.agentId))
+  return (await shouldMockBenchmarkSmsSend(params.agentId))
     ? buildMockAgentPhoneSendResult({
         fromNumber: params.identity.phone ?? '+10000000000',
         toNumber: params.phoneNumber,

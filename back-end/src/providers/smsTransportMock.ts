@@ -5,7 +5,7 @@ import { createLogger } from './logger';
 
 const log = createLogger('SmsTransportMock');
 
-/** Local benchmark stacks fake Surge at the fetch boundary; prod uses Agent.isBenchmark. */
+/** Local benchmark stacks fake Surge at the fetch boundary (`fetchCapture.ts`). */
 export function isLocalBenchmarkSmsTransportMockEnabled(): boolean {
   return process.env.BLACKBOX_TEST_FAKE_SURGE === '1';
 }
@@ -36,13 +36,11 @@ export function mockWhatsAppMessageId(seed: string): string {
 }
 
 export async function shouldMockBenchmarkSmsSend(agentId?: string | null): Promise<boolean> {
-  if (isLocalBenchmarkSmsTransportMockEnabled()) return true;
   if (agentId === undefined || agentId === null || agentId.trim() === '') return false;
   return isBenchmarkAgent(agentId);
 }
 
 export async function shouldMockBenchmarkWhatsAppSend(agentId?: string | null): Promise<boolean> {
-  if (isLocalBenchmarkWhatsAppTransportMockEnabled()) return true;
   if (agentId === undefined || agentId === null || agentId.trim() === '') return false;
   return isBenchmarkAgent(agentId);
 }
