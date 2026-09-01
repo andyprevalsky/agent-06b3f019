@@ -22,6 +22,7 @@
  */
 
 import { isAdminUser } from '../../utils/adminAccess';
+import * as benchmarkHubLookup from '../../providers/benchmarkHubLookup';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
 import {
   launchCursorCloudAgentViaGithub,
@@ -93,6 +94,26 @@ export function buildBugReportTitle(description: string): string {
 export function buildBugReportPrompt(agentId: string, description: string): string {
   // Exact agent-facing prompt — no blank line, no footer, no title line.
   return `/rca the following bug for agent with ID: [${agentId}]\n${description.trim()}`;
+}
+
+/**
+ * Report Bug only needs a stable Rose agent id for the /rca prompt. Live DB rows
+ * and benchmark-hub archived runs both qualify — GET /agents/:id already serves
+ * hub archives via findAgentAcrossRuns, but report-bug used to require a live row.
+ */
+export async function agentExistsForBugReport(
+  agentId: string,
+  deps: {
+    findAgentById?: typeof repo.findAgentById;
+    findAgentAcrossRuns?: typeof benchmarkHubLookup.findAgentAcrossRuns;
+  } = {}
+): Promise<boolean> {
+  const findById = deps.findAgentById ?? repo.findAgentById;
+  const findAcross = deps.findAgentAcrossRuns ?? benchmarkHubLookup.findAgentAcrossRuns;
+  const live = await findById(agentId);
+  if (live !== null) return true;
+  const archived = await findAcross(agentId);
+  return archived !== null;
 }
 
 export function buildBugReportChatName(description: string): string {
@@ -215,8 +236,8 @@ export async function reportAgentBug(
   }
 
   const trimmed = validateBugDescription(description);
-  const agent = await repo.findAgentById(agentId);
-  if (agent === null) {
+  const exists = await agentExistsForBugReport(agentId);
+  if (!exists) {
     throw new ReportBugNotFoundError();
   }
 
