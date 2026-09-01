@@ -30,9 +30,11 @@ with workflow.unsafe.imports_passed_through():
         spawn_agent,
     )
     from domains.wait_for.service import pending_timestamp_wait_to_resume
+    from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
         check_user_usage,
         fetch_agent_config,
+        fetch_agent_queue_pointer,
         finalize_workflow_replacement_bootstrap,
         generate_completion_summary,
         get_model_context_window,
@@ -1477,10 +1479,16 @@ class AgentWorkflow:
                 # Deployment-restored cold states must not enter run_agent's
                 # bounded pause polling before reaching a durable wait. Consume no
                 # workflow timers or activities until a valid signal unpauses us.
-                await workflow.wait_condition(lambda: not self.is_paused)
+                handoff_queue = await self._wait_for_unpause_or_handoff()
                 await self._wait_for_response_schema_refresh()
                 await self._flush_pending_messages()
-                workflow.continue_as_new(args=self._continuation_args(context))
+                if handoff_queue:
+                    workflow.continue_as_new(
+                        args=self._continuation_args(context),
+                        task_queue=handoff_queue.strip(),
+                    )
+                else:
+                    workflow.continue_as_new(args=self._continuation_args(context))
                 return {"status": "paused", "goal": goal}
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
@@ -1596,84 +1604,107 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
 
-        # Send SMS notification for agent_started to every ROOT agent, regardless
-        # of source, so the user always gets a text with the deep link to any
-        # agent they create (SMS, web, mac-app, API). Sub-agents (parent_workflow_id
-        # set) are intentionally excluded — at 10k agents a per-spawn SMS would
-        # firehose the user's phone. Benchmark/eval runs are suppressed centrally
-        # on the backend (Agent.isBenchmark) so this never texts the operator.
+        # Helper: gate is open unless explicitly False
+        def _gate_open(name: str) -> bool:
+            return self.context_gates.get(name, True)
+
+        # Kick SMS off the critical path — start now, await after first LLM.
+        # Prod traces showed ~2–4s here before any model call.
+        self._deferred_startup_sms_handle = None
         if not parent_workflow_id and not self._deployment_resume:
             try:
                 notification_args = [user_id, "agent_started", agent_id, {"goal": goal}]
                 if self.world_model_mode != "real":
                     notification_args.append(self.world_model_mode)
-                await workflow.execute_activity(
+                self._deferred_startup_sms_handle = workflow.start_activity(
                     notify_sms_event_activity,
                     args=notification_args,
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                workflow.logger.info("Sent agent_started SMS notification")
+                workflow.logger.info("Started agent_started SMS notification (deferred await)")
             except Exception as e:
-                workflow.logger.warning(f"Failed to send agent_started SMS notification: {e}")
+                workflow.logger.warning(f"Failed to start agent_started SMS notification: {e}")
 
-        # Fetch user context once (for both phases), respecting context_gates
+        # Parallelize independent startup fetches (historically one Temporal RTT each).
         user_context_section = getattr(self, "user_context_section", "")
 
-        # Helper: gate is open unless explicitly set to False
-        def _gate_open(name: str) -> bool:
-            return self.context_gates.get(name, True)
-
-        try:
-            user_context_section = await workflow.execute_activity(
-                get_user_context,
-                args=[user_id, self.context_gates],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch user context: {e}")
-        self.user_context_section = user_context_section
-
-        if self.context_gates:
-            workflow.logger.info(f"Context gates applied: {self.context_gates}")
-
-        # Fetch user's custom system name (for approval messages and SMS)
-        try:
-            self.system_name = await workflow.execute_activity(
-                get_user_system_name,
-                args=[user_id],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            workflow.logger.info(f"Using system name: {self.system_name}")
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
-
-        # Fetch user's custom system prompt (for personality injection)
-        # Skip if custom_system_prompt gate is closed
-        if _gate_open("custom_system_prompt"):
+        async def _fetch_user_context() -> str:
             try:
-                self.custom_system_prompt = await workflow.execute_activity(
+                return await workflow.execute_activity(
+                    get_user_context,
+                    args=[user_id, self.context_gates],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch user context: {e}")
+                return user_context_section
+
+        async def _fetch_system_name() -> Optional[str]:
+            try:
+                return await workflow.execute_activity(
+                    get_user_system_name,
+                    args=[user_id],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
+                return None
+
+        async def _fetch_custom_system_prompt() -> Optional[str]:
+            if not _gate_open("custom_system_prompt"):
+                workflow.logger.info("Skipping custom system prompt (gate closed)")
+                return None
+            try:
+                return await workflow.execute_activity(
                     get_user_custom_system_prompt,
                     args=[user_id],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                if self.custom_system_prompt:
-                    workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
             except Exception as e:
                 workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
-        else:
-            workflow.logger.info("Skipping custom system prompt (gate closed)")
+                return None
 
-        # Fetch one direct compute token for Rose. Claude is preferred when
-        # available; otherwise GPT/Codex is used. Each LLM call receives only
-        # the selected token family.
-        await self._refresh_compute_token(user_id)
+        async def _fetch_agent_config() -> Dict[str, Any]:
+            try:
+                return await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[agent_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
+                return {}
+
+        (
+            user_context_section,
+            fetched_system_name,
+            fetched_custom_system_prompt,
+            agent_config,
+            _,
+        ) = await asyncio.gather(
+            _fetch_user_context(),
+            _fetch_system_name(),
+            _fetch_custom_system_prompt(),
+            _fetch_agent_config(),
+            self._refresh_compute_token(user_id),
+        )
+
+        self.user_context_section = user_context_section or ""
+        if self.context_gates:
+            workflow.logger.info(f"Context gates applied: {self.context_gates}")
+        if fetched_system_name:
+            self.system_name = fetched_system_name
+            workflow.logger.info(f"Using system name: {self.system_name}")
+        if fetched_custom_system_prompt:
+            self.custom_system_prompt = fetched_custom_system_prompt
+            workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
 
         # Inject custom system prompt as hidden USER message for new agents
-        # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
         if self.custom_system_prompt and not context and not self._deployment_resume:
             try:
                 await self._post_message(
@@ -1688,25 +1719,16 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to inject custom system prompt: {e}")
 
-        # Fetch response schema and write_lock_enabled from agent config
         response_schema = self.output_schema
         fetched_parent_agent_id = None
-        try:
-            agent_config = await workflow.execute_activity(
-                fetch_agent_config,
-                args=[agent_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+        if agent_config:
             response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
-            self.output_schema = response_schema  # Single source of truth for output schema
-            self.write_lock_enabled = agent_config.get("write_lock_enabled", True)  # Default to True (locked)
+            self.output_schema = response_schema
+            self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
             workflow.logger.info(
                 f"Fetched output_schema: {response_schema is not None}, write_lock_enabled: {self.write_lock_enabled}"
             )
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
         # If no schema was provided at create time, generate one synchronously NOW.
         # The schema appears in the initial main/verifier system prompts. Awaiting
@@ -1842,6 +1864,7 @@ class AgentWorkflow:
                 wait_for_messages=self._wait_for_messages,
                 on_context_overflow=self._handle_context_overflow,
                 check_credits=self._check_credits,
+                check_generation_handoff=self._check_generation_handoff,
                 post_message=self._post_message,
                 poll_messages=self._poll_messages,
                 execute_tool=self._execute_tool,
@@ -2029,6 +2052,7 @@ class AgentWorkflow:
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,
+                check_generation_handoff=self._check_generation_handoff,
             post_message=self._post_message,
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
@@ -2190,8 +2214,7 @@ class AgentWorkflow:
     def _make_verifier_prompt_generator(self):
         """Create a generator function that builds the verifier prompt at verification time.
 
-        Main-agent reasoning never waits for schema generation, but completion
-        verification must use the latest accepted revision.
+        Completion verification must use the latest accepted schema revision.
         """
 
         async def generate() -> str:
@@ -2476,6 +2499,51 @@ class AgentWorkflow:
         preceding _check_paused. The loop then returns status='aborted' instead of
         waiting forever on a parent that will never resume it."""
         return self._orphaned
+
+
+    async def _check_generation_handoff(self) -> Optional[str]:
+        """Return live task queue when this execution should hand off generations.
+
+        Safe checkpoint: called only at the top of a run_agent iteration, after any
+        prior LLM/tool/browser activity completed. Returns None when we are already
+        on the live generation (or the pointer cannot be read).
+        """
+        try:
+            pointer = await workflow.execute_activity(
+                fetch_agent_queue_pointer,
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            workflow.logger.warning(f"Generation pointer check failed (continuing): {e}")
+            return None
+        live_queue = (pointer or {}).get("task_queue")
+        current_queue = workflow.info().task_queue
+        if should_handoff_to_generation(current_queue, live_queue):
+            workflow.logger.info(
+                f"Generation handoff required: current={current_queue} live={live_queue}"
+            )
+            return live_queue
+        return None
+
+    async def _wait_for_unpause_or_handoff(self) -> Optional[str]:
+        """Block until unpaused, re-checking generation handoff every 30s.
+
+        Returns the live task queue when cooperative cutover is required while
+        paused; otherwise None once the agent is unpaused.
+        """
+        while self.is_paused:
+            handoff_queue = await self._check_generation_handoff()
+            if handoff_queue:
+                return handoff_queue
+            try:
+                await workflow.wait_condition(
+                    lambda: not self.is_paused,
+                    timeout=timedelta(seconds=30),
+                )
+            except (asyncio.TimeoutError, TemporalTimeoutError):
+                pass
+        return None
 
     async def _check_credits(self) -> None:
         """Check user credits. Sets is_paused=True if depleted."""
@@ -2782,14 +2850,41 @@ class AgentWorkflow:
 
         if pending_tool_call_id in terminal_tool_call_ids:
             self._cloud_agent_lifecycle_finished = True
-        elif pending_tool_call_id is None:
-            # Most agent-mode workflows are created directly and never receive
-            # the chat-mode cloud_agent lifecycle row. Cache that absence after
-            # the first scan so later token callbacks do not keep scheduling
-            # message-poll activities before user-visible tool execution.
-            self._cloud_agent_lifecycle_finished = True
+            return None
 
+        # Direct API / SMS root spawns never get a chat-mode cloud_agent chip.
+        # Synthesize a stable toolCallId so Preparing/Starting Reasoning/Ready
+        # still emit (spawn-latency ratchet + FE parity). Sub-agents skip this
+        # to avoid an extra message-poll on every token callback.
+        if not self.parent_workflow_id:
+            self._cloud_agent_lifecycle_tool_call_id = f"tc-cloud-agent-{self.agent_id}"
+            # current_phase is set in run(); bare unit instances may not have it yet.
+            self._cloud_agent_lifecycle_start_phase = self._cloud_agent_lifecycle_start_phase or (
+                "execute" if getattr(self, "current_phase", None) == "EXECUTE" else "plan"
+            )
+            return self._cloud_agent_lifecycle_tool_call_id
+
+        # Cache absence for sub-agents so later token callbacks do not keep
+        # scheduling message-poll activities before user-visible tool execution.
+        self._cloud_agent_lifecycle_finished = True
         return None
+
+    async def _await_deferred_startup(self) -> None:
+        """Await SMS activity kicked off during startup (off critical path).
+
+        SMS notify is ~2–4s on prod traces. Started during init and awaited after
+        the first reasoning turn begins (or at end-of-run for short/smoke paths
+        that never emit tokens). Idempotent — safe to call multiple times.
+        """
+        sms_handle = getattr(self, "_deferred_startup_sms_handle", None)
+        self._deferred_startup_sms_handle = None
+
+        if sms_handle is not None:
+            try:
+                await sms_handle
+                workflow.logger.info("Completed deferred agent_started SMS notification")
+            except Exception as e:
+                workflow.logger.warning(f"Deferred agent_started SMS notification failed: {e}")
 
     async def _advance_cloud_agent_lifecycle(self, title: str, tool_status: str) -> None:
         """Advance the chat-mode cloud-agent chip without exposing it to LLM context."""
@@ -3783,6 +3878,7 @@ class AgentWorkflow:
             self.iteration_offset = max(self.iteration_offset, iteration)
         self.context_size = tokens_in_delta + cache_read_input_tokens + cache_creation_input_tokens
         await self._advance_cloud_agent_lifecycle(CLOUD_AGENT_READY_TITLE, "FINISHED")
+        await self._await_deferred_startup()
 
         # Track actual_model for credit billing
         if actual_model:
@@ -4279,14 +4375,39 @@ class AgentWorkflow:
         workflow.logger.info(f"{phase} ended: {result['status']}")
 
         if result["status"] == "paused":
-            await workflow.wait_condition(lambda: not self.is_paused)
+            handoff_queue = await self._wait_for_unpause_or_handoff()
             # Preserve feedback received while paused before continue-as-new
             # resets this workflow instance's revision counters.
             await self._wait_for_response_schema_refresh()
             # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
             await self._drain_fast_mode_explores()
             await self._flush_pending_messages()
-            workflow.continue_as_new(args=self._continuation_args(result.get("context")))
+            if handoff_queue:
+                workflow.continue_as_new(
+                    args=self._continuation_args(result.get("context")),
+                    task_queue=handoff_queue.strip(),
+                )
+            else:
+                workflow.continue_as_new(args=self._continuation_args(result.get("context")))
+            return result
+
+        if result["status"] == "generation_handoff":
+            # Cooperative cutover: current tools/LLM finished; move to the live
+            # generation queue before the next LLM call. Do NOT terminate.
+            handoff_queue = result.get("handoff_task_queue")
+            if not isinstance(handoff_queue, str) or not handoff_queue.strip():
+                workflow.logger.error("generation_handoff missing handoff_task_queue; failing open")
+                return result
+            await self._wait_for_response_schema_refresh()
+            await self._drain_fast_mode_explores()
+            await self._flush_pending_messages()
+            workflow.logger.info(
+                f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
+            )
+            workflow.continue_as_new(
+                args=self._continuation_args(result.get("context")),
+                task_queue=handoff_queue.strip(),
+            )
             return result
 
         if result["status"] == "aborted":
@@ -4665,6 +4786,7 @@ class AgentWorkflow:
         6. Signal parent (if sub-agent)
         7. Save blueprint (fire-and-forget, no UI)
         """
+        await self._await_deferred_startup()
         workflow.logger.info("✓ Marking task complete")
         # Drain fire-and-track explores before latching COMPLETED so T9 sees
         # no leftover ACTIVE children under a finished GP.

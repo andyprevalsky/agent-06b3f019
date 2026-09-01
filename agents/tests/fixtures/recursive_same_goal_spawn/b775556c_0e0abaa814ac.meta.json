@@ -1,0 +1,29 @@
+{
+  "fixture_id": "b775556c_0e0abaa814ac",
+  "baseline_status": "PASS",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-sol-gpt",
+  "pool": "rose-1-ultra",
+  "parent_goal": "Resolve this blocked verification task into one fully typed structured record. Target row is `UIUC-PPL/namd`, observed 2026-08-23. Direct GitHub web and REST endpoints return authenticated HTTP 404 with no redirect; exhaustive searches show no current or historical repository object. Official NAMD source is `tcbgUIUC/namd` on GitLab. A separate stale unaffiliated full-source GitHub mirror `Marcello-Sega/namd` exists with 1 star, null description, archived=false, fork=false, pushed_at=2017-06-27 and material CUDA files. Required fields are repository,url,stars int,observed_date,description,category,qualifying_evidence,archived bool,fork bool,last_activity_date,sources,eligible bool,exclusion_reason. Find any further grounded evidence or defensible canonical resolution that allows all fields to be populated without fabrication. Explore GitHub redirects, aliases, repository IDs, commit lineage, official docs, or ranking-row correction. Return one recommended record and explain evidence for every typed value.",
+  "bad_spawn_goal": "Using the grounded evidence below, produce exactly one fully typed JSON-compatible record with NO nulls for required fields: repository(str), url(str), stars(int), observed_date(str), description(str), category(str), qualifying_evidence(str), archived(bool), fork(bool), last_activity_date(str), sources(list[str]), eligible(bool), exclusion_reason(str), rationale(str). Resolve the target ranking row `UIUC-PPL/namd`, observed 2026-08-23. Grounded facts: exact target GitHub API URL returns HTTP 404 Not Found, no redirect or repository metadata; official University of Illinois NAMD env_placeholder page says source is https://gitlab.com/tcbgUIUC/namd; separate GitHub repo https://github.com/Marcello-Sega/namd is repo ID 95521637, 1 star, description null, archived false, fork false, pushed_at 2017-06-27T05:43:24Z, and recursive tree contains material CUDA files; owner is an individual at UCL, not UIUC-PPL. The user explicitly wants a defensible canonical resolution allowing all typed fields without fabrication. Recommend a ranking-row correction to the existing GitHub object `Marcello-Sega/namd` but mark it ineligible because it is a stale unaffiliated mirror and is not the requested or official canonical repository. Encode API null description as an empty string and explicitly explain this conversion in rationale. Use last_activity_date 2017-06-27 based on pushed_at, not GitHub updated_at. Category should state molecular dynamics with CUDA/GPU source. Qualifying evidence should mention exact CUDA tree paths. Include the API, tree, official docs, GitLab, and user metadata URLs in sources. Ensure exclusion_reason is nonempty. Return the one record plus concise evidence mapping, with all typed values.",
+  "prior_fail_in_context": true,
+  "root": "b775556c-e2be-4c61-99b1-81c5af7d5490",
+  "agent_id": "a244a0c3-231f-4a3d-9d59-1f957076b675",
+  "dump_id": "0e0abaa814ac",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 7,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

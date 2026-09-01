@@ -1,0 +1,152 @@
+{
+  "description": "Recursive same-goal general_purpose spawn_agent LLM-call fixtures. PASS/FAIL only from faithful dump-pin replay; UNPLAYABLE/ERROR dropped.",
+  "n": 23,
+  "status_counts": {
+    "PASS": 12,
+    "FAIL": 11
+  },
+  "route_counts": {
+    "openrouter": 9,
+    "gpt_auth": 14
+  },
+  "fixtures": [
+    {
+      "fixture_id": "f0f03928_62e3b19b76da",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "f0f03928_62e3b19b76da_e1",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "f0f03928_473aa9631a72",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "f0f03928_cb0489f38ea8",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "f0f03928_1d5ede3c1318",
+      "baseline_status": "PASS",
+      "route": "gpt_auth",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "aa99c740_7a47e2469dca",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "aa99c740_b95a71d6ef03",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "aa99c740_0fb50445ae8d",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "b775556c_ab9c033fa7d9",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_d0a64881dfea",
+      "baseline_status": "PASS",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_4e6860560596",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_a724cb8fb196",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_b62b0745a4cb",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_b49f91e10061",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_bdef6035fdc9",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_0e0abaa814ac",
+      "baseline_status": "PASS",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_153492bdea8f",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "b775556c_0a269c62d15c",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-ultra"
+    },
+    {
+      "fixture_id": "504e89c0_9792d433ee45",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "504e89c0_e0a877a82723",
+      "baseline_status": "FAIL",
+      "route": "gpt_auth",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "2dc4c954_cfcd2e35c526",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "2dc4c954_f01f67a44669",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-lite"
+    },
+    {
+      "fixture_id": "2dc4c954_4b5031d1aa74",
+      "baseline_status": "PASS",
+      "route": "openrouter",
+      "pool": "rose-1-lite"
+    }
+  ]
+}
