@@ -19802,6 +19802,9 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_press_key_humanizer",
         test_execute_action_press_key_with_humanizer,
+    )
+    await r.record_async(
+        "execute_action_press_key_enter_triggers_purchase_write_lock",
         test_execute_action_press_key_enter_triggers_purchase_write_lock,
     )
     await r.record_async(
