@@ -1,0 +1,29 @@
+{
+  "fixture_id": "b775556c_a724cb8fb196",
+  "baseline_status": "PASS",
+  "route": "openrouter",
+  "actual_model": "openai/gpt-5.6-sol",
+  "pool": "rose-1-ultra",
+  "parent_goal": "For the single GitHub repository in your attached item, perform a live verification on 2026-08-23 for inclusion in a global ranking of public repositories where people materially develop CUDA kernels or closely adjacent GPU-kernel technology. Use direct GitHub repository metadata and direct repository code/docs. Resolve redirects to canonical full_name/html_url. Return exact integer stargazers_count, description, archived, fork, pushed_at reduced to YYYY-MM-DD, and concrete qualifying evidence naming current source paths. Eligible scope: substantial in-repository CUDA C/C++, Triton, CUTLASS/CuTe, HIP, GPU compiler/codegen, core GPU primitives/libraries, collective or memory infrastructure, kernel profiling/debugging/instrumentation, kernel benchmarking/autotuning, GPU architecture simulation, or domain software with material custom kernels. Exclude dependency-only wrappers/UIs, curated lists, merely incidental CUDA support, and education-only repositories. Do not exclude a repository merely because it is a full framework/application if it materially maintains its own kernels. If ineligible, explain precisely. Sources must include the direct GitHub API repository endpoint and at least one direct current GitHub code/tree/blob/doc URL if eligible. Return one structured result only.\n\nUse this row context for the task below.\nRow item:\nOneflow-Inc/oneflow",
+  "bad_spawn_goal": "Produce a grounded structured verification result for GitHub repository Oneflow-Inc/oneflow. The verification is being performed on 2026-08-23, so explicitly return observed_date = 2026-08-23. Retrieve live direct GitHub repository metadata from https://api.github.com/repos/Oneflow-Inc/oneflow and inspect direct current repository code/docs. Return canonical repository full_name and html_url, exact integer stargazers_count, exact description, archived boolean, fork boolean, pushed_at reduced to YYYY-MM-DD, a concise category, concrete qualifying evidence naming current source paths, source URLs including the direct GitHub API endpoint and direct GitHub code/tree/blob/doc URL(s), eligible boolean, and precise exclusion_reason (empty string if eligible). Eligible means material env_placeholder of CUDA kernels or closely adjacent GPU-kernel technology. OneFlow qualifies if its repository currently maintains substantial custom CUDA kernels or core GPU primitives. Explicitly state that all metadata and evidence were observed/verified on 2026-08-23.",
+  "prior_fail_in_context": false,
+  "root": "b775556c-e2be-4c61-99b1-81c5af7d5490",
+  "agent_id": "c5118dac-afc2-497e-9d79-f6728b925e86",
+  "dump_id": "a724cb8fb196",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 11,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

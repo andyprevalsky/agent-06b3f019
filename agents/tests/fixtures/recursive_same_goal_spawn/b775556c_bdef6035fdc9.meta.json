@@ -1,0 +1,29 @@
+{
+  "fixture_id": "b775556c_bdef6035fdc9",
+  "baseline_status": "FAIL",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-sol-gpt",
+  "pool": "rose-1-ultra",
+  "parent_goal": "Use shell curl or Python requests to execute SQL directly against the ClickHouse GitHub Explorer backend for historical GH Archive data, not merely open the webpage. Investigate ghe.clickhouse.tech network/API endpoints, README deployment config, and try POST bodies or query parameters with appropriate user/password. Query 2011-01-01 through 2023-01-01 for lower(repo_name)='chai-magma/magma'. If matches exist, extract timestamps, actors, event types. Then identify exact raw GH Archive hourly files from event timestamps and download/decompress them to extract full event JSON payloads and any payload.repository metadata. Also query lower(repo_name) LIKE '%magma/magma%' to catch case/owner variations, while keeping exact matches distinct. Return commands, endpoint, exact raw results, and file URLs. Goal is affirmative historical metadata or a definitive direct 0 result from a table proven to cover 2011-2022.",
+  "bad_spawn_goal": "Execute the full investigation using shell curl and/or Python requests, not just browser pages. Find the actual ClickHouse GitHub Explorer backend endpoint at ghe.clickhouse.tech, credentials from public frontend/README/deployment config, and query historical GH Archive data for 2011-01-01 <= created_at < 2023-01-01 where lower(repo_name)='chai-magma/magma'. Also run lower(repo_name) LIKE '%magma/magma%' and keep exact vs variants distinct. Prove the queried table covers 2011-2022 using min/max dates and/or per-year counts or system metadata. If exact matches exist, extract timestamps, actors, event types and identify raw GH Archive hourly files based on timestamps, download/decompress them, locate full matching event JSON, and extract payload.repository metadata. Return fully reproducible commands, endpoint, exact row outputs, variant outputs, raw archive URLs/files, metadata payloads, and evidence of coverage. This is an execute task. Keep trying alternate POST bodies/query parameters/auth until grounded results are obtained.",
+  "prior_fail_in_context": false,
+  "root": "b775556c-e2be-4c61-99b1-81c5af7d5490",
+  "agent_id": "3a45494f-1093-43b0-a8dd-d4a77dc2caab",
+  "dump_id": "bdef6035fdc9",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 5,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}
