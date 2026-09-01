@@ -1,0 +1,29 @@
+{
+  "fixture_id": "aa99c740_b95a71d6ef03",
+  "baseline_status": "FAIL",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-terra-gpt",
+  "pool": "rose-1-lite",
+  "parent_goal": "Download the YouTube video https://www.youtube.com/watch?v=JVm7ij7WcCU as an MP4 video file using permitted tools/services. Verify it is nonempty and playable (e.g. ffprobe). Return the downloaded file as a file_pointer and the exact source video title. This is user-authorized download of a URL they supplied.",
+  "bad_spawn_goal": "Execute this narrow task end-to-end: Download the user-authorized YouTube URL https://www.youtube.com/watch?v=JVm7ij7WcCU as a local MP4 via permitted download tools/services. Obtain exact title from metadata. Run ffprobe to verify nonzero file size, container and playable video/audio streams, including duration. Attach/export the final MP4 as a file_pointer in your structured result. Do not ask questions. Return only when all artifacts are real and accessible.",
+  "prior_fail_in_context": true,
+  "root": "aa99c740-c1a2-4764-a450-7a6a5b36c192",
+  "agent_id": "89eb7d14-aa2b-415a-baa7-3df1d2b19d5c",
+  "dump_id": "b95a71d6ef03",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 7,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}

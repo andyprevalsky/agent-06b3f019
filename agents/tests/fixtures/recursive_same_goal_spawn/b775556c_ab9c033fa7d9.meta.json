@@ -1,0 +1,29 @@
+{
+  "fixture_id": "b775556c_ab9c033fa7d9",
+  "baseline_status": "FAIL",
+  "route": "gpt_auth",
+  "actual_model": "gpt-5.6-sol-gpt",
+  "pool": "rose-1-ultra",
+  "parent_goal": "Using only the candidate inventories in these referenced messages, consolidate a best-effort list of exactly 100 unique GitHub repositories relevant to active CUDA-kernel or closely adjacent GPU-kernel env_placeholder: @ref:message:10259ff0-9e1c-447d-a559-073018279c4e, @ref:message:bc737b45-d806-4284-929b-77c1228689a5, @ref:message:1b036408-a896-48e4-9c7d-806cd88a5228, @ref:message:70e329c4-c79d-415c-b548-f5eba09dcc26, @ref:message:fbb4f7bc-8776-4ad8-b359-26bd77515821. The user explicitly said to provide whatever data is currently available, so do not perform fresh web research and do not delay. Deduplicate canonical repositories and sort descending by the best available star estimate from the inventories. Prefer repositories with direct custom CUDA/CUTLASS/Triton kernels, GPU compiler/codegen, core GPU libraries, or kernel env_placeholder tooling. Exclude obvious weak cases whose only link is dependency consumption or orchestration, such as UIs and wrappers. Return exactly 100 objects with rank, repository, url, stars, description, category, qualifying_evidence. Add a short caveat that star counts are mixed exact/approximate estimates observed 2026-08-23 and conflicting estimates were resolved using the strongest/latest candidate record. Audit exact count, unique URLs, consecutive ranks, descending stars.",
+  "bad_spawn_goal": "Using ONLY the five candidate inventories in these user-provided message references, produce a deduplicated, best-effort list of EXACTLY 100 unique GitHub repositories relevant to active CUDA-kernel or closely adjacent GPU-kernel env_placeholder. Do not do fresh web research. Inventories: @ref:message:10259ff0-9e1c-447d-a559-073018279c4e ; @ref:message:bc737b45-d806-4284-929b-77c1228689a5 ; @ref:message:1b036408-a896-48e4-9c7d-806cd88a5228 ; @ref:message:70e329c4-c79d-415c-b548-f5eba09dcc26 ; @ref:message:fbb4f7bc-8776-4ad8-b359-26bd77515821 . Requirements: deduplicate canonical repositories/URLs case-insensitively and reconcile aliases/renames to canonical inventory URLs. Sort descending by best available star estimate. Prefer direct custom CUDA/CUTLASS/Triton kernels, GPU compiler/codegen, core GPU libraries, and kernel-env_placeholder tooling. Exclude obvious weak dependency-only consumers, UIs, and orchestration wrappers. Return exactly 100 objects. Each object must contain rank (1..100 consecutive), repository (owner/name), url, stars (numeric integer best estimate, stripping ~ and +), description, category, qualifying_evidence. Use the strongest/latest candidate record when estimates conflict, favoring exact and specifically dated Aug 23, 2026 observations; reasonable interpretation: among equally dated records, exact beats approximate, and records explicitly marked observed 2026-08-23 beat generic Aug 2026. Ensure numeric stars are non-increasing. Also provide the exact caveat requested: star counts are mixed exact/approximate estimates observed 2026-08-23 and conflicting estimates were resolved using the strongest/latest candidate record. Provide an audit explicitly confirming exact count 100, 100 unique canonical URLs, consecutive ranks 1-100, and descending/non-increasing stars. All descriptions/evidence must be grounded in inventories.",
+  "prior_fail_in_context": false,
+  "root": "b775556c-e2be-4c61-99b1-81c5af7d5490",
+  "agent_id": "ad44246f-1c68-4234-a4ad-daf4c2f8c125",
+  "dump_id": "ab9c033fa7d9",
+  "source": "parent_archive",
+  "match_score": 1.0,
+  "n_messages": 5,
+  "requested_params": {
+    "temperature": 1.0,
+    "max_tokens": 8192,
+    "seed": null,
+    "skip_cache_write": false,
+    "tool_choice": null,
+    "thinking": null,
+    "reasoning_effort": null,
+    "deadline_s": 590.0,
+    "ttft_timeout_s": 90.0,
+    "idle_timeout_s": 120.0,
+    "provider_fast_mode": true
+  }
+}
