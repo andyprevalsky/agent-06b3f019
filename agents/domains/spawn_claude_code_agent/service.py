@@ -154,47 +154,127 @@ def build_codex_credential_feedback(
     ]
 
 
-def build_durable_terminal_transcript(
-    display_output: str,
+_TIMELINE_EVENT_TYPES = frozenset(
+    {
+        "session",
+        "agent_message",
+        "assistant",
+        "tool_use",
+        "tool_result",
+        "result",
+        "error",
+    }
+)
+
+
+def _tool_detail_from_event(event: dict[str, Any]) -> str:
+    """Human-readable one-line detail for a tool_use event."""
+    paths = event.get("paths")
+    if isinstance(paths, list):
+        path_bits = [str(p).strip() for p in paths if str(p).strip()]
+        if path_bits:
+            return ", ".join(path_bits[:4])
+
+    raw_input = event.get("input")
+    if isinstance(raw_input, str) and raw_input.strip():
+        return raw_input.strip()[:240]
+    if isinstance(raw_input, dict):
+        for key in (
+            "command",
+            "file_path",
+            "path",
+            "notebook_path",
+            "pattern",
+            "query",
+            "url",
+            "content",
+            "description",
+        ):
+            value = raw_input.get(key)
+            if isinstance(value, str) and value.strip():
+                text = value.strip().replace("\n", " ")
+                return text[:240]
+        try:
+            return json.dumps(raw_input, ensure_ascii=False, default=str)[:240]
+        except Exception:
+            return ""
+    return ""
+
+
+def format_code_events_transcript(
     code_events: list[Dict[str, Any]] | None = None,
     action_summary: list[str] | None = None,
 ) -> str:
-    """Prefer live PTY display; fall back to SDK events + action summary.
+    """Format SDK/code-agent events into FE-parseable coherent log lines.
 
-    ``ClaudeCodeSession.output`` is what the FE CompletedTranscriptSurface renders.
-    The back-end rejects empty-string POSTs, so a session that only emitted
-    structured ``code_agent_event`` frames (no PTY bytes) would otherwise store
-    null and the chip would show "Transcript unavailable". Rebuild a durable
-    text transcript from those events so storage, the FE, and bench checks all
-    see the work the code agent actually did.
+    Markers match ``ParseCodeAgentTranscript``:
+    ``[Claude]``, ``[Claude tool]``, ``[Claude result]``.
     """
-    if (display_output or "").strip():
-        return display_output
-
     lines: list[str] = []
     for event in code_events or []:
         if not isinstance(event, dict):
             continue
-        event_type = str(event.get("type") or event.get("event_type") or "event").strip() or "event"
-        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
-        status = event.get("status")
-        parts = [f"[{event_type}]"]
-        if tool_name:
-            parts.append(str(tool_name))
-        if status:
-            parts.append(f"status={status}")
-        detail = None
-        for key in ("content", "message", "result", "text", "input", "output", "error"):
-            value = event.get(key)
-            if isinstance(value, str) and value.strip():
-                detail = value.strip()
-                break
-            if isinstance(value, (dict, list)) and value:
-                detail = json.dumps(value, ensure_ascii=False, default=str)
-                break
-        if detail:
-            parts.append(detail[:800])
-        lines.append(" ".join(parts))
+        event_type = str(event.get("type") or event.get("event_type") or "").strip().lower()
+        provider = str(event.get("provider") or "claude").strip().title() or "Claude"
+        if provider.lower() not in {"claude", "codex"}:
+            provider = "Claude"
+
+        if event_type == "session":
+            cwd = event.get("cwd") or event.get("working_directory")
+            detail = f"Session started in {cwd}" if cwd else "Session started"
+            lines.append(f"[{provider}] {detail}")
+            continue
+
+        if event_type in {"agent_message", "assistant"}:
+            text = event.get("text") or event.get("content") or event.get("message")
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{provider}] {text.strip()}")
+            continue
+
+        if event_type == "tool_use":
+            tool_name = (
+                event.get("tool")
+                or event.get("name")
+                or event.get("tool_name")
+                or "Tool"
+            )
+            detail = _tool_detail_from_event(event)
+            if detail:
+                lines.append(f"[{provider} tool] {tool_name} · {detail}")
+            else:
+                lines.append(f"[{provider} tool] {tool_name}")
+            continue
+
+        if event_type == "tool_result":
+            # Keep the log tool-centric; skip noisy raw tool_result blobs unless they
+            # carry a short status/error the FE can show under the next result card.
+            status = event.get("status")
+            error = event.get("error")
+            if isinstance(error, str) and error.strip():
+                lines.append(f"[{provider} result] {error.strip()[:400]}")
+            elif isinstance(status, str) and status.strip() and status.strip().lower() not in {
+                "completed",
+                "success",
+                "ok",
+            }:
+                lines.append(f"[{provider} result] status={status.strip()}")
+            continue
+
+        if event_type == "result":
+            status = str(event.get("status") or "").strip()
+            text = event.get("text") or event.get("content") or event.get("result")
+            if isinstance(text, str) and text.strip():
+                prefix = "failed — " if status.lower() in {"failed", "error"} else ""
+                lines.append(f"[{provider} result] {prefix}{text.strip()[:800]}")
+            elif status:
+                lines.append(f"[{provider} result] {status}")
+            continue
+
+        if event_type == "error":
+            text = event.get("text") or event.get("error") or event.get("message")
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{provider} result] {text.strip()[:800]}")
+            continue
 
     summary_lines = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
     if summary_lines:
@@ -204,6 +284,39 @@ def build_durable_terminal_transcript(
         lines.extend(summary_lines[-30:])
 
     return "\n".join(lines).strip()
+
+
+def code_events_have_timeline(code_events: list[Dict[str, Any]] | None) -> bool:
+    """True when events carry a real note/tool timeline (prefer over janky PTY)."""
+    for event in code_events or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or event.get("event_type") or "").strip().lower()
+        if event_type in _TIMELINE_EVENT_TYPES:
+            return True
+    return False
+
+
+def build_durable_terminal_transcript(
+    display_output: str,
+    code_events: list[Dict[str, Any]] | None = None,
+    action_summary: list[str] | None = None,
+) -> str:
+    """Prefer structured event timeline; fall back to PTY display / summary.
+
+    ``ClaudeCodeSession.output`` is what the FE CompletedTranscriptSurface renders.
+    Raw Claude Code PTY often staircase-wraps and dumps tool lines under a single
+    note. Structured ``code_agent_event`` frames are the coherent source of truth
+    when present. If only PTY bytes exist, keep them so the chip is never empty.
+    """
+    formatted_events = format_code_events_transcript(code_events, action_summary)
+    if formatted_events and code_events_have_timeline(code_events):
+        return formatted_events
+
+    if (display_output or "").strip():
+        return display_output
+
+    return formatted_events
 
 
 

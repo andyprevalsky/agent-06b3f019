@@ -2669,7 +2669,14 @@ async def run_all_tests():
     await r.record_async("repo_create_session_raises", test_repo_create_e2b_session_raises_on_error)
     await r.record_async("repo_persist_output_happy", test_repo_persist_terminal_output_happy)
     await r.record_async("repo_persist_output_swallows", test_repo_persist_terminal_output_swallows_errors)
-    r.record("build_durable_terminal_transcript", test_build_durable_terminal_transcript_prefers_display_then_events)
+    r.record(
+        "build_durable_terminal_transcript",
+        test_build_durable_terminal_transcript_prefers_events_over_janky_pty,
+    )
+    r.record(
+        "format_code_events_transcript",
+        test_format_code_events_transcript_skips_empty_tool_results,
+    )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
     await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
@@ -2763,28 +2770,78 @@ async def run_all_tests():
 
 
 
-def test_build_durable_terminal_transcript_prefers_display_then_events():
-    """Empty PTY display still yields a storeable transcript from SDK events."""
+def test_build_durable_terminal_transcript_prefers_events_over_janky_pty():
+    """Structured code events win over raw PTY so the FE gets a coherent log."""
     from domains.spawn_claude_code_agent.service import build_durable_terminal_transcript
 
-    assert build_durable_terminal_transcript("live pty\noutput", [{"type": "tool_use"}], ["step"]) == "live pty\noutput"
+    # No timeline events → keep PTY display.
+    assert build_durable_terminal_transcript("live pty\noutput", [], ["step"]) == "live pty\noutput"
     assert build_durable_terminal_transcript("   ", [], []) == ""
 
+    janky_pty = (
+        "[Claude] Session started in /home/user\n"
+        "                                      [Claude] I'll start...\n"
+        "                                                           [Claude tool] Bash\n"
+    )
     transcript = build_durable_terminal_transcript(
-        "",
+        janky_pty,
         [
-            {"type": "tool_use", "name": "Bash", "input": {"command": "gh search"}},
-            {"type": "assistant", "content": "Found 100 repos"},
-            {"type": "result", "status": "completed"},
+            {
+                "provider": "claude",
+                "type": "session",
+                "cwd": "/home/user",
+            },
+            {
+                "provider": "claude",
+                "type": "agent_message",
+                "text": "I'll start by checking GitHub access.",
+            },
+            {
+                "provider": "claude",
+                "type": "tool_use",
+                "tool": "Bash",
+                "input": {"command": "gh auth status"},
+            },
+            {
+                "provider": "claude",
+                "type": "tool_use",
+                "name": "Write",
+                "input": {"file_path": "/home/user/discovery.py"},
+            },
+            {
+                "type": "assistant",
+                "content": "Found 100 repos",
+            },
+            {"type": "result", "status": "completed", "text": "done"},
         ],
         ["Connected to Claude Code WebSocket", "Agentic loop finished"],
     )
-    assert "[tool_use] Bash" in transcript
-    assert "gh search" in transcript
-    assert "[assistant]" in transcript
-    assert "Found 100 repos" in transcript
+    assert "[Claude] Session started in /home/user" in transcript
+    assert "[Claude] I'll start by checking GitHub access." in transcript
+    assert "[Claude tool] Bash · gh auth status" in transcript
+    assert "[Claude tool] Write · /home/user/discovery.py" in transcript
+    assert "[Claude] Found 100 repos" in transcript
+    assert "[Claude result] done" in transcript
     assert "## Action Summary" in transcript
     assert "Connected to Claude Code WebSocket" in transcript
+    # Must not prefer the staircase PTY once events exist.
+    assert "                                      [Claude]" not in transcript
+
+
+def test_format_code_events_transcript_skips_empty_tool_results():
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "tool_use", "tool": "Bash", "input": {"command": "ls"}},
+            {"type": "tool_result", "status": "completed"},
+            {"type": "tool_result", "error": "command failed"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude tool] Bash · ls",
+        "[Claude result] command failed",
+    ]
 
 
 if __name__ == "__main__":

@@ -542,6 +542,66 @@ describe('code-agent terminal formatting', () => {
     );
     expect(blocks.find((block) => block.title === 'Exited cleanly')?.tone).toBe('green');
   });
+
+  it('parses Claude tool markers into icon tool rows instead of Claude notes', () => {
+    const blocks = parseCodeAgentTranscript(
+      [
+        '[Claude] Session started in /home/user',
+        "[Claude] I'll start by checking GitHub access.",
+        '[Claude tool] Bash · gh auth status',
+        '[Claude tool] Write · /home/user/discovery.py',
+        '[Claude] Confirmed: unauthenticated access only.',
+        '[Claude tool] Bash',
+        '[Claude result] done',
+      ].join('\n'),
+    );
+
+    expect(blocks.map((block) => block.kind)).toEqual([
+      'agent',
+      'tool',
+      'tool',
+      'agent',
+      'tool',
+      'result',
+    ]);
+    // Consecutive Claude notes merge into one coherent agent block.
+    expect(blocks[0]?.lines.join('\n')).toContain('Session started in /home/user');
+    expect(blocks[0]?.lines.join('\n')).toContain("I'll start by checking GitHub access.");
+    expect(blocks[0]?.title).toBe('Claude');
+    expect(blocks.find((block) => block.title === 'Bash')?.lines).toEqual(['gh auth status']);
+    expect(blocks.find((block) => block.title === 'Write')?.lines).toEqual([
+      '/home/user/discovery.py',
+    ]);
+    // Tools must not be swallowed under a "Claude note" dump.
+    expect(blocks.some((block) => block.title === 'Claude note')).toBe(false);
+  });
+
+  it('heals staircase mid-token wraps so tool rows stay readable', () => {
+    const blocks = parseCodeAgentTranscript(
+      [
+        '[Claude] Session started in /home/user',
+        "                                      [Claude] I'll start by checking GitHub access.",
+        '                                                           [Claude tool] Bas',
+        'h',
+        ' [Claude tool] Bash',
+        '                   [Claude tool] Write',
+        '[Claude] Now the discovery runner with checkpointi',
+        'ng/resumability:',
+      ].join('\n'),
+    );
+
+    expect(blocks.map((block) => block.kind)).toEqual(['agent', 'tool', 'tool', 'tool', 'agent']);
+    expect(blocks.filter((block) => block.kind === 'tool').map((block) => block.title)).toEqual([
+      'Bash',
+      'Bash',
+      'Write',
+    ]);
+    expect(blocks[blocks.length - 1]?.lines.join('\n')).toContain(
+      'discovery runner with checkpointing/resumability:',
+    );
+    expect(blocks.some((block) => block.title === 'Bas')).toBe(false);
+    expect(blocks.some((block) => block.title === 'Claude note')).toBe(false);
+  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

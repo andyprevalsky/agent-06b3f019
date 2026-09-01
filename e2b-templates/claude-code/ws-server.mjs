@@ -322,6 +322,30 @@ function pathsFromToolInput(input) {
   );
 }
 
+function detailFromToolInput(input, paths) {
+  if (input && typeof input === "object") {
+    for (const key of [
+      "command",
+      "file_path",
+      "path",
+      "notebook_path",
+      "pattern",
+      "query",
+      "url",
+      "description",
+    ]) {
+      const value = input[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim().replace(/\s+/g, " ").slice(0, 240);
+      }
+    }
+  }
+  if (Array.isArray(paths) && paths.length) {
+    return paths.slice(0, 4).join(", ");
+  }
+  return "";
+}
+
 function emitClaudeMessage(message) {
   if (message.type === "system" && message.subtype === "init") {
     appendEvent({
@@ -360,9 +384,10 @@ function emitClaudeMessage(message) {
           input: part.input || {},
           paths,
         });
+        const detail = detailFromToolInput(part.input || {}, paths);
         appendOutput(
           "stdout",
-          `[Claude tool] ${part.name}${paths.length ? ` ${paths.join(", ")}` : ""}\n`,
+          `[Claude tool] ${part.name}${detail ? ` · ${detail}` : ""}\n`,
         );
       }
     }
