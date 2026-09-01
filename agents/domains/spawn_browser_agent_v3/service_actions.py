@@ -2943,7 +2943,11 @@ async def _active_element_write_lock_signal(session: Any) -> str:
     get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
     if not callable(get_page):
         return ""
-    page = await get_page()
+    try:
+        page = await _maybe_await(get_page())
+    except Exception as error:
+        logger.debug("Unable to resolve page for active-element write-lock signal", error=str(error))
+        return ""
     if not page:
         return ""
     try:
