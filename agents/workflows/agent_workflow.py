@@ -1250,84 +1250,107 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
 
-        # Send SMS notification for agent_started to every ROOT agent, regardless
-        # of source, so the user always gets a text with the deep link to any
-        # agent they create (SMS, web, mac-app, API). Sub-agents (parent_workflow_id
-        # set) are intentionally excluded — at 10k agents a per-spawn SMS would
-        # firehose the user's phone. Benchmark/eval runs are suppressed centrally
-        # on the backend (Agent.isBenchmark) so this never texts the operator.
+        # Helper: gate is open unless explicitly False
+        def _gate_open(name: str) -> bool:
+            return self.context_gates.get(name, True)
+
+        # Kick SMS off the critical path — start now, await after first LLM.
+        # Prod traces showed ~2–4s here before any model call.
+        self._deferred_startup_sms_handle = None
         if not parent_workflow_id and not self._deployment_resume:
             try:
                 notification_args = [user_id, "agent_started", agent_id, {"goal": goal}]
                 if self.world_model_mode != "real":
                     notification_args.append(self.world_model_mode)
-                await workflow.execute_activity(
+                self._deferred_startup_sms_handle = workflow.start_activity(
                     notify_sms_event_activity,
                     args=notification_args,
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                workflow.logger.info("Sent agent_started SMS notification")
+                workflow.logger.info("Started agent_started SMS notification (deferred await)")
             except Exception as e:
-                workflow.logger.warning(f"Failed to send agent_started SMS notification: {e}")
+                workflow.logger.warning(f"Failed to start agent_started SMS notification: {e}")
 
-        # Fetch user context once (for both phases), respecting context_gates
+        # Parallelize independent startup fetches (historically one Temporal RTT each).
         user_context_section = getattr(self, "user_context_section", "")
 
-        # Helper: gate is open unless explicitly set to False
-        def _gate_open(name: str) -> bool:
-            return self.context_gates.get(name, True)
-
-        try:
-            user_context_section = await workflow.execute_activity(
-                get_user_context,
-                args=[user_id, self.context_gates],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch user context: {e}")
-        self.user_context_section = user_context_section
-
-        if self.context_gates:
-            workflow.logger.info(f"Context gates applied: {self.context_gates}")
-
-        # Fetch user's custom system name (for approval messages and SMS)
-        try:
-            self.system_name = await workflow.execute_activity(
-                get_user_system_name,
-                args=[user_id],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            workflow.logger.info(f"Using system name: {self.system_name}")
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
-
-        # Fetch user's custom system prompt (for personality injection)
-        # Skip if custom_system_prompt gate is closed
-        if _gate_open("custom_system_prompt"):
+        async def _fetch_user_context() -> str:
             try:
-                self.custom_system_prompt = await workflow.execute_activity(
+                return await workflow.execute_activity(
+                    get_user_context,
+                    args=[user_id, self.context_gates],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch user context: {e}")
+                return user_context_section
+
+        async def _fetch_system_name() -> Optional[str]:
+            try:
+                return await workflow.execute_activity(
+                    get_user_system_name,
+                    args=[user_id],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch system name, using default 'Rose': {e}")
+                return None
+
+        async def _fetch_custom_system_prompt() -> Optional[str]:
+            if not _gate_open("custom_system_prompt"):
+                workflow.logger.info("Skipping custom system prompt (gate closed)")
+                return None
+            try:
+                return await workflow.execute_activity(
                     get_user_custom_system_prompt,
                     args=[user_id],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
-                if self.custom_system_prompt:
-                    workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
             except Exception as e:
                 workflow.logger.warning(f"Failed to fetch custom system prompt: {e}")
-        else:
-            workflow.logger.info("Skipping custom system prompt (gate closed)")
+                return None
 
-        # Fetch one direct compute token for Rose. Claude is preferred when
-        # available; otherwise GPT/Codex is used. Each LLM call receives only
-        # the selected token family.
-        await self._refresh_compute_token(user_id)
+        async def _fetch_agent_config() -> Dict[str, Any]:
+            try:
+                return await workflow.execute_activity(
+                    fetch_agent_config,
+                    args=[agent_id],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
+                return {}
+
+        (
+            user_context_section,
+            fetched_system_name,
+            fetched_custom_system_prompt,
+            agent_config,
+            _,
+        ) = await asyncio.gather(
+            _fetch_user_context(),
+            _fetch_system_name(),
+            _fetch_custom_system_prompt(),
+            _fetch_agent_config(),
+            self._refresh_compute_token(user_id),
+        )
+
+        self.user_context_section = user_context_section or ""
+        if self.context_gates:
+            workflow.logger.info(f"Context gates applied: {self.context_gates}")
+        if fetched_system_name:
+            self.system_name = fetched_system_name
+            workflow.logger.info(f"Using system name: {self.system_name}")
+        if fetched_custom_system_prompt:
+            self.custom_system_prompt = fetched_custom_system_prompt
+            workflow.logger.info(f"Custom system prompt loaded: {len(self.custom_system_prompt)} chars")
 
         # Inject custom system prompt as hidden USER message for new agents
-        # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
         if self.custom_system_prompt and not context and not self._deployment_resume:
             try:
                 await self._post_message(
@@ -1342,41 +1365,28 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to inject custom system prompt: {e}")
 
-        # Fetch response schema and write_lock_enabled from agent config
         response_schema = self.output_schema
         fetched_parent_agent_id = None
-        try:
-            agent_config = await workflow.execute_activity(
-                fetch_agent_config,
-                args=[agent_id],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+        if agent_config:
             response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
-            self.output_schema = response_schema  # Single source of truth for output schema
-            self.write_lock_enabled = agent_config.get("write_lock_enabled", True)  # Default to True (locked)
+            self.output_schema = response_schema
+            self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
             workflow.logger.info(
                 f"Fetched output_schema: {response_schema is not None}, write_lock_enabled: {self.write_lock_enabled}"
             )
-        except Exception as e:
-            workflow.logger.warning(f"Failed to fetch agent config for response_schema: {e}")
 
-        # If no schema was provided at create time, generate one synchronously NOW.
-        # The schema appears in the initial main/verifier system prompts. Awaiting
-        # startup generation keeps that initial cache prefix stable; later user
-        # feedback revisions take the non-blocking context-message path below.
+        # Schema generation is itself an LLM call (~5s p50). Do not block the
+        # first reasoning turn — start the activity and apply after first LLM
+        # via _await_deferred_startup().
         is_sub_agent = bool(parent_workflow_id or parent_agent_id or fetched_parent_agent_id)
+        self._deferred_startup_schema_handle = None
         if response_schema is None and self.goal and not is_sub_agent:
             try:
-                generated = await workflow.execute_activity(
+                self._deferred_startup_schema_handle = workflow.start_activity(
                     set_response_schema_activity,
                     args=[
                         agent_id,
-                        # Persisted-row goal: schema generation is content-keyed on
-                        # this text, so the stable goal keeps it cacheable (and
-                        # matches the TS-side setResponseSchema, which reads the
-                        # Agent row).
                         [self.fast_cache_goal],
                         self._active_compute_token_payload(),
                         self.fast_mode_cache_enabled,
@@ -1385,21 +1395,13 @@ class AgentWorkflow:
                     start_to_close_timeout=timedelta(seconds=90),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
-                if isinstance(generated, dict) and generated.get("schema"):
-                    self.output_schema = generated["schema"]
-                    response_schema = self.output_schema
-                    workflow.logger.info(
-                        f"Generated output_schema synchronously with "
-                        f"{len(self.output_schema.get('fields', []))} field(s)"
-                    )
+                workflow.logger.info("Started response_schema generation (deferred await)")
             except Exception as e:
-                workflow.logger.warning(f"Failed to generate response_schema at startup: {e}")
+                workflow.logger.warning(f"Failed to start response_schema generation at startup: {e}")
         elif response_schema is None and is_sub_agent:
             workflow.logger.info("Skipping response_schema generation for sub-agent")
 
-        # Freeze the schema used in the main-agent system prompt. Any later
-        # feedback-driven revision is appended at the conversation tail so the
-        # provider can reuse the existing system/message cache prefix.
+        # Freeze whatever schema we have for the first system prompt.
         self._system_prompt_output_schema = self.output_schema
         self._response_schema_initialized = True
         self._start_response_schema_refresh()
@@ -2398,14 +2400,58 @@ class AgentWorkflow:
 
         if pending_tool_call_id in terminal_tool_call_ids:
             self._cloud_agent_lifecycle_finished = True
-        elif pending_tool_call_id is None:
-            # Most agent-mode workflows are created directly and never receive
-            # the chat-mode cloud_agent lifecycle row. Cache that absence after
-            # the first scan so later token callbacks do not keep scheduling
-            # message-poll activities before user-visible tool execution.
-            self._cloud_agent_lifecycle_finished = True
+            return None
 
+        # Direct API / SMS root spawns never get a chat-mode cloud_agent chip.
+        # Synthesize a stable toolCallId so Preparing/Starting Reasoning/Ready
+        # still emit (spawn-latency ratchet + FE parity). Sub-agents skip this
+        # to avoid an extra message-poll on every token callback.
+        if not self.parent_workflow_id:
+            self._cloud_agent_lifecycle_tool_call_id = f"tc-cloud-agent-{self.agent_id}"
+            # current_phase is set in run(); bare unit instances may not have it yet.
+            self._cloud_agent_lifecycle_start_phase = self._cloud_agent_lifecycle_start_phase or (
+                "execute" if getattr(self, "current_phase", None) == "EXECUTE" else "plan"
+            )
+            return self._cloud_agent_lifecycle_tool_call_id
+
+        # Cache absence for sub-agents so later token callbacks do not keep
+        # scheduling message-poll activities before user-visible tool execution.
+        self._cloud_agent_lifecycle_finished = True
         return None
+
+    async def _await_deferred_startup(self) -> None:
+        """Await SMS + schema activities kicked off during startup (off critical path).
+
+        Schema generation is itself an LLM call (~5s p50) and SMS notify is ~2–4s.
+        Both are started during init and applied here after the first reasoning turn
+        begins (or at end-of-run for short/smoke paths that never emit tokens).
+        Idempotent — safe to call multiple times.
+        """
+        sms_handle = getattr(self, "_deferred_startup_sms_handle", None)
+        schema_handle = getattr(self, "_deferred_startup_schema_handle", None)
+        self._deferred_startup_sms_handle = None
+        self._deferred_startup_schema_handle = None
+
+        if sms_handle is not None:
+            try:
+                await sms_handle
+                workflow.logger.info("Completed deferred agent_started SMS notification")
+            except Exception as e:
+                workflow.logger.warning(f"Deferred agent_started SMS notification failed: {e}")
+
+        if schema_handle is not None:
+            try:
+                generated = await schema_handle
+                if isinstance(generated, dict) and generated.get("schema"):
+                    self.output_schema = generated["schema"]
+                    workflow.logger.info(
+                        "Applied deferred response_schema with "
+                        f"{len(self.output_schema.get('fields', []))} field(s)"
+                    )
+                else:
+                    workflow.logger.warning("Deferred response_schema generation returned no schema")
+            except Exception as e:
+                workflow.logger.warning(f"Deferred response_schema generation failed: {e}")
 
     async def _advance_cloud_agent_lifecycle(self, title: str, tool_status: str) -> None:
         """Advance the chat-mode cloud-agent chip without exposing it to LLM context."""
@@ -3382,6 +3428,7 @@ class AgentWorkflow:
             self.iteration_offset = max(self.iteration_offset, iteration)
         self.context_size = tokens_in_delta + cache_read_input_tokens + cache_creation_input_tokens
         await self._advance_cloud_agent_lifecycle(CLOUD_AGENT_READY_TITLE, "FINISHED")
+        await self._await_deferred_startup()
 
         # Track actual_model for credit billing
         if actual_model:
@@ -4227,6 +4274,7 @@ class AgentWorkflow:
         6. Signal parent (if sub-agent)
         7. Save blueprint (fire-and-forget, no UI)
         """
+        await self._await_deferred_startup()
         workflow.logger.info("✓ Marking task complete")
         # Latch the terminal flag FIRST so any late child_cost_update signal
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
