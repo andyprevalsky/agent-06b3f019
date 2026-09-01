@@ -351,6 +351,17 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
     args.push(params.worldModelMode);
   }
   if (params.forbiddenTools !== undefined && params.forbiddenTools.length > 0) {
+    const resumeAlreadyPushed =
+      params.resumeState !== undefined ||
+      (params.worldModelMode !== undefined && params.worldModelMode !== 'real');
+    if (!resumeAlreadyPushed) {
+      args.push(null);
+    }
+    const worldModelAlreadyPushed =
+      params.worldModelMode !== undefined && params.worldModelMode !== 'real';
+    if (!worldModelAlreadyPushed) {
+      args.push(params.worldModelMode ?? 'real');
+    }
     args.push(params.forbiddenTools);
   }
   return args;
