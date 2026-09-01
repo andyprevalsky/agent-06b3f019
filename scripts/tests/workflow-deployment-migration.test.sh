@@ -232,6 +232,12 @@ if grep -q 'TEMPORAL_WORKER_REQUIRE_ACTIVATION="\${REQUIRE_ACTIVATION}"' "$WORKF
   fail "Fly deploy must NOT gate workers on require_activation (standby stranded prod on every deploy)"
 fi
 require_text "$WORKFLOW" 'group: deploy-agents-production' "agent deploys must share one production concurrency group"
+require_text "$WORKFLOW" 'Resolve Fly app name from fly.toml' "deploy must read Fly app from fly.toml (not a missing secret)"
+require_text "$WORKFLOW" 'steps.flyapp.outputs.name' "cutover step must use fly.toml-resolved app name"
+if grep -qE 'secrets\.FLY_APP_NAME \|\| secrets\.FAS_APP_NAME' "$WORKFLOW"; then
+  fail "deploy must not use unsupported secret || fallback for APP (GitHub Actions leaves it empty)"
+fi
+require_text "$COOP" 'agents/fly.toml' "cutover script must fall back to fly.toml when APP is unset"
 require_text "$WORKFLOW" 'cancel-in-progress: false' "a later agent deploy must queue without canceling the validated fleet"
 require_text "$WORKFLOW" 'Cooperative Fly deploy + generation cutover' "agent deploy workflow must hold serialization through cooperative cutover"
 require_text "$WORKFLOW" 'RELEASE_CONTEXT: agent-cutover/${{ github.run_id }}-${{ github.run_attempt }}' "deploy lock release must be scoped to the exact run attempt"
@@ -434,6 +440,10 @@ require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'migrate-open-
   "cooperative cutover must force-migrate only after the drain SLO"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'count-open-workflows-on-queue.ts' \
   "cooperative cutover must poll open workflows on the old generation queue"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--image-label' \
+  "cutover build must tag the pushed image for registry.fly.io resolution"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'registry.fly.io' \
+  "cutover must construct image ref from app + image label (flyctl deploy has no --json)"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--build-only' \
   "surface-change cutover must build/push without replacing old-gen machines first"
 require_text "$ROOT/agents/fly.toml" 'kill_timeout = "35m"' \

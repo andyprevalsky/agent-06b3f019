@@ -54,6 +54,17 @@ jobs:
           echo "queue=navi-agent-tasks@$SURFACE_HASH" >> "$GITHUB_OUTPUT"
           echo "Workflow surface generation: $SURFACE_HASH"
 
+      - name: Resolve Fly app name from fly.toml
+        id: flyapp
+        run: |
+          APP=$(grep -E '^\s*app\s*=' agents/fly.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$APP" ]; then
+            echo "Could not read app from agents/fly.toml" >&2
+            exit 1
+          fi
+          echo "name=$APP" >> "$GITHUB_OUTPUT"
+          echo "Fly app: $APP"
+
       - name: Classify whether shipped worker runtime changed
         id: classify
         env:
@@ -94,7 +105,7 @@ jobs:
           DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
           DRAIN_TIMEOUT_SECONDS: "2700"
           REQUIRE_ACTIVATION: ${{ steps.classify.outputs.require_activation }}
-          APP: ${{ secrets.FLY_APP_NAME || secrets.FAS_APP_NAME }}
+          APP: ${{ steps.flyapp.outputs.name }}
         run: |
           set -euo pipefail
           release() {
