@@ -3589,7 +3589,7 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert "partial cart" in task.prompt.lower()
     assert "manifest line item" in task.prompt.lower()
     assert task.pinned_facts["manifest_source"] == "doordash-food-plan-grocery-fixture.json"
-    assert task.pinned_facts["prod_user_id"] == "5824c58c-7f11-4c92-8f81-33eb3c324a2f"
+    assert task.pinned_facts["prod_user_id"] == "1f85ff25-6e29-4c1b-8739-f917bd101a30"
     assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
     assert task.environment["required_injectable_cookie_domains"] == ["doordash.com"]
     assert task.expected_attention_kind == "write_lock"
