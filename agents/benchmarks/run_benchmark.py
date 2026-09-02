@@ -42,6 +42,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12483,14 +12484,15 @@ async def main_async(args):
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
-    _live_task_agent_ids: dict[str, str] = {}
+    # name -> FIFO of live agent ids so k-repeats of the same task name each keep
+    # their own deep link instead of overwriting one shared slot.
+    _live_task_agent_ids: dict[str, list[str]] = {}
 
     def _remember_live_agent(task_name: str, agent_id: str) -> None:
         if task_name and agent_id:
-            _live_task_agent_ids[task_name] = agent_id
+            _live_task_agent_ids.setdefault(task_name, []).append(agent_id)
 
-    def _report_snapshot(running_names: set[str]) -> RunState:
-        finished = {r.name for r in run.task_results}
+    def _report_snapshot(running_name_counts: dict[str, int]) -> RunState:
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
@@ -12498,8 +12500,11 @@ async def main_async(args):
             peak_fly_machines = None
         task_world_model_modes = {t.name: t.world_model_mode for t in tasks if t.world_model_mode}
         per_task: list[TaskCard] = []
+        finished_agent_ids: set[str] = set()
         for r in run.task_results:
             status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
+            if r.agent_id:
+                finished_agent_ids.add(r.agent_id)
             per_task.append(
                 TaskCard(
                     name=r.name,
@@ -12516,9 +12521,17 @@ async def main_async(args):
                     infra_usd=_infra_usd_for_elapsed(r.duration_seconds) if r.duration_seconds is not None else None,
                 )
             )
-        for name in running_names:
-            if name not in finished:
-                live_agent_id = _live_task_agent_ids.get(name)
+        # Emit one running card per still-pending occurrence (Counter), not one
+        # per distinct name — otherwise `bench A A A` with one finished looks
+        # like all three completed.
+        for name, running_count in running_name_counts.items():
+            live_ids = [
+                agent_id
+                for agent_id in _live_task_agent_ids.get(name, [])
+                if agent_id not in finished_agent_ids
+            ]
+            for index in range(running_count):
+                live_agent_id = live_ids[index] if index < len(live_ids) else None
                 per_task.append(
                     TaskCard(
                         name=name,
@@ -12551,28 +12564,32 @@ async def main_async(args):
             infra=Infra(peak_machines=peak_fly_machines) if peak_fly_machines is not None else None,
         )
 
-    def _emit_report(running_names: set[str], *, force: bool = False) -> None:
+    def _emit_report(running_name_counts: dict[str, int] | None = None, *, force: bool = False) -> None:
         try:
-            _report_emitter.maybe_emit(_report_snapshot(running_names), force=force)
-        except Exception as exc:  # observability must never fail the run
+            _report_emitter.maybe_emit(
+                _report_snapshot(dict(running_name_counts or {})),
+                force=force,
+            )
+        except Exception as exc:  # [REDACTED] must never fail the run
             print(f"  ⚠ report card emit failed: {exc}")
 
     # Live report card: a background ticker emits on a timer so the dashboard updates
     # DURING the run. The drain loop only emits on task-completion events, so a single
     # blocking task (or any long task) would otherwise leave the report screen blank
-    # until the very end. `_report_running` is kept in sync by the branches below.
-    _report_running: set[str] = set()
+    # until the very end. `_report_running` is a Counter so k-repeats of the same
+    # task name each keep a distinct "running" slot.
+    _report_running: Counter[str] = Counter()
 
     async def _report_ticker() -> None:
         try:
             while True:
                 await asyncio.sleep(1)
-                _emit_report(set(_report_running))
+                _emit_report(dict(_report_running))
         except asyncio.CancelledError:
             pass
 
     _report_ticker_task = asyncio.create_task(_report_ticker())
-    _emit_report(set(), force=True)
+    _emit_report({}, force=True)
     try:
         if checkpoint_source_mode:
             if len(tasks) != 1:
@@ -12627,7 +12644,7 @@ async def main_async(args):
                 for task in exclusive_db_tasks:
                     print(f"\n  Running destructive DB fixture task serially: {task.name}")
                     _report_running.clear()
-                    _report_running.add(task.name)
+                    _report_running[task.name] += 1
                     result = await run_single_task(
                         base_url,
                         task,
@@ -12635,8 +12652,10 @@ async def main_async(args):
                         on_agent_created=_remember_live_agent,
                     )
                     run.task_results.append(result)
-                    _report_running.discard(task.name)
-                    _emit_report(set())
+                    _report_running[task.name] -= 1
+                    if _report_running[task.name] <= 0:
+                        del _report_running[task.name]
+                    _emit_report({})
 
                 task_runners = _parallel_task_runners(
                     parallel_batch,
@@ -12650,7 +12669,9 @@ async def main_async(args):
                 pending = set(pending_results)
                 while pending:
                     _report_running.clear()
-                    _report_running.update(pending_results[future].name for future in pending)
+                    _report_running.update(
+                        Counter(pending_results[future].name for future in pending)
+                    )
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     for task_future in done:
                         task = pending_results[task_future]
@@ -12672,7 +12693,7 @@ async def main_async(args):
                             )
                         else:
                             run.task_results.append(result)
-                    _emit_report({pending_results[future].name for future in pending})
+                    _emit_report(Counter(pending_results[future].name for future in pending))
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()
@@ -12699,7 +12720,7 @@ async def main_async(args):
         else:
             for task in tasks:
                 _report_running.clear()
-                _report_running.add(task.name)
+                _report_running[task.name] += 1
                 result = await run_single_task(
                     base_url,
                     task,
@@ -12707,11 +12728,13 @@ async def main_async(args):
                     on_agent_created=_remember_live_agent,
                 )
                 run.task_results.append(result)
-                _report_running.discard(task.name)
-                _emit_report(set())
+                _report_running[task.name] -= 1
+                if _report_running[task.name] <= 0:
+                    del _report_running[task.name]
+                _emit_report({})
     finally:
         _report_ticker_task.cancel()
-        _emit_report(set(), force=True)
+        _emit_report({}, force=True)
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
         if realtime_started:

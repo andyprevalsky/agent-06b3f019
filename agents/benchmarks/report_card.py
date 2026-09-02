@@ -161,12 +161,23 @@ def _is_completed(status: str) -> bool:
 def build_report_card(state: RunState) -> dict:
     """Build the report-card dict from a RunState. Pure — no clock, no I/O."""
     if state.task_names:
-        by_name = {t.name: t for t in state.per_task}
-        per_task = [
-            by_name.get(name, TaskCard(name=name, status="queued", tokens_in=0, tokens_out=0))
-            for name in state.task_names
-        ]
-        per_task.extend(t for t in state.per_task if t.name not in set(state.task_names))
+        # Consume per_task cards in order so intentional k-repeats of the same
+        # task name (e.g. `bench A A A`) keep independent statuses. A dict keyed
+        # by name would collapse three parallel runs into one card and paint all
+        # three slots with whichever result finished last.
+        from collections import defaultdict, deque
+
+        pools: dict[str, deque[TaskCard]] = defaultdict(deque)
+        for card in state.per_task:
+            pools[card.name].append(card)
+        per_task = []
+        for name in state.task_names:
+            if pools[name]:
+                per_task.append(pools[name].popleft())
+            else:
+                per_task.append(TaskCard(name=name, status="queued", tokens_in=0, tokens_out=0))
+        for leftover in pools.values():
+            per_task.extend(leftover)
     else:
         per_task = list(state.per_task)
 
