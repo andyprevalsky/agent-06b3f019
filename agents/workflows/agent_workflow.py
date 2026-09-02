@@ -1478,8 +1478,10 @@ class AgentWorkflow:
             )
             if self.is_paused:
                 # Deployment-restored cold states must not enter run_agent's
-                # bounded pause polling before reaching a durable wait. Consume no
-                # workflow timers or activities until a valid signal unpauses us.
+                # LLM/tool loop. Park in _wait_for_unpause_or_handoff instead:
+                # periodic generation-pointer checks + a 30s wait_condition
+                # timeout so cooperative cutover can continue_as_new paused
+                # agents without waiting for a resume signal.
                 handoff_queue = await self._wait_for_unpause_or_handoff()
                 await self._wait_for_response_schema_refresh()
                 await self._flush_pending_messages()

@@ -29,7 +29,6 @@ import {
   cleanupSupersededWorkerActivationMarkers,
   getTemporalClient,
   startAgentWorkflowExecution,
-  workerDeploymentActivationWorkflowId,
   type TemporalWorkflowExecutionRef,
 } from '../src/providers/temporal';
 import {
@@ -390,9 +389,18 @@ async function startAndReady(prepared: PreparedAgentWorkflowReplacement): Promis
   };
 }
 
+type ActivityCountSnapshot = {
+  totalEvents: number;
+  activities: number;
+  markers: number;
+  workflowTaskFailures: number;
+  workflowTasks: number;
+  timers: number;
+};
+
 async function activityCount(
   handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>
-) {
+): Promise<ActivityCountSnapshot> {
   const history = await handle.fetchHistory();
   return {
     totalEvents: history.events?.length ?? 0,
@@ -419,6 +427,53 @@ async function activityCount(
           event.timerCanceledEventAttributes != null
       ).length ?? 0,
   };
+}
+
+function sameActivityCount(a: ActivityCountSnapshot, b: ActivityCountSnapshot): boolean {
+  return (
+    a.totalEvents === b.totalEvents &&
+    a.activities === b.activities &&
+    a.markers === b.markers &&
+    a.workflowTaskFailures === b.workflowTaskFailures &&
+    a.workflowTasks === b.workflowTasks &&
+    a.timers === b.timers
+  );
+}
+
+/**
+ * Cooperative cutover parks restored PAUSED / COST_LIMIT / OUT_OF_CREDITS agents
+ * in `_wait_for_unpause_or_handoff`: one pointer activity + a 30s wait_condition
+ * timer per poll cycle. READY can land before that first timer is scheduled, so
+ * a naive before/after sample races the handoff arming. Settle until the handoff
+ * timer is present and history stops moving, then prove no further growth inside
+ * the poll window (no LLM/tool burn while cold).
+ */
+async function assertColdHandoffHistoryStable(
+  handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>,
+  {
+    settleMs = 8_000,
+    observeMs = 2_000,
+  }: { settleMs?: number; observeMs?: number } = {}
+): Promise<ActivityCountSnapshot> {
+  const settleDeadline = Date.now() + settleMs;
+  let last = await activityCount(handle);
+  while (Date.now() < settleDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const next = await activityCount(handle);
+    if (sameActivityCount(next, last) && next.timers >= 1) {
+      last = next;
+      break;
+    }
+    last = next;
+  }
+  assert.ok(
+    last.timers >= 1,
+    `expected cooperative handoff wait timer while cold-paused; got ${JSON.stringify(last)}`
+  );
+  await new Promise((resolve) => setTimeout(resolve, observeMs));
+  const after = await activityCount(handle);
+  assert.deepStrictEqual(after, last);
+  return after;
 }
 
 async function main(): Promise<void> {
@@ -1262,11 +1317,8 @@ async function main(): Promise<void> {
   });
   await check('cold_workflow_uses_no_resources_while_waiting', async () => {
     assert(pausedHandle);
-    const before = await activityCount(pausedHandle.handle);
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-    const after = await activityCount(pausedHandle.handle);
-    assert.deepStrictEqual(after, before);
-    return `${after.totalEvents} total history events; zero activity/task/timer/history growth while paused`;
+    const after = await assertColdHandoffHistoryStable(pausedHandle.handle);
+    return `${after.totalEvents} total history events; handoff timer armed; zero growth inside poll window`;
   });
   await check('fresh_history_has_no_patch_or_nondeterminism', async () => {
     assert(pausedHandle);
@@ -1404,9 +1456,8 @@ async function main(): Promise<void> {
         await ready.handle.query('is_cost_limit_reached_query'),
         status === 'COST_LIMIT_REACHED'
       );
-      const before = await activityCount(ready.handle);
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      assert.deepStrictEqual(await activityCount(ready.handle), before);
+      await assertColdHandoffHistoryStable(ready.handle, { observeMs: 1_000 });
+      return `${status} restored cold; handoff timer armed; zero growth inside poll window`;
     });
   }
 
@@ -1647,7 +1698,11 @@ async function main(): Promise<void> {
   await check('same_sha_old_marker_is_retired_without_retiring_current_attempt', async () => {
     const buildId = process.env.TEMPORAL_WORKER_BUILD_ID!;
     const deploymentToken = process.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN!;
-    const currentMarkerId = workerDeploymentActivationWorkflowId(buildId, deploymentToken);
+    // Cooperative cutover does not keep an activation marker running after the
+    // deploy finishes. Mint the "current" marker here so the cleanup property
+    // under test is self-contained and does not depend on leftover deploy state.
+    const currentMarkerId = await activateTemporalWorkerBuild(buildId, deploymentToken);
+    workflowIds.add(currentMarkerId);
     const oldToken = `validation-${runId}`;
     const oldMarkerId = await activateTemporalWorkerBuild(buildId, oldToken);
     workflowIds.add(oldMarkerId);
