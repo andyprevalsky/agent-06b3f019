@@ -9918,6 +9918,39 @@ async def test_execute_action_press_key_with_humanizer():
     ah.record_action.assert_awaited()
 
 
+async def test_execute_action_press_key_enter_triggers_purchase_write_lock():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.ensure_browser_overlays_suppressed = AsyncMock()
+    page = MagicMock()
+    page.evaluate = AsyncMock(return_value="Place order")
+    session = MagicMock()
+    session.get_page = AsyncMock(return_value=page)
+    session.get_current_page = AsyncMock(return_value=page)
+    dom.session = session
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.press_key = AsyncMock()
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "press_key", "params": {"key": "Enter"}},
+        humanizer=hu,
+        current_url="https://shop.example/checkout",
+        write_lock_enabled=True,
+        write_lock_approvals={},
+    )
+
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "purchase"
+    hu.press_key.assert_not_awaited()
+    ah.record_action.assert_not_awaited()
+
+
 async def test_execute_action_press_key_prefers_provider_computer_input():
     """Kernel-level input can dismiss browser chrome that CDP cannot reach."""
     from domains.spawn_browser_agent_v3 import repo
@@ -19769,6 +19802,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_press_key_humanizer",
         test_execute_action_press_key_with_humanizer,
+    )
+    await r.record_async(
+        "execute_action_press_key_enter_triggers_purchase_write_lock",
+        test_execute_action_press_key_enter_triggers_purchase_write_lock,
     )
     await r.record_async(
         "execute_action_press_key_provider_computer",

@@ -15,6 +15,7 @@ from domains.spawn_agent.config import (
     is_oai_demo_goal,
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
+    resolve_explore_oai_demo,
 )
 from domains.spawn_browser_agent_v3.config import (
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -83,6 +84,16 @@ def test_resolve_explore_depth_promotes_only_on_demo_fast_mode():
     assert resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=True) == "deep"
     assert resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=False) == "quick"
     assert resolve_explore_depth(None, fast_mode_cache_enabled=False, oai_demo=True) == "quick"
+
+
+def test_resolve_explore_oai_demo_explicit_flag_wins_over_goal():
+    live_goal = "Order a Vanilla Bean Shakerato from Blue Bottle"
+    demo_goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    assert resolve_explore_oai_demo(live_goal, oai_demo=True) is True
+    assert resolve_explore_oai_demo(demo_goal, oai_demo=False) is False
+    assert resolve_explore_oai_demo(demo_goal) is True
+    assert resolve_explore_oai_demo(live_goal) is False
+    assert resolve_explore_oai_demo("Research Andrew Huberman last 90 days") is False
 
 
 def test_raise_source_connect_gates_dedups_and_swallows_reject():

@@ -648,6 +648,11 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
+        # One classification for depth, fire-and-track, and the activity's
+        # cancel/evidence wrap-up. Re-resolving inside the activity from the
+        # child goal or Fast Mode root disagrees (truncated explore goals,
+        # resolver failures).
+        oai_demo = is_oai_demo_mass_agent_task(workflow_instance)
         # Caller-controlled thoroughness → turn cap + activity timeout.
         # Fast Mode promotes quick/missing → deep so July OAi-demo explores can
         # reach attempt_completion (~14 turns avg; quick aborts at 5).
@@ -656,7 +661,7 @@ class SpawnAgentManager(ToolManager):
             fast_mode_cache_enabled=bool(
                 getattr(workflow_instance, "fast_mode_cache_enabled", False)
             ),
-            oai_demo=is_oai_demo_mass_agent_task(workflow_instance),
+            oai_demo=oai_demo,
         )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 
@@ -780,6 +785,7 @@ class SpawnAgentManager(ToolManager):
                 explore_max_iterations,
                 world_model_mode,
                 local_data_summary,
+                oai_demo,
             ]
             activity_handle = workflow.start_activity(
                 spawn_explore_agent_activity,
@@ -798,7 +804,7 @@ class SpawnAgentManager(ToolManager):
             if (
                 bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
                 and capture_tool_results is None
-                and is_oai_demo_mass_agent_task(workflow_instance)
+                and oai_demo
             ):
                 # Do not wait for an inflight slot here. A Huberman-class GP
                 # has 224–336 sequential spawn_agent turns; blocking the parent
