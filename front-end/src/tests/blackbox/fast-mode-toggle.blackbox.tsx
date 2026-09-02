@@ -194,17 +194,36 @@ describe('Fast Mode account gating', () => {
     expect(screen.queryByLabelText('Select a test prompt')).toBeNull();
   });
 
-  it('config allow-list contains exactly the two intended accounts', () => {
-    expect(FAST_MODE_USER_IDS).toContain(CURRENT_ANDY_ID); // Andy
-    expect(FAST_MODE_USER_IDS).toContain(CURRENT_TAMY_ID); // Tamy
-    expect(FAST_MODE_USER_IDS.length).toBe(2);
+  it.each(ADMIN_USER_IDS)('#2 shows the toggle for admin account %s', (userId) => {
+    hookMocks.authUserId = userId;
+
+    render(
+      <TooltipProvider>
+        <QueryInput
+          value=""
+          onChange={vi.fn()}
+          onSubmit={vi.fn()}
+          fastMode={false}
+          onFastModeChange={vi.fn()}
+          showModelSelector={false}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByTestId('fast-mode-toggle')).toBeInTheDocument();
   });
 
-  it('defaults Fast Mode on for Andy and Tamy', async () => {
+  it('keeps Fast Mode access in parity with the admin allow-list', () => {
+    expect(FAST_MODE_USER_IDS).toEqual(ADMIN_USER_IDS);
+    expect(FAST_MODE_USER_IDS).toContain(CURRENT_ANDY_ID);
+    expect(FAST_MODE_USER_IDS).toContain(CURRENT_TAMY_ID);
+  });
+
+  it('defaults Fast Mode on for every admin account', async () => {
     const { DEFAULT_FAST_MODE_USER_IDS } = await import('@/lib/fastModeAccounts');
+    expect(DEFAULT_FAST_MODE_USER_IDS).toEqual(ADMIN_USER_IDS);
     expect(DEFAULT_FAST_MODE_USER_IDS).toContain(CURRENT_ANDY_ID);
     expect(DEFAULT_FAST_MODE_USER_IDS).toContain(CURRENT_TAMY_ID);
-    expect(DEFAULT_FAST_MODE_USER_IDS.length).toBe(2);
   });
 });
 
