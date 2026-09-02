@@ -63,6 +63,7 @@ from benchmarks.benchmark_tasks import (
     get_timeout_floor,
     list_all_tasks,
 )
+from benchmarks.polar_catalog import is_polar_bench_task
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
     LIVE_FIXTURE_NAMES,
@@ -11178,7 +11179,10 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             )
     elif args.suite:
         if args.suite == "all":
-            tasks = all_tasks()
+            # Default "all" stays on the first-party catalog. Polar Odysseys +
+            # BU Bench V1 (~300 live browser tasks) are opt-in via
+            # `--suite polar-bench` so full-suite / daily fleets never fan out.
+            tasks = [t for t in all_tasks() if not is_polar_bench_task(t)]
         elif args.suite == "auth":
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
@@ -11189,11 +11193,17 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             # Bench axis: rose-bench = harness-independent capability evals,
             # pipeline-e2e = harness plumbing tests. Orthogonal to tag slices.
-            tasks = [t for t in all_tasks() if t.bench == args.suite]
+            # Polar tasks also declare bench=rose-bench but stay behind the
+            # polar-bench suite tag so this axis stays first-party-sized.
+            tasks = [
+                t
+                for t in all_tasks()
+                if t.bench == args.suite and not is_polar_bench_task(t)
+            ]
         else:
             tasks = get_tasks_by_tag(args.suite)
     else:
-        tasks = all_tasks()
+        tasks = [t for t in all_tasks() if not is_polar_bench_task(t)]
 
     if not explicit_task_names:
         # Suite selection only runs complete benchmark evals. `status == "incomplete"`

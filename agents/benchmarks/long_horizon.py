@@ -340,7 +340,16 @@ def load_raw_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
         data = json.load(f)
     if not isinstance(data, list) or not data:
         raise ValueError(f"{path} must contain a non-empty JSON array of tasks")
-    return data
+    # Merge Polar Odysseys + BU Bench V1 (group/tag = polar-bench) so validation
+    # covers the same catalog run_benchmark / hub serve.
+    from benchmarks.polar_catalog import load_polar_tasks_file
+
+    polar = load_polar_tasks_file()
+    base_names = {t.get("name") for t in data if isinstance(t, dict)}
+    overlap = sorted(base_names & {t["name"] for t in polar})
+    if overlap:
+        raise ValueError(f"{path}: polar catalog name collision: {overlap[:5]}")
+    return [*data, *polar]
 
 
 def validate_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
