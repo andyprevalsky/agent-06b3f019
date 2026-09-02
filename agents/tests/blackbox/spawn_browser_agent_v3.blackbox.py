@@ -8299,6 +8299,47 @@ async def test_execute_action_unknown_action():
     assert out["success"] is False
     assert "Unknown action" in out["error"]
 
+
+async def test_execute_action_drag_dispatches_to_tool_executor():
+    """drag is advertised to browser-use models; dispatcher must not 404 it.
+
+    Repro: browser-biometrics-webdecoy agent 8fadb018 burned early steps on
+    `Unknown action: drag` while simulating natural mouse motion on FCaptcha.
+    """
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    with patch(
+        "browser_tools.tool_executor_v2._execute_drag",
+        new_callable=AsyncMock,
+        return_value={"success": True, "message": "Dragged (1,2) → (3,4)"},
+    ) as drag_mock:
+        out = await execute_action(
+            dom,
+            ah,
+            {
+                "action": "drag",
+                "params": {
+                    "start_x": 1,
+                    "start_y": 2,
+                    "end_x": 3,
+                    "end_y": 4,
+                    "steps": 10,
+                },
+            },
+        )
+    assert out["success"] is True
+    drag_mock.assert_awaited_once()
+    assert drag_mock.await_args.args[0] is dom
+    assert drag_mock.await_args.args[1] is ah
+    assert drag_mock.await_args.args[2]["start_x"] == 1
+    assert drag_mock.await_args.args[2]["end_y"] == 4
+
+
 def test_read_network_requests_tool_is_advertised():
     """The read_network_requests tool (1:1 with Claude Code's) is exposed to the
     browser model so it can detect a 403/Cloudflare challenge by status code or
@@ -19717,6 +19758,10 @@ async def run_all_tests():
     await r.record_async("execute_action_no_session", test_execute_action_no_session)
     await r.record_async("execute_action_element_not_found", test_execute_action_element_not_found)
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
+    await r.record_async(
+        "execute_action_drag_dispatches_to_tool_executor",
+        test_execute_action_drag_dispatches_to_tool_executor,
+    )
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
     r.record(
         "captured_request_body_redaction",
