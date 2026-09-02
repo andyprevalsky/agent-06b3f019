@@ -51,6 +51,7 @@ import { smsBluebottleBehaviorCases } from './sms-supervisor.bluebottle.behavior
 import {
   testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_voiceNoteRoundTrip,
+  testWriteCommit_startNewAgentForwardsInboundImageAttachments,
 } from './sms-supervisor.media.behavior';
 import {
   bareRejectionBlackboxCase,
@@ -598,6 +599,10 @@ async function runAll() {
     {
       name: 'write-commit -- start_new_agent applies before user send',
       fn: testWriteCommit_startNewAgentCommitsBeforeUserSend,
+    },
+    {
+      name: 'write-commit -- start_new_agent forwards inbound MMS image attachments',
+      fn: () => testWriteCommit_startNewAgentForwardsInboundImageAttachments(prisma),
     },
     {
       name: 'write-commit -- commit failure produces user-visible error',

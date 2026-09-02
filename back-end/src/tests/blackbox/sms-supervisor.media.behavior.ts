@@ -7,9 +7,11 @@ import {
   BASE_URL,
   BYPASS_FIXTURE_REAL_LLM,
   assertStatus,
+  buildStartNewAgentFixture,
   captureToken,
   capturedSmsBody,
   cleanupAgentScopedUser,
+  findSurgeCallForReply,
   provisionUserWithPhone,
   readCapturesAfter,
   readCapturesForToken,
@@ -160,4 +162,95 @@ export async function testRealLlm_voiceNoteRoundTrip(prisma: PrismaClient) {
     expectInReply: 'paris',
     expectedPersistedUserTurn: '[1 attachment(s)]',
   });
+}
+
+/**
+ * RCA repro: inbound MMS image(s) must be uploaded and attached as USER
+ * `filePointer` messages on the agent created by `start_new_agent`.
+ *
+ * Prod evidence (agent 6ea9cd1e…): SMS session had `[7 attachment(s)]`, the
+ * supervisor called start_new_agent for mirror-stain cleanup, and every agent
+ * message landed with `filePointer: null` — so the create path never received
+ * the files.
+ */
+export async function testWriteCommit_startNewAgentForwardsInboundImageAttachments(
+  prisma: PrismaClient
+): Promise<void> {
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping MMS→create attachment forward test');
+    return;
+  }
+  const cursor = (probeRes.data as { nextId: number }).nextId - 1;
+
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-mms-forward-create');
+  const goal = `WS-mms-forward-goal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const replyText = `Started agent for: ${goal.substring(0, 30)}`;
+  const fixture = buildStartNewAgentFixture(goal, replyText, 0.5);
+  const media = await serveFixture('red-square.png', 'image/png');
+
+  try {
+    await setFixtureOverride(userId, fixture);
+
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'Clean the stains in the attached photo',
+          attachments: [{ url: media.url, type: 'image/png' }],
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    await waitFor(() => findSurgeCallForReply(token, cursor, phone, replyText));
+
+    const agent = await waitFor(async () => {
+      return await prisma.agent.findFirst({ where: { userId, goal } });
+    });
+    if (!agent) {
+      throw new Error('Expected agent row to exist after start_new_agent commit');
+    }
+
+    const attachmentMessages = await prisma.message.findMany({
+      where: {
+        agentId: agent.id,
+        role: 'USER',
+        NOT: { filePointer: { equals: null } },
+      },
+    });
+    if (attachmentMessages.length < 1) {
+      throw new Error(
+        `Expected start_new_agent to forward inbound MMS as USER filePointer message(s); ` +
+          `got ${attachmentMessages.length} attachment messages on agent ${agent.id}`
+      );
+    }
+
+    const pointer = attachmentMessages[0].filePointer as {
+      mime_type?: string;
+      original_filename?: string;
+      storage_path?: string;
+    } | null;
+    if (!pointer || typeof pointer !== 'object') {
+      throw new Error(`Expected filePointer object, got: ${JSON.stringify(pointer)}`);
+    }
+    if (pointer.mime_type !== 'image/png') {
+      throw new Error(`Expected mime_type=image/png, got: ${JSON.stringify(pointer)}`);
+    }
+    if (!pointer.storage_path || !pointer.original_filename) {
+      throw new Error(
+        `Expected storage_path + original_filename on forwarded attachment, got: ${JSON.stringify(pointer)}`
+      );
+    }
+  } finally {
+    media.close();
+    await cleanupAgentScopedUser(prisma, userId);
+  }
 }
