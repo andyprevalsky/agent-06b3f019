@@ -462,6 +462,54 @@ class RecoverFromChallengeBrowserTool(BaseModel):
     )
 
 
+class ReadCookiesBrowserTool(BaseModel):
+    """Temporary: dump the full Playwright cookie jar (no truncation)."""
+
+    tool: Literal["read_cookies"]
+    domain: Optional[str] = Field(
+        default=None,
+        description="Optional domain filter (e.g. doordash.com). Omit to return every cookie.",
+    )
+
+
+class DeleteCookiesBrowserTool(BaseModel):
+    """Temporary: delete cookies by name and/or domain from the live jar."""
+
+    tool: Literal["delete_cookies"]
+    name: Optional[str] = Field(
+        default=None,
+        description="Cookie name to delete. Omit to delete every cookie matching domain.",
+    )
+    domain: Optional[str] = Field(
+        default=None,
+        description="Cookie domain filter (e.g. .doordash.com). Omit to match name across domains.",
+    )
+
+
+class RestoreCookiesBrowserTool(BaseModel):
+    """Temporary: re-inject the vaulted CookieBundle for the current URL's auth realm."""
+
+    tool: Literal["restore_cookies"]
+
+
+class ReadBrowserConfigBrowserTool(BaseModel):
+    """Temporary: read the live browser provider/proxy config + allowlisted alternatives."""
+
+    tool: Literal["read_browser_config"]
+
+
+class SetBrowserConfigBrowserTool(BaseModel):
+    """Temporary: switch to one allowlisted browser config (new session + cookie restore)."""
+
+    tool: Literal["set_browser_config"]
+    config_key: str = Field(
+        description=(
+            "Allowlisted config key: steel_fixed, kernel_mobile, kernel_residential_city, "
+            "kernel_residential_state, kernel_residential_country, steel_managed, kernel_isp"
+        )
+    )
+
+
 class PaymentLineItem(BaseModel):
     """A checkout line item extracted from the merchant page."""
 
@@ -932,6 +980,11 @@ BROWSER_TOOL_MODELS = {
     "attempt_completion": AttemptCompletionBrowserTool,
     "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
     "recover_from_challenge": RecoverFromChallengeBrowserTool,
+    "read_cookies": ReadCookiesBrowserTool,
+    "delete_cookies": DeleteCookiesBrowserTool,
+    "restore_cookies": RestoreCookiesBrowserTool,
+    "read_browser_config": ReadBrowserConfigBrowserTool,
+    "set_browser_config": SetBrowserConfigBrowserTool,
     "request_payment_card": RequestPaymentCardBrowserTool,
     # Internal write-lock approval metadata. Kept in the stable tool surface
     # so a forked request can append only a user message and preserve cache reads.

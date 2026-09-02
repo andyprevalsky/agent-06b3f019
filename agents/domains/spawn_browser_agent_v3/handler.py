@@ -50,6 +50,8 @@ from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import (
     format_browser_state_for_tool,
     recover_from_challenge_enabled,
+    cookie_config_tools_enabled,
+    COOKIE_CONFIG_TOOL_NAMES,
 )
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
@@ -1937,11 +1939,12 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         task=task,
         browser_state=browser_state_for_llm,
         action_history=action_entries,
-        available_actions=(
-            [a for a in AVAILABLE_ACTIONS if a != "recover_from_challenge"]
-            if not recover_from_challenge_enabled()
-            else AVAILABLE_ACTIONS
-        ),
+        available_actions = ([
+                a
+                for a in AVAILABLE_ACTIONS
+                if (a != "recover_from_challenge" or recover_from_challenge_enabled())
+                and (a not in COOKIE_CONFIG_TOOL_NAMES or cookie_config_tools_enabled())
+            ]),
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
@@ -7768,6 +7771,256 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         browser_turn_messages=browser_turn_messages,
                     ),
                 }
+
+
+
+            if action_name == "read_browser_config":
+                from domains.spawn_browser_agent_v3.cookie_config_tools import (
+                    cookie_config_tools_enabled as _cookie_tools_on,
+                    describe_browser_config,
+                )
+
+                read_call_id = _browser_action_tool_call_id(llm_result)
+                if not _cookie_tools_on():
+                    action_result = {
+                        "success": False,
+                        "error": "read_browser_config is disabled for this run",
+                    }
+                else:
+                    description = describe_browser_config(
+                        browser_session_metadata=browser_session_metadata,
+                        last_promoted_browser_config_key=last_promoted_browser_config_key,
+                        dead_browser_config_keys=dead_browser_config_keys,
+                    )
+                    action_result = {
+                        "success": True,
+                        **description,
+                        "current_url": current_url,
+                    }
+                await _finalize_browser_recovery_action_result(
+                    action_result=action_result,
+                    dom_service=dom_service,
+                    action_history=action_history,
+                    thinking=thinking,
+                    recovery_reason="read_browser_config",
+                    browser_turn_messages=browser_turn_messages,
+                    task_prompt=task_prompt,
+                    browser_state={},
+                    unified_action=unified_action,
+                    recovery_call_id=read_call_id,
+                    browser_stream=browser_stream,
+                )
+                continue
+
+            if action_name == "set_browser_config":
+                from domains.spawn_browser_agent_v3.cookie_config_tools import (
+                    BROWSER_CONFIG_ALLOWLIST,
+                    blocked_config_keys_for_target,
+                    cookie_config_tools_enabled as _cookie_tools_on,
+                )
+
+                set_call_id = _browser_action_tool_call_id(llm_result)
+                set_params = unified_action.get("params", {}) or {}
+                target_key = str(set_params.get("config_key") or "").strip()
+                if not _cookie_tools_on():
+                    action_result = {
+                        "success": False,
+                        "error": "set_browser_config is disabled for this run",
+                        "requested_config_key": target_key,
+                    }
+                    await _finalize_browser_recovery_action_result(
+                        action_result=action_result,
+                        dom_service=dom_service,
+                        action_history=action_history,
+                        thinking=thinking,
+                        recovery_reason="set_browser_config",
+                        browser_turn_messages=browser_turn_messages,
+                        task_prompt=task_prompt,
+                        browser_state={},
+                        unified_action=unified_action,
+                        recovery_call_id=set_call_id,
+                        browser_stream=browser_stream,
+                    )
+                    continue
+                try:
+                    blocked_keys = blocked_config_keys_for_target(
+                        target_key,
+                        extra_blocked=dead_browser_config_keys,
+                    )
+                except ValueError as exc:
+                    action_result = {
+                        "success": False,
+                        "error": str(exc),
+                        "requested_config_key": target_key,
+                        "allowlisted_browser_configs": list(BROWSER_CONFIG_ALLOWLIST),
+                    }
+                    await _finalize_browser_recovery_action_result(
+                        action_result=action_result,
+                        dom_service=dom_service,
+                        action_history=action_history,
+                        thinking=thinking,
+                        recovery_reason="set_browser_config",
+                        browser_turn_messages=browser_turn_messages,
+                        task_prompt=task_prompt,
+                        browser_state={},
+                        unified_action=unified_action,
+                        recovery_call_id=set_call_id,
+                        browser_stream=browser_stream,
+                    )
+                    continue
+
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title=f"Switching browser config to {target_key}",
+                    task_id=task_id,
+                    message=(
+                        f"TEMPORARY set_browser_config: forcing allowlisted key {target_key} "
+                        f"(blocking {blocked_keys})"
+                    ),
+                    status=MessageStatus.IN_PROGRESS,
+                    browser_url=browser_url,
+                    action_type="browser_config_switch",
+                    tool_call_id=set_call_id,
+                    extra_metadata={"configKey": target_key, "blockedConfigKeys": blocked_keys},
+                )
+                try:
+                    storage_state = await _capture_rotation_storage_state(input_page)
+                    if not isinstance(storage_state, dict):
+                        raise RuntimeError("Failed to capture storage_state before set_browser_config")
+                    user_agent = ""
+                    with contextlib.suppress(Exception):
+                        user_agent = str(
+                            await asyncio.wait_for(
+                                input_page.evaluate("() => navigator.userAgent"),
+                                timeout=15,
+                            )
+                        )
+                    if last_promoted_browser_config_key:
+                        dead_browser_config_keys.add(last_promoted_browser_config_key)
+                    config_result = await recover_browser_challenge(
+                        config,
+                        task_id,
+                        current_url,
+                        storage_state,
+                        user_agent,
+                        recovery_reason=f"set_browser_config:{target_key}",
+                        blocked_resource_url="",
+                        require_payment_cdn=False,
+                        preserve_auth=True,
+                        blocked_config_keys=blocked_keys,
+                    )
+                    if config_result.get("rate_limited"):
+                        raise RuntimeError("set_browser_config rate-limited by recover-challenge")
+                    if config_result.get("error") and not config_result.get("ws_url"):
+                        raise RuntimeError(str(config_result.get("error")))
+                    new_cdp_url = config_result.get("ws_url")
+                    if not isinstance(new_cdp_url, str) or not new_cdp_url:
+                        raise RuntimeError(
+                            f"set_browser_config did not return a CDP URL for {target_key}; "
+                            f"failed_config_keys={config_result.get('failed_config_keys')}"
+                        )
+                    reconnected = await _reconnect_browser_stack_after_rotation(
+                        new_cdp_url=new_cdp_url,
+                        old_dom_service=dom_service,
+                        old_playwright_browser=playwright_browser,
+                        old_playwright_instance=playwright_instance,
+                        old_driver_pid=playwright_driver_pid,
+                        fingerprint_injection=fingerprint_injection,
+                        agent_id=agent_id,
+                        config=config,
+                        task_id=task_id,
+                    )
+                    dom_service = reconnected["dom_service"]
+                    dom_page = reconnected["dom_page"]
+                    input_page = reconnected["input_page"]
+                    playwright_browser = reconnected["playwright_browser"]
+                    playwright_instance = reconnected["playwright_instance"]
+                    playwright_driver_pid = reconnected["playwright_driver_pid"]
+                    session_id = config_result.get("session_id", session_id)
+                    browser_url = config_result.get("debug_url", browser_url)
+                    cdp_url = new_cdp_url
+                    browser_session_metadata = _updated_rotation_session_metadata(
+                        browser_session_metadata,
+                        config_result,
+                    )
+                    promoted_key = str(config_result.get("config_key") or target_key)
+                    last_promoted_browser_config_key = promoted_key or None
+                    if last_promoted_browser_config_key:
+                        dead_browser_config_keys.discard(last_promoted_browser_config_key)
+                    for failed_key in config_result.get("failed_config_keys") or []:
+                        key = str(failed_key or "").strip()
+                        if key:
+                            dead_browser_config_keys.add(key)
+                    with contextlib.suppress(Exception):
+                        if session_id and str(current_url).startswith(("http://", "https://")):
+                            await prepare_browser_auth(
+                                config,
+                                user_id=user_id,
+                                session_id=session_id,
+                                target_url=current_url,
+                            )
+                    message = (
+                        f"Switched browser config to {promoted_key} "
+                        f"(requested {target_key}); cookies re-injected when possible."
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Browser config switched",
+                        task_id=task_id,
+                        message=message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_config_switch",
+                        tool_call_id=set_call_id,
+                        extra_metadata={
+                            "configKey": promoted_key,
+                            "requestedConfigKey": target_key,
+                            "provider": config_result.get("provider"),
+                            "proxyTier": config_result.get("proxy_tier"),
+                        },
+                    )
+                    action_result = {
+                        "success": True,
+                        "message": message,
+                        "config_key": promoted_key,
+                        "requested_config_key": target_key,
+                        "provider": config_result.get("provider"),
+                        "proxy_tier": config_result.get("proxy_tier"),
+                        "allowlisted_browser_configs": list(BROWSER_CONFIG_ALLOWLIST),
+                        "current_url": current_url,
+                    }
+                except Exception as exc:
+                    error_message = extract_error_message(exc)
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Browser config switch failed",
+                        task_id=task_id,
+                        message=error_message,
+                        status=MessageStatus.ERROR,
+                        browser_url=browser_url,
+                        action_type="browser_config_switch",
+                        tool_call_id=set_call_id,
+                        extra_metadata={"configKey": target_key},
+                    )
+                    action_result = {
+                        "success": False,
+                        "error": error_message,
+                        "requested_config_key": target_key,
+                    }
+                await _finalize_browser_recovery_action_result(
+                    action_result=action_result,
+                    dom_service=dom_service,
+                    action_history=action_history,
+                    thinking=thinking,
+                    recovery_reason=f"set_browser_config:{target_key}",
+                    browser_turn_messages=browser_turn_messages,
+                    task_prompt=task_prompt,
+                    browser_state={},
+                    unified_action=unified_action,
+                    recovery_call_id=set_call_id,
+                    browser_stream=browser_stream,
+                )
+                continue
 
             if action_name == "recover_from_challenge":
                 recovery_params = unified_action.get("params", {}) or {}

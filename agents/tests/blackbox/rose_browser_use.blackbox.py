@@ -453,11 +453,22 @@ def test_build_browser_use_tools_emits_valid_required_keywords():
 
 def test_provider_tool_schemas_follow_browser_pydantic_models():
     from browser_tools.schemas import BROWSER_TOOL_MODELS
+    from providers.rose.browser_use import (
+        COOKIE_CONFIG_TOOL_NAMES,
+        cookie_config_tools_enabled,
+        recover_from_challenge_enabled,
+    )
 
     generated = {tool["name"]: tool for tool in build_browser_use_tools(list(BROWSER_TOOL_MODELS))}
 
-    assert set(generated) == set(BROWSER_TOOL_MODELS)
-    for tool_name, model in BROWSER_TOOL_MODELS.items():
+    expected = set(BROWSER_TOOL_MODELS)
+    if not recover_from_challenge_enabled():
+        expected.discard("recover_from_challenge")
+    if not cookie_config_tools_enabled():
+        expected -= set(COOKIE_CONFIG_TOOL_NAMES)
+    assert set(generated) == expected
+    for tool_name in expected:
+        model = BROWSER_TOOL_MODELS[tool_name]
         schema_fields = set(generated[tool_name]["input_schema"]["properties"])
         model_fields = set(model.model_fields) - {"tool"}
         assert schema_fields == model_fields, (

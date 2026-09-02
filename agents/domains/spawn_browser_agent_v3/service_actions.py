@@ -816,6 +816,11 @@ _INSPECTION_ACTIONS = {
     "evaluate",
     "extract",
     "screenshot",
+    "read_cookies",
+    "delete_cookies",
+    "restore_cookies",
+    "read_browser_config",
+    "set_browser_config",
 }
 _TERMINAL_ACTIONS = {
     "request_payment_card",
@@ -1397,7 +1402,183 @@ async def classify_evaluate_cdp_stall(
     return classification
 
 
+
+async def _resolve_action_page(context: _ActionContext) -> Any:
+    session = context.session
+    get_page = _explicit_session_callable(session, "get_current_page", "get_page")
+    if get_page is None:
+        raise RuntimeError("Browser session cannot expose the current page")
+    page = await _maybe_await(get_page())
+    if page is None:
+        raise RuntimeError("Browser session has no current page")
+    return page
+
+
+async def _execute_read_cookies_action(context: _ActionContext) -> Dict[str, Any]:
+    from domains.spawn_browser_agent_v3.cookie_config_tools import (
+        cookie_config_tools_enabled,
+        cookies_match_filters,
+        serialize_cookie,
+    )
+
+    if not cookie_config_tools_enabled():
+        return {"success": False, "error": "read_cookies is disabled for this run"}
+    page = await _resolve_action_page(context)
+    domain = context.params.get("domain")
+    cookies = await page.context.cookies()
+    serialized = [
+        serialize_cookie(cookie)
+        for cookie in cookies
+        if cookies_match_filters(cookie, domain=domain if isinstance(domain, str) else None)
+    ]
+    result = {
+        "success": True,
+        "cookie_count": len(serialized),
+        "cookies": serialized,
+        "domain_filter": domain,
+        "current_url": context.current_url,
+    }
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="read_cookies",
+        thinking=context.thinking,
+        params={"domain": domain},
+        result={"success": True, "cookie_count": len(serialized)},
+    )
+    return result
+
+
+async def _execute_delete_cookies_action(context: _ActionContext) -> Dict[str, Any]:
+    from domains.spawn_browser_agent_v3.cookie_config_tools import (
+        cookie_config_tools_enabled,
+        select_cookies_for_deletion,
+    )
+
+    if not cookie_config_tools_enabled():
+        return {"success": False, "error": "delete_cookies is disabled for this run"}
+    name = context.params.get("name")
+    domain = context.params.get("domain")
+    if not name and not domain:
+        return {
+            "success": False,
+            "error": "delete_cookies requires at least one of name or domain",
+        }
+    page = await _resolve_action_page(context)
+    before = await page.context.cookies()
+    targets = select_cookies_for_deletion(
+        before,
+        name=name if isinstance(name, str) else None,
+        domain=domain if isinstance(domain, str) else None,
+    )
+    for cookie in targets:
+        await page.context.clear_cookies(
+            name=cookie.get("name"),
+            domain=cookie.get("domain"),
+            path=cookie.get("path") or "/",
+        )
+    after = await page.context.cookies()
+    result = {
+        "success": True,
+        "deleted_count": len(targets),
+        "deleted_cookies": targets,
+        "remaining_cookie_count": len(after),
+        "current_url": context.current_url,
+    }
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="delete_cookies",
+        thinking=context.thinking,
+        params={"name": name, "domain": domain},
+        result={"success": True, "deleted_count": len(targets)},
+    )
+    return result
+
+
+async def _execute_restore_cookies_action(context: _ActionContext) -> Dict[str, Any]:
+    from domains.spawn_browser_agent_v3.cookie_config_tools import cookie_config_tools_enabled
+    from domains.spawn_browser_agent_v3.repo import prepare_browser_auth
+
+    if not cookie_config_tools_enabled():
+        return {"success": False, "error": "restore_cookies is disabled for this run"}
+    if not context.session_id:
+        return {"success": False, "error": "restore_cookies requires an active browser session id"}
+    if not context.user_id:
+        return {"success": False, "error": "restore_cookies requires user_id"}
+    if context.config is None:
+        return {"success": False, "error": "restore_cookies requires backend config"}
+    target_url = context.current_url or ""
+    if not target_url.startswith(("http://", "https://")):
+        return {
+            "success": False,
+            "error": f"restore_cookies needs an http(s) current URL, got {target_url!r}",
+        }
+    payload = await prepare_browser_auth(
+        context.config,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        target_url=target_url,
+    )
+    result = {
+        "success": True,
+        "message": "Re-injected vaulted CookieBundle via prepare-auth",
+        "prepare_auth": payload,
+        "current_url": target_url,
+    }
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="restore_cookies",
+        thinking=context.thinking,
+        params={},
+        result={"success": True, "current_url": target_url},
+    )
+    return result
+
+
+async def _execute_read_browser_config_action(context: _ActionContext) -> Dict[str, Any]:
+    from domains.spawn_browser_agent_v3.cookie_config_tools import (
+        cookie_config_tools_enabled,
+        describe_browser_config,
+    )
+
+    if not cookie_config_tools_enabled():
+        return {"success": False, "error": "read_browser_config is disabled for this run"}
+    # Handler should prefer its richer branch; this path is a fallback using params.
+    meta = context.params.get("browser_session_metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+    description = describe_browser_config(
+        browser_session_metadata=meta,
+        last_promoted_browser_config_key=context.params.get("last_promoted_browser_config_key"),
+        dead_browser_config_keys=context.params.get("dead_browser_config_keys") or [],
+    )
+    result = {"success": True, **description, "current_url": context.current_url}
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="read_browser_config",
+        thinking=context.thinking,
+        params={},
+        result={"success": True, "config_key": description.get("config_key")},
+    )
+    return result
+
+
 async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "read_cookies":
+        return await _execute_read_cookies_action(context)
+    if context.action_name == "delete_cookies":
+        return await _execute_delete_cookies_action(context)
+    if context.action_name == "restore_cookies":
+        return await _execute_restore_cookies_action(context)
+    if context.action_name == "read_browser_config":
+        return await _execute_read_browser_config_action(context)
+    if context.action_name == "set_browser_config":
+        return {
+            "success": False,
+            "error": (
+                "set_browser_config must be handled by the browser activity loop "
+                "(session rotation); it cannot run inside execute_action"
+            ),
+        }
     if context.action_name == "read_browser_state":
         return await _execute_read_browser_state(context)
     if context.action_name == "read_logs":

@@ -33,6 +33,28 @@ def recover_from_challenge_enabled() -> bool:
     raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
     return raw not in {"1", "true", "yes", "on"}
 
+
+# Temporary cookie/config primitives (DoorDash grocery A/B). Default ON.
+def cookie_config_tools_enabled() -> bool:
+    from domains.spawn_browser_agent_v3.cookie_config_tools import cookie_config_tools_enabled as _enabled
+
+    return _enabled()
+
+
+def _cookie_config_tool_names() -> tuple[str, ...]:
+    from domains.spawn_browser_agent_v3.cookie_config_tools import COOKIE_CONFIG_TOOL_NAMES
+
+    return tuple(COOKIE_CONFIG_TOOL_NAMES)
+
+
+COOKIE_CONFIG_TOOL_NAMES = (
+    "read_cookies",
+    "delete_cookies",
+    "restore_cookies",
+    "read_browser_config",
+    "set_browser_config",
+)
+
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
 
@@ -262,6 +284,72 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     "session with a forced anti-bot). Defaults to true."
                 ),
                 "required": False,
+            },
+        },
+    },
+    "read_cookies": {
+        "description": (
+            "TEMPORARY experiment tool. Read the live browser cookie jar with full fields "
+            "(name, value, domain, path, expires, httpOnly, secure, sameSite). Do not truncate. "
+            "Optional domain filter scopes the dump. Use when diagnosing auth/challenge state "
+            "instead of recover_from_challenge."
+        ),
+        "params": {
+            "domain": {
+                "type": "string",
+                "description": "Optional domain filter (e.g. doordash.com)",
+                "required": False,
+            },
+        },
+    },
+    "delete_cookies": {
+        "description": (
+            "TEMPORARY experiment tool. Delete cookies from the live jar by name and/or domain. "
+            "Provide at least one of name or domain. Prefer surgical deletes of challenge/poison "
+            "cookies over wiping the whole jar when auth must survive."
+        ),
+        "params": {
+            "name": {
+                "type": "string",
+                "description": "Cookie name to delete",
+                "required": False,
+            },
+            "domain": {
+                "type": "string",
+                "description": "Cookie domain filter",
+                "required": False,
+            },
+        },
+    },
+    "restore_cookies": {
+        "description": (
+            "TEMPORARY experiment tool. Re-inject the vaulted authenticated CookieBundle for the "
+            "current page's auth realm (same path as session init / prepare-auth). Use after "
+            "delete_cookies or a fresh config when you need the seeded DoorDash login cookies back. "
+            "Do NOT try to login manually."
+        ),
+        "params": {},
+    },
+    "read_browser_config": {
+        "description": (
+            "TEMPORARY experiment tool. Read the current browser provider/proxy configuration, "
+            "last promoted config key, dead config keys, and the allowlisted config keys you may "
+            "pass to set_browser_config."
+        ),
+        "params": {},
+    },
+    "set_browser_config": {
+        "description": (
+            "TEMPORARY experiment tool. Switch this browser session to one allowlisted config key "
+            "(steel_fixed, kernel_mobile, kernel_residential_city, kernel_residential_state, "
+            "kernel_residential_country, steel_managed, kernel_isp). Creates a replacement session, "
+            "preserves storage when possible, and reconnects. Expensive — prefer cookie surgery first."
+        ),
+        "params": {
+            "config_key": {
+                "type": "string",
+                "description": "Allowlisted browser config key",
+                "required": True,
             },
         },
     },
@@ -706,6 +794,9 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
         available_actions = [
             name for name in available_actions if name != "recover_from_challenge"
         ]
+    if not cookie_config_tools_enabled():
+        blocked = set(COOKIE_CONFIG_TOOL_NAMES)
+        available_actions = [name for name in available_actions if name not in blocked]
 
     known_actions = [name for name in available_actions if name in BROWSER_TOOL_MODELS]
     if not known_actions:
@@ -1196,6 +1287,11 @@ _VALID_ACTIONS = frozenset(
         # allowlist or normalize_browser_use_response() rejects the model's call and
         # the browser step aborts before the handler can run staged recovery.
         "recover_from_challenge",
+        "read_cookies",
+        "delete_cookies",
+        "restore_cookies",
+        "read_browser_config",
+        "set_browser_config",
         "read_browser_state",
         "read_logs",
         "read_network_requests",
@@ -1447,6 +1543,33 @@ def _normalize_action_params(
         out["label"] = label
     if params.get("reason"):
         out["reason"] = params["reason"]
+    if normalized_action == "read_cookies":
+        domain = params.get("domain")
+        if domain is None and isinstance(first_action.get("domain"), str):
+            domain = first_action.get("domain")
+        return {"domain": domain} if domain not in (None, "") else {}
+    if normalized_action == "delete_cookies":
+        name = params.get("name")
+        domain = params.get("domain")
+        if name is None and isinstance(first_action.get("name"), str):
+            name = first_action.get("name")
+        if domain is None and isinstance(first_action.get("domain"), str):
+            domain = first_action.get("domain")
+        out = {}
+        if name not in (None, ""):
+            out["name"] = name
+        if domain not in (None, ""):
+            out["domain"] = domain
+        return out
+    if normalized_action == "restore_cookies":
+        return {}
+    if normalized_action == "read_browser_config":
+        return {}
+    if normalized_action == "set_browser_config":
+        config_key = params.get("config_key") or params.get("key")
+        if config_key is None and isinstance(first_action.get("config_key"), str):
+            config_key = first_action.get("config_key")
+        return {"config_key": config_key}
     if normalized_action == "recover_from_challenge":
         raw_preserve = params.get("auth_cookies_are_preserved")
         if raw_preserve is None:
