@@ -35,10 +35,23 @@ import { config } from 'dotenv';
 import { runAuthCorsPreflights } from '../src/providers/corsSmoke';
 config();
 
-const BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.com').replace(
+const RAW_BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.com').replace(
   /\/$/,
   ''
 );
+const ALLOW_LOCAL = process.env.SMOKE_ALLOW_LOCAL === '1';
+const LOCAL_BASE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(RAW_BASE_URL);
+if (LOCAL_BASE && !ALLOW_LOCAL) {
+  console.error(
+    `❌ Refusing SMOKE_BASE_URL=${RAW_BASE_URL} for production endpoint smoke.\n` +
+      `   Cloud/dev environments often inject localhost here; that makes every probe\n` +
+      `   report fetch failed even when prod is healthy. Unset SMOKE_BASE_URL (or set\n` +
+      `   it to the real prod URL), or set SMOKE_ALLOW_LOCAL=1 only when intentionally\n` +
+      `   probing a local backend.`
+  );
+  process.exit(2);
+}
+const BASE_URL = RAW_BASE_URL;
 // Shared dev credentials (also in CLAUDE.md + every *.blackbox.ts). Not a real
 // secret; override via env to probe a different environment.
 const API_KEY = process.env.SMOKE_API_KEY ?? 'AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=';
