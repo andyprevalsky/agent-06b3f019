@@ -22,7 +22,7 @@ tags:
 sources:
   - agent 6ea9cd1e-c02d-40f3-9c09-0905425f6769
 repro: back-end/src/tests/blackbox/sms-supervisor.media.behavior.ts::testWriteCommit_startNewAgentForwardsInboundImageAttachments
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -55,9 +55,9 @@ Binary search:
 4. Agent USER message `filePointer: null`, zero attachment messages — **first
    bad sink**.
 
-`processInboundAttachments` only builds ephemeral LLM content blocks. It never
-uploads to Supabase Storage / `FilePointer`. `commitStartNewAgent` only creates
-a text USER goal message and has no `attachments` argument, unlike
+`processInboundAttachments` only built ephemeral LLM content blocks. It never
+uploaded to Supabase Storage / `FilePointer`. `commitStartNewAgent` only created
+a text USER goal message and had no `attachments` argument, unlike
 `POST /api/agents` → `createAgentTransaction` → `createAttachmentMessages`.
 
 Archive searches (`sms attachment media file forward create`,
@@ -75,28 +75,32 @@ Local repro (measured ~18s suite / ~130ms failing case):
 cd back-end && bash scripts/run-blackbox-tests.sh sms-supervisor
 ```
 
-Fails with:
+Pre-fix failed with:
 `Expected start_new_agent to forward inbound MMS as USER filePointer message(s); got 0 attachment messages`.
 
 ## Solution
 
-Proposed (awaiting approval — not implemented):
+Minimal wiring (no new LLM tool fields):
 
-1. Extend inbound media processing to upload downloadable image (and other
-   storable) attachments via `processUploadedFile` into `FilePointer`s for the
-   current supervisor run.
-2. Thread those pointers into `commitStartNewAgent` and create USER attachment
-   messages the same way `createAttachmentMessages` / `POST /api/agents`
-   does — auto-forward current-turn inbound media; do not rely on the LLM to
-   invent storage paths.
-3. Keep the new blackbox assertion permanently in `sms-supervisor`.
+1. `processInboundAttachments(attachments, userId)` uploads each downloaded
+   image via `processUploadedFile` while building the supervisor multimodal
+   blocks, returning `filePointers`.
+2. `commitPendingWrites(..., media.filePointers)` passes them into
+   `commitStartNewAgent`, which creates USER attachment messages (same shape as
+   `createAttachmentMessages` / `POST /api/agents`).
+
+Cemented by `testWriteCommit_startNewAgentForwardsInboundImageAttachments`.
+Post-fix: sms-supervisor blackbox green; backend log shows
+`filePointers=1` then `attachmentCount=1` on start_new_agent.
 
 10k-agent behavior: O(attachments on one SMS create) storage uploads + message
 rows per `start_new_agent` commit; no per-user fan-in, no shared broadcast.
 
 ## Human feedback
 
-None recorded.
+Approved the diagnosis but required a minimal implementation: verify the
+supervisor already sees the image/metadata, then pass that metadata through to
+the agent create — ideally ~2 lines of wiring, not a large new pipeline.
 
 ## Reusable lesson
 
