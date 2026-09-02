@@ -36,7 +36,6 @@ from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
-from domains.api_request.config import api_request_disabled
 from utils.tool_schemas import get_explore_agent_tools
 
 logger = structlog.get_logger()
@@ -668,6 +667,8 @@ async def spawn_explore_agent_activity(
                     ):
                         unavailable_sources_collected.append(normalized)
         elif tool_name == "api_request":
+            from domains.api_request.config import api_request_disabled
+
             if api_request_disabled():
                 return {
                     "error": True,
@@ -689,6 +690,8 @@ async def spawn_explore_agent_activity(
                 # ends the leaf so the chip does not fill with 50 rejects.
                 if completion_no_evidence_rejects >= 2 and _oai_demo:
                     return {"success": True, "message": "Completion accepted"}
+                from domains.api_request.config import api_request_disabled
+
                 evidence_tools = "web_search, people_search, web_fetch, or grep"
                 if not api_request_disabled():
                     evidence_tools = (

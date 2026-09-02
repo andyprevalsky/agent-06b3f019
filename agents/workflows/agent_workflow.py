@@ -82,7 +82,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
-    from tools.prompts import get_tool_prompts
+    from tools.prompts import TOOL_PROMPTS
     from tools.request_user_approval import UserRejectedError, request_user_approval_direct
     from tools.request_user_signup import request_user_signup
     from tools.send_message_to_user import send_message_to_user
@@ -2437,7 +2437,7 @@ class AgentWorkflow:
             disabled_tools=self._disabled_tools,
             user_context_section=self.user_context_section,
             response_schema=self._system_prompt_output_schema,
-            tool_prompts=get_tool_prompts(),
+            tool_prompts=TOOL_PROMPTS,
         )
 
     async def _wait_for_messages(self) -> bool:
