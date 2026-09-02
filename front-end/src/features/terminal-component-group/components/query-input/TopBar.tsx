@@ -7,7 +7,8 @@
  *     +--> [TEST_PROMPTS_VISIBLE] when parent says viewport is desktop and account is dev/admin
  *     |      (doc icon, right after write-lock)
  *     |
- *     +--> [FAST_MODE_VISIBLE] when parent says the account is allow-listed
+ *     +--> [FAST_MODE_VISIBLE] when parent says the operator can use Fast Mode
+ *            (admin id, verified admin phone, or live impersonation)
  *     |
  *     +--> [SIMULATOR_VISIBLE] when parent says the account is simulator-allow-listed
  *

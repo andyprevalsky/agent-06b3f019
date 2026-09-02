@@ -17,7 +17,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
 import { useToast } from '@/hooks/use-toast';
-import { DEFAULT_FAST_MODE_USER_IDS, FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
+import { canUseFastMode, defaultsFastModeOn } from '@/lib/fastModeAccounts';
+import {
+  getFastModeSessionOverride,
+  setFastModeSessionOverride,
+} from '@/lib/fastModeSession';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
 
@@ -30,6 +34,7 @@ export interface UseMessageSendingArgs {
   agentDetail: AgentDetail | null;
   canSubmitGoals: boolean;
   isFullySignedIn: boolean;
+  user?: { id?: string; phone?: string } | null;
   userId?: string | null;
   clientSource: string;
   setCurrentView: (v: TerminalView) => void;
@@ -46,6 +51,7 @@ export function useMessageSending({
   agentDetail,
   canSubmitGoals,
   isFullySignedIn,
+  user,
   userId,
   clientSource,
   setCurrentView,
@@ -78,8 +84,9 @@ export function useMessageSending({
   const pendingSubmitRef = useRef(false);
   const autoSubmitRef = useRef(false);
   const fastModeUserOverrideRef = useRef(false);
-  const userCanUseFastMode = userId != null && FAST_MODE_USER_IDS.includes(userId);
-  const userCanUseSimulator = userId != null && SIMULATOR_USER_IDS.includes(userId);
+  const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
+  const userCanUseFastMode = canUseFastMode(resolvedUser);
+  const userCanUseSimulator = userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId);
 
   useEffect(() => {
     messageInputRef.current = messageInput;
@@ -115,18 +122,26 @@ export function useMessageSending({
     }
 
     if (selectedAgentId !== null || fastModeUserOverrideRef.current) return;
-    setFastModeState(userId != null && DEFAULT_FAST_MODE_USER_IDS.includes(userId));
+    const sessionOverride = getFastModeSessionOverride();
+    if (sessionOverride !== null) {
+      setFastModeState(sessionOverride);
+      return;
+    }
+    setFastModeState(defaultsFastModeOn(resolvedUser));
   }, [
     agentDetail?.agent_id,
     agentDetail?.fast_mode_cache_enabled,
     agentDetail?.world_model_mode,
     selectedAgentId,
+    user?.id,
+    user?.phone,
     userCanUseFastMode,
     userId,
   ]);
 
   const setFastMode = useCallback((enabled: boolean) => {
     fastModeUserOverrideRef.current = true;
+    setFastModeSessionOverride(enabled);
     setFastModeState(enabled);
     if (enabled) setSimulatorModeState(false);
   }, []);

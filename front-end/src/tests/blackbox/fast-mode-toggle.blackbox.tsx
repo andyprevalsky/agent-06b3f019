@@ -2,7 +2,8 @@
  * Blackbox tests for the Fast Mode + Simulator toggles and their account gating.
  *
  * Proves checklist items:
- *  - #2  the toggle is hidden unless the user is in FAST_MODE_USER_IDS
+ *  - #2  the toggle is hidden unless canUseFastMode(operator) is true
+ *        (admin id, verified admin phone, or live impersonation)
  *  - #4  default on for allowlisted accounts (controlled value; toggling flips it)
  *  - #3  the toggle drives the boolean threaded into the create-agent payload
  */
@@ -17,8 +18,9 @@ import RoseToolSetChip from '@/features/terminal-component-group/components/Rose
 import SimulatorToggle from '@/features/terminal-component-group/components/SimulatorToggle';
 import { TopBar } from '@/features/terminal-component-group/components/query-input/TopBar';
 import { ADMIN_USER_IDS } from '@/features/terminal-component-group/config';
-import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
-import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
+import { ADMIN_ACCOUNTS, ADMIN_PHONE_DIGITS } from '@/lib/adminAccounts';
+import { canUseFastMode, FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
+import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { TOOL_ICONS } from '@/lib/toolIcons';
 
@@ -26,7 +28,8 @@ const CURRENT_ANDY_ID = ADMIN_ACCOUNTS[0]!.userId;
 const CURRENT_TAMY_ID = ADMIN_ACCOUNTS[1]!.userId;
 
 const hookMocks = vi.hoisted(() => ({
-  authUserId: '' as string,
+  authUserId: '' as string | null,
+  authUserPhone: '' as string,
 }));
 
 const originalInnerWidth = window.innerWidth;
@@ -44,7 +47,10 @@ vi.mock('@/features/terminal-component-group/hooks', async (importOriginal) => {
   return {
     ...actual,
     useAuth: () => ({
-      user: hookMocks.authUserId === null ? null : { id: hookMocks.authUserId },
+      user:
+        hookMocks.authUserId === null
+          ? null
+          : { id: hookMocks.authUserId, phone: hookMocks.authUserPhone },
     }),
     useToast: () => ({ toast: vi.fn() }),
     updateAgent: vi.fn(),
@@ -102,6 +108,8 @@ function renderTopBar({
 
 afterEach(() => {
   setViewportWidth(originalInnerWidth);
+  hookMocks.authUserPhone = '';
+  resetFastModeSessionOverride();
 });
 
 describe('Fast Mode account gating', () => {
@@ -168,7 +176,7 @@ describe('Fast Mode account gating', () => {
       0,
     );
     expect(container.textContent).toContain('Safe Writes');
-    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('');
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('Fast Mode');
     expect(screen.getByTestId('simulator-toggle')).toHaveTextContent('');
     expect(screen.getByTitle('View Rose system tools')).toHaveTextContent('');
   });
@@ -192,6 +200,54 @@ describe('Fast Mode account gating', () => {
 
     expect(screen.queryByTitle('Select a test prompt')).toBeNull();
     expect(screen.queryByLabelText('Select a test prompt')).toBeNull();
+  });
+
+  it('#2 shows the toggle for a phone-matched admin whose user id is not allow-listed', () => {
+    hookMocks.authUserId = 'not-an-allowlisted-admin-id';
+    hookMocks.authUserPhone = '+19729777432';
+
+    render(
+      <TooltipProvider>
+        <QueryInput
+          value=""
+          onChange={vi.fn()}
+          onSubmit={vi.fn()}
+          fastMode={false}
+          onFastModeChange={vi.fn()}
+          showModelSelector={false}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByTestId('fast-mode-toggle')).toBeInTheDocument();
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('Fast Mode');
+    expect(canUseFastMode({ id: 'not-an-allowlisted-admin-id', phone: '+19729777432' })).toBe(
+      true,
+    );
+    expect(ADMIN_PHONE_DIGITS).toContain('19729777432');
+  });
+
+  it('#2 hides the toggle when id and phone are both non-admin', () => {
+    hookMocks.authUserId = 'not-an-allowlisted-admin-id';
+    hookMocks.authUserPhone = '+15555550100';
+
+    render(
+      <TooltipProvider>
+        <QueryInput
+          value=""
+          onChange={vi.fn()}
+          onSubmit={vi.fn()}
+          fastMode={false}
+          onFastModeChange={vi.fn()}
+          showModelSelector={false}
+        />
+      </TooltipProvider>,
+    );
+
+    expect(screen.queryByTestId('fast-mode-toggle')).toBeNull();
+    expect(canUseFastMode({ id: 'not-an-allowlisted-admin-id', phone: '+15555550100' })).toBe(
+      false,
+    );
   });
 
   it.each(ADMIN_USER_IDS)('#2 shows the toggle for admin account %s', (userId) => {
@@ -282,7 +338,7 @@ describe('FastModeToggle behavior', () => {
     const btn = screen.getByTestId('fast-mode-toggle');
     expect(btn.getAttribute('aria-pressed')).toBe('false');
     expect(btn).toHaveAccessibleName('Fast Mode Off');
-    expect(btn).toHaveTextContent('');
+    expect(btn).toHaveTextContent('Fast Mode');
   });
 
   it('#3 toggling fires onChange with the flipped value', () => {
@@ -318,7 +374,7 @@ describe('FastModeToggle behavior', () => {
     );
     expect(screen.getByTestId('fast-mode-toggle').getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByTestId('fast-mode-toggle')).toHaveAccessibleName('Fast Mode On');
-    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('');
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('Fast Mode');
   });
 
   it('updates the visible state after a click in the controlled querybox path', () => {
@@ -334,7 +390,7 @@ describe('FastModeToggle behavior', () => {
 
     const btn = screen.getByTestId('fast-mode-toggle');
     expect(btn).toHaveAccessibleName('Fast Mode Off');
-    expect(btn).toHaveTextContent('');
+    expect(btn).toHaveTextContent('Fast Mode');
 
     act(() => {
       btn.click();
@@ -348,7 +404,7 @@ describe('FastModeToggle behavior', () => {
     );
     expect(btn).toHaveAttribute('aria-pressed', 'true');
     expect(btn).toHaveAccessibleName('Fast Mode On');
-    expect(btn).toHaveTextContent('');
+    expect(btn).toHaveTextContent('Fast Mode');
   });
 });
 

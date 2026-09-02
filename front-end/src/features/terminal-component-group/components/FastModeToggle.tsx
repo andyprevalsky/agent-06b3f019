@@ -14,10 +14,12 @@
  * State:
  * - enabled: boolean (controlled by parent; query-box scoped, session-only, never persisted client-side)
  *
- * UI: icon-only trigger; accessible label still reports Fast Mode On/Off.
+ * UI: Zap + "Fast Mode" label (same pattern as Safe Writes) so the control is
+ * findable on the query box and on the account-info settings tab.
  * Hover shows an explanatory tooltip for the current state.
  *
- * Gating: only rendered when the current user is in FAST_MODE_USER_IDS (admin accounts).
+ * Gating: only rendered when canUseFastMode(operator) is true (admin id, admin
+ * phone, or live impersonation — see fastModeAccounts.ts).
  * The value is threaded into the create-agent payload as `fastMode`; default on means
  * Rose complete calls use provider fast mode and the aggressive cache is active.
  */
@@ -49,13 +51,14 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
           data-state={enabled ? 'on' : 'off'}
           data-testid="fast-mode-toggle"
           className={cn(
-            'inline-flex h-7 w-7 items-center justify-center rounded-md border text-xs transition-colors',
+            'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors',
             enabled
               ? 'border-amber-500/70 bg-amber-400/20 text-amber-700 shadow-sm ring-1 ring-amber-400/40 dark:text-amber-200'
               : 'border-border bg-muted/50 text-muted-foreground',
           )}
         >
           <Zap className={cn('h-3.5 w-3.5', enabled && 'fill-current')} />
+          <span className="font-medium">Fast Mode</span>
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-[280px] z-[100]">
