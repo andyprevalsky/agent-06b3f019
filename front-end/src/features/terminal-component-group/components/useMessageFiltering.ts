@@ -26,6 +26,25 @@ import { isDirectSpawnChildProgress } from './useSubAgentTreeMerge';
 
 // ─── Filter messages by subAgentId ───────────────────────────────────────
 
+/**
+ * Claude Code tags progress rows with `subAgentId` (= sandbox task_id), but
+ * those rows are NOT a nested agent tree. Root filtering that drops every
+ * message with `subAgentId` therefore strips `claude_code_started` /
+ * `task_complete` anchors when they carry a task_id, leaving only the bare
+ * handler cancel (no task_id) after toolCallId dedupe — chip stuck on
+ * "Spinning up...". Keep start/complete anchors on the root transcript;
+ * heartbeats (`agent_observation`) stay nested.
+ */
+export function isClaudeCodeChipAnchor(message: Message): boolean {
+  if (message.metadata?.toolName !== 'spawn_claude_code_agent') return false;
+  const action = message.metadata?.action_type;
+  return (
+    action === 'claude_code_started' ||
+    action === 'task_complete' ||
+    action === 'session_cancelled'
+  );
+}
+
 function sanitizeTrajectoryMessage(message: Message): Message {
   if (message.role === 'USER' || message.role === 'SYSTEM') return message;
   const text = userFacingMessageText(message.text);
@@ -33,7 +52,11 @@ function sanitizeTrajectoryMessage(message: Message): Message {
   return { ...message, text };
 }
 
-function filterMessagesForSubAgent(messages: Message[], subAgentId: string | undefined): Message[] {
+/** Exported for blackbox coverage of the Claude Code root-visibility rule. */
+export function filterMessagesForSubAgent(
+  messages: Message[],
+  subAgentId: string | undefined,
+): Message[] {
   const target = subAgentId ?? null;
   return messages.filter((m) => {
     const msgSub = m.metadata?.subAgentId ?? null;
@@ -41,6 +64,7 @@ function filterMessagesForSubAgent(messages: Message[], subAgentId: string | und
       if (msgSub === null) return true;
       if (isDirectSpawnChildProgress(m)) return true;
       if (m.metadata?.agentType === 'explore') return true;
+      if (isClaudeCodeChipAnchor(m)) return true;
       return false;
     }
     return msgSub === target;

@@ -51,6 +51,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "expected_payment_receipt",
     "no_browser_agent_failures",
     "no_tool_failures",
+    "claude_code_session_output",
     "explore_research_not_reject_loop",
     "explore_completion_summary",
     # runner="sms" — trajectory checks over the literal outbound text thread.

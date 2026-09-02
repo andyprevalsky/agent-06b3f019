@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import { useAgentContext, type Message, type ResponseSchemaField } from '../hooks';
+import { useAgentContext, fetchCodeAgentSession, type Message, type ResponseSchemaField } from '../hooks';
 import { type ChipState, type CodeProvider } from '../types';
 import {
   useClaudeCodeWebSocket,
@@ -106,8 +106,19 @@ export function useClaudeCodeChipState(
         ? 'codex'
         : initialCodeProvider;
 
-    const complete = lastMessage?.metadata?.action_type === 'task_complete';
-    const success = isTaskCompletionSuccess(lastMessage);
+    // Terminality is sticky: a late agent_observation heartbeat after pause
+    // cancel must not reopen the chip (prod race: heartbeat 872s after cancel).
+    const completionMsg = [...taskMessages]
+      .reverse()
+      .find(
+        (m) =>
+          m.metadata?.action_type === 'task_complete' ||
+          m.metadata?.action_type === 'session_cancelled',
+      );
+    const complete = !!completionMsg;
+    const success =
+      completionMsg?.metadata?.action_type === 'task_complete' &&
+      isTaskCompletionSuccess(completionMsg);
 
     const verifying =
       !complete &&
@@ -119,7 +130,6 @@ export function useClaudeCodeChipState(
     const schema = initMessage?.metadata?.output_schema as
       { fields: ResponseSchemaField[] } | undefined;
 
-    const completionMsg = taskMessages.find((m) => m.metadata?.action_type === 'task_complete');
     const extracted = completionMsg?.metadata?.structured_response as
       Record<string, unknown> | undefined;
 
@@ -148,6 +158,47 @@ export function useClaudeCodeChipState(
   }, [initialCodeProvider, messages, taskId]);
 }
 
+/**
+ * Durable FE fallback: seeded/partial transcripts may lack task_complete even
+ * though ClaudeCodeSession is CLOSED (local DB drift, root filter edge cases).
+ * Poll session status so historical agents never spin forever.
+ */
+function useClosedSessionTerminality(
+  taskId: string,
+  codeProvider: CodeProvider,
+  messageComplete: boolean,
+): { isComplete: boolean; isSuccess: boolean } | null {
+  const { agent } = useAgentContext();
+  const [sessionTerminal, setSessionTerminal] = useState<{
+    isComplete: boolean;
+    isSuccess: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    if (messageComplete || taskId === 'pending') {
+      setSessionTerminal(null);
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const data = await fetchCodeAgentSession(taskId, codeProvider);
+      if (cancelled || !data?.status) return;
+      if (data.status.toUpperCase() !== 'CLOSED') return;
+
+      const agentStatus = agent?.status;
+      const success = agentStatus === 'COMPLETED';
+      setSessionTerminal({ isComplete: true, isSuccess: success });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agent?.status, codeProvider, messageComplete, taskId]);
+
+  return sessionTerminal;
+}
+
 export interface ClaudeCodeChipVM extends ChipDerived {
   chipState: ChipState;
   isExpanded: boolean;
@@ -172,7 +223,14 @@ export function useClaudeCodeChip(
 
   const { terminalRef, outputBufferRef, mount } = useTerminalManager();
   const derived = useClaudeCodeChipState(taskId, initialCodeProvider);
-  const { isComplete, isSuccess, isVerifying } = derived;
+  const sessionFallback = useClosedSessionTerminality(
+    taskId,
+    derived.codeProvider,
+    derived.isComplete,
+  );
+  const isComplete = derived.isComplete || sessionFallback?.isComplete === true;
+  const isSuccess = derived.isComplete ? derived.isSuccess : (sessionFallback?.isSuccess ?? false);
+  const { isVerifying } = derived;
   const initialChipState: ChipState = isComplete
     ? isSuccess
       ? 'completed'
@@ -217,8 +275,7 @@ export function useClaudeCodeChip(
   useSavedOutputFetch({
     taskId,
     codeProvider: derived.codeProvider,
-    shouldFetch:
-      (isExpanded || isFullscreen) && (chipState === 'completed' || chipState === 'failed'),
+    shouldFetch: isComplete && taskId !== 'pending',
     terminalRef,
     outputBufferRef,
     onOutputLoaded: setTerminalTranscript,

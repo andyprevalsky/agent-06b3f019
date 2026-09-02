@@ -58,6 +58,10 @@ VALID_EVENTS = {
     "descend": {
         "outcome": {"completed", "failed", "blocked", "interrupted"},
     },
+    "update-prompts": {
+        "stage": {"localize-replay", "propose-edit", "verify-summary"},
+        "outcome": {"iterated", "blocked"},
+    },
 }
 DESCEND_STEP_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 

@@ -101,6 +101,48 @@ def test_cursor_position():
     assert col == 3
 
 
+def test_lf_only_claude_note_does_not_staircase():
+    """Bare LF must match xterm convertEol — no mid-line Claude-note staircase."""
+    from utils.terminal_filter import TerminalFilter
+
+    # Real Claude Code PTY shape: LF without CR between notes/tool lines.
+    sample = (
+        "Claude note\n"
+        "Session started in /home/user\n"
+        "Claude note\n"
+        "I'll start by checking GitHub access.\n"
+        "  [Claude tool] Bash\n"
+        "  [Claude tool] Bash\n"
+    )
+    tf = TerminalFilter(cols=80, rows=50)
+    tf.feed(sample)
+    display = tf.get_display()
+    lines = display.split("\n")
+
+    assert lines[0] == "Claude note"
+    assert lines[1] == "Session started in /home/user"
+    assert lines[2] == "Claude note"
+    assert lines[3] == "I'll start by checking GitHub access."
+    assert lines[4] == "  [Claude tool] Bash"
+    assert lines[5] == "  [Claude tool] Bash"
+    # Staircase signature: second line starts with many leading spaces.
+    assert not lines[1].startswith("           ")
+
+
+def test_convert_eol_preserves_existing_crlf_and_chunk_split_cr():
+    """Existing CRLF stays single; CR|LF split across feeds does not double CR."""
+    from utils.terminal_filter import TerminalFilter
+
+    tf = TerminalFilter(cols=80, rows=24)
+    tf.feed("Line A\r\n")
+    tf.feed("Line B\r")
+    tf.feed("\nLine C\n")
+    display = tf.get_display()
+    assert display.split("\n") == ["Line A", "Line B", "Line C"]
+    # Raw chunks stay untouched (ANSI strip only); normalize is display-path only.
+    assert "Line A\r\n" in tf.get_raw_output()
+
+
 async def run_all_tests():
     print("terminal-filter blackbox tests:")
     r = BlackboxResult()
@@ -111,6 +153,11 @@ async def run_all_tests():
     r.record("multiple_feeds", test_multiple_feeds)
     r.record("get_line_count", test_get_line_count)
     r.record("cursor_position", test_cursor_position)
+    r.record("lf_only_claude_note_does_not_staircase", test_lf_only_claude_note_does_not_staircase)
+    r.record(
+        "convert_eol_preserves_existing_crlf_and_chunk_split_cr",
+        test_convert_eol_preserves_existing_crlf_and_chunk_split_cr,
+    )
     teardown_mock()
     return r.all_passed
 

@@ -36,6 +36,9 @@ import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
 import { archiveJson } from '../../providers/traceArchive';
+import {
+  clearConnectionNeedsReconnectFromIntegrationRecovery,
+} from '../compute-grants/integrationConnectionSync';
 import * as repo from './repo';
 
 const log = createLogger('Integrations');
@@ -552,6 +555,10 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
+  await clearConnectionNeedsReconnectFromIntegrationRecovery({
+    userId,
+    integrationName: 'claude_code',
+  });
   log.info('Claude Code credentials stored', { userId, poolingEnabled });
 }
 
@@ -574,6 +581,10 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
     lastSuccessfulSyncAt: new Date(),
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
+  });
+  await clearConnectionNeedsReconnectFromIntegrationRecovery({
+    userId,
+    integrationName: 'gpt_code',
   });
   log.info('GPT Code credentials stored', { userId, poolingEnabled });
 }

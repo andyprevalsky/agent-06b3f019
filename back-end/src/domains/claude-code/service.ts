@@ -16,6 +16,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
+import { syncConnectionAfterIntegrationAuthFailure } from '../compute-grants/integrationConnectionSync';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -352,6 +353,15 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
   } else if (tokenSource === 'anthropic') {
     log.warn(`Claude Code ${failureKind} on shared Anthropic API key`);
     await markAnthropicApiKeyOnCooldown(sharedCredentialReason);
+  }
+
+  // Non-revoked auth banners ("Please run /login") only rate-limit the Integration
+  // row for pool rotation; the chip still needs to prompt re-sync.
+  if (authFailure && !revokedOauth && integrationId !== '') {
+    await syncConnectionAfterIntegrationAuthFailure({
+      integrationId,
+      failureReason: 'auth_error',
+    });
   }
 }
 

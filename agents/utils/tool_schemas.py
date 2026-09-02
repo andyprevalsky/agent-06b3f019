@@ -372,6 +372,31 @@ class WebFetchTool(BaseModel):
     )
 
 
+class ApiRequestTool(BaseModel):
+    """Call a public HTTP API and return the full response body."""
+
+    tool: Literal["api_request"]
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] = Field(
+        description="HTTP method for the request."
+    )
+    url: str = Field(description="Absolute http(s) URL for the API endpoint.")
+    query: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional query-string parameters appended to the URL.",
+    )
+    body: Optional[Any] = Field(
+        default=None,
+        description="Optional JSON-serializable request body for non-GET methods.",
+    )
+    headers: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Optional HTTP headers, including Authorization or API keys when needed. "
+            "Use grep first when credentials are stored in local data."
+        ),
+    )
+
+
 class GrepTool(BaseModel):
     """Search local data sources with regex grep semantics."""
 
@@ -969,6 +994,7 @@ TOOL_MODELS: ToolRegistry = {
     "web_search": WebSearchTool,
     "people_search": PeopleSearchTool,
     "web_fetch": WebFetchTool,
+    "api_request": ApiRequestTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "spawn_agent": SpawnAgentTool,
@@ -994,7 +1020,7 @@ PLAN_TOOL_MODELS: ToolRegistry = {
 }
 
 # Tools available inside the explore agent (subset of read-only tools)
-EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "attempt_completion_with_result"]
+EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "api_request", "attempt_completion_with_result"]
 
 
 # ============================================================================

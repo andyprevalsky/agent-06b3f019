@@ -4284,6 +4284,176 @@ def test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+
+def test_claude_code_session_output_static_check_is_fail_closed():
+    """Bench fails closed when Claude Code sessions lack stored transcripts."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
+        ],
+    }
+    good = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "_benchmark": {
+            "claude_code_sessions": [
+                {"id": "session-1", "output": "x" * 40},
+            ],
+        },
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    empty = deepcopy(good)
+    empty["_benchmark"]["claude_code_sessions"][0]["output"] = "   "
+    passed, reason = _run_declared_static_check(evaluator, empty)
+    assert passed is False
+    assert "stored transcripts" in reason.lower() or "chars" in reason.lower()
+
+    missing = deepcopy(good)
+    missing["_benchmark"]["claude_code_sessions"] = []
+    missing["_benchmark"]["claude_code_session_evidence_error"] = "api_base_url is missing"
+    passed, reason = _run_declared_static_check(evaluator, missing)
+    assert passed is False
+    assert "session count" in reason.lower()
+    assert "api_base_url is missing" in reason
+
+
+def test_cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures():
+    """CUDA ranking bench requires api_request route with zero tool failures."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
+
+    assert "no_tool_failures" in RUNTIME_STATIC_CHECK_TYPES
+    task = get_task_by_name("cuda-kernel-github-top100-code-agent")
+    assert "api_request" in task.expected_tools
+    assert task.requires_claude_code is False
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    checks = {c["type"]: c for c in static["checks"]}
+    assert "no_tool_failures" in checks
+    assert checks["agent_status"]["value"] == "COMPLETED"
+    assert "Github API token:" in task.prompt
+    assert "{GITHUB_DISPATCH_TOKEN}" in task.prompt
+
+
+async def test_declared_evaluator_hydrates_claude_code_sessions():
+    """Transcript static checks hydrate Claude Code sessions before grading."""
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    static_evaluator = {
+        "id": "claude-code-transcript",
+        "method": "static_check",
+        "checks": [
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
+        ],
+    }
+    task = replace(
+        get_task_by_name("cuda-kernel-github-top100-code-agent"),
+        evaluators=[static_evaluator],
+    )
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "messages": [],
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+
+    fake_response = AsyncMock()
+    fake_response.status_code = 200
+    fake_response.content = b"{}"
+    fake_response.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "durable transcript " + ("y" * 40)}]
+    }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return fake_response
+
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+    ):
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+
+    assert passed is True
+    assert reason is None
+    assert results[0]["passed"] is True
+    assert data["_benchmark"]["claude_code_sessions"][0]["id"] == "session-1"
+
+
+async def test_hydrate_claude_code_sessions_retries_until_transcript_persists():
+    """Cancel-persist can lag pause; hydrate retries while output is still empty."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    empty = AsyncMock()
+    empty.status_code = 200
+    empty.content = b"{}"
+    empty.json = lambda: {"sessions": [{"id": "session-1", "output": ""}]}
+
+    filled = AsyncMock()
+    filled.status_code = 200
+    filled.content = b"{}"
+    filled.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "[Claude] Session started\n" + ("z" * 40)}]
+    }
+
+    responses = [empty, filled]
+    sleeps: list[float] = []
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return responses.pop(0)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "ACTIVE"},
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+        patch.object(bench.asyncio, "sleep", _fake_sleep),
+    ):
+        await bench._hydrate_claude_code_sessions(data)
+
+    sessions = data["_benchmark"]["claude_code_sessions"]
+    assert len(sessions) == 1
+    assert len(sessions[0]["output"].strip()) >= 32
+    assert sleeps == [2.0]
+    assert responses == []
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -15362,6 +15532,100 @@ def test_retired_tasks_hidden_from_suite_and_listing():
     assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
 
 
+def test_fetch_local_worker_logs_reads_benchmark_context_worker_files():
+    """Isolated stacks write worker*.log under BENCHMARK_CONTEXT_DIR — must be scraped."""
+    import tempfile
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = os.path.join(tmp, "logs")
+        os.makedirs(log_dir)
+        line = json.dumps(
+            {
+                "timestamp": "2026-08-31T03:00:00.000000+00:00",
+                "event": "[ClaudeCode] Code-agent event",
+                "agent_id": agent_id,
+                "event_type": "tool_use",
+                "tool_name": "Bash",
+            }
+        )
+        with open(os.path.join(log_dir, "worker.log"), "w") as handle:
+            handle.write(line + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-08-31T02:00:00.000000+00:00",
+                        "event": "too-old",
+                        "agent_id": agent_id,
+                    }
+                )
+                + "\n"
+            )
+            handle.write('{"event":"other-agent","agent_id":"ffffffff-0000-0000-0000-000000000000"}\n')
+
+        with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": tmp}, clear=False):
+            matched = logs.fetch_local_worker_logs(
+                agent_id,
+                datetime(2026, 8, 31, 2, 30, tzinfo=timezone.utc),
+            )
+
+    assert len(matched) == 1
+    assert "tool_use" in matched[0]
+    assert agent_id in matched[0]
+
+
+async def test_collect_logs_prefers_local_worker_logs_over_remote_placeholders():
+    """Run JSON must keep local Claude Code progress, not ClickHouse/Fly DNS stubs."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    local_line = json.dumps(
+        {
+            "timestamp": "2026-08-31T03:10:00+00:00",
+            "event": "[ClaudeCode] Code-agent event",
+            "agent_id": agent_id,
+            "event_type": "tool_use",
+        }
+    )
+
+    with (
+        patch.object(logs, "fetch_local_worker_logs", return_value=[local_line]),
+        patch.object(logs, "get_flyio_logs_for_agent", return_value=[]),
+        patch.object(
+            logs,
+            "fetch_flyio_logs_snapshot",
+            new_callable=AsyncMock,
+            return_value=["[fly.io] 0 logs for agent 11111111-2222"],
+        ),
+        patch.object(
+            logs,
+            "fetch_clickhouse_worker_logs",
+            new_callable=AsyncMock,
+            return_value=["[clickhouse] Error: [Errno -2] Name or service not known"],
+        ),
+        patch.object(logs, "fetch_render_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "fetch_supabase_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "get_supabase_realtime_logs_for_agent", return_value=[]),
+        patch.object(logs, "extract_message_transcript", return_value=[]),
+    ):
+        result = await logs.collect_logs(
+            agent_id,
+            {},
+            datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc),
+        )
+
+    assert result["worker_logs"] == [local_line]
+    assert not any(line.startswith("[fly.io]") for line in result["worker_logs"])
+    assert not any(line.startswith("[clickhouse]") for line in result["worker_logs"])
+
+
 def test_agent_latency_reads_isolated_benchmark_stack_logs():
     """agent_latency.py must see isolated-stack logs, not just the shared ones.
 
@@ -16998,6 +17262,10 @@ async def run_all_tests():
         test_completion_summary_and_sms_static_checks_are_fail_closed,
     )
     r.record(
+        "claude_code_session_output_static_check_fail_closed",
+        test_claude_code_session_output_static_check_is_fail_closed,
+    )
+    r.record(
         "declared_static_completion_summary_rejects_fast_mode_ablation",
         test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs,
     )
@@ -17012,6 +17280,10 @@ async def run_all_tests():
     r.record(
         "blue_bottle_payment_card_request_contract",
         test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
+    )
+    r.record(
+        "cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures",
+        test_cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures,
     )
     await r.record_async(
         "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
@@ -17044,6 +17316,14 @@ async def run_all_tests():
     r.record(
         "blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract",
         test_blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration",
+        test_declared_evaluator_hydrates_claude_code_sessions,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration_retries_empty",
+        test_hydrate_claude_code_sessions_retries_until_transcript_persists,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
@@ -17339,6 +17619,14 @@ async def run_all_tests():
     )
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
+    r.record(
+        "fetch_local_worker_logs_reads_benchmark_context",
+        test_fetch_local_worker_logs_reads_benchmark_context_worker_files,
+    )
+    await r.record_async(
+        "collect_logs_prefers_local_worker_logs",
+        test_collect_logs_prefers_local_worker_logs_over_remote_placeholders,
+    )
     r.record(
         "agent_latency_explicit_context_excludes_neighbor_stacks",
         test_agent_latency_explicit_context_excludes_neighbor_stacks,

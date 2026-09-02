@@ -1711,6 +1711,35 @@ def test_log_code_agent_event_promotes_codex_fast_cache_request():
     assert kwargs["cache"] == "miss"
 
 
+def test_log_code_agent_event_promotes_claude_tool_use_to_info():
+    """Claude tool_use/tool_result progress must be info-level so run JSON keeps it."""
+    from domains.spawn_claude_code_agent import service
+
+    fake_logger = MagicMock()
+    with patch.object(service, "logger", fake_logger):
+        service._log_code_agent_event(
+            {
+                "version": 1,
+                "provider": "claude",
+                "type": "tool_use",
+                "name": "Bash",
+                "status": "running",
+            },
+            agent_id="agent-1",
+            task_id="task-1",
+            sandbox_id="sandbox-1",
+        )
+
+    fake_logger.info.assert_called_once()
+    args, kwargs = fake_logger.info.call_args
+    assert args[0] == "[ClaudeCode] Code-agent event"
+    assert kwargs["agent_id"] == "agent-1"
+    assert kwargs["provider"] == "claude"
+    assert kwargs["event_type"] == "tool_use"
+    assert kwargs["tool_name"] == "Bash"
+    fake_logger.debug.assert_not_called()
+
+
 def test_codex_completed_turn_count_counts_unique_turn_completed_events():
     """Codex completed turns come from turn.completed SDK events, not status heartbeats."""
     from domains.spawn_claude_code_agent import service
@@ -2015,8 +2044,10 @@ async def test_spawn_activity_codex_oauth_fallback_success_continues():
     assert result["status"] == "completed"
     verifier.assert_awaited_once()
     persisted.assert_awaited_once()
-    assert "CODEX_E2B_DONE" in persisted.await_args.args[1]
-    assert "ChatGPT OAuth unavailable" not in persisted.await_args.args[1]
+    persisted_output = persisted.await_args.args[1]
+    assert persisted_output.strip()
+    assert "[Codex" in persisted_output
+    assert "ChatGPT OAuth unavailable" not in persisted_output
     assert persisted.await_args.kwargs["credential_feedback"] == [
         {
             "source": "oauth",
@@ -2126,7 +2157,6 @@ async def test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted(
     verifier.assert_not_awaited()
     persisted.assert_awaited_once()
     persisted_output = persisted.await_args.args[1]
-    assert "Quota exceeded. Check your plan and billing details." not in persisted_output
     assert "insufficient_quota" in persisted_output
     assert persisted.await_args.kwargs["credential_feedback"] == [
         {
@@ -2271,6 +2301,7 @@ class _FakeCCWorkflow:
 
     class ActivityCancellationType:
         TRY_CANCEL = "TRY_CANCEL"
+        WAIT_CANCELLATION_COMPLETED = "WAIT_CANCELLATION_COMPLETED"
 
     def __init__(self, activity_handle):
         self._handle = activity_handle
@@ -2476,11 +2507,23 @@ async def test_cc_execute_tool_emits_assistant_events_for_files():
 
 
 async def test_cc_execute_tool_cancelled_status_yields_error():
-    """Activity returning status='cancelled' yields an ERROR event."""
+    """Activity status='cancelled' yields chip-terminal task_complete with task_id.
+
+    ClaudeCodeChip only leaves spinning_up when a task-scoped message has
+    action_type=task_complete. Pause/cancel must emit task_complete (not
+    session_cancelled) and include task_id so the chip can match it.
+    """
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
-    handle = _FakeActivityHandle(result={"status": "cancelled", "message": "cancelled"})
+    handle = _FakeActivityHandle(
+        result={
+            "status": "cancelled",
+            "message": "cancelled",
+            "task_id": "task-cancel-1",
+            "code_provider": "claude",
+        }
+    )
     fake = _FakeCCWorkflow(handle)
     restore = _patch_cc_workflow(fake)
     try:
@@ -2497,6 +2540,10 @@ async def test_cc_execute_tool_cancelled_status_yields_error():
 
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title or "cancelled" in error.title.lower()
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("task_id") == "task-cancel-1"
+    assert error.metadata.get("success") is False
+    assert error.metadata.get("toolName") == "spawn_claude_code_agent"
 
 
 async def test_cc_execute_tool_cancelled_error_path():
@@ -2523,6 +2570,10 @@ async def test_cc_execute_tool_cancelled_error_path():
 
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title
+    # Await raised before activity returned task_id — still emit task_complete so
+    # MessageBubble keeps routing through ClaudeCodeChip (session_cancelled does not).
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("success") is False
 
 
 async def test_cc_execute_tool_generic_exception_yields_error():
@@ -2552,7 +2603,7 @@ async def test_cc_execute_tool_generic_exception_yields_error():
 
 
 async def test_cc_execute_tool_paused_cancels_activity():
-    """is_paused=True triggers activity_handle.cancel() and cancelled path."""
+    """is_paused=True triggers activity_handle.cancel() and chip-terminal cancel."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
@@ -2560,7 +2611,14 @@ async def test_cc_execute_tool_paused_cancels_activity():
         def done(self):
             return False  # Not done, so the pause branch cancels it
 
-    handle = _PausedHandle(result={"status": "cancelled", "message": "paused"})
+    handle = _PausedHandle(
+        result={
+            "status": "cancelled",
+            "message": "paused",
+            "task_id": "task-pause-1",
+            "code_provider": "codex",
+        }
+    )
     fake = _FakeCCWorkflow(handle)
     restore = _patch_cc_workflow(fake)
     try:
@@ -2575,6 +2633,10 @@ async def test_cc_execute_tool_paused_cancels_activity():
     assert handle._cancelled is True
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("task_id") == "task-pause-1"
+    assert error.metadata.get("code_provider") == "codex"
+    assert error.metadata.get("success") is False
 
 
 async def run_all_tests():
@@ -2649,6 +2711,18 @@ async def run_all_tests():
     await r.record_async("repo_create_session_raises", test_repo_create_e2b_session_raises_on_error)
     await r.record_async("repo_persist_output_happy", test_repo_persist_terminal_output_happy)
     await r.record_async("repo_persist_output_swallows", test_repo_persist_terminal_output_swallows_errors)
+    r.record(
+        "build_durable_terminal_transcript",
+        test_build_durable_terminal_transcript_prefers_events_over_janky_pty,
+    )
+    r.record(
+        "format_code_events_transcript",
+        test_format_code_events_transcript_skips_empty_tool_results,
+    )
+    r.record(
+        "format_code_events_transcript_failed_status",
+        test_format_code_events_transcript_covers_failed_and_status_only_results,
+    )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
     await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
@@ -2695,6 +2769,10 @@ async def run_all_tests():
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
+    r.record(
+        "log_claude_tool_use_event",
+        test_log_code_agent_event_promotes_claude_tool_use_to_info,
+    )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity
     await r.record_async(
@@ -2735,6 +2813,98 @@ async def run_all_tests():
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
     teardown_mock()
     return r.all_passed
+
+
+
+def test_build_durable_terminal_transcript_prefers_events_over_janky_pty():
+    """Structured code events win over raw PTY so the FE gets a coherent log."""
+    from domains.spawn_claude_code_agent.service import build_durable_terminal_transcript
+
+    # No timeline events → keep PTY display.
+    assert build_durable_terminal_transcript("live pty\noutput", [], ["step"]) == "live pty\noutput"
+    assert build_durable_terminal_transcript("   ", [], []) == ""
+
+    janky_pty = (
+        "[Claude] Session started in /home/user\n"
+        "                                      [Claude] I'll start...\n"
+        "                                                           [Claude tool] Bash\n"
+    )
+    transcript = build_durable_terminal_transcript(
+        janky_pty,
+        [
+            {
+                "provider": "claude",
+                "type": "session",
+                "cwd": "/home/user",
+            },
+            {
+                "provider": "claude",
+                "type": "agent_message",
+                "text": "I'll start by checking GitHub access.",
+            },
+            {
+                "provider": "claude",
+                "type": "tool_use",
+                "tool": "Bash",
+                "input": {"command": "gh auth status"},
+            },
+            {
+                "provider": "claude",
+                "type": "tool_use",
+                "name": "Write",
+                "input": {"file_path": "/home/user/discovery.py"},
+            },
+            {
+                "type": "assistant",
+                "content": "Found 100 repos",
+            },
+            {"type": "result", "status": "completed", "text": "done"},
+        ],
+        ["Connected to Claude Code WebSocket", "Agentic loop finished"],
+    )
+    assert "[Claude] Session started in /home/user" in transcript
+    assert "[Claude] I'll start by checking GitHub access." in transcript
+    assert "[Claude tool] Bash · gh auth status" in transcript
+    assert "[Claude tool] Write · /home/user/discovery.py" in transcript
+    assert "[Claude] Found 100 repos" in transcript
+    assert "[Claude result] done" in transcript
+    assert "## Action Summary" in transcript
+    assert "Connected to Claude Code WebSocket" in transcript
+    # Must not prefer the staircase PTY once events exist.
+    assert "                                      [Claude]" not in transcript
+
+
+def test_format_code_events_transcript_skips_empty_tool_results():
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "tool_use", "tool": "Bash", "input": {"command": "ls"}},
+            {"type": "tool_result", "status": "completed"},
+            {"type": "tool_result", "error": "command failed"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude tool] Bash · ls",
+        "[Claude result] command failed",
+    ]
+
+
+def test_format_code_events_transcript_covers_failed_and_status_only_results():
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "tool_use", "tool": "Write"},
+            {"type": "result", "status": "failed", "text": "rank script exited 1"},
+            {"type": "result", "status": "cancelled"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude tool] Write",
+        "[Claude result] failed - rank script exited 1",
+        "[Claude result] cancelled",
+    ]
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ export const KNOWN_TAGS = [
   'minted',
   'social',
   'grep',
+  'github',
   'payment',
   'phone',
   'plaid',

@@ -791,6 +791,77 @@ describe('MessageBubble', () => {
     });
   });
 
+  it('renders session_cancelled branch for Claude Code tool', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: 'User paused the agent',
+      metadata: {
+        toolCallId: 'tc-21b',
+        toolName: 'spawn_claude_code_agent',
+        action_type: 'session_cancelled',
+        task_id: 'cc-cancelled',
+        toolStatus: 'ERROR',
+      },
+    });
+    const { container } = renderBubble(<MessageBubble message={msg} />);
+    await waitFor(() => {
+      expect(container.querySelector('img[alt="Claude Code"]')).not.toBeNull();
+    });
+  });
+
+  it('recovers task_id from sibling when cancel anchor omits it (avoids Spinning up)', async () => {
+    // toolCallId-dedupe can anchor the chip on handler cancel without task_id.
+    // Full agent transcript still has claude_code_started + Session Cancelled
+    // with the real task_id — bubble must recover it so the chip leaves Spinning up.
+    const toolCallId = 'tc-21c-orphan-cancel';
+    const started = baseMessage({
+      message_id: 'm-cc-started',
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId,
+        toolName: 'spawn_claude_code_agent',
+        action_type: 'claude_code_started',
+        task_id: 'cc-orphan-task',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Claude Code Started',
+      },
+    });
+    const cancelledWithId = baseMessage({
+      message_id: 'm-cc-cancelled-id',
+      role: 'TOOL',
+      text: 'Agent paused by user',
+      metadata: {
+        toolCallId,
+        toolName: 'spawn_claude_code_agent',
+        action_type: 'task_complete',
+        task_id: 'cc-orphan-task',
+        toolStatus: 'FINISHED',
+        title: 'Session Cancelled',
+      },
+    });
+    const cancelWithoutId = baseMessage({
+      message_id: 'm-cc-cancel-bare',
+      role: 'TOOL',
+      text: 'User paused the agent',
+      metadata: {
+        toolCallId,
+        toolName: 'spawn_claude_code_agent',
+        action_type: 'task_complete',
+        toolStatus: 'ERROR',
+        title: 'Claude Code Session Cancelled',
+        success: false,
+      },
+    });
+    const ctx = makeAgentCtx({ messages: [started, cancelledWithId, cancelWithoutId] });
+    const { container } = renderBubble(<MessageBubble message={cancelWithoutId} />, ctx);
+    await waitFor(() => {
+      expect(container.querySelector('img[alt="Claude Code"]')).not.toBeNull();
+    });
+    expect(container.textContent).not.toMatch(/Spinning up/i);
+    expect(container.textContent).toMatch(/Failed|Cancelled|Complete/i);
+  });
+
   it('renders USER message with image file_pointer showing loading placeholder', async () => {
     const msg = baseMessage({
       role: 'USER',

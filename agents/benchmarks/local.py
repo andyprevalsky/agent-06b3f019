@@ -2288,6 +2288,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             # database — e.g. the grep fixture's direct agent lookup hits system Postgres
             # instead of the isolated container and fails with "root agent not found".
             os.environ["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
+            # Point collect_logs / agent_latency / agent_cache at THIS stack's
+            # worker*.log files for the whole run (not only post-fail diagnostics).
+            # Without this, run JSON kept ClickHouse/Fly placeholders and dropped
+            # Claude Code tool_use progress that only lived in the isolated logs.
+            for key, value in diagnostic_log_env(stack).items():
+                if key in {"NAVI_WORKER_LOGS", "NAVI_BACKEND_LOGS"} and value:
+                    os.environ[key] = value
             # The SMS web_search stub is a two-process contract: the backend was
             # given this absolute path at boot, and run_benchmark.py must write
             # the file there. Exporting it to the backend alone leaves the runner

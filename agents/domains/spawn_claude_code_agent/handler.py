@@ -139,7 +139,12 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     ],
                     start_to_close_timeout=timedelta(minutes=50),
                     heartbeat_timeout=timedelta(minutes=5),
-                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                    # WAIT so pause cancel receives the activity's cancelled
+                    # result (includes task_id). TRY_CANCEL races the workflow
+                    # ahead of cleanup and posts task_complete without task_id,
+                    # leaving ClaudeCodeChip stuck on "Spinning up..." on the
+                    # durable hub FE (agent 094f1085 / task 1d92a4db).
+                    cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
@@ -164,12 +169,32 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
             if was_cancelled or (result and result.get("status") == "cancelled"):
                 logger.info("[ClaudeCode] Agent cancelled", agent_id=agent_id)
+                # Chip terminality requires action_type=task_complete + task_id.
+                # session_cancelled without task_id leaves ClaudeCodeChip stuck on
+                # "Spinning up..." after pause (hub agent 182cf2ab / task 45ce853d).
+                cancel_metadata = {
+                    "toolName": "spawn_claude_code_agent",
+                    "action_type": "task_complete",
+                    "success": False,
+                }
+                if result:
+                    if result.get("task_id"):
+                        cancel_metadata["task_id"] = result["task_id"]
+                    if result.get("code_provider"):
+                        cancel_metadata["code_provider"] = result["code_provider"]
+                if not cancel_metadata.get("task_id"):
+                    # Last resort: still emit task_complete so routing stays on
+                    # ClaudeCodeChip, but log — FE recovers task_id from siblings.
+                    logger.warning(
+                        "[ClaudeCode] Cancel without task_id; chip may need FE sibling recovery",
+                        agent_id=agent_id,
+                    )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Claude Code Session Cancelled",
                     message="User paused the agent",
                     status=MessageStatus.ERROR,
-                    metadata={"action_type": "session_cancelled", "toolName": "spawn_claude_code_agent"},
+                    metadata=cancel_metadata,
                 )
                 return
 

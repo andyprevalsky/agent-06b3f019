@@ -1925,6 +1925,18 @@ def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
     return f"navi-agent-tasks-{workspace}"
 
 
+def _inject_benchmark_prompt_secrets(goal: str) -> str:
+    """Substitute secret placeholders in benchmark prompts from the environment."""
+    if "{GITHUB_DISPATCH_TOKEN}" in goal:
+        token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
+        if not token:
+            raise ValueError(
+                "GITHUB_DISPATCH_TOKEN is required for this benchmark prompt placeholder"
+            )
+        goal = goal.replace("{GITHUB_DISPATCH_TOKEN}", token)
+    return goal
+
+
 def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     """Resolve the root-agent goal sent to POST /api/agents for a benchmark task."""
     from utils.payment_boundary_goal import payment_boundary_operational_suffix
@@ -1932,6 +1944,7 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
+    goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
         goal += payment_boundary_operational_suffix()
     return goal
@@ -9588,50 +9601,68 @@ def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[
     return failures
 
 
+def _all_trajectory_messages(data: dict) -> list[tuple[list, str]]:
+    """Return (messages, agent_label) pairs for root + captured benchmark tree."""
+    sections: list[tuple[list, str]] = []
+    root_messages = data.get("messages", []) or []
+    if root_messages:
+        sections.append((root_messages, "root"))
+    tree = data.get("_benchmark", {}).get("tree") if isinstance(data.get("_benchmark"), dict) else None
+    if isinstance(tree, dict):
+        for agent_id, info in tree.items():
+            if not isinstance(info, dict):
+                continue
+            messages = info.get("messages") or []
+            if messages:
+                sections.append((messages, str(agent_id)[:8]))
+    return sections
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
-    """Return grounded failed tool lifecycle events from the root trajectory."""
+    """Return grounded failed tool lifecycle events from root + tree trajectories."""
     failures: list[str] = []
-    messages = data.get("messages", []) or []
-    for message_index, message in enumerate(messages):
-        metadata = message.get("metadata") if isinstance(message, dict) else None
-        if not isinstance(metadata, dict):
-            continue
-        message_text = _tool_message_body(message)
-        candidates = [metadata]
-        if isinstance(metadata.get("auxiliary"), dict):
-            candidates.append(metadata["auxiliary"])
-        for candidate in candidates:
-            tool_name = candidate.get("toolName") or candidate.get("tool_name")
-            if not tool_name:
+    for messages, agent_label in _all_trajectory_messages(data):
+        for message_index, message in enumerate(messages):
+            metadata = message.get("metadata") if isinstance(message, dict) else None
+            if not isinstance(metadata, dict):
                 continue
-            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
-                continue
-            if _is_recoverable_browser_element_miss_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_pinned_host_refusal_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_browser_evaluate_uncaught_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
-            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
-            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
-                call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
-                failures.append(f"{tool_name} {call_id} status={status or 'unsuccessful'}")
+            message_text = _tool_message_body(message)
+            candidates = [metadata]
+            if isinstance(metadata.get("auxiliary"), dict):
+                candidates.append(metadata["auxiliary"])
+            for candidate in candidates:
+                tool_name = candidate.get("toolName") or candidate.get("tool_name")
+                if not tool_name:
+                    continue
+                if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                    continue
+                if _is_recoverable_browser_element_miss_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_pinned_host_refusal_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_browser_evaluate_uncaught_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+                event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+                if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                    call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
+                    prefix = f"{agent_label}:" if agent_label != "root" else ""
+                    failures.append(f"{prefix}{tool_name} {call_id} status={status or 'unsuccessful'}")
     return failures
 
 
@@ -9686,6 +9717,17 @@ def _completion_cards_from_messages(messages: list) -> list[dict]:
         ):
             summaries.append(completion)
     return summaries
+
+
+
+def _task_declares_static_check(task: BenchmarkTask, check_type: str) -> bool:
+    """Return True when any declared static_check evaluator includes check_type."""
+    return any(
+        check.get("type") == check_type
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    )
 
 
 def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: bool) -> list[dict]:
@@ -9765,6 +9807,181 @@ _APPROVAL_AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
+
+
+def _claude_code_sessions_with_transcripts(
+    sessions: list[dict], *, min_chars: int = 1
+) -> list[dict]:
+    """Return sessions whose stored terminal output meets ``min_chars``."""
+    return [
+        session
+        for session in sessions
+        if isinstance(session, dict)
+        and isinstance(session.get("output"), str)
+        and len(session.get("output", "").strip()) >= min_chars
+    ]
+
+
+def _claude_code_started_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a claude_code_started (or equivalent) chip anchor."""
+    started: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        action_type = metadata.get("action_type")
+        if action_type in {"claude_code_started", "task_started"} or (
+            metadata.get("toolName") == "spawn_claude_code_agent"
+            and metadata.get("ws_url")
+        ):
+            started.add(task_id)
+    return started
+
+
+def _claude_code_terminal_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a chip-terminal task_complete/session_cancelled."""
+    terminal: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        if metadata.get("action_type") in {"task_complete", "session_cancelled"}:
+            terminal.add(task_id)
+    return terminal
+
+
+async def _await_claude_code_chip_terminality(
+    base_url: str,
+    agent_id: str,
+    data: dict,
+    *,
+    timeout_seconds: float = 45.0,
+) -> dict:
+    """After pause, wait until Claude Code chips have task_complete+task_id in-transcript.
+
+    Pause cancel is async (activity cleanup posts Session Cancelled). Collecting
+    logs immediately freezes the durable hub FE on "Spinning up..." because the
+    archive misses the terminal message (hub agent 094f1085 had 87 msgs without
+    cancel; local agent had 89 with Session Cancelled + task_id).
+    """
+    latest = data
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        messages = latest.get("messages") or []
+        started = _claude_code_started_task_ids(messages)
+        if not started:
+            return latest
+        terminal = _claude_code_terminal_task_ids(messages)
+        if started <= terminal:
+            print(
+                f"    ✓ Claude Code chip terminality settled "
+                f"({len(terminal)}/{len(started)} task_complete+task_id)"
+            )
+            return latest
+        if time.monotonic() >= deadline:
+            missing = sorted(started - terminal)
+            print(
+                f"    ⚠ Claude Code cancel messages incomplete before log collection; "
+                f"missing task_id(s): {missing[:5]}"
+            )
+            return latest
+        await asyncio.sleep(1.5)
+        try:
+            latest = await get_agent(base_url, agent_id)
+        except Exception as refresh_error:
+            print(f"    ⚠ post-pause agent refresh failed: {refresh_error}")
+
+
+async def _hydrate_claude_code_sessions(data: dict) -> None:
+    """Fetch Claude Code sessions (root + tree) for transcript static checks.
+
+    On timeout/early-fail the harness pauses the agent before evaluators run, but
+    ``spawn_claude_code_agent`` persists terminal output asynchronously on cancel.
+    Retry briefly when sessions exist yet still have empty ``output`` so the
+    static check does not race the cancel-persist path.
+    """
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_agent_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+    benchmark_state = data.setdefault("_benchmark", {})
+    base_url = str(benchmark_state.get("api_base_url") or "").rstrip("/")
+    if not root_agent_id:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "root agent id is missing"
+        return
+    if not base_url:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "api_base_url is missing"
+        return
+
+    agent_ids = {root_agent_id}
+    try:
+        tree_agents = await get_agent_tree(base_url, root_agent_id)
+        for node in tree_agents or []:
+            if not isinstance(node, dict):
+                continue
+            aid = str(node.get("agent_id") or node.get("id") or "").strip()
+            if aid:
+                agent_ids.add(aid)
+    except Exception as tree_exc:
+        benchmark_state["claude_code_session_tree_error"] = str(tree_exc)[:200]
+
+    # Pause → cancel → persist can lag the evaluator by a few seconds. Poll until
+    # at least one session has a non-empty transcript (or we exhaust the budget).
+    retry_deadline = time.monotonic() + 45.0
+    sessions_by_id: dict[str, dict] = {}
+    fetch_errors: list[str] = []
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                sessions_by_id = {}
+                fetch_errors = []
+                for aid in sorted(agent_ids):
+                    try:
+                        resp = await client.get(
+                            f"{base_url}/api/claude-code-session/agent/{aid}",
+                            headers=headers,
+                        )
+                        if resp.status_code != 200:
+                            fetch_errors.append(f"{aid[:8]}:HTTP {resp.status_code}")
+                            continue
+                        payload = resp.json() if resp.content else {}
+                        for session in payload.get("sessions") or []:
+                            if not isinstance(session, dict):
+                                continue
+                            session_id = str(session.get("id") or "").strip()
+                            if session_id:
+                                sessions_by_id[session_id] = session
+                    except Exception as fetch_exc:
+                        fetch_errors.append(f"{aid[:8]}:{fetch_exc}")
+
+                sessions = list(sessions_by_id.values())
+                if not sessions:
+                    break
+                if _claude_code_sessions_with_transcripts(sessions):
+                    break
+                if time.monotonic() >= retry_deadline:
+                    break
+                await asyncio.sleep(2.0)
+
+        benchmark_state["claude_code_sessions"] = list(sessions_by_id.values())
+        if fetch_errors and not sessions_by_id:
+            benchmark_state["claude_code_session_evidence_error"] = "; ".join(fetch_errors)[:300]
+    except Exception as exc:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = str(exc)[:300]
+
+
 
 
 def _approval_user_visible_text(request: dict) -> str:
@@ -9990,7 +10207,9 @@ def _run_declared_static_check(
                 )
             continue
         if check_type == "agent_status":
-            expected_status = str(check.get("value") or "COMPLETED").upper()
+            expected_status = str(
+                check.get("value") or check.get("expected_status") or "COMPLETED"
+            ).upper()
             observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
             if observed_status != expected_status:
                 return False, f"Agent status was {observed_status}; expected {expected_status}"
@@ -10109,6 +10328,32 @@ def _run_declared_static_check(
             ):
                 return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type == "claude_code_session_output":
+            sessions = benchmark_state.get("claude_code_sessions") or []
+            min_sessions = int(check.get("min_sessions", 1))
+            min_chars = int(check.get("min_chars", 1))
+            if len(sessions) < min_sessions:
+                evidence_error = benchmark_state.get("claude_code_session_evidence_error")
+                suffix = f" ({evidence_error})" if evidence_error else ""
+                return (
+                    False,
+                    f"Claude Code session count was {len(sessions)}; "
+                    f"expected at least {min_sessions}{suffix}",
+                )
+            stored = [
+                session
+                for session in sessions
+                if isinstance(session, dict)
+                and isinstance(session.get("output"), str)
+                and len(session.get("output", "").strip()) >= min_chars
+            ]
+            if len(stored) < min_sessions:
+                return (
+                    False,
+                    f"Claude Code sessions with stored transcripts (≥{min_chars} chars): "
+                    f"{len(stored)}; expected at least {min_sessions}",
+                )
+            continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"
 
@@ -10116,7 +10361,9 @@ def _run_declared_static_check(
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
+    *,
     base_url: str | None = None,
+    static_only: bool = False,
 ) -> tuple[bool, Optional[str], list[dict]]:
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
     if not task.enforce_declared_evaluators:
@@ -10130,6 +10377,14 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    if any(
+        check.get("type") == "claude_code_session_output"
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    ):
+        await _hydrate_claude_code_sessions(data)
+
     needs_tree_evidence = any(
         evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge"}
         for evaluator in task.evaluators
@@ -10141,6 +10396,8 @@ async def _run_declared_evaluators(
     for evaluator in task.evaluators:
         evaluator_id = evaluator.get("id", "unnamed")
         method = evaluator.get("method")
+        if static_only and method != "static_check":
+            continue
         usage = None
         evidence_mode = method
         try:
@@ -10529,6 +10786,9 @@ async def run_single_task(
                     data = await _refresh_agent_after_pause_for_browser_terminal(
                         base_url, agent_id, data
                     )
+                    # Wait for Session Cancelled (task_complete+task_id) before
+                    # freezing the transcript into the durable hub archive.
+                    data = await _await_claude_code_chip_terminality(base_url, agent_id, data)
             except Exception as pause_error:
                 print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 
@@ -10787,7 +11047,10 @@ async def run_single_task(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
-        if task.enforce_declared_evaluators and passed:
+        run_declared = task.enforce_declared_evaluators and (
+            passed or _task_declares_static_check(task, "claude_code_session_output")
+        )
+        if run_declared and passed:
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
                 tree = canonicalize_agent_tree(
@@ -10815,11 +11078,13 @@ async def run_single_task(
                     "live_output_tokens": tokens_out,
                     "tree_tokens_out": tree_tokens_out,
                 }
-        if task.enforce_declared_evaluators and passed:
+        if run_declared:
+            data.setdefault("_benchmark", {})["api_base_url"] = base_url
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,
                 data,
                 base_url=base_url,
+                static_only=not passed,
             )
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),
@@ -10834,6 +11099,16 @@ async def run_single_task(
         logs = await collect_logs(agent_id, data, start_time)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
+        # Keep hydrated Claude Code transcripts in the run JSON so durable FE
+        # publish can dual-write them after the ephemeral bench DB is dropped.
+        claude_code_sessions = (data.get("_benchmark") or {}).get("claude_code_sessions")
+        if isinstance(claude_code_sessions, list) and claude_code_sessions:
+            logs["claude_code_sessions"] = claude_code_sessions
+        session_evidence_error = (data.get("_benchmark") or {}).get(
+            "claude_code_session_evidence_error"
+        )
+        if session_evidence_error:
+            logs["claude_code_session_evidence_error"] = session_evidence_error
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
