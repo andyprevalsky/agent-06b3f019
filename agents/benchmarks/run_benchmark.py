@@ -11924,32 +11924,12 @@ def _parallel_task_phases(
     shared rows during the fixture. Starting the exclusive phase first makes the
     clean-stack boundary real without sacrificing failed-tree diagnostics.
     """
-    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-    def uses_shared_browser_auth(task: BenchmarkTask) -> bool:
-        if not getattr(task, "requires_browser_agent", False):
-            return False
-        if getattr(task, "browser_profile_mode", "persistent") == "fresh":
-            return False
-        environment = getattr(task, "environment", None) or {}
-        return bool(
-            getattr(task, "browser_auth_realm", None)
-            or environment.get("live_cookie_domains")
-            or resolve_live_fixtures(environment)
-        )
-
+    # WebDecoy stays exclusive even with isolated browser profiles. Profile
+    # isolation only avoids shared cookie/DB collisions; FCaptcha PoW +
+    # behavioral scoring still need uncontended CPU. Running it in the parallel
+    # smoke batch previously burned the 420s cap with "Verification failed" /
+    # pow_not_satisfied under contention — without any LLM completion nudges.
     exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
-    if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
-        auth_reading_siblings = [
-            task for task in tasks if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
-        ]
-        if not auth_reading_siblings:
-            exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)
 
     exclusive = [task for task in tasks if task.name in exclusive_names]
     parallel = [task for task in tasks if task.name not in exclusive_names]
