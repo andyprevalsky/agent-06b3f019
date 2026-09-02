@@ -8340,6 +8340,63 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     assert drag_mock.await_args.args[2]["end_y"] == 4
 
 
+async def test_action_history_record_action_accepts_tuple_coordinates():
+    """Drag/click executors pass (x, y); record_action used to index that as a dict.
+
+    Repro: browser-biometrics-webdecoy agent c247de84 — CDP drag succeeded, then
+    ``coordinates["x"]`` raised TypeError and the TOOL step failed.
+    """
+    from browser_tools.dom_service import ActionHistory
+
+    history = ActionHistory()
+    dom = SimpleNamespace(selector_map={}, get_element_at_coordinates=AsyncMock(return_value=None))
+    entry = await history.record_action(
+        dom_service=dom,
+        action="drag",
+        coordinates=(100, 200),
+    )
+    assert entry.coordinates == {"x": 100, "y": 200}
+
+    dict_entry = await history.record_action(
+        dom_service=dom,
+        action="click",
+        coordinates={"x": 3, "y": 4},
+    )
+    assert dict_entry.coordinates == {"x": 3, "y": 4}
+
+
+async def test_execute_drag_records_through_real_action_history():
+    """Unmocked record_action after a successful CDP drag must not TypeError."""
+    from browser_tools.dom_service import ActionHistory
+    from browser_tools.tool_executor_v2 import _execute_drag
+
+    send = AsyncMock()
+    cdp_session = SimpleNamespace(
+        session_id="sess-1",
+        cdp_client=SimpleNamespace(
+            send=SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=send))
+        ),
+    )
+    session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp_session))
+    history = ActionHistory()
+    with patch("browser_tools.tool_executor_v2.asyncio.sleep", new_callable=AsyncMock):
+        out = await _execute_drag(
+            SimpleNamespace(
+                session=session,
+                selector_map={},
+                get_element_at_coordinates=AsyncMock(return_value=None),
+            ),
+            history,
+            {"start_x": 10, "start_y": 20, "end_x": 30, "end_y": 40, "steps": 2},
+        )
+    assert out["success"] is True
+    assert out["start"] == {"x": 10, "y": 20}
+    entries = history.get_entries()
+    assert entries[-1]["action"] == "drag"
+    assert entries[-1]["coordinates"] == {"x": 10, "y": 20}
+    assert entries[-1]["params"] == {"end": {"x": 30, "y": 40}, "steps": 2}
+
+
 def test_read_network_requests_tool_is_advertised():
     """The read_network_requests tool (1:1 with Claude Code's) is exposed to the
     browser model so it can detect a 403/Cloudflare challenge by status code or
@@ -19761,6 +19818,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_drag_dispatches_to_tool_executor",
         test_execute_action_drag_dispatches_to_tool_executor,
+    )
+    await r.record_async(
+        "action_history_record_action_accepts_tuple_coordinates",
+        test_action_history_record_action_accepts_tuple_coordinates,
+    )
+    await r.record_async(
+        "execute_drag_records_through_real_action_history",
+        test_execute_drag_records_through_real_action_history,
     )
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
     r.record(
