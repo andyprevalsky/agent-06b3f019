@@ -300,8 +300,17 @@ def _purchase_signal_match_forms(signal: str) -> list[str]:
 
 
 def _is_purchase_informational_exclusion(normalized: str) -> bool:
-    """True when the label is BNPL / learn-more chrome, not a charge commit."""
-    return any(pattern in normalized for pattern in PURCHASE_INFORMATIONAL_EXCLUSION_PATTERNS)
+    """True when the label is BNPL / learn-more chrome, not a charge commit.
+
+    Strip non-alphanumerics so ``Buy now, pay later`` collapses to the same
+    ``buynowpaylater`` form as ``Buy Now Pay Later``. Do not use bare
+    ``paylater`` — that would also match charge commits like
+    ``Place order — pay later``.
+    """
+    alnum = re.sub(r"[^a-z0-9]", "", normalized or "")
+    if not alnum:
+        return False
+    return any(pattern in alnum for pattern in PURCHASE_INFORMATIONAL_EXCLUSION_PATTERNS)
 
 _DOM_IDENTIFIER_SIGNAL = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
