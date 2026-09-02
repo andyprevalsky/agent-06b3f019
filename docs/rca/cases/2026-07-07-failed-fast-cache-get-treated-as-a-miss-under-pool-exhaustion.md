@@ -66,8 +66,19 @@ number of concurrent agents rather than with the work.
 
 None recorded.
 
+## Recurrence (2026-09-02) — get-position timeout → live LLM
+
+`test-mass-agent-run-0` agent `14eda9c6` hit T5 with $0.41 / 372k cache-create /
+48406 live out at 99.8% hit. GET retries held (`get_failed=0`) but
+`/api/fast-cache/get-position` had no retry; `httpx.ReadTimeout('')` raised,
+`RoseClient.complete` set `lookup_failed`, skipped passthroughs, then called
+`_complete_impl`. Sibling run `fa1980b8` the same day was 100% cache / $0.
+Fix + case: `2026-09-02-fast-cache-position-timeout-falls-through-to-live`.
+
 ## Reusable lesson
 
 Never let a failed cache read fall through as a MISS — retry it and distinguish
 transport failure from absence, or every pool exhaustion becomes a billed
-recomputation.
+recomputation. The retry must cover every read verb (GET and get-position),
+and `lookup_failed` must not be followed by a live provider call on
+allowlisted Fast Mode reads.
