@@ -48,6 +48,7 @@ def test_polar_bench_group_and_tags_never_daily():
     assert all(t.status == "ready" for t in polar)
     assert all(t.requires_browser_agent for t in polar)
     assert all(t.enforce_declared_evaluators for t in polar)
+    assert all(t.approval_handling is None for t in polar)
 
     odysseys = [t for t in polar if "odysseys" in t.tags]
     bu = [t for t in polar if "bu-bench" in t.tags]
