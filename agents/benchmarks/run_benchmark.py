@@ -5087,6 +5087,66 @@ def _agent_messages_have_browser_terminal(messages: Optional[List[dict]]) -> boo
     return open_task_ids.issubset(terminal_task_ids)
 
 
+def _recording_attachment_ready(metadata: dict) -> bool:
+    """True when a FINISHED recording row carries a playable FE attachment."""
+    if metadata.get("action_type") != "recording":
+        return False
+    if metadata.get("toolStatus") != "FINISHED":
+        return False
+    view_url = metadata.get("recording_view_url")
+    if isinstance(view_url, str) and view_url.strip():
+        return True
+    view_urls = metadata.get("recording_view_urls")
+    if isinstance(view_urls, list) and any(
+        isinstance(url, str) and url.strip() for url in view_urls
+    ):
+        return True
+    file_pointer = metadata.get("recording_file_pointer")
+    return isinstance(file_pointer, dict) and bool(
+        file_pointer.get("storage_path") or file_pointer.get("id")
+    )
+
+
+def _agent_messages_have_browser_recording_ready(
+    messages: Optional[List[dict]],
+) -> bool:
+    """True when every browser task that started a recording has a playable one.
+
+    Timeout cleanup posts ``session_paused`` / ``task_complete`` and finalizes
+    Kernel replay asynchronously. Hub archives that snapshot as soon as the
+    terminal lands (before the FINISHED recording row) leave the FE Recording
+    tab empty even though Kernel already has the MP4.
+    """
+    started_task_ids: set[str] = set()
+    ready_task_ids: set[str] = set()
+    for message in messages or []:
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent":
+            continue
+        if metadata.get("action_type") != "recording":
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        started_task_ids.add(task_id)
+        if _recording_attachment_ready(metadata):
+            ready_task_ids.add(task_id)
+    if not started_task_ids:
+        return True
+    return started_task_ids.issubset(ready_task_ids)
+
+
+def _agent_messages_ready_for_browser_hub_archive(
+    messages: Optional[List[dict]],
+) -> bool:
+    """Terminal chip close + playable recording — both required for hub FE links."""
+    return _agent_messages_have_browser_terminal(
+        messages
+    ) and _agent_messages_have_browser_recording_ready(messages)
+
+
 async def _refresh_agent_after_pause_for_browser_terminal(
     base_url: str,
     agent_id: str,
@@ -5100,9 +5160,10 @@ async def _refresh_agent_after_pause_for_browser_terminal(
     Timeout/stall paths pause the agent *after* the poll snapshot. Cancel +
     recording cleanup then post ``task_complete`` / ``session_paused`` and finalize
     the recording asynchronously. Archiving the pre-pause snapshot leaves FE links
-    with an IN_PROGRESS browser chip forever.
+    with an IN_PROGRESS browser chip forever. Archiving as soon as ``session_paused``
+    lands (before Kernel replay finalize) leaves the Recording tab empty.
     """
-    if _agent_messages_have_browser_terminal(data.get("messages")):
+    if _agent_messages_ready_for_browser_hub_archive(data.get("messages")):
         return data
     deadline = time.time() + timeout_seconds
     latest = data
@@ -5113,7 +5174,7 @@ async def _refresh_agent_after_pause_for_browser_terminal(
         except Exception as refresh_error:
             print(f"    ⚠ Browser-terminal refresh failed: {refresh_error}")
             continue
-        if _agent_messages_have_browser_terminal(latest.get("messages")):
+        if _agent_messages_ready_for_browser_hub_archive(latest.get("messages")):
             print(
                 f"    ✓ Browser terminal messages landed after pause "
                 f"({len(latest.get('messages') or [])} messages)"

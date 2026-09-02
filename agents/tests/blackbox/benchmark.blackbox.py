@@ -1499,6 +1499,56 @@ def test_agent_messages_have_browser_terminal_requires_explicit_close():
     assert bench._agent_messages_have_browser_terminal([])
 
 
+def test_agent_messages_ready_for_browser_hub_archive_waits_for_recording():
+    """session_paused alone must not archive before Kernel replay is attached.
+
+    DoorDash grocery timeout 3afbbda8 (2026-09-02): cleanup posted session_paused
+    without task_id, the refresh helper returned early, and the hub bundle missed
+    the FINISHED recording_view_url that landed ~1s later. FE Recording tab empty.
+    """
+    import benchmarks.run_benchmark as bench
+
+    task_id = "task-dd-1"
+    recording_started = {
+        "metadata": {
+            "toolName": "spawn_browser_agent",
+            "action_type": "recording",
+            "toolStatus": "IN_PROGRESS",
+            "task_id": task_id,
+        }
+    }
+    session_paused = {
+        "metadata": {
+            "toolName": "spawn_browser_agent",
+            "action_type": "session_paused",
+            "toolStatus": "ERROR",
+            "toolCallId": "tool-timeout-1",
+        }
+    }
+    recording_finished = {
+        "metadata": {
+            "toolName": "spawn_browser_agent",
+            "action_type": "recording",
+            "toolStatus": "FINISHED",
+            "task_id": task_id,
+            "recording_view_url": "https://kernel.example/replay.mp4",
+        }
+    }
+
+    paused_before_recording = [recording_started, session_paused]
+    assert bench._agent_messages_have_browser_terminal(paused_before_recording)
+    assert not bench._agent_messages_have_browser_recording_ready(
+        paused_before_recording
+    )
+    assert not bench._agent_messages_ready_for_browser_hub_archive(
+        paused_before_recording
+    )
+
+    paused_with_recording = [recording_started, recording_finished, session_paused]
+    assert bench._agent_messages_ready_for_browser_hub_archive(paused_with_recording)
+    assert bench._agent_messages_ready_for_browser_hub_archive([])
+
+
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
     """A displayed tax-rate qualifier is equivalent only when its amount is exact."""
     from benchmarks.benchmark_tasks import BenchmarkTask
