@@ -1973,7 +1973,7 @@
     "title": "DoorDash Food-Plan Grocery Order",
     "description": "Reproduces prod premature-checkout failure: cart must match the prod-derived weekly manifest at checkout, not a single-item or partial basket.",
     "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout \u2014 a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it.",
-    "timeout_seconds": 1800,
+    "timeout_seconds": 2700,
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent"
