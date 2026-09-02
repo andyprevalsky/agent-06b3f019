@@ -251,9 +251,11 @@ PURCHASE_CONSENT_PROSE_PATTERNS = [
 
 # Buy-Now-Pay-Later / informational finance chrome contains "buy now" but is not
 # a charge commit. Match on whitespace-stripped forms.
+# Do NOT use bare "paylater" — that would exclude real charge commits like
+# "Place order — pay later" (normalizes to …placeorder…paylater…). Keep BNPL
+# product chrome (`buynowpaylater`) and learn-more copy (`learnaboutbuy`).
 PURCHASE_INFORMATIONAL_EXCLUSION_PATTERNS = [
     "buynowpaylater",
-    "paylater",
     "learnaboutbuy",
 ]
 

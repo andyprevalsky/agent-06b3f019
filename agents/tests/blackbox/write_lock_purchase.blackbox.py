@@ -223,6 +223,23 @@ def test_generative_consent_and_bnpl_still_excluded():
     assert hits == [], f"held-out FP ({len(hits)}): {hits}"
 
 
+def test_place_order_pay_later_still_locks():
+    """Charge commits that mention pay-later must not be excluded by BNPL chrome.
+
+    CodeRabbit on PR #1197: bare `paylater` exclusion would skip the write lock
+    for labels like `Place order — pay later` (contains both placeorder + paylater).
+    """
+    from browser_tools.write_lock import is_purchase_button
+
+    assert is_purchase_button("Place order — pay later")
+    assert is_purchase_button("Place Order Pay Later")
+    assert is_purchase_button("Complete purchase — pay later with Klarna")
+    # Informational BNPL chrome still excluded
+    assert not is_purchase_button("Buy now, pay later")
+    assert not is_purchase_button("Buy Now Pay Later with Affirm")
+    assert not is_purchase_button("Learn about buy now pay later")
+
+
 def test_method_is_fulfillment_collapse_not_phrase_dump():
     """Matcher must expose fulfillment collapse — not only a giant phrase list.
 
@@ -282,6 +299,10 @@ async def run_all_tests():
     r.record(
         "generative_consent_and_bnpl_still_excluded",
         test_generative_consent_and_bnpl_still_excluded,
+    )
+    r.record(
+        "place_order_pay_later_still_locks",
+        test_place_order_pay_later_still_locks,
     )
     r.record(
         "method_is_fulfillment_collapse_not_phrase_dump",
