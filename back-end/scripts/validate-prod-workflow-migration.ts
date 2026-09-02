@@ -1659,13 +1659,13 @@ async function main(): Promise<void> {
 
   await check('same_sha_old_marker_is_retired_without_retiring_current_attempt', async () => {
     const buildId = process.env.TEMPORAL_WORKER_BUILD_ID!;
-    const deploymentToken = process.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN!;
-    // Cooperative cutover does not keep an activation marker running after the
-    // deploy finishes. Mint the "current" marker here so the cleanup property
-    // under test is self-contained and does not depend on leftover deploy state.
-    const currentMarkerId = await activateTemporalWorkerBuild(buildId, deploymentToken);
+    // Mint both markers under unique validation tokens. Cooperative cutover does
+    // not keep deploy activation markers running, and a prior validation pass may
+    // leave the real deploy-token marker TERMINATED (activate then throws).
+    const currentToken = `validation-current-${runId}`;
+    const oldToken = `validation-old-${runId}`;
+    const currentMarkerId = await activateTemporalWorkerBuild(buildId, currentToken);
     workflowIds.add(currentMarkerId);
-    const oldToken = `validation-${runId}`;
     const oldMarkerId = await activateTemporalWorkerBuild(buildId, oldToken);
     workflowIds.add(oldMarkerId);
     assert.notStrictEqual(oldMarkerId, currentMarkerId);
