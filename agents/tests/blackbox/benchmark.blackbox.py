@@ -3596,6 +3596,7 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
+    assert task.max_steps == {"browser": 250}
     cart_evaluator = task.evaluators[0]
     assert cart_evaluator["id"] == "doordash-food-plan-cart-completeness"
     criteria = " ".join(cart_evaluator["criteria"]).lower()

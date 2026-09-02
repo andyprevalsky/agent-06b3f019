@@ -1999,6 +1999,9 @@
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
+    "max_steps": {
+      "browser": 250
+    },
     "status": "ready",
     "runner": "agent",
     "harness": "rose",
