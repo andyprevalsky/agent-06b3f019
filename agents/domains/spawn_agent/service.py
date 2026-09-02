@@ -469,9 +469,8 @@ async def spawn_explore_agent_activity(
             }
         )
 
-    # Non-demo explores background FE posts so fanout does not serialize on
-    # createMessage. OAi-demo Fast Mode awaits each post so cached web_search /
-    # web_fetch / LLM turns paint the chip instead of dumping after the leaf ends.
+    # Background FE posts so fanout does not serialize on createMessage.
+    # Fast Mode does not change this — cache only mocks external lib calls.
     _pending_fe_posts: "list[asyncio.Task]" = []
     # Tail of the in-flight post chain for each chip, keyed by toolCallId.
     _fe_post_chain: "dict[str, asyncio.Task]" = {}
@@ -515,8 +514,6 @@ async def spawn_explore_agent_activity(
                 metadata["subAgentId"] = task_id
                 tool_call_id = metadata.get("toolCallId")
                 chain_key = str(tool_call_id) if tool_call_id else None
-            if _oai_demo and _explore_fast_mode_enabled:
-                return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
             _dispatch_fe_post(
                 chain_key,
                 lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),
@@ -727,31 +724,20 @@ async def spawn_explore_agent_activity(
         ):
             # Same chain as the tool managers' posts: both writers can target one
             # toolCallId, so both must respect that chip's ordering invariant.
-            if _oai_demo and _explore_fast_mode_enabled:
-                await save_explore_message(
-                    agent_id=agent_id,
-                    title=title,
-                    message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                    status=message_status,
-                    task_id=task_id,
-                    tool_call_id=tool_call_id,
-                    tool_name=tool_name,
-                )
-            else:
-                _dispatch_fe_post(
-                    tool_call_id,
-                    lambda: (
-                        save_explore_message(
-                            agent_id=agent_id,
-                            title=title,
-                            message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                            status=message_status,
-                            task_id=task_id,
-                            tool_call_id=tool_call_id,
-                            tool_name=tool_name,
-                        )
-                    ),
-                )
+            _dispatch_fe_post(
+                tool_call_id,
+                lambda: (
+                    save_explore_message(
+                        agent_id=agent_id,
+                        title=title,
+                        message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
+                        status=message_status,
+                        task_id=task_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                    )
+                ),
+            )
         await _maybe_drain_pending_fe_posts()
 
     # Build initial context with goal + any resolved attachment content.
@@ -830,17 +816,6 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             goal_text=_explore_fast_mode_goal,
         )
-    except asyncio.CancelledError:
-        # Demo fire-and-track only. CancelledError is BaseException, so a bare
-        # try/finally used to skip wrap-up and leave the chip on "Research started."
-        # Live explores must not fake a completed leaf after Temporal cancel.
-        if not _oai_demo:
-            raise
-        result = {
-            "status": "completed" if (tool_call_results or has_usable_tool_evidence) else "error",
-            "final_response": "",
-            "message": "cancelled after research",
-        }
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()

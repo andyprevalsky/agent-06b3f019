@@ -1529,13 +1529,12 @@ async def test_handler_fast_mode_spawns_explore_on_oai_demo_child():
 
     assert fake.start_activity_calls, "OAi demo explore must still run so trajectories replay"
     assert any(e.status == MessageStatus.IN_PROGRESS for e in events)
-    assert not any(e.status == MessageStatus.FINISHED for e in events), (
-        "parent must not stub-finish the explore chip; cached turns paint it"
-    )
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished, "Fast Mode waits for explore like live and posts the real result"
+    assert "Huberman cadence notes." in finished[-1].message
     assert not any("Research started" in str(e.message or "") for e in events)
     assert not any("skipping nested spawn" in str(e.message or "") for e in events)
-    in_progress = [e for e in events if e.status == MessageStatus.IN_PROGRESS]
-    assert in_progress and (in_progress[-1].metadata or {}).get("fastModeParallel") is True
+    assert not any((e.metadata or {}).get("fastModeParallel") for e in events)
 
 
 def test_user_facing_explore_result_keeps_prod_summaries():
@@ -1558,9 +1557,9 @@ def test_user_facing_explore_result_keeps_prod_summaries():
     assert user_facing_explore_result(None) == ""
 
 
-async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
-    """Parent execute_loop must FINISH without awaiting the explore activity."""
-    from domains.spawn_agent.handler import SpawnAgentManager, drain_fast_mode_explores
+async def test_handler_fast_mode_oai_demo_explore_awaits_activity():
+    """Fast Mode waits for explore like live — cache only mocks externals."""
+    from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
     handle = _Activity(
@@ -1570,7 +1569,6 @@ async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
             "accumulated_usage": [],
             "llm_iteration_usage": [],
         },
-        done=False,
     )
     wf = _FakeWFInstance(
         depth=1,
@@ -1591,207 +1589,24 @@ async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
             SpawnAgentManager().execute_tool(
                 workflow_instance=wf,
                 tool_call={"type": "explore", "goal": "Research Andrew Huberman last 90 days"},
-                tool_call_id="tc-oai-parallel",
+                tool_call_id="tc-oai-wait",
             )
         )
-        assert handle._awaited is False, "parallel Fast Mode explore must not block the parent"
-        assert handle.done() is False
-        assert fake.start_activity_calls, "explore activity must still start (T3 full traj)"
-        assert not any(e.status == MessageStatus.FINISHED for e in events)
-        assert not any("Research started" in str(e.message or "") for e in events)
-        in_progress = [e for e in events if e.status == MessageStatus.IN_PROGRESS][-1]
-        assert (in_progress.metadata or {}).get("fastModeParallel") is True
-        assert "Fast Mode" not in (in_progress.message or "")
-        assert "cached trajectory" not in (in_progress.message or "").lower()
-        assert getattr(wf, "_fm_explore_handles", None), "handle must be tracked for drain"
-
-        await drain_fast_mode_explores(wf)
-        assert handle._awaited is True
+        assert handle._awaited is True, "Fast Mode must not fire-and-track explore"
         assert handle.done() is True
+        assert fake.start_activity_calls, "explore activity must still start"
+        finished = [e for e in events if e.status == MessageStatus.FINISHED]
+        assert finished
+        assert finished[-1].message == "Huberman cadence notes."
+        assert not any("Research started" in str(e.message or "") for e in events)
+        assert not any((e.metadata or {}).get("fastModeParallel") for e in events)
         assert not getattr(wf, "_fm_explore_handles", None)
-        posted = [
-            (event.message, tcid)
-            for event, tcid, name in wf.handled_events
-            if name == "spawn_agent"
-        ]
-        assert any(
-            message == "Huberman cadence notes." and tcid == "tc-oai-parallel" for message, tcid in posted
-        ), "drain must post the explore summary onto the chip like prod"
-    finally:
-        restore()
-
-
-async def test_handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbing():
-    """A Fast Mode stub result must not leave the explore chip on Thinking..."""
-    from domains.spawn_agent.handler import SpawnAgentManager, drain_fast_mode_explores
-    from tools.base import MessageStatus
-
-    evidence = (
-        "[web_search] Nick Norwitz June 2026 YouTube views and Stay Curious "
-        "Substack likes with citations from nicknorwitz.substack.com and "
-        "youtube.com/@nicknorwitzPhD covering Apr 4 to Jul 3 2026."
-    )
-    handle = _Activity(
-        result={
-            "result": "Fast Mode cache trajectory ended for this explore goal. Returning with evidence gathered so far.",
-            "tool_call_results": [evidence],
-            "accumulated_usage": [],
-            "llm_iteration_usage": [],
-        },
-        done=False,
-    )
-    wf = _FakeWFInstance(
-        depth=1,
-        goal=(
-            "You are analyzing ONE creator for Andy Prevalsky. "
-            "Research the creator's public activity in the last 90 days "
-            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
-        ),
-    )
-    wf.fast_mode_cache_enabled = True
-    fake = _FakeSpawnWF(
-        activity_results={"fetch_local_data_summary": "local"},
-        start_activity_result=handle,
-    )
-    restore = _patch_spawn_workflow(fake)
-    try:
-        await _collect(
-            SpawnAgentManager().execute_tool(
-                workflow_instance=wf,
-                tool_call={"type": "explore", "goal": "Research Nick Norwitz last 90 days"},
-                tool_call_id="tc-oai-plumbing",
-            )
-        )
-        await drain_fast_mode_explores(wf)
-        posted = [
-            event.message
-            for event, tcid, name in wf.handled_events
-            if name == "spawn_agent" and tcid == "tc-oai-plumbing"
-        ]
-        assert any("Stay Curious" in str(message) for message in posted)
-        assert not any("Fast Mode" in str(message) for message in posted)
-    finally:
-        restore()
-
-
-async def test_handler_fast_mode_drain_posts_wrapup_from_timeout_heartbeat():
-    """Heartbeat timeout after research must still land the chip wrap-up.
-
-    Local mass-agent d5743a6a / explore 44c81111 replayed 84 research tools,
-    then spawn_explore_agent_activity hit Activity task timed out. Drain
-    logged Fast Mode parallel explore failed and posted nothing, so T3 saw
-    Research started. (0 chars). Heartbeat details already held the compiled
-    evidence — the parent chip must use that, not stay empty.
-    """
-    from domains.spawn_agent.handler import SpawnAgentManager, drain_fast_mode_explores
-
-    wrap_up = (
-        "Peter Attia MD public-content activity report — focus window "
-        "April 4 to July 3 2026. The Drive remains weekly (eps 391-398), "
-        "Instagram @peterattiamd posts several times per week, and YouTube "
-        "clips of AMA 86 / colorectal screening are the high-engagement "
-        "pieces with citations from peterattiamd.com and Apple Podcasts."
-    )
-    assert len(wrap_up) >= 200
-
-    class _TimeoutAfterResearch(Exception):
-        def __init__(self):
-            self.last_heartbeat_details = (
-                {
-                    "result": wrap_up,
-                    "tool_call_results": [
-                        "[web_search] **Result:** Peter Attia Drive weekly cadence 2026"
-                    ],
-                },
-            )
-
-    handle = _Activity(exception=_TimeoutAfterResearch(), done=False)
-    wf = _FakeWFInstance(
-        depth=1,
-        goal=(
-            "You are analyzing ONE creator for Andy Prevalsky. "
-            "Research the creator's public activity in the last 90 days "
-            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
-        ),
-    )
-    wf.fast_mode_cache_enabled = True
-    fake = _FakeSpawnWF(
-        activity_results={"fetch_local_data_summary": "local"},
-        start_activity_result=handle,
-    )
-    restore = _patch_spawn_workflow(fake)
-    try:
-        await _collect(
-            SpawnAgentManager().execute_tool(
-                workflow_instance=wf,
-                tool_call={
-                    "type": "explore",
-                    "goal": "Do 3 quick web searches about Peter Attia MD",
-                },
-                tool_call_id="tc-oai-timeout-44c81111",
-            )
-        )
-        await drain_fast_mode_explores(wf)
-        posted = [
-            event.message
-            for event, tcid, name in wf.handled_events
-            if name == "spawn_agent" and tcid == "tc-oai-timeout-44c81111"
-        ]
-        assert any(len(str(message or "")) >= 200 for message in posted), posted
-        assert any("Peter Attia MD public-content" in str(message) for message in posted)
-        assert not any("Research started." == str(message) for message in posted)
-        assert not any("Fast Mode" in str(message) for message in posted)
-    finally:
-        restore()
-
-
-async def test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot():
-    """Parent must not block on the inflight cap; Temporal queues the extras."""
-    from domains.spawn_agent.config import FM_EXPLORE_INFLIGHT_CAP
-    from domains.spawn_agent.handler import SpawnAgentManager
-
-    handles = [
-        _Activity(result={"result": f"r{i}", "tool_call_results": [], "accumulated_usage": [], "llm_iteration_usage": []}, done=False)
-        for i in range(FM_EXPLORE_INFLIGHT_CAP + 2)
-    ]
-    wf = _FakeWFInstance(
-        depth=1,
-        goal=(
-            "You are analyzing ONE creator for Andy Prevalsky. "
-            "Research the creator's public activity in the last 90 days "
-            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
-        ),
-    )
-    wf.fast_mode_cache_enabled = True
-    fake = _FakeSpawnWF(activity_results={"fetch_local_data_summary": "local"})
-    started = []
-
-    def _next_handle(*_a, **_k):
-        handle = handles[len(started)]
-        started.append(handle)
-        return handle
-
-    fake.start_activity = lambda *a, **k: _next_handle()
-    restore = _patch_spawn_workflow(fake)
-    try:
-        for i, _handle in enumerate(handles):
-            events = await _collect(
-                SpawnAgentManager().execute_tool(
-                    workflow_instance=wf,
-                    tool_call={"type": "explore", "goal": f"Research creator batch {i}"},
-                    tool_call_id=f"tc-oai-uncap-{i}",
-                )
-            )
-            assert any((e.metadata or {}).get("fastModeParallel") for e in events)
-            assert _handle._awaited is False
-        assert len(getattr(wf, "_fm_explore_handles", [])) == len(handles)
-        assert all(h._awaited is False for h in handles)
     finally:
         restore()
 
 
 async def test_handler_fast_mode_oai_demo_capture_still_awaits_explore():
-    """wait_for / capture_tool_results still needs the real explore result."""
+    """wait_for / capture_tool_results still gets the real explore result."""
     from domains.spawn_agent.handler import SpawnAgentManager
 
     handle = _Activity(
@@ -4175,20 +3990,8 @@ async def run_all_tests():
         test_handler_fast_mode_spawns_explore_on_oai_demo_child,
     )
     await r.record_async(
-        "handler_fast_mode_oai_demo_explore_does_not_await_activity",
-        test_handler_fast_mode_oai_demo_explore_does_not_await_activity,
-    )
-    await r.record_async(
-        "handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbing",
-        test_handler_fast_mode_drain_posts_tool_evidence_when_result_is_plumbing,
-    )
-    await r.record_async(
-        "handler_fast_mode_drain_posts_wrapup_from_timeout_heartbeat",
-        test_handler_fast_mode_drain_posts_wrapup_from_timeout_heartbeat,
-    )
-    await r.record_async(
-        "handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot",
-        test_handler_fast_mode_oai_demo_explore_does_not_wait_for_inflight_slot,
+        "handler_fast_mode_oai_demo_explore_awaits_activity",
+        test_handler_fast_mode_oai_demo_explore_awaits_activity,
     )
     await r.record_async(
         "handler_fast_mode_oai_demo_capture_still_awaits_explore",
