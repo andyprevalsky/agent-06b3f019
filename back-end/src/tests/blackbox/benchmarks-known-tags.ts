@@ -37,6 +37,7 @@ export const KNOWN_TAGS = [
   'grep',
   'payment',
   'phone',
+  'ivr',
   'plaid',
   'transactions',
   'bot-challenge',
