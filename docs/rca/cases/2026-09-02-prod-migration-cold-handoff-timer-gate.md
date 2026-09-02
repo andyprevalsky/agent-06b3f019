@@ -31,6 +31,9 @@ Cold rows asserted `timers:0 → timers:1` (and matching workflow-task/event gro
 
 ## Fix
 
+Validation script + RCA only in the follow-up PR (comment correction in `agent_workflow.py` deferred so a comment-only edit does not force another surface-hash generation rollover).
+
+
 - Settle cold history until `timers >= 1` and counts stop moving, then assert no further growth inside the 30s poll window (`assertColdHandoffHistoryStable` in `validate-prod-workflow-migration.ts`).
 - Mint the current activation marker inside `same_sha_old_marker_…` before creating the superseded one.
 - Correct the outdated cold-pause comment in `agent_workflow.py`.
