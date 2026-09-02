@@ -31,6 +31,7 @@ import {
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 import { commitStartNewAgent, type StartNewAgentArgs } from './supervisorTools.startAgent';
 import type { SupervisorChannel } from './channelDelivery';
+import type { FilePointer } from '../storage';
 // web_search MUST come from supervisorTools.webSearch: it is the only copy that
 // honours BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE. A fixture-blind copy silently
 // runs a LIVE search underneath a benchmark whose whole purpose is controlling
@@ -226,7 +227,9 @@ export async function dispatchToolCall(
 export async function commitPendingWrites(
   pendingWrites: readonly PendingOp[],
   userId: string,
-  channel: SupervisorChannel = 'SMS'
+  channel: SupervisorChannel = 'SMS',
+  /** Current-turn inbound MMS FilePointers — auto-forwarded onto start_new_agent. */
+  inboundAttachments: readonly FilePointer[] = []
 ): Promise<ToolResult[]> {
   const results: ToolResult[] = [];
   for (const op of pendingWrites) {
@@ -244,7 +247,7 @@ export async function commitPendingWrites(
           result = await commitIncreaseBudget(op);
           break;
         case 'start_new_agent':
-          result = await commitStartNewAgent(op, userId, channel);
+          result = await commitStartNewAgent(op, userId, channel, inboundAttachments);
           break;
       }
       log.info('Pending op committed', {
