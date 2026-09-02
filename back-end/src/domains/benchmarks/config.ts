@@ -65,6 +65,7 @@ export interface TaskAttempt {
   duration_seconds: number | null;
   fast_mode_cache: boolean;
   timestamp: string;
+  agent_id: string | null;
 }
 
 let attemptsCache: { mtimeMs: number; attempts: TaskAttempt[] } | null = null;
@@ -100,6 +101,8 @@ export function readTaskAttempts(): TaskAttempt[] {
           typeof parsed.duration_seconds === 'number' ? parsed.duration_seconds : null,
         fast_mode_cache: parsed.fast_mode_cache === true,
         timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : '',
+        agent_id:
+          typeof parsed.agent_id === 'string' && parsed.agent_id !== '' ? parsed.agent_id : null,
       });
     } catch {
       // skip malformed line
