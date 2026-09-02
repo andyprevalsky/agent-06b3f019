@@ -17,7 +17,7 @@
  * UI: icon-only trigger; accessible label still reports Fast Mode On/Off.
  * Hover shows an explanatory tooltip for the current state.
  *
- * Gating: only rendered when the current user is in FAST_MODE_USER_IDS (Andy / Tamy).
+ * Gating: only rendered when the current user is in FAST_MODE_USER_IDS (admin accounts).
  * The value is threaded into the create-agent payload as `fastMode`; default on means
  * Rose complete calls use provider fast mode and the aggressive cache is active.
  */
