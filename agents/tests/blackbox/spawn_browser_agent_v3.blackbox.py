@@ -289,6 +289,55 @@ def test_transient_session_init_failure_classification():
 # don't exist (ImportError) and the guarantees below don't hold.
 # ============================================================================
 
+def test_visible_result_completion_rewrites_post_submit_wait():
+    """c3762be3 already stated score 0.07 + bot verdict, then waited 6–10s.
+
+    A post-submit wait after that reasoning must become attempt_completion so
+    the 420s smoke cap cannot be burned on PoW retries.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        forced_visible_result_completion_action,
+        should_force_visible_result_completion,
+    )
+
+    stated = (
+        'A risk score of "0.07" is shown, but there\'s a "Bot detected - form blocked" '
+        'message. The form was blocked with reason "pow_not_satisfied".'
+    )
+    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
+    assert should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning=stated,
+        action_summaries=prior_submit,
+    )
+    forced = forced_visible_result_completion_action(stated)
+    assert forced["action"] == "attempt_completion"
+    assert "0.07" in forced["params"]["reasoning"]
+
+
+def test_visible_result_completion_does_not_rewrite_before_submit():
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stated = 'A risk score of "0.07" is shown, Bot detected - form blocked'
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning=stated,
+        action_summaries=['click: {"text": "I\'m not a robot"}'],
+    )
+    assert not should_force_visible_result_completion(
+        action_name="click",
+        last_reasoning=stated,
+        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
+    )
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning="Scrolling to bring the checkbox into view.",
+        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
+    )
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -19201,6 +19250,14 @@ async def run_all_tests():
     r.record(
         "browser_fast_mode_timeout_is_demo_only",
         test_browser_fast_mode_timeout_is_demo_only,
+    )
+    r.record(
+        "visible_result_completion_rewrites_post_submit_wait",
+        test_visible_result_completion_rewrites_post_submit_wait,
+    )
+    r.record(
+        "visible_result_completion_does_not_rewrite_before_submit",
+        test_visible_result_completion_does_not_rewrite_before_submit,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
