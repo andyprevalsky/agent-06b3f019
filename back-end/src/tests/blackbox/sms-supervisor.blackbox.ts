@@ -51,6 +51,8 @@ import { smsBluebottleBehaviorCases } from './sms-supervisor.bluebottle.behavior
 import {
   testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_voiceNoteRoundTrip,
+  testRealLlm_blueRecolorSpawnsAgentWithAllFiveAttachments,
+  testWriteCommit_startNewAgentForwardsInboundImageAttachments,
 } from './sms-supervisor.media.behavior';
 import {
   bareRejectionBlackboxCase,
@@ -600,6 +602,10 @@ async function runAll() {
       fn: testWriteCommit_startNewAgentCommitsBeforeUserSend,
     },
     {
+      name: 'write-commit -- start_new_agent forwards all 5 object photos (byte-exact)',
+      fn: () => testWriteCommit_startNewAgentForwardsInboundImageAttachments(prisma),
+    },
+    {
       name: 'write-commit -- commit failure produces user-visible error',
       fn: testWriteCommit_failureBuildsUserVisibleError,
     },
@@ -654,6 +660,10 @@ async function runAll() {
     {
       name: 'real-llm -- photo attachment round-trip (opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1)',
       fn: () => testRealLlm_photoAttachmentRoundTrip(prisma),
+    },
+    {
+      name: 'real-llm -- 5 object photos blue-recolor spawns agent with all attachments (opt-in)',
+      fn: () => testRealLlm_blueRecolorSpawnsAgentWithAllFiveAttachments(prisma),
     },
     {
       name: 'real-llm -- voice note round-trip (opt-in via BLACKBOX_SMS_SUPERVISOR_REAL_LLM=1)',

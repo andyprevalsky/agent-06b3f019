@@ -13545,6 +13545,42 @@ def test_phone_call_tasks_define_two_sided_verification():
     assert "use the endCall tool" in payment.phone_persona["system_prompt"]
 
 
+def test_phone_call_ivr_dtmf_task_defines_call_tree_verification():
+    """IVR phone benchmark pairs a keypad-input callee with DTMF navigation checks."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    ivr = get_task_by_name("phone-call-ivr-dtmf")
+    assert ivr.expected_tools == ["call_phone_number"]
+    assert ivr.expected_tool_counts == {"call_phone_number": 1}
+    assert ivr.approval_handling == "auto_approve"
+    assert ivr.group == "daily"
+    assert "phone" in ivr.tags
+    assert "ivr" in ivr.tags
+    assert "{callee_phone_number}" in ivr.prompt
+    assert "exactly once" in ivr.prompt
+    assert "2451338820" in ivr.prompt
+    assert "keypad" in ivr.prompt.lower()
+    assert ivr.pinned_facts == {
+        "tracking_number": "2451338820",
+        "reference_code": "DELIV-9012",
+        "delivery_status": "scheduled for delivery tomorrow",
+    }
+    assert ivr.phone_persona["first_message"]
+    assert ivr.phone_persona["keypad_input_plan"]["enabled"] is True
+    assert ivr.phone_persona["keypad_input_plan"]["delimiters"] == ["#"]
+    assert ivr.phone_persona["keypad_input_plan"]["timeoutSeconds"] == 10
+    assert "No ten digit tracking number was entered" in ivr.phone_persona["system_prompt"]
+    assert "DELIV-9012" in ivr.phone_persona["system_prompt"]
+    assert ivr.callee_checks["menu_option_selected"] == "2"
+    assert ivr.callee_checks["tracking_number_entered"] == "2451338820"
+    assert ivr.callee_checks["dtmf_used_for_menu"] is True
+    assert ivr.callee_checks["dtmf_used_for_tracking"] is True
+    assert ivr.callee_checks["reference_code_given"] is True
+    assert "2451338820" in ivr.expected_call_findings
+    assert "DELIV-9012" in ivr.expected_final_findings
+    assert any("308c7437-b205-45ca-aa47-0a9c6a5c5f0a" in entry for entry in ivr.source)
+
+
 def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
     """Benchmark callees can end completed calls instead of waiting for max duration."""
     from benchmarks.phone_callee import _CALLEE_ASSISTANT_BASE
@@ -14865,6 +14901,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "browser-indeed-account-create",
         "phone-call-client-intake",
         "phone-call-payment",
+        "phone-call-ivr-dtmf",
         "response-schema-non-goal-feedback",
     } <= suite_names
     # This branch added four ready gate benchmarks (subscription free-credit,
@@ -16174,6 +16211,7 @@ async def run_all_tests():
         test_run_context_normalization_keeps_absolute_workspace_path_single_rooted,
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
+    r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",

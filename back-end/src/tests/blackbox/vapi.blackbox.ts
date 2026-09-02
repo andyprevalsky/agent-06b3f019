@@ -390,12 +390,20 @@ async function testBoundary_vapiCallCreation() {
   if (!systemMessage.includes('use the endCall tool')) {
     throw new Error('Expected outbound assistant prompt to instruct explicit call termination');
   }
+  if (!systemMessage.includes('use the dtmf function')) {
+    throw new Error('Expected outbound assistant prompt to instruct DTMF for IVR navigation');
+  }
   if (!systemMessage.includes('Boundary test')) {
     throw new Error('Expected per-call system prompt in outbound assistant config');
   }
   if (!assistant.model.tools?.some((tool) => tool.type === 'endCall')) {
     throw new Error(
       `Expected outbound assistant to include endCall tool, got ${JSON.stringify(assistant.model.tools)}`
+    );
+  }
+  if (!assistant.model.tools?.some((tool) => tool.type === 'dtmf')) {
+    throw new Error(
+      `Expected outbound assistant to include dtmf tool for IVR navigation, got ${JSON.stringify(assistant.model.tools)}`
     );
   }
   // "Rose" preset from mac-app onboarding VoiceSelector (PRESET_VOICES[0]).
@@ -591,7 +599,7 @@ async function testReproducibility_threeSequential() {
 }
 
 async function testPollDiagnosticsArchiveFreshnessSignalsWithoutSecrets() {
-  const { buildVapiPollExchange } = await import('../../domains/vapi/service');
+  const { buildVapiPollExchange } = await import('../../domains/vapi/archive');
   const response = new Response('{}', {
     status: 200,
     headers: {

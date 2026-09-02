@@ -225,6 +225,57 @@ def test_build_completion_message_minimal():
     assert "Transcript" not in out
 
 
+def test_enrich_transcript_with_dtmf_marks_keypresses_inline():
+    from domains.call_phone_number.service import enrich_transcript_with_dtmf
+
+    speech = (
+        "User: Press two to track a package.\n"
+        "User: Enter your tracking number.\n"
+        "AI: Thank you. Goodbye."
+    )
+    messages = [
+        {"role": "user", "message": "Press two to track a package."},
+        {
+            "role": "tool_calls",
+            "toolCalls": [
+                {
+                    "function": {
+                        "name": "dtmf",
+                        "arguments": '{"keys": "2"}',
+                    }
+                }
+            ],
+        },
+        {"role": "user", "message": "Enter your tracking number."},
+        {
+            "role": "tool_calls",
+            "toolCalls": [
+                {
+                    "function": {
+                        "name": "dtmf",
+                        "arguments": {"keys": "ww245w133w8820#"},
+                    }
+                }
+            ],
+        },
+        {"role": "bot", "message": "Thank you. Goodbye."},
+    ]
+    out = enrich_transcript_with_dtmf(speech, messages)
+    assert "[DTMF] 2" in out
+    assert "[DTMF] 2451338820# (sent: ww245w133w8820#)" in out
+    assert out.index("[DTMF] 2") < out.index("[DTMF] 2451338820#")
+    assert "Press two to track a package." in out
+    assert "Enter your tracking number." in out
+
+
+def test_enrich_transcript_with_dtmf_noop_without_keypresses():
+    from domains.call_phone_number.service import enrich_transcript_with_dtmf
+
+    speech = "User: Hello.\nAI: Hi."
+    assert enrich_transcript_with_dtmf(speech, None) == speech
+    assert enrich_transcript_with_dtmf(speech, [{"role": "user", "message": "Hello."}]) == speech
+
+
 def test_calculate_duration_from_timestamps_valid():
     from domains.call_phone_number.service import calculate_duration_from_timestamps
     d = calculate_duration_from_timestamps(
@@ -374,6 +425,14 @@ async def run_all_tests():
     r.record("compute_service_usage", test_compute_service_usage)
     r.record("build_completion_message_full", test_build_completion_message_full)
     r.record("build_completion_message_minimal", test_build_completion_message_minimal)
+    r.record(
+        "enrich_transcript_with_dtmf_marks_keypresses_inline",
+        test_enrich_transcript_with_dtmf_marks_keypresses_inline,
+    )
+    r.record(
+        "enrich_transcript_with_dtmf_noop_without_keypresses",
+        test_enrich_transcript_with_dtmf_noop_without_keypresses,
+    )
     r.record("calculate_duration_from_timestamps_valid", test_calculate_duration_from_timestamps_valid)
     r.record("calculate_duration_from_timestamps_missing", test_calculate_duration_from_timestamps_missing)
     r.record("calculate_duration_from_timestamps_invalid", test_calculate_duration_from_timestamps_invalid)

@@ -322,9 +322,28 @@ class PhoneCalleeSession:
         self.assistant_id: str = ""
         self.tool_ids: List[str] = []
         self.started_at: Optional[datetime] = None
+        self._keypad_success_task: Optional[asyncio.Task] = None
+        self._keypad_success_announced = False
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+
+    def _keypad_success_config(self) -> Optional[dict]:
+        """Optional deterministic IVR success injection after tracking DTMF.
+
+        AI IVR assistants often receive the correct keypad digits but still skip
+        the scripted status line. When phone_persona.keypad_success is set, a
+        background watcher injects the canned say+end-call via live call control
+        as soon as the tracking number appears as a keypad entry.
+        """
+        config = self.persona.get("keypad_success")
+        if not isinstance(config, dict):
+            return None
+        tracking_number = str(config.get("tracking_number") or "").strip()
+        say = str(config.get("say") or "").strip()
+        if not tracking_number or not say:
+            return None
+        return {"tracking_number": tracking_number, "say": say}
 
     async def setup(self) -> None:
         try:
@@ -334,6 +353,11 @@ class PhoneCalleeSession:
                 await self._create_persona_assistant(client)
                 await self._attach_assistant(client, self.assistant_id)
             self.started_at = datetime.now(timezone.utc)
+            if self._keypad_success_config() is not None:
+                self._keypad_success_task = asyncio.create_task(
+                    self._watch_keypad_success_announcement(),
+                    name=f"keypad-success-{self.task_name}",
+                )
         except BaseException:
             await self.cleanup()
             raise
@@ -468,11 +492,23 @@ class PhoneCalleeSession:
             **_CALLEE_ASSISTANT_BASE["model"],
             "messages": [{"role": "system", "content": self.persona["system_prompt"]}],
             "tools": [{"type": "endCall"}],
+            "temperature": 0,
         }
         if self.tool_ids:
             config["model"]["toolIds"] = self.tool_ids
         if self.persona.get("first_message"):
             config["firstMessage"] = self.persona["first_message"]
+        if self.persona.get("end_call_message"):
+            # When the IVR LLM short-circuits to endCall after valid tracking DTMF,
+            # this guarantees the caller still hears DELIV-9012 / status.
+            config["endCallMessage"] = self.persona["end_call_message"]
+        keypad_input_plan = self.persona.get("keypad_input_plan")
+        if isinstance(keypad_input_plan, dict) and keypad_input_plan:
+            config["keypadInputPlan"] = keypad_input_plan
+        if isinstance(self.persona.get("silence_timeout_seconds"), int):
+            config["silenceTimeoutSeconds"] = self.persona["silence_timeout_seconds"]
+        if isinstance(self.persona.get("max_duration_seconds"), int):
+            config["maxDurationSeconds"] = self.persona["max_duration_seconds"]
         analysis_plan: dict = {"summaryPlan": {"enabled": True}}
         if self.persona.get("structured_data_schema"):
             analysis_plan["structuredDataPlan"] = {
@@ -480,10 +516,109 @@ class PhoneCalleeSession:
                 "schema": self.persona["structured_data_schema"],
             }
         config["analysisPlan"] = analysis_plan
+        # Live call control is required for deterministic keypad_success injection.
+        if self._keypad_success_config() is not None:
+            config["monitorPlan"] = {"listenEnabled": True, "controlEnabled": True}
         resp = await client.post("/assistant", json=config)
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Failed to create callee persona assistant: {resp.status_code} {resp.text}")
         self.assistant_id = resp.json()["id"]
+
+    async def _watch_keypad_success_announcement(self) -> None:
+        """Inject the canned IVR success line once tracking DTMF is observed."""
+        success = self._keypad_success_config()
+        if success is None:
+            return
+        tracking_number = success["tracking_number"]
+        say = success["say"]
+        deadline = asyncio.get_event_loop().time() + float(
+            self.persona.get("max_duration_seconds") or _CALLEE_ASSISTANT_BASE["maxDurationSeconds"]
+        )
+        try:
+            async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
+                while asyncio.get_event_loop().time() < deadline and not self._keypad_success_announced:
+                    if not (self.phone_number_id and self.assistant_id):
+                        return
+                    resp = await client.get(
+                        "/call", params={"phoneNumberId": self.phone_number_id, "limit": 10}
+                    )
+                    resp.raise_for_status()
+                    for call in resp.json() or []:
+                        if call.get("assistantId") != self.assistant_id:
+                            continue
+                        if call.get("status") not in {"queued", "ringing", "in-progress"}:
+                            continue
+                        created_at = str(call.get("createdAt") or "")
+                        if self.started_at and created_at:
+                            try:
+                                created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                                if created < self.started_at:
+                                    continue
+                            except ValueError:
+                                pass
+                        call_id = str(call.get("id") or "")
+                        detailed = call
+                        if call_id:
+                            detail_resp = await client.get(f"/call/{call_id}")
+                            if detail_resp.status_code == 200:
+                                detailed = detail_resp.json() or call
+                        if not self._call_messages_contain_keypad_tracking(detailed, tracking_number):
+                            continue
+                        control_url = ((detailed.get("monitor") or call.get("monitor") or {}).get("controlUrl") or "").strip()
+                        if not control_url:
+                            # controlUrl can lag a moment after the call becomes in-progress
+                            continue
+                        async with httpx.AsyncClient(timeout=30) as control_client:
+                            say_resp = await control_client.post(
+                                control_url,
+                                json={
+                                    "type": "say",
+                                    "content": say,
+                                    "endCallAfterSpoken": True,
+                                },
+                            )
+                            if say_resp.status_code >= 300:
+                                print(
+                                    f"    ⚠ keypad_success say failed for call "
+                                    f"{call_id[:8]}: "
+                                    f"{say_resp.status_code} {say_resp.text[:200]}"
+                                )
+                                continue
+                        self._keypad_success_announced = True
+                        print(
+                            f"    ✓ Injected keypad_success announcement for tracking "
+                            f"{tracking_number} on call {call_id[:8]}"
+                        )
+                        return
+                    await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"    ⚠ keypad_success watcher error: {exc}")
+
+    @staticmethod
+    def _call_messages_contain_keypad_tracking(call: dict, tracking_number: str) -> bool:
+        """True when the inbound call artifact shows keypad entry of the tracking number."""
+        chunks: List[str] = []
+        for message in call.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            chunks.append(str(message.get("message") or message.get("content") or ""))
+        artifact = call.get("artifact") or {}
+        if isinstance(artifact, dict):
+            for message in artifact.get("messages") or []:
+                if isinstance(message, dict):
+                    chunks.append(str(message.get("message") or message.get("content") or ""))
+            transcript = artifact.get("transcript")
+            if isinstance(transcript, str):
+                chunks.append(transcript)
+        haystack = "\n".join(chunks)
+        if tracking_number not in haystack:
+            return False
+        # Prefer explicit keypad labeling when present; still accept bare digits
+        # because some call snapshots omit the "Keypad Entry" prefix.
+        lowered = haystack.lower()
+        return "keypad" in lowered or f"User's Keypad Entry: {tracking_number}" in haystack or tracking_number in haystack
 
     async def _attach_assistant(self, client: httpx.AsyncClient, assistant_id: Optional[str]) -> None:
         resp = await client.patch(f"/phone-number/{self.phone_number_id}", json={"assistantId": assistant_id})
@@ -567,6 +702,15 @@ class PhoneCalleeSession:
 
     async def cleanup(self) -> None:
         """Best-effort: detach and delete every resource owned by this session."""
+        if self._keypad_success_task is not None and not self._keypad_success_task.done():
+            self._keypad_success_task.cancel()
+            try:
+                await self._keypad_success_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                print(f"    ⚠ keypad_success watcher cleanup error: {exc}")
+            self._keypad_success_task = None
         try:
             async with httpx.AsyncClient(base_url=VAPI_BASE_URL, headers=self._headers(), timeout=30) as client:
                 try:
