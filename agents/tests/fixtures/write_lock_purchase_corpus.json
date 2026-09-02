@@ -1,0 +1,1410 @@
+{
+  "version": 1,
+  "description": "Purchase write-lock classifier corpus: 100 TP, 100 issue (50 FN-risk + 50 FP-risk), 100 TN. Production code must NOT embed these labels as an allow/deny list.",
+  "true_positives": [
+    {
+      "label": "Buy Now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Buy now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "BUY NOW",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Buy It Now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Buy with Prime",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "PLACE ORDER",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Your Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place your order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Pickup Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Delivery Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Takeout Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place To-Go Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Shipping Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Curbside Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Same-Day Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Express Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete Purchase",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete Checkout",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete Your Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm Purchase",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm and Pay",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm & Pay",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Submit Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Submit Your Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Pay Now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Pay now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Proceed to Pay",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Checkout Now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Order and Pay",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Order & Pay",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Purchase Now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Finish Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Order and Pay",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete Pickup Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm Pickup Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Submit Pickup Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Your Pickup Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Your Delivery Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Pickup Order\n$20.31",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Buy Now with 1-Click",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Order (Visa \u20229616)",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete order securely",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm order and pay",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Pay now \u2014 $19.50",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Priority Pickup Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place ASAP Delivery Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Drive-Thru Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Submit order now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place order for pickup",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place order for delivery",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete your purchase",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm your purchase",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Buy Now\n$3.99",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "PLACE PICKUP ORDER",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "place delivery order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place  Pickup  Order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place\tPickup\tOrder",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Order and pay now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Pay Now with card",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete checkout now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm & pay $20.31",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Submit Order\n2 items",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Your Order\nSubtotal $11",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Buy it now",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place take-out order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place to go order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place same day order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete delivery order",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Order\n$20.31",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Buy Now \u00b7 $12.99",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Pay Now - $8.00",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Complete Order\nTotal $45.00",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Confirm and Pay\n$20.31",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Order & Pay \u00b7 $9.99",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Submit Order - $15.00",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Purchase Now\n$4.50",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Delivery Order\n$33.10",
+      "why": "final purchase/commit control"
+    },
+    {
+      "label": "Place Priority Order",
+      "why": "fulfillment-mode Priority between ('Place', 'Order')"
+    },
+    {
+      "label": "Place Your Shipping Order",
+      "why": "fulfillment-mode Shipping between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Place Your Takeout Order",
+      "why": "fulfillment-mode Takeout between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Place Your Curbside Order",
+      "why": "fulfillment-mode Curbside between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Place Your Express Order",
+      "why": "fulfillment-mode Express between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Place Your Priority Order",
+      "why": "fulfillment-mode Priority between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Place Your Same-Day Order",
+      "why": "fulfillment-mode Same-Day between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Place Your To-Go Order",
+      "why": "fulfillment-mode To-Go between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Place Your Drive-Thru Order",
+      "why": "fulfillment-mode Drive-Thru between ('Place Your', 'Order')"
+    },
+    {
+      "label": "Complete Delivery Order",
+      "why": "fulfillment-mode Delivery between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete Shipping Order",
+      "why": "fulfillment-mode Shipping between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete Takeout Order",
+      "why": "fulfillment-mode Takeout between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete Curbside Order",
+      "why": "fulfillment-mode Curbside between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete Express Order",
+      "why": "fulfillment-mode Express between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete Priority Order",
+      "why": "fulfillment-mode Priority between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete Same-Day Order",
+      "why": "fulfillment-mode Same-Day between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete To-Go Order",
+      "why": "fulfillment-mode To-Go between ('Complete', 'Order')"
+    },
+    {
+      "label": "Complete Drive-Thru Order",
+      "why": "fulfillment-mode Drive-Thru between ('Complete', 'Order')"
+    },
+    {
+      "label": "Confirm Delivery Order",
+      "why": "fulfillment-mode Delivery between ('Confirm', 'Order')"
+    }
+  ],
+  "issues": [
+    {
+      "label": "Place Pickup Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "prod DoorDash miss"
+    },
+    {
+      "label": "Place Delivery Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "sibling of prod miss"
+    },
+    {
+      "label": "Place Takeout Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "fulfillment mid-token"
+    },
+    {
+      "label": "Place To-Go Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "hyphenated fulfillment"
+    },
+    {
+      "label": "Place to go order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "two-word to go"
+    },
+    {
+      "label": "Place Shipping Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "shipping mid"
+    },
+    {
+      "label": "Place Curbside Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "curbside mid"
+    },
+    {
+      "label": "Place Same-Day Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "same-day mid"
+    },
+    {
+      "label": "Place Express Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "express mid"
+    },
+    {
+      "label": "Place Priority Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "priority mid"
+    },
+    {
+      "label": "Place Drive-Thru Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "drive-thru mid"
+    },
+    {
+      "label": "Place Your Pickup Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "your + pickup"
+    },
+    {
+      "label": "Place Your Delivery Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "your + delivery"
+    },
+    {
+      "label": "Complete Pickup Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "complete + pickup"
+    },
+    {
+      "label": "Confirm Delivery Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "confirm + delivery"
+    },
+    {
+      "label": "Submit Takeout Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "submit + takeout"
+    },
+    {
+      "label": "Place Pickup Order\n$20.31",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "prod exact label+price"
+    },
+    {
+      "label": "Place Delivery Order \u00b7 $33.10",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "price accessory"
+    },
+    {
+      "label": "PLACE PICKUP ORDER",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "all caps"
+    },
+    {
+      "label": "place pickup order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "all lower"
+    },
+    {
+      "label": "Place  Pickup  Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "multi-space"
+    },
+    {
+      "label": "Order & Pay",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "ampersand pay commit"
+    },
+    {
+      "label": "Order and Pay",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "and pay commit"
+    },
+    {
+      "label": "Order and pay now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "order and pay variant"
+    },
+    {
+      "label": "Purchase Now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "purchase now verb"
+    },
+    {
+      "label": "Purchase now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "purchase now lower"
+    },
+    {
+      "label": "Finish Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "finish order"
+    },
+    {
+      "label": "Finish and Pay",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "finish and pay"
+    },
+    {
+      "label": "Place Order and Pay",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "place order and pay"
+    },
+    {
+      "label": "Place order for pickup",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "for pickup trailing"
+    },
+    {
+      "label": "Place order for delivery",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "for delivery trailing"
+    },
+    {
+      "label": "Confirm order and pay",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "confirm order and pay"
+    },
+    {
+      "label": "Complete your purchase",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "complete your purchase"
+    },
+    {
+      "label": "Confirm your purchase",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "confirm your purchase"
+    },
+    {
+      "label": "Pay now \u2014 $19.50",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "unicode dash price"
+    },
+    {
+      "label": "Buy Now with 1-Click",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "1-click buy"
+    },
+    {
+      "label": "Buy it now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "buy it now"
+    },
+    {
+      "label": "Buy It Now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "ebay-style"
+    },
+    {
+      "label": "Checkout Now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "checkout now"
+    },
+    {
+      "label": "Complete checkout now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "complete checkout now"
+    },
+    {
+      "label": "Submit order now",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "submit order now"
+    },
+    {
+      "label": "Place ASAP Delivery Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "ASAP + delivery"
+    },
+    {
+      "label": "Place Priority Pickup Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "priority + pickup"
+    },
+    {
+      "label": "Confirm & Pay",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "ampersand confirm"
+    },
+    {
+      "label": "Confirm & pay $20.31",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "confirm amp pay price"
+    },
+    {
+      "label": "Pay Now with card",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "pay now with card"
+    },
+    {
+      "label": "Complete Delivery Purchase",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "complete delivery purchase"
+    },
+    {
+      "label": "Submit Your Pickup Order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "submit your pickup"
+    },
+    {
+      "label": "Place take-out order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "take-out hyphen"
+    },
+    {
+      "label": "Place same day order",
+      "expected": true,
+      "issue_kind": "false_negative_risk",
+      "why": "same day two words"
+    },
+    {
+      "label": "Add to Cart",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "cart not commit"
+    },
+    {
+      "label": "Add to bag",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "bag not commit"
+    },
+    {
+      "label": "Go to Cart",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "nav to cart"
+    },
+    {
+      "label": "Proceed to checkout",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "checkout nav not commit"
+    },
+    {
+      "label": "Continue to checkout",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "checkout nav"
+    },
+    {
+      "label": "Checkout",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "bare checkout nav"
+    },
+    {
+      "label": "View cart",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "view cart"
+    },
+    {
+      "label": "Save for later",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "save"
+    },
+    {
+      "label": "Apply coupon",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "coupon"
+    },
+    {
+      "label": "Change address",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "address edit"
+    },
+    {
+      "label": "Continue",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "continue"
+    },
+    {
+      "label": "Next",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "next"
+    },
+    {
+      "label": "Back",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "back"
+    },
+    {
+      "label": "Sign in",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "auth"
+    },
+    {
+      "label": "Log in",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "auth"
+    },
+    {
+      "label": "Create account",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "auth"
+    },
+    {
+      "label": "Return to your orders",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "orders nav"
+    },
+    {
+      "label": "View your orders",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "orders nav"
+    },
+    {
+      "label": "Track order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "track"
+    },
+    {
+      "label": "Track your order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "track"
+    },
+    {
+      "label": "Cancel order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "cancel"
+    },
+    {
+      "label": "Cancel this order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "cancel"
+    },
+    {
+      "label": "Reorder",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "reorder"
+    },
+    {
+      "label": "Order history",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "history"
+    },
+    {
+      "label": "Your orders",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "orders list"
+    },
+    {
+      "label": "Buy Now Pay Later",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "BNPL product"
+    },
+    {
+      "label": "Buy now, pay later",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "BNPL comma"
+    },
+    {
+      "label": "Pay later",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "BNPL fragment"
+    },
+    {
+      "label": "By clicking \"Buy Now,\" you agree to our Terms of Purchase",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "Eventim consent"
+    },
+    {
+      "label": "By clicking Place Order you agree to the Terms of Service",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "consent place order"
+    },
+    {
+      "label": "Terms of Purchase",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "terms only"
+    },
+    {
+      "label": "Privacy Policy",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "privacy"
+    },
+    {
+      "label": "Send me order updates",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "marketing order"
+    },
+    {
+      "label": "Email me about my order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "marketing"
+    },
+    {
+      "label": "Subscribe to order alerts",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "marketing"
+    },
+    {
+      "label": "Edit order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "edit"
+    },
+    {
+      "label": "Modify order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "modify"
+    },
+    {
+      "label": "Schedule order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "schedule only"
+    },
+    {
+      "label": "Choose pickup",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "fulfillment choice not commit"
+    },
+    {
+      "label": "Choose delivery",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "fulfillment choice"
+    },
+    {
+      "label": "Pickup options",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "options"
+    },
+    {
+      "label": "Delivery details",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "details"
+    },
+    {
+      "label": "Payment methods",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "payment methods nav"
+    },
+    {
+      "label": "Add payment method",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "add payment"
+    },
+    {
+      "label": "Use a gift card",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "gift card"
+    },
+    {
+      "label": "Apply promo code",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "promo"
+    },
+    {
+      "label": "Estimate total",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "estimate"
+    },
+    {
+      "label": "See order summary",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "summary nav"
+    },
+    {
+      "label": "Review order",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "review step not final commit"
+    },
+    {
+      "label": "buynow-email-si",
+      "expected": false,
+      "issue_kind": "false_positive_risk",
+      "why": "DOM id Fandango"
+    }
+  ],
+  "true_negatives": [
+    {
+      "label": "Add to Cart",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Add to cart",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "ADD TO CART",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Add item to cart",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Add to Bag",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Go to Cart",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "View Cart",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Open cart",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Cart (2)",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "2 items in cart",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Proceed to checkout",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Continue to checkout",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Go to checkout",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Checkout",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Continue",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Next",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Back",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Close",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Done",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Skip",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Sign in",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Log in",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Sign up",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Create account",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Forgot password",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Apply",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Apply coupon",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Apply promo code",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Remove",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Update",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Change address",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Edit address",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Add address",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Use current location",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Save for later",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Move to wishlist",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Share",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Copy link",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Filter",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Sort",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Search",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "See all",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Show more",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Show less",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Pickup",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Delivery",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Group Order",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Schedule",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "ASAP",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Choose a time",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Select store",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Change store",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Get directions",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Call store",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "View menu",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Full menu",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Nutrition",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Allergens",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Help",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Contact support",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Chat with us",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "FAQ",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Return to your orders",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Your orders",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Order history",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Track package",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Track order",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "View order details",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Download receipt",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Reorder previous",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Cancel",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Keep shopping",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Continue shopping",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Start over",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Yes",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "No",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "OK",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Got it",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Dismiss",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Not now",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Increase quantity",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Decrease quantity",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Remove item",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Edit item",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Make it a combo",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Add a drink",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Popular items",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Recommended",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "DashPass",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Subscribe and save",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Learn more",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "See details",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Privacy Policy",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Terms of Service",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Cookie settings",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Accept cookies",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Enable location",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Allow notifications",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Not interested",
+      "why": "non-commit / navigation / chrome"
+    },
+    {
+      "label": "Switch accounts",
+      "why": "non-commit / navigation / chrome"
+    }
+  ]
+}

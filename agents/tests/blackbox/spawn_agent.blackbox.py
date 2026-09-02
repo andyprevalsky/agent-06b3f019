@@ -1529,10 +1529,13 @@ async def test_handler_fast_mode_spawns_explore_on_oai_demo_child():
 
     assert fake.start_activity_calls, "OAi demo explore must still run so trajectories replay"
     assert any(e.status == MessageStatus.IN_PROGRESS for e in events)
-    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.FINISHED for e in events), (
+        "parent must not stub-finish the explore chip; cached turns paint it"
+    )
+    assert not any("Research started" in str(e.message or "") for e in events)
     assert not any("skipping nested spawn" in str(e.message or "") for e in events)
-    finished = [e for e in events if e.status == MessageStatus.FINISHED]
-    assert finished and (finished[-1].metadata or {}).get("fastModeParallel") is True
+    in_progress = [e for e in events if e.status == MessageStatus.IN_PROGRESS]
+    assert in_progress and (in_progress[-1].metadata or {}).get("fastModeParallel") is True
 
 
 def test_user_facing_explore_result_keeps_prod_summaries():
@@ -1594,11 +1597,12 @@ async def test_handler_fast_mode_oai_demo_explore_does_not_await_activity():
         assert handle._awaited is False, "parallel Fast Mode explore must not block the parent"
         assert handle.done() is False
         assert fake.start_activity_calls, "explore activity must still start (T3 full traj)"
-        assert any(e.status == MessageStatus.FINISHED for e in events)
-        finished = [e for e in events if e.status == MessageStatus.FINISHED][-1]
-        assert (finished.metadata or {}).get("fastModeParallel") is True
-        assert "Fast Mode" not in (finished.message or "")
-        assert "cached trajectory" not in (finished.message or "").lower()
+        assert not any(e.status == MessageStatus.FINISHED for e in events)
+        assert not any("Research started" in str(e.message or "") for e in events)
+        in_progress = [e for e in events if e.status == MessageStatus.IN_PROGRESS][-1]
+        assert (in_progress.metadata or {}).get("fastModeParallel") is True
+        assert "Fast Mode" not in (in_progress.message or "")
+        assert "cached trajectory" not in (in_progress.message or "").lower()
         assert getattr(wf, "_fm_explore_handles", None), "handle must be tracked for drain"
 
         await drain_fast_mode_explores(wf)
