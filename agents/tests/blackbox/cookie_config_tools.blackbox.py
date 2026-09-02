@@ -223,6 +223,41 @@ def test_read_and_delete_cookies_use_humanizer_playwright_context_not_actor_page
     asyncio.run(_run())
 
 
+def test_finalize_recovery_records_actual_tool_name_not_hardcoded_recover():
+    """read/set_browser_config share the recovery finalizer — must not mislabel history."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _finalize_browser_recovery_action_result,
+    )
+
+    async def _run() -> None:
+        action_history = SimpleNamespace(record_action=AsyncMock())
+        browser_stream = SimpleNamespace(finish_tools=AsyncMock())
+        await _finalize_browser_recovery_action_result(
+            action_result={"success": True, "config_key": "steel_fixed"},
+            dom_service=SimpleNamespace(),
+            action_history=action_history,
+            thinking="inspect config",
+            recovery_reason="read_browser_config",
+            browser_turn_messages=[],
+            task_prompt="order groceries",
+            browser_state={},
+            unified_action={"action": "read_browser_config", "params": {}},
+            recovery_call_id="cfg-1",
+            browser_stream=browser_stream,
+        )
+        action_history.record_action.assert_awaited_once()
+        assert (
+            action_history.record_action.await_args.kwargs["action"]
+            == "read_browser_config"
+        )
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     test_cookie_config_tools_are_registered_and_advertised_when_enabled()
     test_cookie_config_tools_can_be_hidden()
@@ -230,4 +265,5 @@ if __name__ == "__main__":
     test_delete_cookie_selection_and_config_allowlist()
     test_normalize_cookie_config_tool_params()
     test_read_and_delete_cookies_use_humanizer_playwright_context_not_actor_page()
+    test_finalize_recovery_records_actual_tool_name_not_hardcoded_recover()
     print("cookie_config_tools.blackbox: PASS")

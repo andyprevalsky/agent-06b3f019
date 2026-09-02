@@ -2168,9 +2168,14 @@ async def _finalize_browser_recovery_action_result(
 ) -> None:
     """Persist one recovery result and close its streamed tool lifecycle."""
     if dom_service is not None:
+        # Prefer the real tool name (read/set_browser_config, recover_from_challenge, …).
+        # Hardcoding recover_from_challenge mislabeled config-tool calls in action history.
+        recorded_action = (
+            str(unified_action.get("action") or "").strip() or "recover_from_challenge"
+        )
         await action_history.record_action(
             dom_service=dom_service,
-            action="recover_from_challenge",
+            action=recorded_action,
             thinking=thinking,
             params={"reason": recovery_reason},
             result=action_result,
