@@ -40,14 +40,36 @@ const RAW_BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.
   ''
 );
 const ALLOW_LOCAL = process.env.SMOKE_ALLOW_LOCAL === '1';
-const LOCAL_BASE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(RAW_BASE_URL);
+
+function isLoopbackSmokeBase(rawBaseUrl: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(rawBaseUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) return true;
+  if (hostname === '::1' || hostname === '[::1]' || hostname === '0:0:0:0:0:0:0:1') return true;
+  // IPv4 loopback 127.0.0.0/8
+  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4 && ipv4[1] === '127') {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.every((n) => n >= 0 && n <= 255)) return true;
+  }
+  // IPv4-mapped IPv6 loopback (:ffff:127.x.x.x)
+  const mapped = hostname.match(/^::ffff:(127(?:\.\d{1,3}){3})$/i);
+  if (mapped) return true;
+  return false;
+}
+
+const LOCAL_BASE = isLoopbackSmokeBase(RAW_BASE_URL);
 if (LOCAL_BASE && !ALLOW_LOCAL) {
   console.error(
     `❌ Refusing SMOKE_BASE_URL=${RAW_BASE_URL} for production endpoint smoke.\n` +
-      `   Cloud/dev environments often inject localhost here; that makes every probe\n` +
-      `   report fetch failed even when prod is healthy. Unset SMOKE_BASE_URL (or set\n` +
-      `   it to the real prod URL), or set SMOKE_ALLOW_LOCAL=1 only when intentionally\n` +
-      `   probing a local backend.`
+      `   Cloud/dev environments often inject a loopback URL here; that makes every\n` +
+      `   probe report fetch failed even when prod is healthy. Unset SMOKE_BASE_URL\n` +
+      `   (or set it to the real prod URL), or set SMOKE_ALLOW_LOCAL=1 only when\n` +
+      `   intentionally probing a local backend.`
   );
   process.exit(2);
 }
