@@ -937,6 +937,16 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         "off",
     }:
         os.environ["ROSE_DISABLE_CODE_AGENT_VERIFIER"] = "1"
+    # TEMPORARY: strip api_request from explore tool injection + prompt context
+    # so coding-agent GitHub ranking benches are not steered onto that route.
+    # Override with ROSE_DISABLE_API_REQUEST=0.
+    if os.environ.get("ROSE_DISABLE_API_REQUEST", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        os.environ["ROSE_DISABLE_API_REQUEST"] = "1"
     browser_max_steps = 0
     for task in all_tasks():
         if task.name not in selected:

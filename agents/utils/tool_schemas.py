@@ -1019,8 +1019,19 @@ PLAN_TOOL_MODELS: ToolRegistry = {
     "spawn_agent": SpawnExploreAgentTool,
 }
 
-# Tools available inside the explore agent (subset of read-only tools)
+# Tools available inside the explore agent (subset of read-only tools).
+# Full registry list — callers that inject tools into an explore agent MUST use
+# `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
 EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "api_request", "attempt_completion_with_result"]
+
+
+def get_explore_agent_tools() -> list[str]:
+    """Explore tool names for injection, honoring ROSE_DISABLE_API_REQUEST."""
+    from domains.api_request.config import api_request_disabled
+
+    if not api_request_disabled():
+        return list(EXPLORE_AGENT_TOOLS)
+    return [name for name in EXPLORE_AGENT_TOOLS if name != "api_request"]
 
 
 # ============================================================================
@@ -1194,6 +1205,8 @@ __all__ = [
     "TOOL_MODELS",
     "ToolRegistry",
     "create_agent_action_model",
+    "EXPLORE_AGENT_TOOLS",
+    "get_explore_agent_tools",
     "render_tool_list",
     "ProgressScore",
 ]

@@ -48,4 +48,14 @@ TOOL_PROMPTS: dict[str, str] = {
     "wait_for": wait_for_prompt,
 }
 
-__all__ = ["TOOL_PROMPTS"]
+
+def get_tool_prompts() -> dict[str, str]:
+    """TOOL_PROMPTS for injection, honoring ROSE_DISABLE_API_REQUEST."""
+    from domains.api_request.config import api_request_disabled
+
+    if not api_request_disabled():
+        return dict(TOOL_PROMPTS)
+    return {name: prompt for name, prompt in TOOL_PROMPTS.items() if name != "api_request"}
+
+
+__all__ = ["TOOL_PROMPTS", "get_tool_prompts"]

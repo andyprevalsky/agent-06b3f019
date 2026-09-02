@@ -36,7 +36,8 @@ from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
-from utils.tool_schemas import EXPLORE_AGENT_TOOLS
+from domains.api_request.config import api_request_disabled
+from utils.tool_schemas import get_explore_agent_tools
 
 logger = structlog.get_logger()
 
@@ -667,6 +668,11 @@ async def spawn_explore_agent_activity(
                     ):
                         unavailable_sources_collected.append(normalized)
         elif tool_name == "api_request":
+            if api_request_disabled():
+                return {
+                    "error": True,
+                    "message": "api_request is temporarily disabled.",
+                }
             manager = ApiRequestManager()
             result = await manager.execute_tool(
                 execute_activity=tagged_execute_activity,
@@ -683,11 +689,16 @@ async def spawn_explore_agent_activity(
                 # ends the leaf so the chip does not fill with 50 rejects.
                 if completion_no_evidence_rejects >= 2 and _oai_demo:
                     return {"success": True, "message": "Completion accepted"}
+                evidence_tools = "web_search, people_search, web_fetch, or grep"
+                if not api_request_disabled():
+                    evidence_tools = (
+                        "web_search, people_search, web_fetch, grep, or api_request"
+                    )
                 return {
                     "error": True,
                     "message": (
                         "Completion rejected: no evidence tool has succeeded yet. "
-                        "Call web_search, people_search, web_fetch, grep, or api_request successfully before completing."
+                        f"Call {evidence_tools} successfully before completing."
                     ),
                 }
             return {"success": True, "message": "Completion accepted"}
@@ -814,7 +825,7 @@ async def spawn_explore_agent_activity(
             system_prompt=explore_system_prompt,
             verifier_prompt_generator=explore_verifier_prompt,
             model=model,
-            tools=EXPLORE_AGENT_TOOLS,
+            tools=get_explore_agent_tools(),
             initial_context=[{"role": "USER", "text": initial_user_text}],
             task_id=task_id,
             is_inside_temporal_activity=True,

@@ -5236,7 +5236,7 @@
     "is_chat_mode": false,
     "expected_tools": [
       "spawn_agent",
-      "api_request"
+      "spawn_claude_code_agent"
     ],
     "tags": [
       "claude-code",
@@ -5251,7 +5251,7 @@
     "approval_handling": null,
     "start_phase": "plan",
     "min_tool_counts": {
-      "api_request": 1
+      "spawn_claude_code_agent": 1
     },
     "expected_tool_counts": {},
     "forbidden_tools": [
@@ -5293,7 +5293,7 @@
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
-    "description": "Top-100 CUDA-kernel GitHub ranking via explore agents using api_request against the GitHub REST API.",
+    "description": "Top-100 CUDA-kernel GitHub ranking via a coding agent (Claude Code / Codex) that fetches GitHub metadata programmatically. api_request explore route is temporarily disabled.",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -5306,14 +5306,14 @@
       "live_targets": [
         "https://api.github.com"
       ],
-      "context_notes": "Live GitHub metadata fetch via explore api_request. Prompt includes an explicit GitHub token line for API auth."
+      "context_notes": "Live GitHub metadata fetch via coding agent (spawn_claude_code_agent / spawn_agent type=code). Prompt includes an explicit GitHub token line for API auth. api_request is temporarily not injected into explore agents."
     },
     "evaluators": [
       {
-        "id": "api-request-ranking-route",
+        "id": "code-agent-ranking-route",
         "method": "static_check",
         "criteria": [
-          "At least one api_request call returns GitHub repository data",
+          "At least one coding-agent (spawn_claude_code_agent) call runs",
           "No spawn_general_purpose_agent detour is used",
           "Final structured output contains a repos list",
           "Agent status is COMPLETED",

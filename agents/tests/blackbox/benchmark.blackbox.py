@@ -4321,14 +4321,15 @@ def test_claude_code_session_output_static_check_is_fail_closed():
     assert "api_base_url is missing" in reason
 
 
-def test_cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures():
-    """CUDA ranking bench requires api_request route with zero tool failures."""
+def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
+    """CUDA ranking bench requires coding-agent route with zero tool failures."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
 
     assert "no_tool_failures" in RUNTIME_STATIC_CHECK_TYPES
     task = get_task_by_name("cuda-kernel-github-top100-code-agent")
-    assert "api_request" in task.expected_tools
+    assert "spawn_claude_code_agent" in task.expected_tools
+    assert "api_request" not in task.expected_tools
     assert task.requires_claude_code is False
     static = next(e for e in task.evaluators if e["method"] == "static_check")
     checks = {c["type"]: c for c in static["checks"]}
@@ -17282,8 +17283,8 @@ async def run_all_tests():
         test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
     )
     r.record(
-        "cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures",
-        test_cuda_kernel_catalog_enforces_api_request_route_and_no_tool_failures,
+        "cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures",
+        test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures,
     )
     await r.record_async(
         "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",

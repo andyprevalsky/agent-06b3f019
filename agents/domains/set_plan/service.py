@@ -24,7 +24,7 @@ from domains.set_plan.config import (
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
 from helpers.context_scope import is_internal_subagent_message
-from tools.prompts import TOOL_PROMPTS
+from tools.prompts import get_tool_prompts
 from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
 
 PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
@@ -300,10 +300,11 @@ def get_planner_tools_description() -> str:
     planner prompt itself.
     """
     sections = []
+    tool_prompts = get_tool_prompts()
     for name in EXECUTE_PHASE_TOOLS:
         model = TOOL_MODELS.get(name)
-        if name in TOOL_PROMPTS:
-            description = TOOL_PROMPTS[name].strip()
+        if name in tool_prompts:
+            description = tool_prompts[name].strip()
         elif model:
             description = (model.__doc__ or "").strip() or "No description"
         else:
