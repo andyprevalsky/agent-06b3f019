@@ -947,6 +947,22 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         "off",
     }:
         os.environ["ROSE_DISABLE_API_REQUEST"] = "1"
+    # When a selected task forbids general-purpose spawn aliases, also strip
+    # general_purpose / for_each from spawn_agent schemas + planner enums so
+    # the model cannot select them (mirrors ROSE_DISABLE_API_REQUEST). Override
+    # with ROSE_DISABLE_GENERAL_PURPOSE_AGENT=0.
+    _GPA_FORBIDDEN = {
+        "spawn_general_purpose_agent",
+        "spawn_general_purpose_agent_for_each",
+    }
+    if any(_GPA_FORBIDDEN.intersection(task.forbidden_tools) for task in all_tasks() if task.name in selected):
+        if os.environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "1"
     browser_max_steps = 0
     for task in all_tasks():
         if task.name not in selected:

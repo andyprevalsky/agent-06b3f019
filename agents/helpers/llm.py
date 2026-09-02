@@ -6559,7 +6559,9 @@ async def call_planner_llm_activity(
     import time
 
     from utils.prompts import build_planner_system_prompt
-    from utils.tool_schemas import PlannerResponse
+    from utils.tool_schemas import get_planner_response_model
+
+    planner_response_model = get_planner_response_model()
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
@@ -6640,7 +6642,7 @@ async def call_planner_llm_activity(
             model=model,
             temperature=0.2,
             max_tokens=16384,
-            response_model=PlannerResponse,
+            response_model=planner_response_model,
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,

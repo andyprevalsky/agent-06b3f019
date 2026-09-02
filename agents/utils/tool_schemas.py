@@ -857,6 +857,98 @@ class SpawnAgentTool(BaseModel):
         return self
 
 
+class SpawnAgentToolNoGP(BaseModel):
+    """EXECUTE-phase spawn_agent with general_purpose / for_each removed.
+
+    Used when ROSE_DISABLE_GENERAL_PURPOSE_AGENT is set so coding-agent
+    GitHub ranking benches cannot select recursive GP fan-out. Schema-level
+    narrowing beats a runtime rejection loop the same way SpawnExploreAgentTool
+    does for PLAN.
+    """
+
+    tool: Literal["spawn_agent"]
+    type: Literal["browser", "code", "explore"] = Field(
+        description=(
+            "Select by capability: 'browser' starts a browser session for stateful "
+            "or authenticated web work; 'code' starts a coding agent (Claude Code / "
+            "Codex CLI) in an ephemeral sandbox; 'explore' performs read-only "
+            "research for web or user-data facts. "
+            "general_purpose and for_each are disabled for this run — use "
+            "type='code' for GitHub discovery/ranking work."
+        )
+    )
+    goal: str = Field(
+        description=(
+            "The self-contained task/prompt and description for the spawned agent. "
+            "Spawned agents have no access to ANY of your context by default. "
+            "The goal and attachments parameters are their ONLY source of information. "
+            "Include all relevant pieces of information. "
+            f"{SELF_CONTAINED_GOAL_RULE.strip()}"
+        )
+    )
+    output_schema: Optional[ResponseSchemaConfig] = Field(
+        default=None,
+        description=(
+            "Structured data the agent returns and validates against. Required when "
+            "type='browser' or type='code'. Ignored when type='explore'."
+        ),
+    )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional when the spawned agent needs files from the current context. "
+            "Use exact `original_filename` values from file_pointer objects."
+        ),
+    )
+    start_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "HTTPS URL the browser opens first. Required when type='browser'; "
+            "ignored otherwise."
+        ),
+    )
+    github_repo_link: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional when type='code'. GitHub repository URL to clone and sync to. "
+            "Ignored for every other type."
+        ),
+    )
+    context_gates: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description=(
+            "Optional when type='explore'. Applicable keys are 'network' and "
+            "'recent_communications'. Missing keys default to true."
+        ),
+    )
+    depth: Optional[Literal["quick", "medium", "deep"]] = Field(
+        default="quick",
+        description=(
+            "Optional when type='explore'. Controls research thoroughness as a TURN "
+            "budget: 'quick' (~5 turns), 'medium' (~20 turns), 'deep' (~50 turns). "
+            "Default 'quick'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_spawn_agent_no_gp_constraints(self) -> "SpawnAgentToolNoGP":
+        if self.type == "browser" and not self.start_url:
+            recovered = first_url_in_text(self.goal)
+            if recovered and urlsplit(recovered).scheme == "https":
+                self.start_url = recovered
+                logger.warning(
+                    "spawn_agent(type='browser') omitted start_url; recovered from goal",
+                    start_url_origin=url_origin_for_log(recovered),
+                )
+            else:
+                raise ValueError("start_url is required when type='browser'.")
+        if self.type in ("browser", "code") and not self.output_schema:
+            raise ValueError(f"output_schema is required when type='{self.type}'.")
+        if self.type == "explore" and self.output_schema:
+            self.output_schema = None
+        return self
+
+
 class SpawnExploreAgentTool(BaseModel):
     """Spawn a read-only explore agent to gather information during PLAN.
 
@@ -1101,6 +1193,75 @@ def render_tool_list(
 # ============================================================================
 
 
+def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
+    """Return the tool registry for ``phase``, honoring GPA kill-switch.
+
+    PLAN keeps the explore-only spawn_agent variant. EXECUTE (and unspecified)
+    swaps in :class:`SpawnAgentToolNoGP` when
+    ``ROSE_DISABLE_GENERAL_PURPOSE_AGENT`` is set so the LLM cannot select
+    general_purpose / for_each.
+    """
+    from domains.spawn_agent.config import general_purpose_agent_disabled
+
+    if phase == "plan":
+        return dict(PLAN_TOOL_MODELS)
+    registry = dict(TOOL_MODELS)
+    if general_purpose_agent_disabled():
+        registry["spawn_agent"] = SpawnAgentToolNoGP
+    return registry
+
+
+def get_planner_assignable_tools() -> list[str]:
+    """Planner-assignable tool names, stripping GPA aliases when disabled."""
+    from domains.spawn_agent.config import general_purpose_agent_disabled
+
+    if not general_purpose_agent_disabled():
+        return list(PLANNER_ASSIGNABLE_TOOLS)
+    return [
+        name
+        for name in PLANNER_ASSIGNABLE_TOOLS
+        if name
+        not in {
+            "spawn_general_purpose_agent",
+            "spawn_general_purpose_agent_for_each",
+        }
+    ]
+
+
+def get_planner_response_model() -> Type[BaseModel]:
+    """PlannerResponse model, with GPA aliases removed when the kill-switch is on."""
+    from domains.spawn_agent.config import general_purpose_agent_disabled
+
+    if not general_purpose_agent_disabled():
+        return PlannerResponse
+
+    allowed = get_planner_assignable_tools()
+    # Dynamic enum so structured-output schema cannot emit disabled aliases.
+    filtered_enum = Enum(  # type: ignore[misc]
+        "PlanToolNameNoGP",
+        {name: name for name in allowed},
+        type=str,
+    )
+    task_model = create_model(
+        "PlannerTaskNoGP",
+        task_idx=(str, Field(description=PLANNER_TASK_IDX_DESCRIPTION)),
+        goal=(str, Field(description=PLANNER_TASK_GOAL_DESCRIPTION)),
+        tool_name=(filtered_enum, Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)),
+        depends_on=(
+            List[str],
+            Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION),
+        ),
+        __base__=BaseModel,
+    )
+    return create_model(
+        "PlannerResponseNoGP",
+        title=(str, Field(description=PLANNER_RESPONSE_TITLE_DESCRIPTION)),
+        tasks=(List[task_model], Field(description=PLANNER_RESPONSE_TASKS_DESCRIPTION)),
+        join=(Literal["all", "any"], Field(description=PLANNER_RESPONSE_JOIN_DESCRIPTION)),
+        __base__=BaseModel,
+    )
+
+
 def create_agent_action_model(
     available_tool_names: List[str],
     tool_registry: Optional[Dict[str, Type[BaseModel]]] = None,
@@ -1119,12 +1280,13 @@ def create_agent_action_model(
 
     Args:
         available_tool_names: List of tool names this agent can use
-        tool_registry: Optional custom registry (defaults to TOOL_MODELS)
+        tool_registry: Optional custom registry (defaults to TOOL_MODELS,
+            with SpawnAgentToolNoGP when ROSE_DISABLE_GENERAL_PURPOSE_AGENT is set)
 
     Returns:
         Pydantic model class for AgentAction with proper tool union
     """
-    registry = tool_registry or TOOL_MODELS
+    registry = tool_registry if tool_registry is not None else get_tool_models()
 
     # Build list of tool models for available tools
     tool_types = []
@@ -1197,6 +1359,7 @@ __all__ = [
     "SendMessageToUserExecutePhaseTool",
     "MessagePersonTool",
     "SpawnAgentTool",
+    "SpawnAgentToolNoGP",
     "SetPlanTool",
     "AttemptCompletionTool",
     "AttemptCompletionWithResultTool",
@@ -1205,6 +1368,9 @@ __all__ = [
     "TOOL_MODELS",
     "ToolRegistry",
     "create_agent_action_model",
+    "get_tool_models",
+    "get_planner_assignable_tools",
+    "get_planner_response_model",
     "EXPLORE_AGENT_TOOLS",
     "get_explore_agent_tools",
     "render_tool_list",

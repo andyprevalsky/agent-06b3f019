@@ -5231,7 +5231,7 @@
   {
     "name": "cuda-kernel-github-top100-code-agent",
     "title": "CUDA Kernel GitHub Top 100 (Code Agent Ranking)",
-    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nPrefer kernel libraries, GPU kernel DSLs, CUDA samples/tooling, and inference/runtime projects with substantial hand-written CUDA/Triton/PTX kernels. Exclude one-off research paper demos that only incidentally use CUDA for an unrelated application.\nGithub API token: {GITHUB_DISPATCH_TOKEN}",
+    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nPrefer kernel libraries, GPU kernel DSLs, CUDA samples/tooling, and inference/runtime projects with substantial hand-written CUDA/Triton/PTX kernels. Exclude one-off research paper demos that only incidentally use CUDA for an unrelated application.\nUse spawn_agent(type='code') / Claude Code (spawn_claude_code_agent) for GitHub discovery, ranking, and verification. Do NOT use spawn_agent(type='general_purpose'), spawn_general_purpose_agent, for_each, or browser agents — they are forbidden for this task and will fail the run. Prefer explore over browser if you need lightweight read-only research.\nGithub API token: {GITHUB_DISPATCH_TOKEN}",
     "timeout_seconds": 4200,
     "is_chat_mode": false,
     "expected_tools": [

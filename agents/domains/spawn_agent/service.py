@@ -191,6 +191,14 @@ def validate_spawn_params(tool_call: dict) -> None:
             f"spawn_agent type='{agent_type}' is invalid. Must be one of: {', '.join(sorted(VALID_AGENT_TYPES))}."
         )
 
+    from domains.spawn_agent.config import (
+        disabled_general_purpose_rejection_message,
+        is_disabled_general_purpose_type,
+    )
+
+    if is_disabled_general_purpose_type(agent_type):
+        raise ValueError(disabled_general_purpose_rejection_message(agent_type=agent_type))
+
     # PLAN-phase gate: only `explore` is legal during PLAN. The PLAN-loop
     # response_model already narrows the schema to SpawnExploreAgentTool, but
     # Anthropic's native tool calling doesn't enforce `const` constraints
