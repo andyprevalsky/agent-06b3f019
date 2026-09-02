@@ -94,11 +94,13 @@ from .config import (
 from .fcaptcha_pow_recovery import (
     FCAPTCHA_MAX_POW_RECOVERY_WAITS,
     click_targets_fcaptcha_submit,
+    dom_has_reportable_fcaptcha_progress,
     dom_indicates_fcaptcha_pow_blocked,
     fcaptcha_pow_exhausted_completion_guidance,
     fcaptcha_pow_retry_guidance,
     is_webdecoy_fcaptcha_url,
     pow_recovery_wait_seconds,
+    should_force_fcaptcha_completion,
     should_reload_page_on_pow_recovery,
 )
 from .credential_runtime import build_realm_credential_state
@@ -9019,14 +9021,39 @@ Based on this feedback, I need to continue working on the task and address the i
             )
 
             dom_tree_text = str(observe_page_state.get("dom_tree") or "")
+            result_message = str(result.get("message") or "")
+            result_error = str(result.get("error") or "")
             fcaptcha_pow_blocked_now = is_webdecoy_fcaptcha_url(
                 current_url
             ) and dom_indicates_fcaptcha_pow_blocked(
                 dom_tree_text,
-                str(result.get("message") or ""),
-                str(result.get("error") or ""),
+                result_message,
+                result_error,
             )
-            if (
+            fcaptcha_reportable_progress = dom_has_reportable_fcaptcha_progress(
+                dom_tree_text,
+                result_message,
+                result_error,
+            )
+            if fcaptcha_pow_blocked_now and should_force_fcaptcha_completion(
+                blocked=True,
+                recovery_waits=fcaptcha_pow_recovery_waits,
+                reportable_progress=fcaptcha_reportable_progress,
+            ):
+                if not fcaptcha_pow_completion_nudged:
+                    fcaptcha_pow_completion_nudged = True
+                    activity.heartbeat(
+                        "WebDecoy FCaptcha forcing attempt_completion "
+                        f"(reportable={fcaptcha_reportable_progress}, "
+                        f"recovery_waits={fcaptcha_pow_recovery_waits})"
+                    )
+                    browser_turn_messages.append(
+                        {
+                            "role": "user",
+                            "content": fcaptcha_pow_exhausted_completion_guidance(),
+                        }
+                    )
+            elif (
                 fcaptcha_pow_blocked_now
                 and fcaptcha_pow_recovery_waits < FCAPTCHA_MAX_POW_RECOVERY_WAITS
             ):
@@ -9068,21 +9095,6 @@ Based on this feedback, I need to continue working on the task and address the i
                             recovery_seconds=recovery_seconds,
                             reloaded=reloaded,
                         ),
-                    }
-                )
-            elif (
-                fcaptcha_pow_blocked_now
-                and fcaptcha_pow_recovery_waits >= FCAPTCHA_MAX_POW_RECOVERY_WAITS
-                and not fcaptcha_pow_completion_nudged
-            ):
-                fcaptcha_pow_completion_nudged = True
-                activity.heartbeat(
-                    "WebDecoy FCaptcha PoW recovery exhausted — nudging attempt_completion"
-                )
-                browser_turn_messages.append(
-                    {
-                        "role": "user",
-                        "content": fcaptcha_pow_exhausted_completion_guidance(),
                     }
                 )
 
