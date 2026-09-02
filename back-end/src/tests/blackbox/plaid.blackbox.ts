@@ -125,27 +125,65 @@ const AnonymousResponse = z.object({
 
 // ==================== HELPERS ====================
 
+function isRetryablePlaidSandboxError(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false;
+  const candidate = error as {
+    code?: unknown;
+    message?: unknown;
+    cause?: { code?: unknown; message?: unknown };
+    response?: { status?: unknown };
+  };
+  const status = candidate.response?.status;
+  if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
+  const codes = [candidate.code, candidate.cause?.code];
+  if (
+    codes.some(
+      (code) =>
+        code === 'ECONNABORTED' ||
+        code === 'ECONNRESET' ||
+        code === 'ETIMEDOUT' ||
+        (typeof code === 'string' && code.startsWith('UND_ERR'))
+    )
+  ) {
+    return true;
+  }
+  const messages = [candidate.message, candidate.cause?.message].filter(
+    (message): message is string => typeof message === 'string'
+  );
+  return messages.some((message) => /fetch failed|other side closed|socket hang up/i.test(message));
+}
+
 async function request(
   url: string,
   init: { method?: string; body?: string; headers?: Record<string, string> } = {}
 ): Promise<{ status: number; data: unknown }> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(init.headers ?? {}),
-  };
-  const res = await fetch(url, {
-    method: init.method ?? 'GET',
-    headers,
-    body: init.body,
-  });
-  const text = await res.text();
-  let data: unknown;
-  try {
-    data = text === '' ? null : JSON.parse(text);
-  } catch {
-    data = text;
-  }
-  return { status: res.status, data };
+  return retryWithBackoff(
+    async () => {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(init.headers ?? {}),
+      };
+      const res = await fetch(url, {
+        method: init.method ?? 'GET',
+        headers,
+        body: init.body,
+      });
+      const text = await res.text();
+      let data: unknown;
+      try {
+        data = text === '' ? null : JSON.parse(text);
+      } catch {
+        data = text;
+      }
+      return { status: res.status, data };
+    },
+    {
+      maxRetries: 3,
+      fixedDelays: [250, 750],
+      isRetryable: isRetryablePlaidSandboxError,
+      component: 'PlaidBlackboxRequest',
+    }
+  );
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -223,21 +261,7 @@ async function mintSandboxPublicToken(): Promise<string> {
     {
       maxRetries: 3,
       fixedDelays: [500, 1_500],
-      isRetryable: (error) => {
-        if (error === null || typeof error !== 'object') return false;
-        const candidate = error as {
-          code?: unknown;
-          response?: { status?: unknown };
-        };
-        const status = candidate.response?.status;
-        return (
-          status === 429 ||
-          (typeof status === 'number' && status >= 500) ||
-          candidate.code === 'ECONNABORTED' ||
-          candidate.code === 'ECONNRESET' ||
-          candidate.code === 'ETIMEDOUT'
-        );
-      },
+      isRetryable: isRetryablePlaidSandboxError,
       component: 'PlaidSandboxPublicToken',
     }
   );
@@ -568,10 +592,31 @@ async function testExchange_persistsIntegrationCONNECTED(): Promise<void> {
 
 // ==================== MAIN ====================
 
+async function testSandboxRetryClassifier(): Promise<void> {
+  assert(
+    isRetryablePlaidSandboxError(
+      Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('Connect Timeout Error'), {
+          code: 'UND_ERR_CONNECT_TIMEOUT',
+        }),
+      })
+    ),
+    'sandbox fetch failed / UND_ERR must retry instead of failing the suite'
+  );
+  assert(
+    !isRetryablePlaidSandboxError(new Error('INVALID_PUBLIC_TOKEN')),
+    'permanent Plaid errors must not retry'
+  );
+}
+
 async function runAll(): Promise<void> {
   console.log('Plaid blackbox tests — running against', BASE_URL);
 
   const tests: { name: string; fn: () => Promise<void> }[] = [
+    {
+      name: 'sandbox retry classifier treats fetch failed as retryable',
+      fn: testSandboxRetryClassifier,
+    },
     { name: 'link-token: no auth -> 401', fn: testLinkToken_noAuth },
     { name: 'exchange: no auth -> 401', fn: testExchange_noAuth },
     { name: 'list-items: no auth -> 401', fn: testListItems_noAuth },
