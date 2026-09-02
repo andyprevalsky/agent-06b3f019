@@ -807,6 +807,7 @@ _INTERACTION_ACTIONS = {
     "dropdown_options",
     "select_dropdown",
     "upload_file",
+    "drag",
 }
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
 _INSPECTION_ACTIONS = {
@@ -1129,6 +1130,17 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             result={"success": True},
         )
         return {"success": True, "message": ""}
+    if context.action_name == "drag":
+        # Advertised in BROWSER_USE_TOOLS / tool_executor_v2, but historically
+        # missing from this dispatcher — biometrics agents then burned steps on
+        # "Unknown action: drag" while trying to simulate natural mouse motion.
+        from browser_tools.tool_executor_v2 import _execute_drag
+
+        return await _execute_drag(
+            context.dom_service,
+            context.action_history,
+            context.params,
+        )
     if context.action_name == "scroll":
         direction = context.params.get("direction", "down")
         amount = context.params.get("amount", 300)
