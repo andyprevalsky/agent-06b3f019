@@ -8,6 +8,7 @@ PREFLIGHT="$ROOT/back-end/src/domains/agents/agentRestartPreflight.ts"
 MANIFEST="$ROOT/back-end/src/providers/workflowDeploymentManifest.ts"
 PROD_VALIDATOR="$ROOT/back-end/scripts/validate-prod-workflow-migration.ts"
 CANDIDATE_VALIDATOR="$ROOT/back-end/scripts/validate-candidate-workflow-image.ts"
+HISTORY_METRICS="$ROOT/back-end/src/providers/workflowHistoryMetrics.ts"
 CLASSIFIER="$ROOT/scripts/classify-agent-runtime-changes.sh"
 FLEET_GATE="$ROOT/scripts/verify-agent-candidate-fleet.sh"
 MIGRATION_SQL="$ROOT/back-end/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
@@ -88,7 +89,12 @@ require_text "$CANDIDATE_VALIDATOR" "deployment_initialized_query" "candidate va
 require_text "$CANDIDATE_VALIDATOR" "workflowTaskFailedEventAttributes" "candidate validator must reject nondeterministic workflow tasks"
 require_text "$CANDIDATE_VALIDATOR" "workflowTaskFailedEventAttributes != null" "candidate validator must ignore protobuf nulls while rejecting real workflow-task failures"
 require_text "$CANDIDATE_VALIDATOR" "activityTaskScheduledEventAttributes != null" "candidate validator must count only real initialization activities"
-require_text "$PROD_VALIDATOR" "workflowTaskFailedEventAttributes != null" "production validator must ignore protobuf nulls while rejecting real workflow-task failures"
+# Prod validator delegates history counting to workflowHistoryMetrics so cold/
+# handoff gates share one protobuf-null-safe implementation (Temporal may emit
+# attributes as explicit null). The helper must reject both null and undefined.
+require_text "$PROD_VALIDATOR" "summarizeWorkflowHistory" "production validator must summarize history via shared helper"
+require_text "$HISTORY_METRICS" "event.workflowTaskFailedEventAttributes !== null" "production validator must ignore protobuf nulls while rejecting real workflow-task failures"
+require_text "$HISTORY_METRICS" "event.workflowTaskFailedEventAttributes !== undefined" "history metrics must also ignore missing workflow-task-failure attributes"
 require_text "$PROD_VALIDATOR" "assertSameInstant" "production validator must compare restored timestamps as instants, not format strings"
 require_text "$PROD_VALIDATOR" "prisma.toolUsage.createMany" "production validator must seed durable accounting checkpoints"
 require_text "$PROD_VALIDATOR" "tokenCountCheckpoint: 950" "production validator must preserve the durable context checkpoint"
