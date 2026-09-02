@@ -171,7 +171,7 @@ export async function testRealLlm_voiceNoteRoundTrip(prisma: PrismaClient) {
  * Prod evidence (agent 6ea9cd1e…): SMS session had `[7 attachment(s)]`, the
  * supervisor called start_new_agent for mirror-stain cleanup, and every agent
  * message landed with `filePointer: null` — so the create path never received
- * the files.
+ * the files. Cement with 5 images so a partial forward cannot pass.
  */
 export async function testWriteCommit_startNewAgentForwardsInboundImageAttachments(
   prisma: PrismaClient
@@ -189,7 +189,13 @@ export async function testWriteCommit_startNewAgentForwardsInboundImageAttachmen
   const goal = `WS-mms-forward-goal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const replyText = `Started agent for: ${goal.substring(0, 30)}`;
   const fixture = buildStartNewAgentFixture(goal, replyText, 0.5);
+  const imageCount = 5;
   const media = await serveFixture('red-square.png', 'image/png');
+  // Distinct Surge-style URLs so each download becomes its own FilePointer.
+  const attachments = Array.from({ length: imageCount }, (_, index) => ({
+    url: `${media.url}?n=${index}`,
+    type: 'image/png',
+  }));
 
   try {
     await setFixtureOverride(userId, fixture);
@@ -199,8 +205,8 @@ export async function testWriteCommit_startNewAgentForwardsInboundImageAttachmen
       headers: { 'X-Capture-Token': token },
       body: JSON.stringify({
         data: {
-          body: 'Clean the stains in the attached photo',
-          attachments: [{ url: media.url, type: 'image/png' }],
+          body: 'Clean the stains in each attached photo',
+          attachments,
           conversation: {
             contact: { phone_number: phone },
             phone_number: { number: '+14154498072' },
@@ -225,28 +231,47 @@ export async function testWriteCommit_startNewAgentForwardsInboundImageAttachmen
         role: 'USER',
         NOT: { filePointer: { equals: null } },
       },
+      orderBy: { timestamp: 'asc' },
     });
-    if (attachmentMessages.length < 1) {
+    if (attachmentMessages.length !== imageCount) {
       throw new Error(
-        `Expected start_new_agent to forward inbound MMS as USER filePointer message(s); ` +
-          `got ${attachmentMessages.length} attachment messages on agent ${agent.id}`
+        `Expected start_new_agent to forward all ${imageCount} inbound MMS images as USER ` +
+          `filePointer messages; got ${attachmentMessages.length} on agent ${agent.id}`
       );
     }
 
-    const pointer = attachmentMessages[0].filePointer as {
-      mime_type?: string;
-      original_filename?: string;
-      storage_path?: string;
-    } | null;
-    if (!pointer || typeof pointer !== 'object') {
-      throw new Error(`Expected filePointer object, got: ${JSON.stringify(pointer)}`);
+    const storagePaths = new Set<string>();
+    const filenames = new Set<string>();
+    for (const message of attachmentMessages) {
+      const pointer = message.filePointer as {
+        mime_type?: string;
+        original_filename?: string;
+        storage_path?: string;
+      } | null;
+      if (!pointer || typeof pointer !== 'object') {
+        throw new Error(`Expected filePointer object, got: ${JSON.stringify(pointer)}`);
+      }
+      if (pointer.mime_type !== 'image/png') {
+        throw new Error(`Expected mime_type=image/png, got: ${JSON.stringify(pointer)}`);
+      }
+      if (!pointer.storage_path || !pointer.original_filename) {
+        throw new Error(
+          `Expected storage_path + original_filename on forwarded attachment, got: ${JSON.stringify(pointer)}`
+        );
+      }
+      storagePaths.add(pointer.storage_path);
+      filenames.add(pointer.original_filename);
     }
-    if (pointer.mime_type !== 'image/png') {
-      throw new Error(`Expected mime_type=image/png, got: ${JSON.stringify(pointer)}`);
-    }
-    if (!pointer.storage_path || !pointer.original_filename) {
+    if (storagePaths.size !== imageCount) {
       throw new Error(
-        `Expected storage_path + original_filename on forwarded attachment, got: ${JSON.stringify(pointer)}`
+        `Expected ${imageCount} distinct storage_path values, got ${storagePaths.size}: ` +
+          `${[...storagePaths].join(', ')}`
+      );
+    }
+    if (filenames.size !== imageCount) {
+      throw new Error(
+        `Expected ${imageCount} distinct original_filename values, got ${filenames.size}: ` +
+          `${[...filenames].join(', ')}`
       );
     }
   } finally {

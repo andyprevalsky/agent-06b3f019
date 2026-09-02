@@ -601,7 +601,7 @@ async function runAll() {
       fn: testWriteCommit_startNewAgentCommitsBeforeUserSend,
     },
     {
-      name: 'write-commit -- start_new_agent forwards inbound MMS image attachments',
+      name: 'write-commit -- start_new_agent forwards all 5 inbound MMS images',
       fn: () => testWriteCommit_startNewAgentForwardsInboundImageAttachments(prisma),
     },
     {
