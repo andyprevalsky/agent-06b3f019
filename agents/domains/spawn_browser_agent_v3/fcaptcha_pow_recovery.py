@@ -6,10 +6,9 @@ between interactions; the browser agent can submit too eagerly and retry until
 the benchmark timeout. These helpers detect that state and insert bounded waits
 so PoW can complete before another submit attempt.
 
-Under smoke concurrency, PoW is CPU-contended and retries often still block.
-If the DOM already shows a risk score plus checkbox Verified, force
-``attempt_completion`` immediately — the smoke evaluator accepts that evidence
-and further screenshot loops burn the 420s cap.
+Under smoke concurrency, PoW is CPU-contended: use longer silent waits and a
+single reload so the worker can finish. Do not inject completion nudges — the
+agent must finish via normal tool use once PoW clears.
 """
 
 from __future__ import annotations
@@ -20,12 +19,11 @@ from urllib.parse import urlparse
 WEBDECOY_HOST_SUFFIX = "webdecoy.com"
 FCAPTCHA_DEMO_PATH_FRAGMENT = "/product/fcaptcha-demo"
 
-# One reload+wait, then stop. Extra retries under smoke contention rarely clear
-# the block and historically burned the remaining budget until the 420s timeout.
-FCAPTCHA_PAGE_SETTLE_SECONDS = 4.0
-FCAPTCHA_PRE_SUBMIT_WAIT_SECONDS = 6.0
-FCAPTCHA_POW_RETRY_WAIT_SECONDS = 12.0
-FCAPTCHA_MAX_POW_RECOVERY_WAITS = 1
+# Tuned for smoke CPU contention. Silent waits only — no LLM completion nudges.
+FCAPTCHA_PAGE_SETTLE_SECONDS = 8.0
+FCAPTCHA_PRE_SUBMIT_WAIT_SECONDS = 12.0
+FCAPTCHA_POW_RETRY_WAIT_SECONDS = 20.0
+FCAPTCHA_MAX_POW_RECOVERY_WAITS = 3
 
 _POW_BLOCKED_RE = re.compile(
     r"pow_not_satisfied|bot detected.*form blocked",
@@ -35,11 +33,6 @@ _SUBMIT_LABEL_RE = re.compile(
     r"\b(submit|send message|send\b|post message)\b",
     re.IGNORECASE,
 )
-_RISK_SCORE_RE = re.compile(
-    r"risk\s*score[^0-9]{0,20}([01](?:\.\d+)?|2(?:\.0+)?)",
-    re.IGNORECASE,
-)
-_VERIFIED_RE = re.compile(r"\bverified\b", re.IGNORECASE)
 
 
 def is_webdecoy_fcaptcha_url(url: str | None) -> bool:
@@ -81,51 +74,15 @@ def should_reload_page_on_pow_recovery(attempt: int) -> bool:
     return attempt == 1
 
 
-def dom_has_reportable_fcaptcha_progress(*text_parts: str | None) -> bool:
-    """True when DOM already has score + Verified — enough for smoke grading."""
-    combined = "\n".join(part for part in text_parts if part)
-    if not combined.strip():
-        return False
-    return bool(_RISK_SCORE_RE.search(combined) and _VERIFIED_RE.search(combined))
-
-
-def should_force_fcaptcha_completion(
-    *,
-    blocked: bool,
-    recovery_waits: int,
-    reportable_progress: bool,
-) -> bool:
-    """Stop retrying once we can grade or recovery budget is exhausted."""
-    if not blocked:
-        return False
-    if reportable_progress:
-        return True
-    return recovery_waits >= FCAPTCHA_MAX_POW_RECOVERY_WAITS
-
-
 def fcaptcha_pow_retry_guidance(*, recovery_seconds: float, reloaded: bool) -> str:
-    """User-turn guidance after a bounded PoW recovery wait."""
+    """Factual user-turn status after a bounded PoW recovery wait (no completion nudge)."""
     reload_clause = (
-        " Reloaded the page for a fresh proof-of-work worker; quickly redo checkbox "
-        "verify, re-fill the invisible form, and submit once. If it blocks again or "
-        "a risk score + Verified are already visible, call attempt_completion immediately."
+        " Reloaded the page for a fresh proof-of-work worker; redo checkbox verify, "
+        "re-fill the invisible form, then submit once."
         if reloaded
-        else " Move the mouse naturally, then retry the invisible-form submit once. "
-        "If it blocks again, call attempt_completion with the visible score/verdict."
+        else " Move the mouse naturally, then retry the invisible-form submit once."
     )
     return (
         "FCaptcha rejected the submit (pow_not_satisfied / form blocked) — the page "
         f"proof-of-work was not ready. Waited {recovery_seconds:.0f}s.{reload_clause}"
-    )
-
-
-def fcaptcha_pow_exhausted_completion_guidance() -> str:
-    """Force the agent to stop retrying and report visible results."""
-    return (
-        "FCaptcha form is blocked (or recovery budget is exhausted) and a gradeable "
-        "result is already on screen or will not improve with more retries. "
-        "Do NOT keep retrying submits, scrolling, or taking more screenshots. "
-        "Call attempt_completion NOW with: the visible risk score, whether checkbox "
-        "mode shows Verified, whether the invisible form submitted successfully, and "
-        "the visible bot/human verdict text."
     )

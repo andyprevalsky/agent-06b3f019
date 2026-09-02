@@ -94,13 +94,10 @@ from .config import (
 from .fcaptcha_pow_recovery import (
     FCAPTCHA_MAX_POW_RECOVERY_WAITS,
     click_targets_fcaptcha_submit,
-    dom_has_reportable_fcaptcha_progress,
     dom_indicates_fcaptcha_pow_blocked,
-    fcaptcha_pow_exhausted_completion_guidance,
     fcaptcha_pow_retry_guidance,
     is_webdecoy_fcaptcha_url,
     pow_recovery_wait_seconds,
-    should_force_fcaptcha_completion,
     should_reload_page_on_pow_recovery,
 )
 from .credential_runtime import build_realm_credential_state
@@ -5602,7 +5599,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     action_entries: List[Dict[str, Any]] = []
     webdecoy_fcaptcha_settled = False
     fcaptcha_pow_recovery_waits = 0
-    fcaptcha_pow_completion_nudged = False
     browser_turn_messages: List[Dict[str, Any]] = [
         message
         for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
@@ -9030,30 +9026,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 result_message,
                 result_error,
             )
-            fcaptcha_reportable_progress = dom_has_reportable_fcaptcha_progress(
-                dom_tree_text,
-                result_message,
-                result_error,
-            )
-            if fcaptcha_pow_blocked_now and should_force_fcaptcha_completion(
-                blocked=True,
-                recovery_waits=fcaptcha_pow_recovery_waits,
-                reportable_progress=fcaptcha_reportable_progress,
-            ):
-                if not fcaptcha_pow_completion_nudged:
-                    fcaptcha_pow_completion_nudged = True
-                    activity.heartbeat(
-                        "WebDecoy FCaptcha forcing attempt_completion "
-                        f"(reportable={fcaptcha_reportable_progress}, "
-                        f"recovery_waits={fcaptcha_pow_recovery_waits})"
-                    )
-                    browser_turn_messages.append(
-                        {
-                            "role": "user",
-                            "content": fcaptcha_pow_exhausted_completion_guidance(),
-                        }
-                    )
-            elif (
+            if (
                 fcaptcha_pow_blocked_now
                 and fcaptcha_pow_recovery_waits < FCAPTCHA_MAX_POW_RECOVERY_WAITS
             ):
