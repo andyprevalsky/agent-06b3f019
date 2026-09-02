@@ -97,7 +97,19 @@ export async function sendSms(
   };
 
   const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${phoneNumber}:${message}`;
-  if (await shouldMockBenchmarkSmsSend(options.archiveRootAgentId)) {
+  let shouldMockSms = false;
+  try {
+    shouldMockSms = await shouldMockBenchmarkSmsSend(options.archiveRootAgentId);
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    log.error('Benchmark SMS mock eligibility lookup failed', { error: messageText });
+    return {
+      success: false,
+      error: `Benchmark SMS mock eligibility lookup failed: ${messageText}`,
+      definitiveFailure: true,
+    };
+  }
+  if (shouldMockSms) {
     const mocked = await buildMockSurgeSendResult({
       phoneNumber,
       message,
@@ -207,7 +219,18 @@ export async function sendMms(
   };
 
   const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${phoneNumber}:${message}:${mediaUrl}`;
-  if (await shouldMockBenchmarkSmsSend(options.archiveRootAgentId)) {
+  let shouldMockMms = false;
+  try {
+    shouldMockMms = await shouldMockBenchmarkSmsSend(options.archiveRootAgentId);
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    log.error('Benchmark MMS mock eligibility lookup failed', { error: messageText });
+    return {
+      success: false,
+      error: `Benchmark MMS mock eligibility lookup failed: ${messageText}`,
+    };
+  }
+  if (shouldMockMms) {
     const mocked = await buildMockSurgeSendResult({
       phoneNumber,
       message,

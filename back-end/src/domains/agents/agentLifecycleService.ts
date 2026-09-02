@@ -153,10 +153,13 @@ async function startChatMode(
 
 async function resolveSubAgentBenchmarkFlag(
   body: CreateAgentBody,
+  userId: string,
   isBenchmark: boolean
 ): Promise<boolean> {
   if (body.parent_agent_id === undefined) return isBenchmark;
-  const parent = await repo.findAgentById(body.parent_agent_id);
+  // Only inherit benchmark (and mode flags) from a parent the caller owns —
+  // otherwise any UUID would escalate into SMS/WhatsApp transport mocking.
+  const parent = await repo.findAgent(body.parent_agent_id, userId);
   if (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined) {
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
     applyWorldModelModeInheritance(body, parent?.worldModelMode);
@@ -176,7 +179,7 @@ export async function createAgent(
   const isSubAgent = body.parent_agent_id !== undefined;
   applyFastModeDefault(body, userId);
 
-  const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, isBenchmark);
+  const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
   disableFastModeForWorldModel(body);
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);

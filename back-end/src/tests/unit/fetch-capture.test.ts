@@ -249,7 +249,7 @@ async function run(): Promise<void> {
     const surgeBody = (await surge.json()) as { id?: string };
     assert.strictEqual(
       surgeBody.id,
-      mockSurgeMessageId('capture:7:{"to":"+15555550100","body":"hello"}')
+      mockSurgeMessageId('capture:{"to":"+15555550100","body":"hello"}')
     );
 
     const whatsappSuccess = await fetch(
@@ -346,7 +346,7 @@ async function run(): Promise<void> {
     );
     assert.strictEqual(
       all.captures[6].responseBody,
-      JSON.stringify({ id: mockSurgeMessageId('capture:7:{"to":"+15555550100","body":"hello"}') })
+      JSON.stringify({ id: mockSurgeMessageId('capture:{"to":"+15555550100","body":"hello"}') })
     );
     assert.strictEqual(all.captures[6].cached, false);
     assert.strictEqual(all.captures[7].cached, false);

@@ -208,10 +208,14 @@ export async function findUserDeliveryAddress(userId: string) {
 }
 
 /** Fetch parent execution-mode flags in bulk for batch-created sub-agents. */
-export async function findExecutionModeFlagsByIds(agentIds: string[]) {
+export async function findExecutionModeFlagsByIds(agentIds: string[], userId?: string) {
   if (agentIds.length === 0) return [];
   return prisma.agent.findMany({
-    where: { id: { in: agentIds }, deletedAt: null },
+    where: {
+      id: { in: agentIds },
+      deletedAt: null,
+      ...(userId !== undefined ? { userId } : {}),
+    },
     select: {
       id: true,
       fastModeCacheEnabled: true,

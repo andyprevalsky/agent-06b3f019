@@ -187,7 +187,19 @@ async function postWhatsAppMessage(
   options: WhatsAppArchiveOptions
 ): Promise<WhatsAppSendResult> {
   const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${JSON.stringify(requestBody)}`;
-  if (await shouldMockBenchmarkWhatsAppSend(options.archiveRootAgentId)) {
+  let shouldMockWhatsApp = false;
+  try {
+    shouldMockWhatsApp = await shouldMockBenchmarkWhatsAppSend(options.archiveRootAgentId);
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    log.error('Benchmark WhatsApp mock eligibility lookup failed', { error: messageText });
+    return {
+      success: false,
+      error: `Benchmark WhatsApp mock eligibility lookup failed: ${messageText}`,
+      definitiveFailure: true,
+    };
+  }
+  if (shouldMockWhatsApp) {
     const mocked = await buildMockWhatsAppSendResult({
       phoneNumber,
       seed: mockSeed,

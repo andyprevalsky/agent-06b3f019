@@ -485,8 +485,10 @@ export function installFetchCapture(): Router {
           headers: { 'content-type': 'text/plain' },
         });
       }
+      // Seed from request body only — the process-wide capture counter makes
+      // identical SMS payloads get different fake IDs across unrelated traffic.
       const body = JSON.stringify({
-        id: mockSurgeMessageId(`capture:${String(id)}:${requestBody ?? ''}`),
+        id: mockSurgeMessageId(`capture:${requestBody ?? ''}`),
       });
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 200;
@@ -523,16 +525,22 @@ export function installFetchCapture(): Router {
       });
     }
 
+    const agentPhoneHost = new URL(url).hostname;
     if (
       process.env.BLACKBOX_TEST_FAKE_AGENTPHONE === '1' &&
-      new URL(url).hostname.endsWith('agentphone.ai') &&
+      (agentPhoneHost === 'agentphone.ai' ||
+        agentPhoneHost === 'api.agentphone.ai' ||
+        agentPhoneHost.endsWith('.agentphone.ai')) &&
       new URL(url).pathname.endsWith('/messages') &&
       method.toUpperCase() === 'POST'
     ) {
       let parsedBody: Record<string, unknown> = {};
       if (requestBody) {
         try {
-          parsedBody = JSON.parse(requestBody) as Record<string, unknown>;
+          const parsed: unknown = JSON.parse(requestBody);
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            parsedBody = parsed as Record<string, unknown>;
+          }
         } catch {
           parsedBody = {};
         }
@@ -541,7 +549,7 @@ export function installFetchCapture(): Router {
         typeof parsedBody.to_number === 'string' ? parsedBody.to_number : '+10000000000';
       const fromNumber =
         typeof parsedBody.from_number === 'string' ? parsedBody.from_number : '+10000000001';
-      const messageId = mockAgentPhoneMessageId(`capture:${String(id)}:${requestBody ?? ''}`);
+      const messageId = mockAgentPhoneMessageId(`capture:${requestBody ?? ''}`);
       const body = JSON.stringify({
         id: messageId,
         status: 'sent',

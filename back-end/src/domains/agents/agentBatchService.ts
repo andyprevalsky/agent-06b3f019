@@ -256,7 +256,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     for (const body of bodies) body.goal = resolvePromptSecrets(body.goal);
   }
   for (const body of bodies) applyFastModeDefault(body, userId);
-  const parentById = await loadBatchParentExecutionFlags(bodies);
+  const parentById = await loadBatchParentExecutionFlags(bodies, userId);
   applyExecutionModeInheritanceForBatch(bodies, parentById);
   for (const body of bodies) {
     disableFastModeForWorldModel(body);

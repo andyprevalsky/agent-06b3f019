@@ -11,7 +11,8 @@ export type BatchParentExecutionFlags = Awaited<
 >[number];
 
 export async function loadBatchParentExecutionFlags(
-  bodies: CreateAgentBody[]
+  bodies: CreateAgentBody[],
+  userId: string
 ): Promise<Map<string, BatchParentExecutionFlags>> {
   const parentIds = Array.from(
     new Set(
@@ -21,7 +22,8 @@ export async function loadBatchParentExecutionFlags(
     )
   );
   if (parentIds.length === 0) return new Map();
-  const parents = await repo.findExecutionModeFlagsByIds(parentIds);
+  // Scope to the caller so foreign parent UUIDs cannot escalate benchmark mocks.
+  const parents = await repo.findExecutionModeFlagsByIds(parentIds, userId);
   return new Map(parents.map((parent) => [parent.id, parent]));
 }
 
