@@ -43,6 +43,36 @@ async function serveFixture(
   };
 }
 
+/** Serve multiple distinct fixture files from one local HTTP server (path = filename). */
+async function serveFixtureFiles(
+  filenames: string[],
+  contentType: string
+): Promise<{ baseUrl: string; close: () => void }> {
+  const files = new Map(
+    filenames.map((filename) => [
+      `/${filename}`,
+      readFileSync(resolve(__dirname, 'fixtures', filename)),
+    ])
+  );
+  const server = createServer((req, res) => {
+    const pathOnly = (req.url ?? '/').split('?')[0] ?? '/';
+    const bytes = files.get(pathOnly);
+    if (!bytes) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': contentType });
+    res.end(bytes);
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    close: () => server.close(),
+  };
+}
+
 interface MediaRoundTripParams {
   label: string;
   inboundBody: string;
@@ -165,14 +195,23 @@ export async function testRealLlm_voiceNoteRoundTrip(prisma: PrismaClient) {
 }
 
 /**
- * RCA repro: inbound MMS image(s) must be uploaded and attached as USER
- * `filePointer` messages on the agent created by `start_new_agent`.
+ * Cement: 5 distinct non-blue object photos (synthetic fixtures — never user
+ * phone photos) are forwarded onto start_new_agent create, and each FilePointer
+ * is downloadable with the exact bytes the SMS inbound served. Goal text asks
+ * for blue recolors so this mirrors the product path without depending on a
+ * live agent worker for the create-boundary assert.
  *
- * Prod evidence (agent 6ea9cd1e…): SMS session had `[7 attachment(s)]`, the
- * supervisor called start_new_agent for mirror-stain cleanup, and every agent
- * message landed with `filePointer: null` — so the create path never received
- * the files. Cement with 5 images so a partial forward cannot pass.
+ * Prod evidence (agent 6ea9cd1e…): SMS session had `[7 attachment(s)]` but
+ * create landed with `filePointer: null`.
  */
+const BLUE_RECOLOR_OBJECT_FIXTURES = [
+  'object-apple.png',
+  'object-banana.png',
+  'object-leaf.png',
+  'object-orange.png',
+  'object-grape.png',
+] as const;
+
 export async function testWriteCommit_startNewAgentForwardsInboundImageAttachments(
   prisma: PrismaClient
 ): Promise<void> {
@@ -186,14 +225,21 @@ export async function testWriteCommit_startNewAgentForwardsInboundImageAttachmen
   const phone = uniqueSmsPhone();
   const userId = await provisionUserWithPhone(prisma, phone);
   const token = captureToken('sms-supervisor-mms-forward-create');
-  const goal = `WS-mms-forward-goal-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const goal =
+    'Recolor every attached photo so the object is blue. Keep shape and background; ' +
+    `return one blue version per input. marker=${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const replyText = `Started agent for: ${goal.substring(0, 30)}`;
   const fixture = buildStartNewAgentFixture(goal, replyText, 0.5);
-  const imageCount = 5;
-  const media = await serveFixture('red-square.png', 'image/png');
-  // Distinct Surge-style URLs so each download becomes its own FilePointer.
-  const attachments = Array.from({ length: imageCount }, (_, index) => ({
-    url: `${media.url}?n=${index}`,
+  const imageCount = BLUE_RECOLOR_OBJECT_FIXTURES.length;
+  const media = await serveFixtureFiles([...BLUE_RECOLOR_OBJECT_FIXTURES], 'image/png');
+  const sourceBytes = new Map(
+    BLUE_RECOLOR_OBJECT_FIXTURES.map((filename) => [
+      filename,
+      readFileSync(resolve(__dirname, 'fixtures', filename)),
+    ])
+  );
+  const attachments = BLUE_RECOLOR_OBJECT_FIXTURES.map((filename) => ({
+    url: `${media.baseUrl}/${filename}`,
     type: 'image/png',
   }));
 
@@ -205,7 +251,7 @@ export async function testWriteCommit_startNewAgentForwardsInboundImageAttachmen
       headers: { 'X-Capture-Token': token },
       body: JSON.stringify({
         data: {
-          body: 'Clean the stains in each attached photo',
+          body: 'Make blue versions of all 5 attached photos (apple, banana, leaf, orange, grape).',
           attachments,
           conversation: {
             contact: { phone_number: phone },
@@ -240,13 +286,15 @@ export async function testWriteCommit_startNewAgentForwardsInboundImageAttachmen
       );
     }
 
+    const { getFileContent } = await import('../../providers/storage');
     const storagePaths = new Set<string>();
-    const filenames = new Set<string>();
+    const matchedSources = new Set<string>();
     for (const message of attachmentMessages) {
       const pointer = message.filePointer as {
         mime_type?: string;
         original_filename?: string;
         storage_path?: string;
+        size_bytes?: number;
       } | null;
       if (!pointer || typeof pointer !== 'object') {
         throw new Error(`Expected filePointer object, got: ${JSON.stringify(pointer)}`);
@@ -260,18 +308,121 @@ export async function testWriteCommit_startNewAgentForwardsInboundImageAttachmen
         );
       }
       storagePaths.add(pointer.storage_path);
-      filenames.add(pointer.original_filename);
+
+      const downloaded = await getFileContent({
+        id: '00000000-0000-0000-0000-000000000000',
+        storage_path: pointer.storage_path,
+        original_filename: pointer.original_filename,
+        mime_type: pointer.mime_type,
+        size_bytes: pointer.size_bytes ?? 0,
+        created_at: new Date().toISOString(),
+      });
+      let matched: string | null = null;
+      for (const [filename, bytes] of sourceBytes) {
+        if (bytes.equals(downloaded)) {
+          matched = filename;
+          break;
+        }
+      }
+      if (!matched) {
+        throw new Error(
+          `Downloaded attachment ${pointer.original_filename} (${downloaded.length} bytes) ` +
+            `did not match any of the 5 source object fixtures — create cannot use the real files`
+        );
+      }
+      matchedSources.add(matched);
     }
     if (storagePaths.size !== imageCount) {
       throw new Error(
-        `Expected ${imageCount} distinct storage_path values, got ${storagePaths.size}: ` +
-          `${[...storagePaths].join(', ')}`
+        `Expected ${imageCount} distinct storage_path values, got ${storagePaths.size}`
       );
     }
-    if (filenames.size !== imageCount) {
+    if (matchedSources.size !== imageCount) {
       throw new Error(
-        `Expected ${imageCount} distinct original_filename values, got ${filenames.size}: ` +
-          `${[...filenames].join(', ')}`
+        `Expected all ${imageCount} source fixtures on the agent, matched: ${[...matchedSources].join(', ')}`
+      );
+    }
+  } finally {
+    media.close();
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+/**
+ * Opt-in real-LLM: SMS "make these 5 photos blue" must spawn an agent that
+ * receives all 5 FilePointers (create-boundary + supervisor tool choice).
+ */
+export async function testRealLlm_blueRecolorSpawnsAgentWithAllFiveAttachments(
+  prisma: PrismaClient
+): Promise<void> {
+  if (process.env.BLACKBOX_SMS_SUPERVISOR_REAL_LLM !== '1') {
+    console.warn(
+      '  ⚠ BLACKBOX_SMS_SUPERVISOR_REAL_LLM != 1 — skipping real-LLM 5-image blue-recolor spawn'
+    );
+    return;
+  }
+  const probeRes = await request(`${BASE_URL}/api/test/captures`);
+  if (probeRes.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping real-LLM 5-image blue-recolor spawn');
+    return;
+  }
+
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-real-llm-blue-recolor-5');
+  const media = await serveFixtureFiles([...BLUE_RECOLOR_OBJECT_FIXTURES], 'image/png');
+  const attachments = BLUE_RECOLOR_OBJECT_FIXTURES.map((filename) => ({
+    url: `${media.baseUrl}/${filename}`,
+    type: 'image/png',
+  }));
+
+  try {
+    await setFixtureOverride(userId, BYPASS_FIXTURE_REAL_LLM);
+
+    const res = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body:
+            'Please start an agent to recolor every attached photo so the object is blue. ' +
+            'There are 5 photos (apple, banana, leaf, orange, grape). Do not ask clarifying questions.',
+          attachments,
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const agent = await waitFor(
+      async () => prisma.agent.findFirst({ where: { userId, source: 'SMS' } }),
+      120000,
+      2000
+    );
+    if (!agent) {
+      throw new Error(
+        'Expected real-LLM supervisor to call start_new_agent for the 5-image blue-recolor request'
+      );
+    }
+    const goal = agent.goal.toLowerCase();
+    if (!/blue|recolor|color/.test(goal)) {
+      throw new Error(`Expected agent goal to mention blue/recolor, got: "${agent.goal}"`);
+    }
+
+    const attachmentMessages = await prisma.message.findMany({
+      where: {
+        agentId: agent.id,
+        role: 'USER',
+        NOT: { filePointer: { equals: null } },
+      },
+    });
+    if (attachmentMessages.length !== BLUE_RECOLOR_OBJECT_FIXTURES.length) {
+      throw new Error(
+        `Expected ${BLUE_RECOLOR_OBJECT_FIXTURES.length} FilePointers on spawned agent, ` +
+          `got ${attachmentMessages.length} (agent ${agent.id})`
       );
     }
   } finally {
