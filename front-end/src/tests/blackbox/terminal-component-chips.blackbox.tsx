@@ -101,13 +101,14 @@ describe('ClaudeCodeChip', () => {
   it('renders spinning_up with forceShow terminal surface', () => {
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
     expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
-    expect(screen.getByText('0 turns completed')).toBeInTheDocument();
+    // Turn-count chip temporarily removed (code-agent verifier kill-switch work).
+    expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
     // The compact header shows Maximize2 button
     const buttons = screen.getAllByRole('button');
     expect(buttons.length).toBeGreaterThan(0);
   });
 
-  it('does not count heartbeat progress messages as completed turns', () => {
+  it('does not show a turn-count chip for heartbeat progress messages', () => {
     messagesRef.current = [
       makeMsg({
         metadata: {
@@ -136,11 +137,10 @@ describe('ClaudeCodeChip', () => {
     ];
 
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
-    expect(screen.getByText('0 turns completed')).toBeInTheDocument();
-    expect(screen.queryByText('2 turns completed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
   });
 
-  it('shows explicit Codex completed turn count in code-agent headers', () => {
+  it('does not show a turn-count chip for Codex completed_turns metadata', () => {
     messagesRef.current = [
       makeMsg({
         metadata: {
@@ -173,7 +173,7 @@ describe('ClaudeCodeChip', () => {
     ];
 
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow codeProvider="codex" />);
-    expect(screen.getByText('1 turn completed')).toBeInTheDocument();
+    expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
   });
 
   it('shows completed state and structured response when expanded', async () => {

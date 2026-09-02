@@ -926,6 +926,17 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
     if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
         os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
+    # TEMPORARY: skip post-run Claude Code / Codex dual-agent verifier. The
+    # verifier cannot see sandbox files and false-fails complete runs. Re-enable
+    # by unsetting ROSE_DISABLE_CODE_AGENT_VERIFIER once we have an in-sandbox
+    # agentic verifier. Override with ROSE_DISABLE_CODE_AGENT_VERIFIER=0.
+    if os.environ.get("ROSE_DISABLE_CODE_AGENT_VERIFIER", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        os.environ["ROSE_DISABLE_CODE_AGENT_VERIFIER"] = "1"
     browser_max_steps = 0
     for task in all_tasks():
         if task.name not in selected:

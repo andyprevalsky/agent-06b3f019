@@ -1282,6 +1282,47 @@ async def test_run_verifier_happy_path():
     assert seen_args["args"][-3:] == [True, "fast goal", 3]
 
 
+async def test_run_verifier_disabled_by_env_flag():
+    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("done")
+    called = {"check_progress": 0}
+
+    async def fake_activity(*a, **kw):
+        called["check_progress"] += 1
+        raise AssertionError("verifier LLM must not be called when disabled")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        for provider in ("claude", "codex"):
+            score, reasoning, struct, itok, otok = await service._run_verifier(
+                agent_id="a",
+                task_id="t",
+                goal="g",
+                model="rose-labs/rose-1-lite",
+                terminal=terminal,
+                action_summary=["wrote output"],
+                output_schema={"fields": []},
+                claude_token=None,
+                exit_code=0,
+                code_provider=provider,
+                output_files=[],
+            )
+            assert score == 1.0, provider
+            assert "verifier disabled" in reasoning.lower(), reasoning
+            assert struct is None
+            assert itok == 0 and otok == 0
+
+    assert called["check_progress"] == 0
+
+
 async def test_run_verifier_exception_fallback():
     """Exception returns 0.5 score and assumes partial completion."""
     from domains.spawn_claude_code_agent import service

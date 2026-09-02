@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
+import os
 from typing import Final
+
+# Temporary kill-switch for the post-run code-agent completion verifier
+# (Claude Code + Codex share this path). When set, the sandbox session's
+# natural end is the result — no dual-agent verifier LLM pass.
+# Values: 1 / true / yes / on
+ROSE_DISABLE_CODE_AGENT_VERIFIER_ENV: Final[str] = "ROSE_DISABLE_CODE_AGENT_VERIFIER"
+
+
+def code_agent_verifier_disabled() -> bool:
+    """Return True when the post-run code-agent verifier should be skipped."""
+    raw = os.getenv(ROSE_DISABLE_CODE_AGENT_VERIFIER_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
 
 # Silence timeout — if no output for this long, Claude Code is "done talking"
 SILENCE_TIMEOUT_S: Final[float] = 1.0

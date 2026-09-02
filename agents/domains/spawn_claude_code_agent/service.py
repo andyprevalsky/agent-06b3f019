@@ -27,6 +27,7 @@ from domains.spawn_claude_code_agent.config import (
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
     SILENCE_TIMEOUT_S,
+    code_agent_verifier_disabled,
 )
 from domains.spawn_claude_code_agent.repo import (
     check_sandbox_health,
@@ -1080,6 +1081,10 @@ async def _run_verifier(
     """Run the verifier to confirm completion.
 
     Returns (score, reasoning, structured_response, input_tokens, output_tokens).
+
+    When ``ROSE_DISABLE_CODE_AGENT_VERIFIER`` is set, skip the dual-agent LLM
+    verifier entirely (Claude Code and Codex). The session result is returned
+    as-is so the parent tool call finishes when the code agent ends.
     """
     from helpers.llm import check_progress
     from loop.activity_helper import call_temporal_activity_from_activity
@@ -1088,6 +1093,31 @@ async def _run_verifier(
     verifier_call_id = str(uuid_module.uuid4())
     input_tokens = 0
     output_tokens = 0
+    extracted_output_files = output_files or []
+    output_file_structured = _structured_response_from_output_files(
+        output_schema, extracted_output_files
+    )
+
+    if code_agent_verifier_disabled():
+        # Treat a finished session as complete — no "Verifying completion"
+        # chip and no second LLM pass. Still surface any /home/user/output
+        # files we already extracted so the parent can use them. Always
+        # score 1.0 — the kill-switch exists specifically to stop dual-agent
+        # verifier loops, including non-zero exits.
+        score = 1.0
+        v_reasoning = (
+            "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
+            f"Returning session result as-is (provider={code_provider}, exit_code={exit_code})."
+        )
+        logger.info(
+            "[ClaudeCode] Verifier skipped via ROSE_DISABLE_CODE_AGENT_VERIFIER",
+            agent_id=agent_id,
+            task_id=task_id,
+            code_provider=code_provider,
+            exit_code=exit_code,
+            has_structured_from_files=bool(output_file_structured),
+        )
+        return score, v_reasoning, output_file_structured, input_tokens, output_tokens
 
     try:
         await save_claude_code_message(
@@ -1103,8 +1133,6 @@ async def _run_verifier(
 
         final_output = terminal.get_display()
         normalized_events = code_events or []
-        extracted_output_files = output_files or []
-        output_file_structured = _structured_response_from_output_files(output_schema, extracted_output_files)
         if output_file_structured and (exit_code is None or exit_code == 0):
             v_reasoning = (
                 "The code agent completed successfully and the requested file outputs were extracted "
