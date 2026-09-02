@@ -40,16 +40,14 @@ def test_fcaptcha_max_recovery_waits_allows_multiple_retries():
     assert FCAPTCHA_MAX_POW_RECOVERY_WAITS >= 3
 
 
-def test_should_reload_page_on_first_pow_recovery_only():
-    assert should_reload_page_on_pow_recovery(1) is True
+def test_should_reload_page_on_pow_recovery_is_disabled():
+    assert should_reload_page_on_pow_recovery(1) is False
     assert should_reload_page_on_pow_recovery(2) is False
 
 
-def test_fcaptcha_pow_retry_guidance_is_factual_without_completion_nudge():
-    retry = fcaptcha_pow_retry_guidance(recovery_seconds=20.0, reloaded=True)
-    assert "20s" in retry
-    assert "Reloaded" in retry
+def test_fcaptcha_pow_retry_guidance_preserves_verified_without_nudge():
+    retry = fcaptcha_pow_retry_guidance(recovery_seconds=15.0, reloaded=False)
+    assert "15s" in retry
+    assert "without reloading" in retry
     assert "attempt_completion" not in retry
-    assert "attempt_completion" not in fcaptcha_pow_retry_guidance(
-        recovery_seconds=20.0, reloaded=False
-    )
+    assert "Reloaded" not in retry
