@@ -2811,6 +2811,10 @@ async def run_all_tests():
     await r.record_async("cc_exec_cancel_error", test_cc_execute_tool_cancelled_error_path)
     await r.record_async("cc_exec_generic_exc", test_cc_execute_tool_generic_exception_yields_error)
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
+    r.record(
+        "claude_code_max_runtime_cuda_kernel_headroom",
+        test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom,
+    )
     teardown_mock()
     return r.all_passed
 
@@ -2905,6 +2909,32 @@ def test_format_code_events_transcript_covers_failed_and_status_only_results():
         "[Claude result] failed - rank script exited 1",
         "[Claude result] cancelled",
     ]
+
+
+def test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom():
+    """Hung Claude Code must return before the cuda-kernel bench budget is gone.
+
+    Local repro (k=3, 2026-09-02): with MAX_RUNTIME_S=3600 and task timeout=4200,
+    two roots waited 3009s/3721s on claude_code_activity_wait and timed out with
+    no recovery. A completed code-agent path finished CC in ~947s. Cap CC at 30m
+    so a hang still leaves ≥15m of parent budget inside the 70m task timeout.
+    """
+    import json
+    from pathlib import Path
+
+    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
+
+    tasks = json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text()
+    )
+    if isinstance(tasks, dict):
+        tasks = tasks.get("tasks", tasks)
+    cuda = next(t for t in tasks if t["name"] == "cuda-kernel-github-top100-code-agent")
+    task_timeout = int(cuda["timeout_seconds"])
+
+    assert MAX_RUNTIME_S == 1800
+    assert task_timeout >= 4200
+    assert task_timeout - MAX_RUNTIME_S >= 900
 
 
 if __name__ == "__main__":

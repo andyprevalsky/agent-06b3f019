@@ -21,8 +21,12 @@ def code_agent_verifier_disabled() -> bool:
 # Silence timeout — if no output for this long, Claude Code is "done talking"
 SILENCE_TIMEOUT_S: Final[float] = 1.0
 
-# Maximum runtime before timeout
-MAX_RUNTIME_S: Final[int] = 3600  # 60 minutes (matches E2B SANDBOX_TIMEOUT_MS)
+# Maximum runtime before timeout.
+# Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
+# A 60m cap let hung Claude Code sessions burn the whole bench with no parent
+# recovery (k=3 2026-09-02: 3009s/3721s CC waits → all timeouts). Successful
+# code-agent path finishes CC in ~15m; 30m fails hung sessions with headroom.
+MAX_RUNTIME_S: Final[int] = 1800  # 30 minutes (matches E2B SANDBOX_TIMEOUT_MS)
 
 # Fatal error patterns in Claude Code output that should immediately abort the session.
 # These are unrecoverable inside a headless sandbox (e.g., OAuth login can't be completed).

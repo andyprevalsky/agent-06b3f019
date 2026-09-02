@@ -80,7 +80,7 @@ if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
 }
 
 const WS_PORT = 3000;
-const SANDBOX_TIMEOUT_MS = 3600000; // 60 minutes
+const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes (matches agents MAX_RUNTIME_S)
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
