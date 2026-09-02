@@ -91,15 +91,6 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
-from .fcaptcha_pow_recovery import (
-    FCAPTCHA_MAX_POW_RECOVERY_WAITS,
-    click_targets_fcaptcha_submit,
-    dom_indicates_fcaptcha_pow_blocked,
-    fcaptcha_pow_retry_guidance,
-    is_webdecoy_fcaptcha_url,
-    pow_recovery_wait_seconds,
-    should_reload_page_on_pow_recovery,
-)
 from .credential_runtime import build_realm_credential_state
 from .download_persist import BrowserDownloadPersister
 from .recording import (
@@ -5597,8 +5588,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
     _heartbeat_task = asyncio.create_task(_background_heartbeat())
     action_entries: List[Dict[str, Any]] = []
-    webdecoy_fcaptcha_settled = False
-    fcaptcha_pow_recovery_waits = 0
     browser_turn_messages: List[Dict[str, Any]] = [
         message
         for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
@@ -6924,23 +6913,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
-
-            if is_webdecoy_fcaptcha_url(current_url) and not webdecoy_fcaptcha_settled:
-                settle_seconds = pow_recovery_wait_seconds()
-                activity.heartbeat(
-                    f"WebDecoy FCaptcha page settle ({settle_seconds:.0f}s for PoW worker)"
-                )
-                await asyncio.sleep(settle_seconds)
-                webdecoy_fcaptcha_settled = True
-                browser_turn_messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Waited {settle_seconds:.0f}s on the WebDecoy FCaptcha demo so the "
-                            "page proof-of-work worker can initialize before interacting."
-                        ),
-                    }
-                )
 
             # 4. Call Rose API
             try:
@@ -8831,18 +8803,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
 
-            fcaptcha_pre_submit_wait = (
-                action_name == "click"
-                and is_webdecoy_fcaptcha_url(current_url)
-                and click_targets_fcaptcha_submit(element_desc)
-            )
-            if fcaptcha_pre_submit_wait:
-                pre_submit_seconds = pow_recovery_wait_seconds(pre_submit=True)
-                activity.heartbeat(
-                    f"WebDecoy FCaptcha pre-submit wait ({pre_submit_seconds:.0f}s)"
-                )
-                await asyncio.sleep(pre_submit_seconds)
-
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
             try:
                 result = await asyncio.wait_for(
@@ -9015,61 +8975,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 result=result,
                 tool_call_id=tool_call_id_action,
             )
-
-            dom_tree_text = str(observe_page_state.get("dom_tree") or "")
-            result_message = str(result.get("message") or "")
-            result_error = str(result.get("error") or "")
-            fcaptcha_pow_blocked_now = is_webdecoy_fcaptcha_url(
-                current_url
-            ) and dom_indicates_fcaptcha_pow_blocked(
-                dom_tree_text,
-                result_message,
-                result_error,
-            )
-            if (
-                fcaptcha_pow_blocked_now
-                and fcaptcha_pow_recovery_waits < FCAPTCHA_MAX_POW_RECOVERY_WAITS
-            ):
-                recovery_seconds = pow_recovery_wait_seconds(pow_blocked=True)
-                fcaptcha_pow_recovery_waits += 1
-                reloaded = False
-                if should_reload_page_on_pow_recovery(fcaptcha_pow_recovery_waits):
-                    reload_page = input_page
-                    if reload_page is None and dom_service is not None:
-                        with contextlib.suppress(Exception):
-                            reload_page = await dom_service.session.get_current_page()
-                    if reload_page is not None:
-                        with contextlib.suppress(Exception):
-                            activity.heartbeat(
-                                "WebDecoy FCaptcha PoW recovery reload "
-                                f"(attempt {fcaptcha_pow_recovery_waits})"
-                            )
-                            await asyncio.wait_for(reload_page.reload(), timeout=30.0)
-                            webdecoy_fcaptcha_settled = False
-                            reloaded = True
-                activity.heartbeat(
-                    f"WebDecoy FCaptcha pow_not_satisfied recovery wait "
-                    f"({recovery_seconds:.0f}s, attempt {fcaptcha_pow_recovery_waits}"
-                    f"{', reloaded' if reloaded else ''})"
-                )
-                await asyncio.sleep(recovery_seconds)
-                if not webdecoy_fcaptcha_settled:
-                    settle_seconds = pow_recovery_wait_seconds()
-                    activity.heartbeat(
-                        f"WebDecoy FCaptcha re-settle after PoW reload "
-                        f"({settle_seconds:.0f}s)"
-                    )
-                    await asyncio.sleep(settle_seconds)
-                    webdecoy_fcaptcha_settled = True
-                browser_turn_messages.append(
-                    {
-                        "role": "user",
-                        "content": fcaptcha_pow_retry_guidance(
-                            recovery_seconds=recovery_seconds,
-                            reloaded=reloaded,
-                        ),
-                    }
-                )
 
             if result.get("status") == "needs_write_approval":
                 approval_type = result.get("approval_type", "unknown")

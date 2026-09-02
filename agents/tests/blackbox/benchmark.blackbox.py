@@ -604,8 +604,8 @@ async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles()
     )
 
 
-def test_auth_independent_biometrics_fixture_stays_exclusive_for_pow_cpu():
-    """WebDecoy stays exclusive: FCaptcha PoW needs uncontended CPU, not just isolated profiles."""
+def test_auth_independent_biometrics_fixture_joins_isolated_parallel_batch():
+    """WebDecoy can overlap tasks that neither read nor inject saved browser auth."""
     from benchmarks import run_benchmark as bench
 
     class Task:
@@ -626,8 +626,8 @@ def test_auth_independent_biometrics_fixture_stays_exclusive_for_pow_cpu():
         )
 
     assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
-        ("exclusive", ["browser-biometrics-webdecoy"]),
-        ("parallel", ["claude-code-agent", "chat-mode"]),
+        ("exclusive", []),
+        ("parallel", ["claude-code-agent", "browser-biometrics-webdecoy", "chat-mode"]),
     ]
 
 
@@ -16303,8 +16303,8 @@ async def run_all_tests():
         test_parallel_benchmark_scheduler_serializes_shared_browser_profiles,
     )
     r.record(
-        "auth_independent_biometrics_stays_exclusive_for_pow_cpu",
-        test_auth_independent_biometrics_fixture_stays_exclusive_for_pow_cpu,
+        "auth_independent_biometrics_joins_parallel_batch",
+        test_auth_independent_biometrics_fixture_joins_isolated_parallel_batch,
     )
     r.record(
         "biometrics_fixture_exclusive_with_shared_auth",
