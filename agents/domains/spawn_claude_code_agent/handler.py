@@ -137,7 +137,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         gpt_token_pool_id,
                         fast_mode_cache_enabled,
                     ],
-                    start_to_close_timeout=timedelta(minutes=50),
+                    start_to_close_timeout=timedelta(minutes=60),
                     heartbeat_timeout=timedelta(minutes=5),
                     # WAIT so pause cancel receives the activity's cancelled
                     # result (includes task_id). TRY_CANCEL races the workflow

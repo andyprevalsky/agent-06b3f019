@@ -22,7 +22,7 @@ def code_agent_verifier_disabled() -> bool:
 SILENCE_TIMEOUT_S: Final[float] = 1.0
 
 # Maximum runtime before timeout
-MAX_RUNTIME_S: Final[int] = 1800  # 30 minutes (matches E2B SANDBOX_TIMEOUT_MS)
+MAX_RUNTIME_S: Final[int] = 3600  # 60 minutes (matches E2B SANDBOX_TIMEOUT_MS)
 
 # Fatal error patterns in Claude Code output that should immediately abort the session.
 # These are unrecoverable inside a headless sandbox (e.g., OAuth login can't be completed).
