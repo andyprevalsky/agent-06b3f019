@@ -47,7 +47,10 @@ from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
-from providers.rose.browser_use import format_browser_state_for_tool
+from providers.rose.browser_use import (
+    format_browser_state_for_tool,
+    recover_from_challenge_enabled,
+)
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.payment_card import (
@@ -1934,7 +1937,11 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         task=task,
         browser_state=browser_state_for_llm,
         action_history=action_entries,
-        available_actions=AVAILABLE_ACTIONS,
+        available_actions=(
+            [a for a in AVAILABLE_ACTIONS if a != "recover_from_challenge"]
+            if not recover_from_challenge_enabled()
+            else AVAILABLE_ACTIONS
+        ),
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
@@ -7765,6 +7772,50 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             if action_name == "recover_from_challenge":
                 recovery_params = unified_action.get("params", {}) or {}
                 recovery_reason = recovery_params.get("reason", "")
+                recovery_call_id = _browser_action_tool_call_id(llm_result)
+                if not recover_from_challenge_enabled():
+                    disabled_message = (
+                        "recover_from_challenge is disabled for this run "
+                        f"(reason was: {recovery_reason or 'n/a'}). "
+                        "Do not retry it. Wait briefly for the provider auto-solver "
+                        "or try an alternate URL/path to continue the goal."
+                    )
+                    logger.info(
+                        "Browser agent recover_from_challenge refused — tool disabled",
+                        reason=recovery_reason,
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Challenge recovery disabled",
+                        task_id=task_id,
+                        message=disabled_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={"recoveryStage": "disabled_by_env"},
+                    )
+                    action_result = {
+                        "success": False,
+                        "message": disabled_message,
+                        "recovery_action": "disabled_by_env",
+                        "current_url": current_url,
+                    }
+                    await _finalize_browser_recovery_action_result(
+                        action_result=action_result,
+                        dom_service=dom_service,
+                        action_history=action_history,
+                        thinking=thinking,
+                        recovery_reason=recovery_reason,
+                        browser_turn_messages=browser_turn_messages,
+                        task_prompt=task_prompt,
+                        browser_state={},
+                        unified_action=unified_action,
+                        recovery_call_id=recovery_call_id,
+                        browser_stream=browser_stream,
+                    )
+                    continue
+
                 # Default true: preserve authenticated cookies unless the model
                 # explicitly opts into a fresh-cookie machine search.
                 if "auth_cookies_are_preserved" in recovery_params:
@@ -7774,7 +7825,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 else:
                     auth_cookies_are_preserved = True
                 allow_logged_out_cookie_commit = not auth_cookies_are_preserved
-                recovery_call_id = _browser_action_tool_call_id(llm_result)
                 logger.info(
                     "Browser agent requested staged challenge recovery",
                     reason=recovery_reason,

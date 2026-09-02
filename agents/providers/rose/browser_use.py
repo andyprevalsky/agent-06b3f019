@@ -16,11 +16,22 @@ and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
+
+
+def recover_from_challenge_enabled() -> bool:
+    """Temp kill-switch for challenge recovery (bench A/B).
+
+    Set ``BROWSER_DISABLE_RECOVER_FROM_CHALLENGE=1`` to hide and refuse the tool
+    so the browser agent must navigate around blockers like the manual CDP path.
+    """
+    raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
+    return raw not in {"1", "true", "yes", "on"}
 
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
@@ -691,6 +702,11 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     # providers.rose during worker startup.
     from browser_tools.schemas import BROWSER_TOOL_MODELS, create_browser_agent_action_model
 
+    if not recover_from_challenge_enabled():
+        available_actions = [
+            name for name in available_actions if name != "recover_from_challenge"
+        ]
+
     known_actions = [name for name in available_actions if name in BROWSER_TOOL_MODELS]
     if not known_actions:
         return []
@@ -703,10 +719,27 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     for action_name in known_actions:
         generated_tool = by_name[action_name]
         prompt_metadata = BROWSER_USE_TOOLS.get(action_name) or {}
+        description = prompt_metadata.get("description") or generated_tool["description"]
+        if (
+            action_name == "request_user_assistance_for_authentication"
+            and not recover_from_challenge_enabled()
+        ):
+            description = (
+                "Waterfall step 8: request user help signing in only after steps 1-7 are "
+                "exhausted or unavailable. Before calling, you must have tried every saved "
+                "password, email OTP if available, SMS OTP if available, the minted agent "
+                "account when it has an email, and guest/anonymous completion when the page "
+                "offers it (for example Continue as guest, Checkout as guest, or I'll reserve). "
+                "Cookie and Steel-session auth are applied automatically before you start. "
+                "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
+                "access-denied interstitials, or unusual-traffic pages - those are not "
+                "authentication blockers. Wait briefly or try an alternate URL/path instead "
+                "of trying to solve them yourself."
+            )
         tools.append(
             {
                 "name": action_name,
-                "description": prompt_metadata.get("description") or generated_tool["description"],
+                "description": description,
                 "input_schema": _collapse_nullable_schema(generated_tool["input_schema"]),
             }
         )
@@ -724,6 +757,30 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     present. Provider transforms strip the marker before sending the request.
     """
     _ = available_actions
+    recover_enabled = (
+        recover_from_challenge_enabled()
+        and "recover_from_challenge" in set(available_actions or [])
+    )
+    if recover_enabled:
+        challenge_rule = (
+            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
+            "are not authentication. recover_from_challenge is a relatively expensive way to "
+            "force-open a blocked page or service — do not use it when an alternate path can "
+            "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
+            "to solve challenge widgets yourself. Never call "
+            "request_user_assistance_for_authentication while a challenge interstitial is "
+            "still visible."
+        )
+    else:
+        challenge_rule = (
+            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
+            "are not authentication. No challenge-recovery tool is available — wait briefly "
+            "for the provider auto-solver, try an alternate URL or path to complete the "
+            "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
+            "challenge widgets yourself. Never call "
+            "request_user_assistance_for_authentication while a challenge interstitial is "
+            "still visible."
+        )
     return f"""# Role
 
 You are a browser automation agent. You take in a user goal and complete the goal by interacting with a browser you are exposed to via tools.
@@ -793,7 +850,7 @@ action envelope in text; use the provided tool call.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
 - When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. recover_from_challenge is a relatively expensive way to force-open a blocked page or service — do not use it when an alternate path can complete the goal. Do not drag sliders, click verify buttons, or otherwise try to solve challenge widgets yourself. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
+{challenge_rule}
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 
