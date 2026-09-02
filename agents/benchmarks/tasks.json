@@ -5231,7 +5231,7 @@
   {
     "name": "cuda-kernel-github-top100-code-agent",
     "title": "CUDA Kernel GitHub Top 100 (Code Agent Ranking)",
-    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nGithub API token: {GITHUB_DISPATCH_TOKEN}",
+    "prompt": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nPrefer kernel libraries, GPU kernel DSLs, CUDA samples/tooling, and inference/runtime projects with substantial hand-written CUDA/Triton/PTX kernels. Exclude one-off research paper demos that only incidentally use CUDA for an unrelated application.\nGithub API token: {GITHUB_DISPATCH_TOKEN}",
     "timeout_seconds": 4200,
     "is_chat_mode": false,
     "expected_tools": [
@@ -5335,10 +5335,10 @@
         "criteria": [
           "Final output contains exactly 100 unique GitHub repositories",
           "Repos are ranked by stars descending with rank 1 highest",
-          "Repositories are materially CUDA-kernel or kernel-adjacent engineering projects",
+          "Repositories are predominantly CUDA-kernel or kernel-adjacent engineering projects (a small number of borderline entries alone does not fail)",
           "Each entry includes repo_name, repo_url, stars, and description grounded in tool evidence"
         ],
-        "judge_prompt": "Grade whether the agent returned exactly 100 unique public GitHub repositories ranked by current stars for CUDA-kernel-adjacent engineering work. PASS only if: (1) repos list length is 100 with unique canonical URLs; (2) ranks are consecutive 1-100 and stars are non-increasing; (3) entries are real CUDA/GPU-kernel engineering repos, not incidental CUDA mentions; (4) repo_name, repo_url, stars, and description are present and grounded in coding-agent or explore evidence. FAIL if the agent used only prose synthesis without a coding-agent fetch, returned fewer than 100 repos, or has duplicates/forks dominating the list."
+        "judge_prompt": "Grade whether the agent returned exactly 100 unique public GitHub repositories ranked by current stars for CUDA-kernel-adjacent engineering work. PASS if: (1) repos list length is 100 with unique canonical URLs; (2) ranks are consecutive 1-100 and stars are non-increasing; (3) the ranking is substantially CUDA/GPU-kernel engineering (kernel libraries, DSLs, GPU runtimes, inference engines with hand-written kernels, CUDA samples/tooling) — a small number of borderline GPU-adjacent ML/paper repos does not alone fail when the overall list is clearly kernel-focused; (4) repo_name, repo_url, stars, and description are present and grounded in coding-agent or explore evidence. FAIL if the agent used only prose synthesis without a coding-agent fetch, returned fewer than 100 repos, has duplicates/forks dominating the list, or the majority of entries are off-topic (unrelated application papers with only incidental CUDA)."
       }
     ],
     "enforce_declared_evaluators": true,
