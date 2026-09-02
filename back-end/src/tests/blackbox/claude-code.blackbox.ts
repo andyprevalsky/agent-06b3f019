@@ -1200,6 +1200,31 @@ async function testBoundary_createGithubMissingUserIdNoOutbound() {
  *  - WebSocket never connects
  *  - Claude Code output never contains "4" within 90s
  */
+function isClaudeSmokeCredentialFailure(output: string): boolean {
+  return (
+    output.includes('Invalid authentication credentials') ||
+    /oauth access token has been revoked/i.test(output) ||
+    /failed to authenticate/i.test(output)
+  );
+}
+
+async function testSmokeCredentialFailureClassifier() {
+  assert(
+    isClaudeSmokeCredentialFailure(
+      '[Claude] Failed to authenticate. API Error: 401 OAuth access token has been revoked.'
+    ),
+    'revoked OAuth must classify as a smoke credential skip, not a 240s timeout'
+  );
+  assert(
+    isClaudeSmokeCredentialFailure('Invalid authentication credentials'),
+    'legacy 401 copy must still classify as a smoke credential skip'
+  );
+  assert(
+    !isClaudeSmokeCredentialFailure('CLAUDE_E2B_DONE'),
+    'a successful smoke sentinel must not classify as a credential skip'
+  );
+}
+
 async function testSmoke_claudeCodeAnswersQuestion() {
   await ensureSmokeUserClaudeCredentials();
 
@@ -1284,7 +1309,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
         if (
           clean.includes('CLAUDE_E2B_DONE') ||
-          clean.includes('Invalid authentication credentials') ||
+          isClaudeSmokeCredentialFailure(clean) ||
           /credit balance is too low/i.test(clean)
         ) {
           clearTimeout(timeout);
@@ -1309,7 +1334,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     const finalOutput = await outputPromise;
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
-    if (finalOutput.includes('Invalid authentication credentials')) {
+    if (isClaudeSmokeCredentialFailure(finalOutput)) {
       console.log(
         '    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)'
       );
@@ -1489,6 +1514,10 @@ async function runAll() {
     {
       name: 'sandbox retry -- transient transport errors retry, rejections do not',
       fn: async () => testSandboxRetry_classifiesTransientOnly(),
+    },
+    {
+      name: 'smoke classifier -- revoked OAuth is a credential skip, not a timeout',
+      fn: testSmokeCredentialFailureClassifier,
     },
     {
       name: 'agent context -- repo-less agent resolves credential owner',

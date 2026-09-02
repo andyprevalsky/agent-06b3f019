@@ -13,6 +13,7 @@ are written for future Fast Mode runs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from types import SimpleNamespace
@@ -30,6 +31,15 @@ if TYPE_CHECKING:
     from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger(__name__)
+
+# Allowlisted Fast Mode reads (mass-agent / OAi demo) must not fall through to a
+# live LLM when the store times out. A transport fault is not a semantic miss.
+_LOOKUP_RETRY_ATTEMPTS = 3
+_LOOKUP_RETRY_BACKOFF_S = 0.25
+
+
+class FastCacheLookupError(RuntimeError):
+    """Fast Mode store transport failure after retries. Not a clean cache miss."""
 
 
 def _empty_response() -> Dict[str, Any]:
@@ -665,6 +675,47 @@ async def july_explore_resolve(
     return None, None
 
 
+async def lookup_llm_cache(
+    ctx: Any,
+    call_site: str,
+    key_material: Any,
+) -> tuple[Any, Any]:
+    """Exact-key + July position lookup. Raises FastCacheLookupError on transport fault.
+
+    Transient get/get-position failures are retried. A remaining failure is
+    never returned as ``(None, None)`` — callers must not treat it as a miss.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_LOOKUP_RETRY_ATTEMPTS):
+        try:
+            lookup_keys = ctx.llm_lookup_keys(call_site, key_material)
+            stored, hit_key = await cache_client.cache_get_first(lookup_keys)
+            if stored is None:
+                stored, hit_key = await cache_client.cache_get_position_fallback(
+                    ctx.goal_hash,
+                    call_site,
+                    ctx.base_step,
+                )
+            stored, hit_key = await july_gp_resolve_execute(ctx, call_site, stored, hit_key)
+            stored, hit_key = await july_explore_resolve(ctx, call_site, stored, hit_key)
+            return stored, hit_key
+        except FastCacheLookupError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "fast_cache.get_error",
+                call_site=call_site,
+                error=f"{type(exc).__name__}: {exc}"[:300],
+                attempt=attempt + 1,
+            )
+            if attempt < _LOOKUP_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(_LOOKUP_RETRY_BACKOFF_S * (attempt + 1))
+    raise FastCacheLookupError(
+        f"fast-cache lookup failed for {call_site} after {_LOOKUP_RETRY_ATTEMPTS} attempts"
+    ) from last_exc
+
+
 async def cached_complete(
     rose_client: Any,
     *,
@@ -690,18 +741,15 @@ async def cached_complete(
     if ctx.read_enabled:
         lookup_failed = False
         try:
-            lookup_keys = ctx.llm_lookup_keys(call_site, request_key_material(complete_kwargs))
-            stored, hit_key = await cache_client.cache_get_first(lookup_keys)
-            if stored is None:
-                stored, hit_key = await cache_client.cache_get_position_fallback(
-                    ctx.goal_hash,
-                    call_site,
-                    ctx.base_step,
-                )
-            stored, hit_key = await july_gp_resolve_execute(ctx, call_site, stored, hit_key)
-            stored, hit_key = await july_explore_resolve(ctx, call_site, stored, hit_key)
-        except Exception as exc:  # cache read failures degrade to live
-            logger.warning("fast_cache.get_error", key=key, error=str(exc))
+            stored, hit_key = await lookup_llm_cache(
+                ctx, call_site, request_key_material(complete_kwargs)
+            )
+        except FastCacheLookupError as exc:
+            logger.warning("fast_cache.get_error", key=key, error=f"{type(exc).__name__}: {exc}"[:300])
+            if ctx.soft_complete_allowed:
+                # Allowlisted Fast Mode (mass-agent) must not bill a live LLM for
+                # a store timeout. The activity/Temporal retry re-enters this path.
+                raise
             stored, hit_key = None, None
             lookup_failed = True
         if stored is not None:

@@ -14,7 +14,7 @@ import math
 import random
 import re
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,29 @@ logger = logging.getLogger(__name__)
 # Kernel session file listing only scans /tmp/downloads (+ uploads / share).
 STEEL_DOWNLOADS_PATH = "/files"
 KERNEL_DOWNLOADS_PATH = "/tmp/downloads"
+
+
+def normalize_action_coordinates(coordinates: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """Accept ``{"x","y"}`` or ``(x, y)`` from click/drag ``record_action`` callers.
+
+    ``_execute_drag`` and ``_execute_click_coordinates`` pass a tuple; other
+    callers pass a dict. Indexing a tuple with ``"x"`` raises TypeError and
+    turns a successful CDP drag into a failed TOOL step.
+    """
+    if not coordinates:
+        return None
+    if isinstance(coordinates, Mapping):
+        try:
+            return {"x": coordinates["x"], "y": coordinates["y"]}
+        except KeyError as exc:
+            raise TypeError(
+                f"coordinate mapping must include x and y, got {dict(coordinates)!r}"
+            ) from exc
+    if isinstance(coordinates, (tuple, list)) and len(coordinates) >= 2:
+        return {"x": coordinates[0], "y": coordinates[1]}
+    raise TypeError(
+        f"coordinates must be {{'x', 'y'}} or (x, y), got {type(coordinates).__name__}"
+    )
 
 
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
@@ -351,7 +374,7 @@ class ActionHistory:
         action: str,
         thinking: Optional[str] = None,
         index: Optional[int] = None,
-        coordinates: Optional[Tuple[int, int]] = None,
+        coordinates: Optional[Any] = None,
         params: Optional[Dict[str, Any]] = None,
         result: Optional[Dict[str, Any]] = None,
         screenshot: Optional[str] = None,
@@ -367,7 +390,7 @@ class ActionHistory:
             action: Action name (e.g., "click", "type")
             thinking: LLM's reasoning
             index: Element index from DOM (backend_node_id)
-            coordinates: Dict with {"x": int, "y": int} viewport coordinates
+            coordinates: {"x","y"} dict or (x, y) tuple/list viewport coordinates
             params: Additional action parameters
             result: Action result (defaults to {"success": True})
             screenshot: Base64 screenshot for vision providers
@@ -380,7 +403,7 @@ class ActionHistory:
         # Convert between index and coordinates
         coords_dict = None
         if coordinates:
-            coords_dict = {"x": coordinates["x"], "y": coordinates["y"]}
+            coords_dict = normalize_action_coordinates(coordinates)
 
         # If we have index but not coordinates, look up coordinates
         if index is not None and coords_dict is None:

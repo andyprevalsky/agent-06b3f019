@@ -52,3 +52,10 @@ Cement with a blackbox that fails closed if drag returns Unknown action.
 Every tool name in `BROWSER_USE_TOOLS` / normalize output must have a matching
 `service_actions` dispatcher entry. Schema-only additions without dispatcher
 wiring turn into silent step burns on live smoke.
+
+## Follow-up
+
+The dispatcher fix held. The next `browser-biometrics-webdecoy` timeout
+(`c247de84`) is a different boundary: `_execute_drag` still passed a
+coordinate tuple into `ActionHistory.record_action`, which indexed it as a
+dict. See `2026-09-02-browser-biometrics-drag-record-action-tuple`.

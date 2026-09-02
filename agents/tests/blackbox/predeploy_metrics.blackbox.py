@@ -16,8 +16,11 @@ from _test_utils import BlackboxResult, teardown_mock
 def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if path.exists():
-            return
+        try:
+            if path.read_text().strip():
+                return
+        except FileNotFoundError:
+            pass
         time.sleep(0.05)
     raise AssertionError(f"timed out waiting for {path}")
 

@@ -142,6 +142,10 @@ from .service import (
     safe_time,
     select_auth_assistance_current_url,
 )
+from .visible_result_completion import (
+    forced_visible_result_completion_action,
+    should_force_visible_result_completion,
+)
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
     _get_base_domain,
@@ -7424,6 +7428,22 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     task_id,
                     stream_id=llm_result.get("_thinking_stream_id"),
                 )
+
+            if should_force_visible_result_completion(
+                action_name=action_name,
+                last_reasoning=thinking,
+                prior_reasoning_messages=reasoning_messages,
+                action_summaries=action_summary,
+                action_entries=action_entries,
+            ):
+                logger.info(
+                    "Forcing attempt_completion after visible FCaptcha result already stated",
+                    rejected_action=action_name,
+                    iteration=iteration,
+                )
+                unified_action = forced_visible_result_completion_action(thinking)
+                llm_result = {**llm_result, "action": unified_action}
+                action_name = "attempt_completion"
 
             action_summary.append(_summarize_browser_action_history_entry(action_name, unified_action))
             if len(action_summary) > 20:
