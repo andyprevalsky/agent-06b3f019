@@ -2039,13 +2039,21 @@ def _doordash_food_plan_frozen_fixture() -> dict | None:
     }
 
 
+# Fixture execute_prompt is prod-derived and already assumes an authenticated
+# session; still append this classifier so the agent does not fall into login/OTP.
+DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
+
+
 def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
     if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
         return None
     frozen = _doordash_food_plan_frozen_fixture()
     if not frozen:
         return None
-    return frozen["execute_prompt"]
+    prompt = frozen["execute_prompt"]
+    if DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER.lower() not in prompt.lower():
+        prompt = f"{prompt.rstrip()}\n\n{DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER}"
+    return prompt
 
 
 def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:

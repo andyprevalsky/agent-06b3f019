@@ -3588,6 +3588,7 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert "exactly one browser agent" in task.prompt.lower()
     assert "partial cart" in task.prompt.lower()
     assert "manifest line item" in task.prompt.lower()
+    assert "do not try to login" in task.prompt.lower()
     assert task.pinned_facts["manifest_source"] == "doordash-food-plan-grocery-fixture.json"
     assert task.pinned_facts["prod_user_id"] == "1f85ff25-6e29-4c1b-8739-f917bd101a30"
     assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
@@ -3625,6 +3626,7 @@ def test_doordash_food_plan_grocery_repro_contract():
         assert "BENCHMARK EXECUTION CONTRACT" not in override
         assert "FIRST open Safeway and remove every item" not in override
         assert "93/7 lean ground beef" in override.lower()
+        assert "do not try to login" in override.lower()
         manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
         manifest_lower = manifest_context.lower()
         assert "checkout-ready one-week manifest" in manifest_lower
