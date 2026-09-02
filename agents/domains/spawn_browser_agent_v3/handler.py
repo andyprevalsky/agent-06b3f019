@@ -95,8 +95,11 @@ from .fcaptcha_pow_recovery import (
     FCAPTCHA_MAX_POW_RECOVERY_WAITS,
     click_targets_fcaptcha_submit,
     dom_indicates_fcaptcha_pow_blocked,
+    fcaptcha_pow_exhausted_completion_guidance,
+    fcaptcha_pow_retry_guidance,
     is_webdecoy_fcaptcha_url,
     pow_recovery_wait_seconds,
+    should_reload_page_on_pow_recovery,
 )
 from .credential_runtime import build_realm_credential_state
 from .download_persist import BrowserDownloadPersister
@@ -5597,6 +5600,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     action_entries: List[Dict[str, Any]] = []
     webdecoy_fcaptcha_settled = False
     fcaptcha_pow_recovery_waits = 0
+    fcaptcha_pow_completion_nudged = False
     browser_turn_messages: List[Dict[str, Any]] = [
         message
         for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
@@ -9015,30 +9019,70 @@ Based on this feedback, I need to continue working on the task and address the i
             )
 
             dom_tree_text = str(observe_page_state.get("dom_tree") or "")
+            fcaptcha_pow_blocked_now = is_webdecoy_fcaptcha_url(
+                current_url
+            ) and dom_indicates_fcaptcha_pow_blocked(
+                dom_tree_text,
+                str(result.get("message") or ""),
+                str(result.get("error") or ""),
+            )
             if (
-                is_webdecoy_fcaptcha_url(current_url)
-                and dom_indicates_fcaptcha_pow_blocked(
-                    dom_tree_text,
-                    str(result.get("message") or ""),
-                    str(result.get("error") or ""),
-                )
+                fcaptcha_pow_blocked_now
                 and fcaptcha_pow_recovery_waits < FCAPTCHA_MAX_POW_RECOVERY_WAITS
             ):
                 recovery_seconds = pow_recovery_wait_seconds(pow_blocked=True)
                 fcaptcha_pow_recovery_waits += 1
+                reloaded = False
+                if should_reload_page_on_pow_recovery(fcaptcha_pow_recovery_waits):
+                    reload_page = input_page
+                    if reload_page is None and dom_service is not None:
+                        with contextlib.suppress(Exception):
+                            reload_page = await dom_service.session.get_current_page()
+                    if reload_page is not None:
+                        with contextlib.suppress(Exception):
+                            activity.heartbeat(
+                                "WebDecoy FCaptcha PoW recovery reload "
+                                f"(attempt {fcaptcha_pow_recovery_waits})"
+                            )
+                            await asyncio.wait_for(reload_page.reload(), timeout=30.0)
+                            webdecoy_fcaptcha_settled = False
+                            reloaded = True
                 activity.heartbeat(
                     f"WebDecoy FCaptcha pow_not_satisfied recovery wait "
-                    f"({recovery_seconds:.0f}s, attempt {fcaptcha_pow_recovery_waits})"
+                    f"({recovery_seconds:.0f}s, attempt {fcaptcha_pow_recovery_waits}"
+                    f"{', reloaded' if reloaded else ''})"
                 )
                 await asyncio.sleep(recovery_seconds)
+                if not webdecoy_fcaptcha_settled:
+                    settle_seconds = pow_recovery_wait_seconds()
+                    activity.heartbeat(
+                        f"WebDecoy FCaptcha re-settle after PoW reload "
+                        f"({settle_seconds:.0f}s)"
+                    )
+                    await asyncio.sleep(settle_seconds)
+                    webdecoy_fcaptcha_settled = True
                 browser_turn_messages.append(
                     {
                         "role": "user",
-                        "content": (
-                            "FCaptcha rejected the submit with pow_not_satisfied — the page "
-                            f"proof-of-work was not ready. Waited {recovery_seconds:.0f}s; move "
-                            "the mouse naturally, then retry the invisible-form submit."
+                        "content": fcaptcha_pow_retry_guidance(
+                            recovery_seconds=recovery_seconds,
+                            reloaded=reloaded,
                         ),
+                    }
+                )
+            elif (
+                fcaptcha_pow_blocked_now
+                and fcaptcha_pow_recovery_waits >= FCAPTCHA_MAX_POW_RECOVERY_WAITS
+                and not fcaptcha_pow_completion_nudged
+            ):
+                fcaptcha_pow_completion_nudged = True
+                activity.heartbeat(
+                    "WebDecoy FCaptcha PoW recovery exhausted — nudging attempt_completion"
+                )
+                browser_turn_messages.append(
+                    {
+                        "role": "user",
+                        "content": fcaptcha_pow_exhausted_completion_guidance(),
                     }
                 )
 

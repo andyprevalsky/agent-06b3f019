@@ -4,8 +4,11 @@ from domains.spawn_browser_agent_v3.fcaptcha_pow_recovery import (
     FCAPTCHA_MAX_POW_RECOVERY_WAITS,
     click_targets_fcaptcha_submit,
     dom_indicates_fcaptcha_pow_blocked,
+    fcaptcha_pow_exhausted_completion_guidance,
+    fcaptcha_pow_retry_guidance,
     is_webdecoy_fcaptcha_url,
     pow_recovery_wait_seconds,
+    should_reload_page_on_pow_recovery,
 )
 
 
@@ -33,4 +36,18 @@ def test_pow_recovery_wait_seconds_phases():
 
 
 def test_fcaptcha_max_recovery_waits_is_bounded():
-    assert FCAPTCHA_MAX_POW_RECOVERY_WAITS >= 1
+    assert 1 <= FCAPTCHA_MAX_POW_RECOVERY_WAITS <= 4
+
+
+def test_should_reload_page_on_first_pow_recovery_only():
+    assert should_reload_page_on_pow_recovery(1) is True
+    assert should_reload_page_on_pow_recovery(2) is False
+
+
+def test_fcaptcha_pow_guidance_mentions_reload_and_completion():
+    retry = fcaptcha_pow_retry_guidance(recovery_seconds=15.0, reloaded=True)
+    assert "15s" in retry
+    assert "Reloaded" in retry
+    exhausted = fcaptcha_pow_exhausted_completion_guidance()
+    assert "attempt_completion" in exhausted
+    assert "Do NOT keep retrying" in exhausted
