@@ -32,6 +32,11 @@ import {
   type TemporalWorkflowExecutionRef,
 } from '../src/providers/temporal';
 import {
+  sameWorkflowHistoryMetrics,
+  summarizeWorkflowHistory,
+  type WorkflowHistoryMetrics,
+} from '../src/providers/workflowHistoryMetrics';
+import {
   runWorkflowDeploymentCutover,
   waitForWorkflowReplacementBootstrap,
 } from '../src/providers/workflowDeploymentMigration';
@@ -389,64 +394,21 @@ async function startAndReady(prepared: PreparedAgentWorkflowReplacement): Promis
   };
 }
 
-type ActivityCountSnapshot = {
-  totalEvents: number;
-  activities: number;
-  markers: number;
-  workflowTaskFailures: number;
-  workflowTasks: number;
-  timers: number;
-};
-
 async function activityCount(
   handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>
-): Promise<ActivityCountSnapshot> {
+): Promise<WorkflowHistoryMetrics> {
   const history = await handle.fetchHistory();
-  return {
-    totalEvents: history.events?.length ?? 0,
-    activities:
-      history.events?.filter((event) => event.activityTaskScheduledEventAttributes != null)
-        .length ?? 0,
-    markers:
-      history.events?.filter((event) => event.markerRecordedEventAttributes != null).length ?? 0,
-    workflowTaskFailures:
-      history.events?.filter((event) => event.workflowTaskFailedEventAttributes != null).length ??
-      0,
-    workflowTasks:
-      history.events?.filter(
-        (event) =>
-          event.workflowTaskScheduledEventAttributes != null ||
-          event.workflowTaskStartedEventAttributes != null ||
-          event.workflowTaskCompletedEventAttributes != null
-      ).length ?? 0,
-    timers:
-      history.events?.filter(
-        (event) =>
-          event.timerStartedEventAttributes != null ||
-          event.timerFiredEventAttributes != null ||
-          event.timerCanceledEventAttributes != null
-      ).length ?? 0,
-  };
-}
-
-function sameActivityCount(a: ActivityCountSnapshot, b: ActivityCountSnapshot): boolean {
-  return (
-    a.totalEvents === b.totalEvents &&
-    a.activities === b.activities &&
-    a.markers === b.markers &&
-    a.workflowTaskFailures === b.workflowTaskFailures &&
-    a.workflowTasks === b.workflowTasks &&
-    a.timers === b.timers
-  );
+  return summarizeWorkflowHistory(history.events ?? []);
 }
 
 /**
  * Cooperative cutover parks restored PAUSED / COST_LIMIT / OUT_OF_CREDITS agents
  * in `_wait_for_unpause_or_handoff`: one pointer activity + a 30s wait_condition
  * timer per poll cycle. READY can land before that first timer is scheduled, so
- * a naive before/after sample races the handoff arming. Settle until the handoff
- * timer is present and history stops moving, then prove no further growth inside
- * the poll window (no LLM/tool burn while cold).
+ * a naive before/after sample races the handoff arming. Settle until an *active*
+ * handoff timer is present (started, not yet fired/canceled) and history stops
+ * moving, then prove no further growth inside the poll window (no LLM/tool burn
+ * while cold).
  */
 async function assertColdHandoffHistoryStable(
   handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>,
@@ -454,21 +416,21 @@ async function assertColdHandoffHistoryStable(
     settleMs = 8_000,
     observeMs = 2_000,
   }: { settleMs?: number; observeMs?: number } = {}
-): Promise<ActivityCountSnapshot> {
+): Promise<WorkflowHistoryMetrics> {
   const settleDeadline = Date.now() + settleMs;
   let last = await activityCount(handle);
   while (Date.now() < settleDeadline) {
     await new Promise((resolve) => setTimeout(resolve, 250));
     const next = await activityCount(handle);
-    if (sameActivityCount(next, last) && next.timers >= 1) {
+    if (sameWorkflowHistoryMetrics(next, last) && next.activeTimers >= 1) {
       last = next;
       break;
     }
     last = next;
   }
   assert.ok(
-    last.timers >= 1,
-    `expected cooperative handoff wait timer while cold-paused; got ${JSON.stringify(last)}`
+    last.activeTimers >= 1,
+    `expected armed cooperative handoff wait timer while cold-paused; got ${JSON.stringify(last)}`
   );
   await new Promise((resolve) => setTimeout(resolve, observeMs));
   const after = await activityCount(handle);
