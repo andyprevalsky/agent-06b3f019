@@ -108,5 +108,18 @@ def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
     )
     return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
 
+
+def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) -> bool:
+    """Canonical explore demo class: explicit flag wins, else goal prefix only.
+
+    `_spawn_explore` computes `is_oai_demo_mass_agent_task` once and passes it
+    as the activity's trailing `oai_demo`. Direct/old callers omit the flag;
+    those fall back to `is_oai_demo_goal(goal)` and must not re-read Fast Mode
+    resolver goals — truncated child goals and resolver failures disagree.
+    """
+    if oai_demo is not None:
+        return bool(oai_demo)
+    return is_oai_demo_goal(goal)
+
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0

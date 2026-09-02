@@ -1916,7 +1916,12 @@ echo "✅ /api/agents -> 200 (DB/Prisma path healthy)"
 #     ComputeTokenFastCacheAffinity tables never migrated -> every compute-token
 #     fetch 500'd -> every agent fell to the paid waterfall, while /api/agents
 #     stayed 200). This probe hits the compute-token route plus other domains.
-cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/prod-endpoint-smoke.ts
+#     Cloud agents often inject SMOKE_BASE_URL=http://localhost:<port> — unset it
+#     so the script's prod default wins (script also refuses localhost unless
+#     SMOKE_ALLOW_LOCAL=1).
+cd "$(git rev-parse --show-toplevel)/back-end" && \
+  env -u SMOKE_BASE_URL -u SMOKE_HEALTH_URL -u SMOKE_FRONTEND_URL \
+  npx tsx scripts/prod-endpoint-smoke.ts
 ```
 
 `GET /api/agents` is the canonical warmup probe because it runs an authenticated `prisma.agent.findMany()` — the same query class that broke on 2026-06-27. Step (c) then runs `back-end/scripts/prod-endpoint-smoke.ts`, which probes one DB-backed endpoint per domain (agents, models, benchmarks, user-settings, people, tool-usage, **integrations/compute-code token**, …) and fails on any 5xx. **When you add a new domain whose runtime path is independent of the ones already probed, add a line to the `PROBES` array in that script** — that is how we keep the post-deploy check from going stale.

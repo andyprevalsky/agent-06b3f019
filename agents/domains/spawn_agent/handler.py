@@ -648,6 +648,11 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
+        # One classification for depth, fire-and-track, and the activity's
+        # cancel/evidence wrap-up. Re-resolving inside the activity from the
+        # child goal or Fast Mode root disagrees (truncated explore goals,
+        # resolver failures).
+        oai_demo = is_oai_demo_mass_agent_task(workflow_instance)
         # Caller-controlled thoroughness → turn cap + activity timeout.
         # Fast Mode promotes quick/missing → deep so July OAi-demo explores can
         # reach attempt_completion (~14 turns avg; quick aborts at 5).
@@ -656,17 +661,29 @@ class SpawnAgentManager(ToolManager):
             fast_mode_cache_enabled=bool(
                 getattr(workflow_instance, "fast_mode_cache_enabled", False)
             ),
-            oai_demo=is_oai_demo_mass_agent_task(workflow_instance),
+            oai_demo=oai_demo,
         )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 
-        # IN_PROGRESS
+        # IN_PROGRESS. OAi-demo Fast Mode fire-and-track keeps this chip live
+        # so cached web_search / web_fetch / LLM turns paint the trajectory.
+        # Do not stub-finish with "Research started." — that hid the replay.
+        fire_and_track = (
+            bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            and capture_tool_results is None
+            and oai_demo
+        )
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="Exploring",
             message=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
             status=MessageStatus.IN_PROGRESS,
-            metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
+            metadata={
+                "agentType": "explore",
+                "taskId": task_id,
+                "fullGoal": ui_goal,
+                **({"fastModeParallel": True} if fire_and_track else {}),
+            },
         )
 
         try:
@@ -780,6 +797,7 @@ class SpawnAgentManager(ToolManager):
                 explore_max_iterations,
                 world_model_mode,
                 local_data_summary,
+                oai_demo,
             ]
             activity_handle = workflow.start_activity(
                 spawn_explore_agent_activity,
@@ -790,16 +808,10 @@ class SpawnAgentManager(ToolManager):
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
             # OAi-demo Fast Mode: start the explore (T3 full trajectory) but
-            # do not block the parent execute_loop. July GPs replay by
-            # get-position step, not conversation prefix, so a parallel
-            # FINISH chip does not break cache hits. Drain before
-            # attempt_completion so T9 has no leftover ACTIVE children.
+            # do not block the parent execute_loop. Chip stays IN_PROGRESS so
+            # cached turns paint; drain posts FINISHED before attempt_completion.
             # wait_for / capture_tool_results still need the real result.
-            if (
-                bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-                and capture_tool_results is None
-                and is_oai_demo_mass_agent_task(workflow_instance)
-            ):
+            if fire_and_track:
                 # Do not wait for an inflight slot here. A Huberman-class GP
                 # has 224–336 sequential spawn_agent turns; blocking the parent
                 # at cap=16 keeps 336/16 × ~32s on the execute_loop critical
@@ -812,18 +824,6 @@ class SpawnAgentManager(ToolManager):
                     task_id=task_id,
                     tool_call_id=tool_call_id,
                     ui_goal=ui_goal,
-                )
-                yield ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
-                    message="Research started.",
-                    status=MessageStatus.FINISHED,
-                    metadata={
-                        "agentType": "explore",
-                        "taskId": task_id,
-                        "fullGoal": ui_goal,
-                        "fastModeParallel": True,
-                    },
                 )
                 return
 

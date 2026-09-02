@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
+from helpers.context_compaction import is_excluded_from_model
 from helpers.context_scope import is_internal_subagent_message
 
 
@@ -91,12 +92,12 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
     tool_by_id: Dict[str, Dict] = {}
     deduped_msgs: List[Dict] = []
     for msg in sorted_msgs:
-        # Match build_llm_messages ordering exactly: child-only UI rows must be
-        # removed before terminal tool-result deduplication. Direct sub-agent
-        # completion writes both a parent-visible aggregate row (subAgentIds)
-        # and a slightly later child UI row (subAgentId) under the same
-        # toolCallId. Deduping first lets the child row erase the aggregate.
-        if is_internal_subagent_message(msg):
+        # Match build_llm_messages / drop_rows_never_sent_to_model: FE-only and
+        # child-only UI rows must be removed before terminal tool-result
+        # deduplication. A late "Browser Session Closed" teardown FINISHED that
+        # reuses the spawn toolCallId would otherwise win over the real
+        # completion payload and make the next ASSISTANT look adjacent.
+        if is_excluded_from_model(msg) or is_internal_subagent_message(msg):
             continue
         role = msg.get("role", "")
         metadata = msg.get("metadata") or {}

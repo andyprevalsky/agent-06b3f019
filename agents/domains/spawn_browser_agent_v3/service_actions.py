@@ -807,6 +807,7 @@ _INTERACTION_ACTIONS = {
     "dropdown_options",
     "select_dropdown",
     "upload_file",
+    "drag",
 }
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
 _INSPECTION_ACTIONS = {
@@ -1066,6 +1067,17 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
+        if context.write_lock_enabled and _is_submit_key(key):
+            write_lock_result = await _press_key_write_lock_result(
+                session=context.session,
+                dom_service=context.dom_service,
+                write_lock_approvals=context.write_lock_approvals,
+                current_url=context.current_url,
+                system_name=context.system_name,
+                secret_refs=context.secret_refs,
+            )
+            if write_lock_result:
+                return write_lock_result
         provider_pressed = False
         if context.config is not None and context.session_id and context.user_id.strip():
             from domains.spawn_browser_agent_v3.repo import press_browser_computer_key
@@ -1118,6 +1130,17 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             result={"success": True},
         )
         return {"success": True, "message": ""}
+    if context.action_name == "drag":
+        # Advertised in BROWSER_USE_TOOLS / tool_executor_v2, but historically
+        # missing from this dispatcher — biometrics agents then burned steps on
+        # "Unknown action: drag" while trying to simulate natural mouse motion.
+        from browser_tools.tool_executor_v2 import _execute_drag
+
+        return await _execute_drag(
+            context.dom_service,
+            context.action_history,
+            context.params,
+        )
     if context.action_name == "scroll":
         direction = context.params.get("direction", "down")
         amount = context.params.get("amount", 300)
@@ -2830,13 +2853,7 @@ async def _click_write_lock_result(
     secret_refs: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
-        get_write_lock_approval_question,
         is_click_write_lock_eligible_control,
-        is_email_send_button,
-        is_purchase_button,
-        is_return_button,
-        is_social_domain,
-        is_submit_button,
     )
 
     # Andy (2026-08-21): never raise click write locks on plain inputs /
@@ -2881,13 +2898,131 @@ async def _click_write_lock_result(
             url=current_url[:80] if current_url else None,
         )
 
+    return _evaluate_element_text_write_lock(
+        element_text=element_text,
+        write_lock_approvals=write_lock_approvals,
+        current_url=current_url,
+        system_name=system_name,
+        secret_refs=secret_refs,
+        action_label="coordinate click" if coordinate_click else "click",
+        element_text_for_question=element_text[:100],
+        coords=coords if coordinate_click else None,
+    )
+
+
+_SUBMIT_KEYS = frozenset({"enter", "return", "numpadenter"})
+
+
+def _is_submit_key(key: Any) -> bool:
+    normalized = re.sub(r"\s+", "", str(key or "")).lower()
+    return normalized in _SUBMIT_KEYS
+
+
+_ACTIVE_ELEMENT_WRITE_LOCK_JS = """
+() => {
+    const el = document.activeElement;
+    if (!el || el === document.body) return '';
+    const parts = [];
+    const push = (value) => {
+        if (!value) return;
+        const text = String(value).trim();
+        if (!text || parts.includes(text)) return;
+        parts.push(text.slice(0, 200));
+    };
+    push(el.innerText);
+    push(el.value);
+    for (const attr of ['aria-label', 'title', 'name', 'id', 'type', 'placeholder']) {
+        push(el.getAttribute(attr));
+    }
+    const form = el.form;
+    if (form) {
+        const submit = form.querySelector('button[type="submit"], input[type="submit"]');
+        if (submit) {
+            push(submit.innerText || submit.value);
+            push(submit.getAttribute('aria-label'));
+        }
+        const buttons = form.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]');
+        for (const btn of buttons) {
+            push(btn.innerText || btn.value || btn.getAttribute('aria-label'));
+        }
+    }
+    return parts.join('\\n');
+}
+"""
+
+
+async def _active_element_write_lock_signal(session: Any) -> str:
+    get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
+    if not callable(get_page):
+        return ""
+    try:
+        page = await _maybe_await(get_page())
+    except Exception as error:
+        logger.debug("Unable to resolve page for active-element write-lock signal", error=str(error))
+        return ""
+    if not page:
+        return ""
+    try:
+        signal = await page.evaluate(_ACTIVE_ELEMENT_WRITE_LOCK_JS)
+        return signal if isinstance(signal, str) else ""
+    except Exception as error:
+        logger.debug("Unable to collect active-element write-lock signal", error=str(error))
+        return ""
+
+
+async def _press_key_write_lock_result(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    write_lock_approvals: Optional[Dict],
+    current_url: str,
+    system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    element_text = await _active_element_write_lock_signal(session)
+    logger.info(
+        "Write lock submit-key check",
+        element_text=element_text[:100] if element_text else "(empty)",
+        url=current_url[:80] if current_url else None,
+    )
+    return _evaluate_element_text_write_lock(
+        element_text=element_text,
+        write_lock_approvals=write_lock_approvals,
+        current_url=current_url,
+        system_name=system_name,
+        secret_refs=secret_refs,
+        action_label="submit key",
+        element_text_for_question=element_text[:100],
+    )
+
+
+def _evaluate_element_text_write_lock(
+    *,
+    element_text: str,
+    write_lock_approvals: Optional[Dict],
+    current_url: str,
+    system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
+    action_label: str,
+    element_text_for_question: str,
+    coords: Any = None,
+) -> Optional[Dict[str, Any]]:
+    from browser_tools.write_lock import (
+        get_write_lock_approval_question,
+        is_email_send_button,
+        is_purchase_button,
+        is_return_button,
+        is_social_domain,
+        is_submit_button,
+    )
+
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
         ("email_send", is_email_send_button(element_text), "email send"),
         ("return", is_return_button(element_text), "return confirmation"),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
-    suffix = " (coordinate click)" if coordinate_click else ""
+    suffix = f" ({action_label})"
     minted_card_unlocks_purchase = has_payment_card_secret_refs(secret_refs)
     for approval_type, detected, description in checks:
         if not detected:
@@ -2899,10 +3034,6 @@ async def _click_write_lock_result(
                 url=current_url,
             )
             continue
-        # H-06: a minted one-time card in THIS browser activity unlocks Place
-        # order / purchase write locks (same ephemeral scope as site unlock).
-        # Payment-field typing already bypasses via secret refs; purchase must
-        # too or Place order re-prompts after Payment card ready.
         if approval_type == "purchase" and minted_card_unlocks_purchase:
             logger.info(
                 f"Write lock bypassed: minted payment card unlocks purchase{suffix}",
@@ -2913,7 +3044,7 @@ async def _click_write_lock_result(
             f"Write lock triggered: {description} detected{suffix}",
             url=current_url,
             element_text=element_text[:50],
-            **({"coords": coords} if coordinate_click else {}),
+            **({"coords": coords} if coords is not None else {}),
         )
         return {
             "status": "needs_write_approval",
@@ -2921,10 +3052,10 @@ async def _click_write_lock_result(
             "question": get_write_lock_approval_question(
                 action_type=approval_type,
                 url=current_url,
-                element_text=element_text[:100],
+                element_text=element_text_for_question,
                 system_name=system_name,
             ),
-            "element_text": element_text[:100],
+            "element_text": element_text_for_question,
             "url": current_url,
         }
     return None
