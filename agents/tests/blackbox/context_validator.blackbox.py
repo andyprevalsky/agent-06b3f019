@@ -389,6 +389,97 @@ def test_duplicate_system_messages_are_scoped_to_sub_agent():
     assert same_scope_duplicate_errors, "same browser task scope should still flag exact duplicate messages"
 
 
+def test_browser_teardown_exclude_from_model_preserves_spawn_tool_result():
+    """FE chip-close teardown must not erase the real spawn tool result.
+
+    Repro shape from browser-smoke agent dabeeb92 (2026-09-02): spawn ASSISTANT
+    → real FINISHED completion → later "Browser Session Closed" FINISHED reusing
+    the same toolCallId → next ASSISTANT (attempt_completion). Without
+    excludeFromModel, latest-FINISHED dedup keeps only the empty teardown and
+    role_alternation fires on consecutive tool-calling assistants.
+    """
+    from context_validator import validate_context
+
+    spawn_id = "toolu_01PCzoKQ9gq6LhjBMpsSx6dt"
+    complete_id = "6c297be6-71a0-459d-85a4-9e19c67baf06"
+    messages = [
+        _make_msg("USER", "Use a browser agent on example.com", ts="2026-09-02T03:53:22.969Z"),
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("spawn_agent", spawn_id)],
+            ts="2026-09-02T03:53:31.970Z",
+        ),
+        {
+            "role": "TOOL",
+            "text": "**Status**: ✅ SUCCESS\n\nStructured Response: {\"main_heading\": \"Example Domain\"}",
+            "timestamp": "2026-09-02T03:54:03.945Z",
+            "metadata": {
+                "toolCallId": spawn_id,
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "action_type": "task_complete",
+                "structured_response": {"main_heading": "Example Domain"},
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Browser session closed after teardown",
+            "timestamp": "2026-09-02T03:54:07.057Z",
+            "metadata": {
+                "toolCallId": spawn_id,
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser Session Closed",
+                "action_type": "task_complete",
+                "excludeFromModel": True,
+            },
+        },
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("attempt_completion", complete_id)],
+            ts="2026-09-02T03:54:06.369Z",
+        ),
+        {
+            "role": "TOOL",
+            "text": "done",
+            "timestamp": "2026-09-02T03:54:06.914Z",
+            "metadata": {
+                "toolCallId": complete_id,
+                "toolName": "attempt_completion",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    # Buggy shape (no excludeFromModel): teardown wins dedup → role_alternation.
+    buggy = []
+    for msg in messages:
+        copied = {**msg, "metadata": dict(msg.get("metadata") or {})}
+        if copied["metadata"].get("title") == "Browser Session Closed":
+            copied["metadata"].pop("excludeFromModel", None)
+        buggy.append(copied)
+    buggy_errors = [
+        v for v in validate_context(buggy)
+        if v.rule == "role_alternation" and v.severity == "error"
+    ]
+    assert buggy_errors, (
+        "expected role_alternation when teardown FINISHED is model-visible and "
+        f"reuses spawn toolCallId, got: {buggy_errors}"
+    )
+
+    fixed_errors = [
+        v for v in validate_context(messages)
+        if v.severity == "error"
+    ]
+    assert not fixed_errors, (
+        "excludeFromModel teardown must preserve spawn completion and clear "
+        f"role_alternation, got: {fixed_errors}"
+    )
+
+
 async def run_all_tests():
     print("context_validator blackbox tests:")
     r = BlackboxResult()
@@ -402,6 +493,10 @@ async def run_all_tests():
     r.record("direct_subagent_parent_result_wins_over_later_child_ui_row", test_direct_subagent_parent_result_wins_over_later_child_ui_row)
     r.record("final_orphan_tool_use_matches_llm_repair_path", test_final_orphan_tool_use_matches_llm_repair_path)
     r.record("duplicate_system_messages_are_scoped_to_sub_agent", test_duplicate_system_messages_are_scoped_to_sub_agent)
+    r.record(
+        "browser_teardown_exclude_from_model_preserves_spawn_tool_result",
+        test_browser_teardown_exclude_from_model_preserves_spawn_tool_result,
+    )
     return r.all_passed
 
 

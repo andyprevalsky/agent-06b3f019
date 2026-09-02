@@ -3769,6 +3769,12 @@ async def _emit_browser_task_terminal_for_fe(
     **not** close the chip — timeout/cancel paths historically left hub
     transcripts with FINISHED recordings and an IN_PROGRESS ``browser`` row,
     so every FE link kept showing an active browser panel.
+
+    Reuses the spawn ``tool_call_id`` so the FE can associate the terminal with
+    the open panel, but marks ``excludeFromModel=True``: this row is FE-only.
+    Without that flag, late teardown FINISHED wins LLM tool-result dedup over
+    the real "Browser automation complete" / "✓ Task Completed" payload and
+    smoke context validation reports a false role_alternation dual-write.
     """
     if not task_id:
         return
@@ -3783,6 +3789,7 @@ async def _emit_browser_task_terminal_for_fe(
             action_type="task_complete",
             tool_call_id=tool_call_id or str(uuid_module.uuid4()),
             is_completion_message=True,
+            extra_metadata={"excludeFromModel": True},
         )
 
 

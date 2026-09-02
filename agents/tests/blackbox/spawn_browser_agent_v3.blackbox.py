@@ -2282,6 +2282,7 @@ async def test_browser_cleanup_emits_task_complete_terminal_for_fe_chip():
     assert terminal_calls[0].kwargs["task_id"] == "task-hotel-1"
     assert terminal_calls[0].kwargs["tool_call_id"] == "tool-call-1"
     assert terminal_calls[0].kwargs["is_completion_message"] is True
+    assert terminal_calls[0].kwargs.get("extra_metadata", {}).get("excludeFromModel") is True
 
 
 async def test_browser_cleanup_skips_task_complete_when_paused_for_resume():
