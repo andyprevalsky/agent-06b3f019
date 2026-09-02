@@ -1414,6 +1414,78 @@ async def _resolve_action_page(context: _ActionContext) -> Any:
     return page
 
 
+class _SessionCookieJarAdapter:
+    """Adapt browser-use BrowserSession CDP cookie APIs to Playwright's jar shape."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    async def cookies(self, urls: Optional[Any] = None) -> List[Dict[str, Any]]:
+        del urls  # CDP Storage.getCookies returns the full jar; URL filter is optional.
+        raw = await self._session.cookies()
+        return [dict(cookie) if not isinstance(cookie, dict) else cookie for cookie in raw]
+
+    async def clear_cookies(
+        self,
+        name: Optional[str] = None,
+        domain: Optional[str] = None,
+        path: Optional[str] = None,
+    ) -> None:
+        if name is None and domain is None and path is None:
+            clear_all = getattr(self._session, "clear_cookies", None)
+            if clear_all is None:
+                raise RuntimeError("Browser session cannot clear cookies")
+            await clear_all()
+            return
+
+        # Prefer CDP Network.deleteCookies for selective deletes.
+        cdp_client = getattr(self._session, "cdp_client", None) or getattr(
+            self._session, "cdp", None
+        )
+        send = getattr(cdp_client, "send", None) if cdp_client is not None else None
+        network = getattr(send, "Network", None) if send is not None else None
+        delete = getattr(network, "deleteCookies", None) if network is not None else None
+        if delete is None:
+            raise RuntimeError(
+                "Selective cookie delete requires Playwright context or CDP Network.deleteCookies"
+            )
+        params: Dict[str, Any] = {}
+        if name is not None:
+            params["name"] = name
+        if domain is not None:
+            params["domain"] = domain
+        if path is not None:
+            params["path"] = path
+        await delete(params)
+
+
+async def _resolve_cookie_jar(context: _ActionContext) -> Any:
+    """Return a Playwright-like cookie jar (``cookies`` / ``clear_cookies``).
+
+    ``session.get_current_page()`` returns browser-use's actor Page, which has no
+    ``.context``. The Playwright page (with a real BrowserContext) is on the
+    humanizer's ``input_page``. Fall back to the session CDP cookie APIs when
+    Playwright is unavailable.
+    """
+    input_page = _humanizer_input_page(context.humanizer)
+    jar = getattr(input_page, "context", None) if input_page is not None else None
+    if jar is not None and hasattr(jar, "cookies"):
+        return jar
+
+    page = await _resolve_action_page(context)
+    jar = getattr(page, "context", None)
+    if jar is not None and hasattr(jar, "cookies"):
+        return jar
+
+    session = context.session
+    if session is not None and hasattr(session, "cookies"):
+        return _SessionCookieJarAdapter(session)
+
+    raise RuntimeError(
+        "No cookie jar available: humanizer Playwright context and session CDP cookies are both missing"
+    )
+
+
 async def _execute_read_cookies_action(context: _ActionContext) -> Dict[str, Any]:
     from domains.spawn_browser_agent_v3.cookie_config_tools import (
         cookie_config_tools_enabled,
@@ -1423,9 +1495,9 @@ async def _execute_read_cookies_action(context: _ActionContext) -> Dict[str, Any
 
     if not cookie_config_tools_enabled():
         return {"success": False, "error": "read_cookies is disabled for this run"}
-    page = await _resolve_action_page(context)
+    jar = await _resolve_cookie_jar(context)
     domain = context.params.get("domain")
-    cookies = await page.context.cookies()
+    cookies = await jar.cookies()
     serialized = [
         serialize_cookie(cookie)
         for cookie in cookies
@@ -1463,20 +1535,20 @@ async def _execute_delete_cookies_action(context: _ActionContext) -> Dict[str, A
             "success": False,
             "error": "delete_cookies requires at least one of name or domain",
         }
-    page = await _resolve_action_page(context)
-    before = await page.context.cookies()
+    jar = await _resolve_cookie_jar(context)
+    before = await jar.cookies()
     targets = select_cookies_for_deletion(
         before,
         name=name if isinstance(name, str) else None,
         domain=domain if isinstance(domain, str) else None,
     )
     for cookie in targets:
-        await page.context.clear_cookies(
+        await jar.clear_cookies(
             name=cookie.get("name"),
             domain=cookie.get("domain"),
             path=cookie.get("path") or "/",
         )
-    after = await page.context.cookies()
+    after = await jar.cookies()
     result = {
         "success": True,
         "deleted_count": len(targets),

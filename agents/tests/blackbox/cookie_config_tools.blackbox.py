@@ -115,10 +115,119 @@ def test_normalize_cookie_config_tool_params():
     assert cfg["params"]["config_key"] == "kernel_isp"
 
 
+def test_read_and_delete_cookies_use_humanizer_playwright_context_not_actor_page():
+    """browser-use actor Page has no ``.context``; cookie tools must use Playwright jar.
+
+    Local repro of DoorDash grocery bench failure:
+    ``Action read_cookies failed: 'Page' object has no attribute 'context'``.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3 import service_actions as sa
+
+    os.environ["BROWSER_EXPOSE_COOKIE_CONFIG_TOOLS"] = "1"
+
+    long_value = "SESSION_" + ("B" * 12000)
+    jar_state = [
+        {
+            "name": "ddweb_session_id",
+            "value": long_value,
+            "domain": ".doordash.com",
+            "path": "/",
+            "expires": 1893456000,
+            "httpOnly": True,
+            "secure": True,
+            "sameSite": "None",
+        },
+        {
+            "name": "other",
+            "value": "1",
+            "domain": ".example.com",
+            "path": "/",
+            "expires": -1,
+            "httpOnly": False,
+            "secure": False,
+            "sameSite": "Lax",
+        },
+    ]
+
+    class ActorPage:
+        """Mirrors browser-use actor Page: no Playwright ``context`` attribute."""
+
+    class FakeCookieJar:
+        def __init__(self) -> None:
+            self.cookies_list = list(jar_state)
+
+        async def cookies(self, urls=None):
+            del urls
+            return list(self.cookies_list)
+
+        async def clear_cookies(self, name=None, domain=None, path=None):
+            del path
+            kept = []
+            for cookie in self.cookies_list:
+                name_match = name is None or cookie.get("name") == name
+                domain_match = domain is None or cookie.get("domain") == domain
+                if name_match and domain_match:
+                    continue
+                kept.append(cookie)
+            self.cookies_list = kept
+
+    class FakeSession:
+        async def get_current_page(self):
+            return ActorPage()
+
+    class FakeActionHistory:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def record_action(self, **kwargs):
+            self.calls.append(kwargs)
+
+    async def _run() -> None:
+        jar = FakeCookieJar()
+        humanizer = SimpleNamespace(input_page=SimpleNamespace(context=jar))
+        history = FakeActionHistory()
+        context = SimpleNamespace(
+            session=FakeSession(),
+            humanizer=humanizer,
+            params={"domain": ".doordash.com"},
+            current_url="https://www.doordash.com/",
+            action_history=history,
+            dom_service=object(),
+            thinking="inspect cookies",
+        )
+
+        # Old code path: actor page.context → AttributeError.
+        actor = await context.session.get_current_page()
+        try:
+            _ = actor.context
+            raise AssertionError("actor page unexpectedly exposed .context")
+        except AttributeError as exc:
+            assert "context" in str(exc)
+
+        read = await sa._execute_read_cookies_action(context)
+        assert read["success"] is True
+        assert read["cookie_count"] == 1
+        assert read["cookies"][0]["value"] == long_value
+        assert len(read["cookies"][0]["value"]) == len(long_value)
+
+        context.params = {"name": "ddweb_session_id", "domain": ".doordash.com"}
+        deleted = await sa._execute_delete_cookies_action(context)
+        assert deleted["success"] is True
+        assert deleted["deleted_count"] == 1
+        assert deleted["remaining_cookie_count"] == 1
+        assert jar.cookies_list[0]["name"] == "other"
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     test_cookie_config_tools_are_registered_and_advertised_when_enabled()
     test_cookie_config_tools_can_be_hidden()
     test_serialize_cookie_does_not_truncate_values()
     test_delete_cookie_selection_and_config_allowlist()
     test_normalize_cookie_config_tool_params()
+    test_read_and_delete_cookies_use_humanizer_playwright_context_not_actor_page()
     print("cookie_config_tools.blackbox: PASS")
