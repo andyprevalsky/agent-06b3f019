@@ -21,24 +21,24 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
 
 AGENTS_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(AGENTS_ROOT))
 
-from dotenv import load_dotenv  # noqa: E402
-
 load_dotenv(AGENTS_ROOT / ".env")
-
-from helpers.trace_archive import list_archive_bundle_ids  # noqa: E402
-from providers.planner_rag import store  # noqa: E402
-from providers.planner_rag.corpus import PlanEntry, scan_bundles  # noqa: E402
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_existing(backend: str) -> tuple[list[PlanEntry], dict[str, str]]:
+def _load_existing(backend: str) -> tuple[list[Any], dict[str, str]]:
+    from providers.planner_rag import store
+    from providers.planner_rag.corpus import PlanEntry
+
     index_doc = store.read_encrypted_json(store.INDEX_KEY, backend=backend)
     scan_doc = store.read_encrypted_json(store.SCAN_STATE_KEY, backend=backend)
     entries = [PlanEntry.from_dict(raw) for raw in (index_doc or {}).get("entries") or []]
@@ -46,7 +46,9 @@ def _load_existing(backend: str) -> tuple[list[PlanEntry], dict[str, str]]:
     return entries, scan_state
 
 
-def _write(entries: list[PlanEntry], scan_state: dict[str, str], *, backend: str, source_backend: str) -> str:
+def _write(entries: list[Any], scan_state: dict[str, str], *, backend: str, source_backend: str) -> str:
+    from providers.planner_rag import store
+
     entries_sorted = sorted(entries, key=lambda e: (e.created_at, e.root_agent_id))
     document = {
         "schema_version": 1,
@@ -65,6 +67,10 @@ def _write(entries: list[PlanEntry], scan_state: dict[str, str], *, backend: str
 
 
 def main() -> int:
+    from helpers.trace_archive import list_archive_bundle_ids
+    from providers.planner_rag import store
+    from providers.planner_rag.corpus import scan_bundles
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--limit", type=int, default=0, help="Scan at most N pending bundles (0 = all)")
     parser.add_argument("--concurrency", type=int, default=int(os.environ.get("PLANNER_RAG_BUILD_CONCURRENCY", "48")))

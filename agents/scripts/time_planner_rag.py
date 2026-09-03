@@ -20,14 +20,12 @@ import sys
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 AGENTS_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(AGENTS_ROOT))
 
-from dotenv import load_dotenv  # noqa: E402
-
 load_dotenv(AGENTS_ROOT / ".env")
-
-from providers.planner_rag import load_index_from_store, retrieve_reference_plans, store  # noqa: E402
 
 DEFAULT_GOALS = [
     "Find the current population of Tokyo and New York City and multiply them together",
@@ -47,6 +45,8 @@ def _pct(values: list[float], pct: float) -> float:
 
 
 async def main() -> int:
+    from providers.planner_rag import load_index_from_store, retrieve_reference_plans, store
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--goal", action="append", default=[], help="Goal(s) to time (default: 5 samples)")
     parser.add_argument("--rounds", type=int, default=3)

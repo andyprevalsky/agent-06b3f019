@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import BlackboxResult, get_captured_requests, teardown_mock
 
@@ -571,9 +571,7 @@ async def test_planner_activity_injects_reference_block_after_goal():
             None,
         )
 
-    original = llm.call_llm_structured_streaming
-    llm.call_llm_structured_streaming = fake_structured  # type: ignore[assignment]
-    try:
+    with patch.object(llm, "call_llm_structured_streaming", new=fake_structured):
         with _LocalArchive() as archive:
             _seed_corpus(archive)
             _publish_local_index()
@@ -589,8 +587,6 @@ async def test_planner_activity_injects_reference_block_after_goal():
                 None,
                 claude_token_user_id="user-a",
             )
-    finally:
-        llm.call_llm_structured_streaming = original  # type: ignore[assignment]
 
     sent = captured["messages"]
     assert sent[0]["role"] == "system" and "# User Context" in sent[0]["content"]
@@ -612,9 +608,7 @@ async def test_planner_activity_without_hits_sends_unchanged_messages():
         captured.update(kwargs)
         return PlannerResponse.model_validate(PIZZA_PLAN), {"prompt_tokens": 1, "completion_tokens": 1}, None
 
-    original = llm.call_llm_structured_streaming
-    llm.call_llm_structured_streaming = fake_structured  # type: ignore[assignment]
-    try:
+    with patch.object(llm, "call_llm_structured_streaming", new=fake_structured):
         with _LocalArchive() as archive:
             _seed_corpus(archive)
             _publish_local_index()
@@ -622,8 +616,6 @@ async def test_planner_activity_without_hits_sends_unchanged_messages():
             result = await llm.call_planner_llm_activity(
                 messages, "m", "tools", "", None, claude_token_user_id="user-a"
             )
-    finally:
-        llm.call_llm_structured_streaming = original  # type: ignore[assignment]
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
     assert result["planner_rag"]["hits"] == [] and result["planner_rag"]["message_chars"] == 0
 
@@ -750,13 +742,10 @@ async def test_cold_load_is_single_flight_under_concurrency():
             calls["n"] += 1
             return original(*args, **kwargs)
 
-        retrieval.load_index_from_store = counting_load  # type: ignore[assignment]
-        try:
+        with patch.object(retrieval, "load_index_from_store", new=counting_load):
             results = await asyncio.gather(
                 *[retrieve_reference_plans(POPULATION_GOAL, user_id="user-a") for _ in range(25)]
             )
-        finally:
-            retrieval.load_index_from_store = original  # type: ignore[assignment]
         assert calls["n"] == 1, f"expected one cold load, got {calls['n']}"
         assert all(r.hits and r.hits[0].entry.root_agent_id == "pop-2" for r in results)
         assert sum(1 for r in results if r.cache == "cold") == 25
