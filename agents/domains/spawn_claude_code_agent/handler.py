@@ -51,7 +51,27 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
     found`` / ``sandbox timeout``. Those are capacity flakes, not agent bugs —
     hard-ERROR trips ``no_tool_failures`` while the model can still succeed by
     retrying spawn (ideally one session at a time). Soft-FINISH instead.
+
+    Also covers httpx ReadTimeout/ConnectTimeout on session create (cuda-kernel
+    k=3 r16 agent2): create hung past the 60s httpx timeout with an empty
+    ``ReadTimeout('')`` message, so substring markers alone miss it — match
+    exception type names across the cause chain as well.
     """
+    timeout_types = (
+        "ReadTimeout",
+        "ConnectTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "TimeoutException",
+    )
+    cur: BaseException | None = error
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ in timeout_types:
+            return True
+        cur = cur.__cause__ or getattr(cur, "cause", None) or cur.__context__
+
     text = extract_error_message(error).upper()
     if "GITHUB_ACCESS_DENIED" in text:
         return False
@@ -68,6 +88,9 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
         # retries so no_tool_failures stays green while the agent can re-spawn.
         "NO HEALTHY UPSTREAM",
         "HTTP 503",
+        "READTIMEOUT",
+        "CONNECTTIMEOUT",
+        "POOLTIMEOUT",
     )
     return any(m in text for m in markers)
 

@@ -2821,6 +2821,45 @@ async def test_cc_execute_tool_missing_payment_method_soft_fails_finished():
     )
 
 
+async def test_cc_execute_tool_readtimeout_soft_fails_finished():
+    """Empty httpx.ReadTimeout on E2B create must soft-FINISH (type-match).
+
+    Local repro (cuda-kernel k=3 r16 agent2): session create hung past the 60s
+    httpx timeout and raised ``ReadTimeout('')`` — message markers miss it, so
+    Temporal exhausted retries and hard-ERRORed. Soft-fail via exception type.
+    """
+    import httpx
+    from temporalio.exceptions import ActivityError
+
+    from domains.spawn_claude_code_agent.handler import (
+        SpawnClaudeCodeAgentManager,
+        _is_recoverable_sandbox_infra_failure,
+        _maybe_soft_fail_session_create_result,
+    )
+    from tools.base import MessageStatus
+
+    read_timeout = httpx.ReadTimeout("")
+    assert _is_recoverable_sandbox_infra_failure(read_timeout) is True
+    soft = _maybe_soft_fail_session_create_result(
+        code_provider="claude", error=read_timeout
+    )
+    assert soft is not None
+    assert soft["success"] is False
+    assert "capacity" in soft["message"].lower() or "sandbox" in soft["message"].lower()
+
+    activity_error = ActivityError(
+        message="ReadTimeout('')",
+        scheduled_event_id=1,
+        started_event_id=1,
+        identity="worker",
+        activity_type="spawn_claude_code_activity",
+        activity_id="1",
+        retry_state=None,
+    )
+    activity_error.__cause__ = read_timeout
+    await _assert_cc_sandbox_infra_soft_fail("ReadTimeout('')", "tc-readtimeout")
+
+
 def test_cc_spawn_activity_retries_capacity_flakes_before_soft_fail():
     """spawn_claude_code_activity must retry enough times for brief E2B 503s.
 
@@ -3066,6 +3105,10 @@ async def run_all_tests():
     await r.record_async(
         "cc_exec_missing_payment_method_soft_fail",
         test_cc_execute_tool_missing_payment_method_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_readtimeout_soft_fail",
+        test_cc_execute_tool_readtimeout_soft_fails_finished,
     )
     r.record(
         "cc_spawn_activity_retries_capacity_flakes",

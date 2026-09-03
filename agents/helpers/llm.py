@@ -947,6 +947,8 @@ def build_verifier_context_messages(
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     current_batch: List[str] = []
+    _tool_result_chars_used = 0
+    _tool_result_budget_hits = 0
 
     def _flush_batch() -> None:
         """Emit current_batch as a single user-role message and reset it."""
@@ -1008,14 +1010,26 @@ def build_verifier_context_messages(
             if structured_result is None:
                 structured_result = metadata.get("structuredResponse")
 
+            tool_name = metadata.get("toolName", "tool")
             tool_payload = {
-                "tool_name": metadata.get("toolName", "tool"),
+                "tool_name": tool_name,
                 "tool_call_id": metadata.get("toolCallId"),
                 "result": structured_result if structured_result is not None else text,
             }
             if metadata.get("title"):
                 tool_payload["title"] = metadata["title"]
-            tool_text = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
+            # Cap per-tool and total TOOL_RESULT size. File-evidence budget only
+            # covers resolved file pointers; spawn_agent / artifact_file tool
+            # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
+            # user batch → GPT RoseDeadline). Truncate before dump.
+            tool_text, truncated = _budget_verifier_tool_result_text(
+                "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str),
+                tool_name=str(tool_name or "tool"),
+                used_chars=_tool_result_chars_used,
+            )
+            _tool_result_chars_used += len(tool_text)
+            if truncated:
+                _tool_result_budget_hits += 1
 
             screenshot_b64 = metadata.get("screenshot_b64")
             if screenshot_b64:
@@ -1059,7 +1073,64 @@ def build_verifier_context_messages(
     current_batch.append("Evaluate the agent's progress as JSON.")
     _flush_batch()
 
+    if _tool_result_budget_hits:
+        logger.info(
+            "Verifier tool-result budget applied",
+            truncated_tool_results=_tool_result_budget_hits,
+            used_chars=_tool_result_chars_used,
+            budget_chars=VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS,
+        )
+
     return messages
+
+
+# Per-tool / total caps for TOOL_RESULT bodies in verifier_execute. Distinct from
+# the file-evidence budget: spawn_agent and artifact_file tool rows often embed
+# full ranking JSON directly in `result`, bypassing file-pointer inlining.
+VERIFIER_MAX_TOOL_RESULT_CHARS = 12_000
+VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 40_000
+VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 64_000
+_VERIFIER_DELIVERABLE_TOOL_NAMES = frozenset(
+    {
+        "attempt_completion",
+        "artifact_file",
+        "write_file",
+        "create_file",
+    }
+)
+
+
+def _budget_verifier_tool_result_text(
+    tool_text: str,
+    *,
+    tool_name: str,
+    used_chars: int,
+) -> tuple[str, bool]:
+    """Truncate a verifier TOOL_RESULT line to per-tool and total budgets.
+
+    Returns (possibly_truncated_text, was_truncated).
+    """
+    per_tool_cap = (
+        VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS
+        if tool_name in _VERIFIER_DELIVERABLE_TOOL_NAMES
+        else VERIFIER_MAX_TOOL_RESULT_CHARS
+    )
+    remaining_total = max(0, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS - used_chars)
+    cap = min(per_tool_cap, remaining_total)
+    if cap <= 0:
+        stub = (
+            f"TOOL_RESULT {json.dumps({'tool_name': tool_name, 'result': '[omitted: verifier tool-result budget exhausted]'}, ensure_ascii=False)}"
+        )
+        return stub, True
+    if len(tool_text) <= cap:
+        return tool_text, False
+    marker = f"...[verifier truncated {len(tool_text) - cap} chars from {tool_name}]..."
+    keep = max(0, cap - len(marker))
+    if keep < 64:
+        return tool_text[:cap], True
+    head = keep // 2
+    tail = keep - head
+    return tool_text[:head] + marker + tool_text[-tail:], True
 
 
 def _verifier_file_evidence_key(msg: Dict[str, Any]) -> str:

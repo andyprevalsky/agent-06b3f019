@@ -5092,6 +5092,64 @@ async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
     assert total_inlined <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
 
 
+def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent():
+    """spawn_agent ranking dumps must not inflate verifier_execute past Rose deadlines.
+
+    Regression (cuda-kernel top100 r16 agent2): file-evidence budget only capped
+    resolved file pointers, but TOOL_RESULT bodies still embedded 25k–45k JSON
+    tables → 134k user batch on GPT → attempt deadline → score 0.5 loop.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_TOOL_RESULT_CHARS,
+        VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS,
+        build_verifier_context_messages,
+    )
+
+    huge_table = "| repo | stars |\n" + "\n".join(
+        f"| org/cuda-repo-{i} | {100000 - i} |" for i in range(2000)
+    )
+    assert len(huge_table) > VERIFIER_MAX_TOOL_RESULT_CHARS
+
+    ctx = [
+        {
+            "role": "USER",
+            "text": "Rank top 100 CUDA kernel repos",
+            "timestamp": "2026-09-03T08:00:00Z",
+        },
+        {
+            "role": "TOOL",
+            "text": huge_table,
+            "timestamp": "2026-09-03T08:01:00Z",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolCallId": "call_spawn_huge",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": '{"repos":[' + ",".join(f'{{"rank":{i},"url":"https://github.com/o/r{i}"}}' for i in range(100)) + "]}",
+            "timestamp": "2026-09-03T08:02:00Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolCallId": "call_done",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    user_blobs = [m["content"] for m in msgs if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    joined = "\n\n".join(user_blobs)
+    assert "verifier truncated" in joined or "[omitted: verifier tool-result budget exhausted]" in joined
+    # spawn_agent body must be capped; attempt_completion deliverable may use the larger cap
+    spawn_segments = [s for s in joined.split("TOOL_RESULT ") if '"tool_name": "spawn_agent"' in s or '"tool_name":"spawn_agent"' in s]
+    assert spawn_segments, joined[:500]
+    assert len(spawn_segments[0]) <= VERIFIER_MAX_TOOL_RESULT_CHARS + 64
+    tool_only = sum(len(s) for s in joined.split("\n\n") if s.startswith("TOOL_RESULT "))
+    assert tool_only <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 200
+
+
 async def test_build_verifier_context_messages_self_closes_trailing_refs():
     """Verifier context should not expand terminal message refs inside JSON/batches."""
     from helpers.context_pointers import resolve_pointers_in_messages
@@ -7639,6 +7697,10 @@ async def run_all_tests():
     await r.record_async(
         "verifier_file_evidence_budget_prefers_deliverable",
         test_resolve_verifier_file_evidence_budget_prefers_deliverable,
+    )
+    r.record(
+        "verifier_ctx_tool_result_budget_truncates_spawn_agent",
+        test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent,
     )
     await r.record_async(
         "verifier_ctx_self_closes_trailing_refs",
