@@ -183,7 +183,6 @@ class ResponseSchemaFieldConfig(BaseModel):
     def _coerce_null_properties(cls, value: Any) -> Any:
         return [] if value is None else value
 
-
     @model_validator(mode="after")
     def _object_fields_require_properties(self):
         if self.type in ("object", "list[object]") and not self.properties:

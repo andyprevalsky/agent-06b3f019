@@ -258,12 +258,12 @@ def format_required_output_schema_user_message(
     if not response_schema or not response_schema.get("fields"):
         return ""
 
-    def _field_line(f: Dict[str, Any]) -> str:
-        req = "required" if f.get("required") else "optional"
-        desc = f.get("description") or ""
-        return f"- {f['name']} ({f['type']}, {req}): {desc}"
-
-    fields_desc = "\n".join(_field_line(f) for f in response_schema["fields"])
+    fields_desc = "\n".join(
+        [
+            f"- {f['name']} ({f['type']}, {'required' if f.get('required') else 'optional'}): {f.get('description', '')}"
+            for f in response_schema["fields"]
+        ]
+    )
     if for_decomposition:
         return (
             "Required output schema:\n"

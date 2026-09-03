@@ -221,7 +221,6 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
             ],
             description: 'Field type',
           },
-
           properties: {
             type: 'array',
             description:
@@ -324,7 +323,7 @@ Always replace with a goal-anchored name. Examples:
   - list[int]:                  List of integers
   - object:                     Nested object — MUST include properties: [{ name, type }]
   - list[object]:               List of objects — MUST include properties describing each item shape
-  - file_pointer:               Reference to a file produced by the agent (image, doc, etc.). Use for tasks that produce files. The verifier extracts full file metadata: path, id, storage_path, original_filename, mime_type, size_bytes, created_at. Do NOT invent a separate format field — mime_type on the produced FilePointer is the source of truth for format.
+  - file_pointer:               Reference to a file produced by the agent (image, doc, etc.). Use for tasks that produce files. The verifier extracts full file metadata: path, id, storage_path, original_filename, mime_type, size_bytes, created_at.
   - list[file_pointer]:         List of file references. Use when multiple files are produced.
   - session_file_pointer:       Cheap variant of file_pointer for cloud-agent goals (spawn_claude_code_agent / spawn_browser_agent). The verifier extracts ONLY the absolute path from terminal output — the spawning activity handles download/upload, so you avoid the full FilePointer round-trip. Prefer this over file_pointer when the goal is delegated to a cloud sandbox or browser session.
   - list[session_file_pointer]: List of session file references — same use case as session_file_pointer, but for goals producing multiple cloud-session files.
@@ -397,18 +396,6 @@ GOOD:
   fields: [
     { name: "logo", type: "file_pointer" }
   ]
-
-## Example 6 — website deliverable
-
-Goal: "Make me a simple one-page website for my coffee shop."
-
-GOOD:
-  fields: [
-    { name: "website", type: "file_pointer" }
-  ]
-
-Why file_pointer (not str): a website is a file deliverable even when the user never says "file". Format is observed later from the FilePointer mime_type (e.g. text/html), not a second schema field.
-
 
 # YOUR JOB
 

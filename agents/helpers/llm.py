@@ -289,8 +289,8 @@ Always replace with a goal-anchored name. Examples:
   - list[int]: List of integers
   - object: Nested object — MUST include properties: [{ name, type }]
   - list[object]: List of objects — MUST include properties describing each item shape
-  - file_pointer: Reference to a file produced by the agent. Format is observed from the produced FilePointer mime_type — do not emit a separate format field.
-  - list[file_pointer]: List of file references.
+  - file_pointer: Reference to a file produced by the agent
+  - list[file_pointer]: List of file references
   - session_file_pointer: Internal remote-session file reference
   - list[session_file_pointer]: List of internal remote-session file references
 
@@ -312,10 +312,6 @@ GOOD fields: [{ "name": "cities", "type": "list[object]", "properties": [{ "name
 
 Goal: "Generate a logo as a PNG."
 GOOD fields: [{ "name": "logo", "type": "file_pointer" }]
-
-Goal: "Make me a simple one-page website for my coffee shop."
-GOOD fields: [{ "name": "website", "type": "file_pointer" }]
-(Why file_pointer: a website is a file deliverable even when the user never says "file". Format comes from mime_type on the produced FilePointer.)
 
 Goal: "Buy me a black beanie on Amazon that costs less than $35 and looks well-made."
 GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "order_confirmation_id", "type": "str" }]
