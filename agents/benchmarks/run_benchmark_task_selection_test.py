@@ -32,6 +32,24 @@ def test_comma_separated_task_selects_exact_tasks_in_order():
     assert [task.name for task in tasks] == ["parallel-tool-calls", "spawn-sub-agents"]
 
 
+def test_mixed_gpa_forbidden_and_required_tasks_keep_gp_tools_enabled(monkeypatch):
+    monkeypatch.delenv("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", raising=False)
+
+    local_runner.configure_task_environment(
+        ["parallel-tool-calls", "spawn-sub-agents"], isolated=True
+    )
+
+    assert os.environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT") == "0"
+
+
+def test_gpa_forbidden_only_tasks_disable_gp_tools(monkeypatch):
+    monkeypatch.delenv("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", raising=False)
+
+    local_runner.configure_task_environment(["parallel-tool-calls"], isolated=True)
+
+    assert os.environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT") == "1"
+
+
 def test_suite_label_for_repeated_task_args_is_readable():
     args = _args(task=["parallel-tool-calls", "spawn-sub-agents"])
 

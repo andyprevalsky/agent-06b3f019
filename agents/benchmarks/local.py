@@ -976,14 +976,38 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         "spawn_general_purpose_agent",
         "spawn_general_purpose_agent_for_each",
     }
-    if any(_GPA_FORBIDDEN.intersection(task.forbidden_tools) for task in all_tasks() if task.name in selected):
-        if os.environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1").strip().lower() not in {
-            "0",
-            "false",
-            "no",
-            "off",
-        }:
-            os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "1"
+    _GPA_REQUIRED = {
+        "spawn_general_purpose_agent",
+        "spawn_general_purpose_agent_for_each",
+    }
+
+    def _task_requires_general_purpose_agent(task) -> bool:
+        if _GPA_REQUIRED.intersection(task.expected_tools or []):
+            return True
+        for counts in (task.expected_tool_counts or {}, task.min_tool_counts or {}):
+            if _GPA_REQUIRED.intersection(counts):
+                return True
+        return False
+
+    selected_tasks = [task for task in all_tasks() if task.name in selected]
+    gpa_forbidden_by_any = any(
+        _GPA_FORBIDDEN.intersection(task.forbidden_tools or []) for task in selected_tasks
+    )
+    gpa_required_by_any = any(_task_requires_general_purpose_agent(task) for task in selected_tasks)
+    # Concurrent predeploy batches mix GPA-forbidden tasks (parallel-tool-calls)
+    # with GPA-required tasks (spawn-sub-agents). A global env disable would strip
+    # spawn_general_purpose_agent from the whole stack and false-fail the latter.
+    if gpa_required_by_any:
+        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "0"
+    elif gpa_forbidden_by_any and os.environ.get(
+        "ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1"
+    ).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "1"
     browser_max_steps = 0
     for task in all_tasks():
         if task.name not in selected:
