@@ -602,6 +602,39 @@ async def test_upload_to_storage_happy():
     assert "file_name_.txt" in result["storage_path"]
 
 
+async def test_upload_to_storage_idempotency_key_reuses_path_and_upserts():
+    """Activity retries overwrite one deterministic object instead of duplicating files."""
+    requests = []
+
+    def handler(req):
+        requests.append(req)
+        return httpx.Response(200, json={"Key": "ok"})
+
+    setup_mock_fn(handler)
+
+    from helpers.attachments import upload_to_storage
+
+    first = await upload_to_storage(
+        user_id="user-up-1",
+        file_content=b"first",
+        filename="report.html",
+        mime_type="text/html",
+        idempotency_key="oai-demo-report:agent-1:report.html",
+    )
+    second = await upload_to_storage(
+        user_id="user-up-1",
+        file_content=b"second",
+        filename="report.html",
+        mime_type="text/html",
+        idempotency_key="oai-demo-report:agent-1:report.html",
+    )
+
+    assert first["id"] == second["id"]
+    assert first["storage_path"] == second["storage_path"]
+    assert len(requests) == 2
+    assert all(req.headers.get("x-upsert") == "true" for req in requests)
+
+
 async def test_get_file_from_pointer_cache_hit():
     """get_file_from_pointer hits cache without downloading."""
     _clear_cache()
@@ -667,6 +700,10 @@ async def run_all_tests():
     await r.record_async("mm_user_text_merged", test_build_multimodal_user_message_text_attachment_merged)
     await r.record_async("upload_missing_key", test_upload_to_storage_missing_key)
     await r.record_async("upload_happy", test_upload_to_storage_happy)
+    await r.record_async(
+        "upload_idempotency_key_reuses_path",
+        test_upload_to_storage_idempotency_key_reuses_path_and_upserts,
+    )
     await r.record_async("get_file_from_pointer_cache_hit", test_get_file_from_pointer_cache_hit)
     await r.record_async("get_file_from_pointer_download", test_get_file_from_pointer_download)
     teardown_mock()

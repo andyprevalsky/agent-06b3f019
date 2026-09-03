@@ -7197,8 +7197,12 @@ printf '%s' "$tok"
 
 
 def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
-    """Owning-boundary repro: empty AUTH_HDR fails private fetch; controller
-    header succeeds. Mirrors the warm-box failure mode without Fly."""
+    """Owning-boundary repro against a deterministic auth-required Git server.
+
+    The Rose repository can change visibility independently of this contract, so
+    using GitHub itself made an unauthenticated fetch turn green when it became
+    public. The loopback fixture preserves the real Git HTTP-header boundary.
+    """
     resolver = ROOT / "scripts/lib/cloudbench-github-token.sh"
     resolved = subprocess.run(
         [
@@ -7215,10 +7219,51 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
     assert resolved.returncode == 0, "canonical controller GitHub token resolver failed"
     token = resolved.stdout.strip()
     assert token, "canonical controller GitHub token resolver returned an empty token"
-    auth = "Authorization: Basic " + base64.b64encode(
+    auth_value = "Basic " + base64.b64encode(
         f"x-access-token:{token}".encode()
     ).decode()
-    url = "https://github.com/rose-ai-labs/rose.git"
+    auth = f"Authorization: {auth_value}"
+    commit_sha = "1" * 40
+    observed_auth: list[str | None] = []
+
+    def pkt_line(payload: bytes) -> bytes:
+        return f"{len(payload) + 4:04x}".encode() + payload
+
+    advertisement = (
+        pkt_line(b"# service=git-upload-pack\n")
+        + b"0000"
+        + pkt_line(
+            f"{commit_sha} HEAD\0symref=HEAD:refs/heads/main agent=fixture/1.0\n".encode()
+        )
+        + pkt_line(f"{commit_sha} refs/heads/main\n".encode())
+        + b"0000"
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received_auth = self.headers.get("Authorization")
+            observed_auth.append(received_auth)
+            if received_auth != auth_value:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="cloudbench-test"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", "application/x-git-upload-pack-advertisement"
+            )
+            self.send_header("Content-Length", str(len(advertisement)))
+            self.end_headers()
+            self.wfile.write(advertisement)
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/rose.git"
     env = {
         **os.environ,
         "GIT_TERMINAL_PROMPT": "0",
@@ -7228,28 +7273,40 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
     }
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     base = ["git", "-c", "credential.helper="]
-    bug = subprocess.run(
-        base + ["-c", "http.extraheader=", "ls-remote", url, "HEAD"],
-        text=True,
-        capture_output=True,
-        cwd=env["HOME"],
-        env=env,
-        timeout=30,
-        check=False,
-    )
+    try:
+        bug = subprocess.run(
+            base + ["-c", "http.extraheader=", "ls-remote", url, "HEAD"],
+            text=True,
+            capture_output=True,
+            cwd=env["HOME"],
+            env=env,
+            timeout=30,
+            check=False,
+        )
+        fixed = subprocess.run(
+            base + ["-c", f"http.extraheader={auth}", "ls-remote", url, "HEAD"],
+            text=True,
+            capture_output=True,
+            cwd=env["HOME"],
+            env=env,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
+
     assert bug.returncode != 0
-    assert "could not read Username" in (bug.stderr or "")
-    fixed = subprocess.run(
-        base + ["-c", f"http.extraheader={auth}", "ls-remote", url, "HEAD"],
-        text=True,
-        capture_output=True,
-        cwd=env["HOME"],
-        env=env,
-        timeout=30,
-        check=False,
+    assert re.search(
+        r"authentication failed|could not read username",
+        bug.stderr or "",
+        re.IGNORECASE,
     )
     assert fixed.returncode == 0, fixed.stderr
-    assert re.match(r"^[0-9a-f]{40}\s+HEAD$", fixed.stdout.strip().splitlines()[0])
+    assert fixed.stdout.strip().splitlines()[0] == f"{commit_sha}\tHEAD"
+    assert observed_auth[0] is None
+    assert auth_value in observed_auth
 
 
 

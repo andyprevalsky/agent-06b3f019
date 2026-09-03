@@ -1,6 +1,5 @@
 from benchmarks.benchmark_tasks import get_task_by_name
 from benchmarks.run_benchmark import _benchmark_goal_for_task
-from utils.payment_boundary_goal import PAYMENT_BOUNDARY_GOAL_MARKER
 
 
 def test_browser_event_ticket_counts_spawn_browser_agent_not_spawn_agent():
@@ -32,6 +31,21 @@ def test_browser_hotel_booking_prompt_requires_single_browser_agent():
     """Hotel bench must name one browser session in the catalog prompt (H-02 pattern)."""
     task = get_task_by_name("browser-hotel-booking")
     assert task.prompt.startswith("Use exactly one browser agent")
+
+
+def test_oai_demo_requires_readable_files_and_forbids_browser_calls():
+    task = get_task_by_name("test-mass-agent-run-0")
+    assert "spawn_browser_agent" in task.forbidden_tools
+
+    evaluator = next(item for item in task.evaluators if item["id"] == "t7-readable-report-files")
+    checks = evaluator["checks"]
+    assert {
+        (tuple(check.get("extensions", [])), tuple(check.get("mime_contains", [])), check.get("min_files"))
+        for check in checks
+    } == {
+        ((".html", ".htm"), ("html",), 3),
+        ((".csv",), ("csv",), 2),
+    }
     goal = _benchmark_goal_for_task(task, "http://localhost:3201")
     assert goal == task.prompt
 

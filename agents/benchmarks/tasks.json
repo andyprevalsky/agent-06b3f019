@@ -28,6 +28,9 @@
     "expected_tool_counts": {
       "spawn_general_purpose_agent_for_each": 1
     },
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
@@ -206,6 +209,36 @@
           "T7: Schema / Task Complete / assemble-final outputs are populated"
         ],
         "judge_prompt": "Score 1.0 only if Task Complete cards display the real summary and schema outputs like prod. FAIL if any completionSummary.summary contains Fast Mode / cache trajectory ended / prior tool evidence ablation. FAIL if root or first-level GP completion cards have empty outputs when response_schema.fields is populated. response_schema.fields plus assemble_deliverable is not enough when the visible Task Complete card is ablated. Use typed agent/tree completion_summary / completion_outputs_count / completion_is_ablated fields, not assistant claims."
+      },
+      {
+        "id": "t7-readable-report-files",
+        "method": "static_check",
+        "criteria": [
+          "T7: Task Complete exposes the narrative reports as three readable HTML files and the tabular deliverables as two CSV files"
+        ],
+        "checks": [
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".html",
+              ".htm"
+            ],
+            "mime_contains": [
+              "html"
+            ],
+            "min_files": 3
+          },
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".csv"
+            ],
+            "mime_contains": [
+              "csv"
+            ],
+            "min_files": 2
+          }
+        ]
       },
       {
         "id": "t9-no-leftover-children",

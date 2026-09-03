@@ -275,6 +275,7 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
   };
 
   const totalTools = totalToolCalls || toolUsage?.reduce((sum, t) => sum + t.count, 0) || 0;
+  const hasNonFileOutputs = outputs?.some((output) => !isFilePointerValue(output.value)) ?? false;
 
   return (
     <div className={cn('w-full', className)}>
@@ -294,18 +295,24 @@ export const CompletionSummaryCard = memo(function CompletionSummaryCard({
         </div>
         {outputs && outputs.length > 0 && (
           <div className="px-3 pb-3">
-            <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2">
-              Output
-            </div>
+            {hasNonFileOutputs ? (
+              <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2">
+                Output
+              </div>
+            ) : null}
             <div className="space-y-1.5">
-              {outputs.map((output) => (
-                <OutputRow
-                  key={output.key}
-                  output={output}
-                  copiedField={copiedField}
-                  onCopy={(v, k) => void handleCopy(v, k)}
-                />
-              ))}
+              {outputs.map((output) =>
+                isFilePointerValue(output.value) ? (
+                  <OutputValue key={output.key} value={output.value} />
+                ) : (
+                  <OutputRow
+                    key={output.key}
+                    output={output}
+                    copiedField={copiedField}
+                    onCopy={(v, k) => void handleCopy(v, k)}
+                  />
+                ),
+              )}
             </div>
           </div>
         )}

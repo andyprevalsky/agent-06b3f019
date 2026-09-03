@@ -46,9 +46,7 @@ export function FilePointerDisplay({
       <span className="shrink-0 text-[10px] text-muted-foreground">
         ({formatFileSize(file.size_bytes)})
       </span>
-      <Eye
-        className={cn('h-3 w-3 shrink-0 text-muted-foreground', showMiniPreview && 'ml-auto')}
-      />
+      <Eye className={cn('h-3 w-3 shrink-0 text-muted-foreground', showMiniPreview && 'ml-auto')} />
     </>
   );
 
@@ -56,7 +54,7 @@ export function FilePointerDisplay({
     <>
       {showMiniPreview ? (
         <div
-          className="flex w-full max-w-md flex-col gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-muted/70"
+          className="flex w-full max-w-md flex-col gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-2 text-left shadow-sm transition-[border-color,background-color,box-shadow] hover:border-foreground/25 hover:bg-muted/70 hover:shadow-md"
           data-testid="file-pointer-chip-wrap"
         >
           <button

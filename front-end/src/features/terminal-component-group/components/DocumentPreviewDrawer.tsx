@@ -26,19 +26,14 @@
 
 import { useEffect, useState } from 'react';
 import { Download, FileIcon } from 'lucide-react';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetTitle,
-} from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
 import { type FilePointer } from '../hooks';
 import { formatFileSize } from './claudeCodeChip.utils';
 import { MarkdownText } from './MarkdownText';
 import { SpreadsheetTable } from './SpreadsheetTable';
 import { documentPreviewKind, documentTypeLabel } from './documentPreview.utils';
-import { useDocumentPreview } from './useDocumentPreview';
+import { documentPreviewFileKey, useDocumentPreview } from './useDocumentPreview';
 
 interface DocumentPreviewDrawerProps {
   file: FilePointer | null;
@@ -50,11 +45,12 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
   // Only set after an explicit tab click. Passing the loader's default sheet back
   // into useDocumentPreview would remount the load and race blackbox assertions.
   const [selectedSheet, setSelectedSheet] = useState<string | undefined>(undefined);
+  const fileKey = documentPreviewFileKey(file);
   const loadState = useDocumentPreview(file, open, { activeSheet: selectedSheet });
 
   useEffect(() => {
     if (!open) setSelectedSheet(undefined);
-  }, [open, file]);
+  }, [open, fileKey]);
 
   const kind = file ? documentPreviewKind(file) : 'download';
   const typeLabel = file ? documentTypeLabel(file) : 'File';

@@ -14250,6 +14250,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t5-zero-live-spend",
         "t6-no-nested-gps",
         "t7-real-deliverable",
+        "t7-readable-report-files",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
         "no-browser-agents",
@@ -14269,6 +14270,10 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-completion-summary-length": ["completion_summary_length"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t7-real-deliverable": ["root_deliverable_markers"],
+        "t7-readable-report-files": [
+            "completion_summary_file_outputs",
+            "completion_summary_file_outputs",
+        ],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
     }

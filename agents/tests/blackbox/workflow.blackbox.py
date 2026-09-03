@@ -5565,7 +5565,7 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
 
 
 async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
-    """Root OAi demo Task Complete outputs become markdown file_pointers."""
+    """Root OAI demo Task Complete outputs become HTML/CSV file_pointers."""
     from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
@@ -5585,17 +5585,18 @@ async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
     }
     pointer = {
         "id": "fp-pos",
-        "storage_path": "u-demo/positioning-statement.md",
-        "original_filename": "positioning-statement.md",
-        "mime_type": "text/markdown",
+        "storage_path": "u-demo/positioning-statement.html",
+        "original_filename": "positioning-statement.html",
+        "mime_type": "text/html",
         "size_bytes": 12,
         "created_at": "2026-09-03T00:00:00Z",
     }
     calendar_pointer = {
         **pointer,
         "id": "fp-cal",
-        "storage_path": "u-demo/90-day-content-calendar.md",
-        "original_filename": "90-day-content-calendar.md",
+        "storage_path": "u-demo/90-day-content-calendar.csv",
+        "original_filename": "90-day-content-calendar.csv",
+        "mime_type": "text/csv",
     }
     fake = _FakeWorkflowModule()
     fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
@@ -5627,6 +5628,13 @@ async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
         )
         names = [name for name, _args in fake.activity_calls]
         assert "materialize_oai_demo_report_files_activity" in names
+        materialize_args = next(
+            args
+            for name, args in fake.activity_calls
+            if name == "materialize_oai_demo_report_files_activity"
+        )
+        assert materialize_args[0] == "u-demo"
+        assert materialize_args[3] == "oai-demo-root"
         summary_args = next(
             args
             for name, args in fake.activity_calls
@@ -5637,11 +5645,11 @@ async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
         )
         outputs = (summary_args[3] or {}).get("completionSummary", {}).get("outputs") or []
         by_key = {item["key"]: item["value"] for item in outputs}
-        assert by_key["positioning_statement"]["original_filename"] == "positioning-statement.md"
-        assert by_key["ninety_day_content_calendar"]["original_filename"] == "90-day-content-calendar.md"
+        assert by_key["positioning_statement"]["original_filename"] == "positioning-statement.html"
+        assert by_key["ninety_day_content_calendar"]["original_filename"] == "90-day-content-calendar.csv"
         assert wf.output_schema["fields"][0]["type"] == "file_pointer"
         finished_args = next(args for name, args in fake.activity_calls if name == "mark_finished")
-        assert finished_args[8]["positioning_statement"]["original_filename"] == "positioning-statement.md"
+        assert finished_args[8]["positioning_statement"]["original_filename"] == "positioning-statement.html"
     finally:
         _restore_workflow(original)
 

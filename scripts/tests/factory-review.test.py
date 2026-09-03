@@ -1423,8 +1423,12 @@ class ApprovalLifecycleTest(unittest.TestCase):
         base_epoch = 1_753_056_000.0
         step_durations = (10.0, 12.0, 8.0, 6.0)
         run_durations = (100.0, 120.0, 90.0, 60.0)
+        # Pair the fixtures explicitly instead of zip(strict=True): this suite runs
+        # under the deploy host's bare `python3`, which is 3.9 on the Linux cloud
+        # images, and the strict keyword is 3.10+.
+        self.assertEqual(len(step_durations), len(run_durations))
         for index, (step_duration, run_duration) in enumerate(
-            zip(step_durations, run_durations, strict=True)
+            zip(step_durations, run_durations)
         ):
             run_id = f"run-{index}"
             started = base_epoch + index * 1_000

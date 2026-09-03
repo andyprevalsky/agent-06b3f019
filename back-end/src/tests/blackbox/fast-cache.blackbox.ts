@@ -16,6 +16,7 @@
 import { config } from 'dotenv';
 import { anthropicSlotKey } from '../../providers/anthropicProxyCore';
 import { codeAgentSlotKey } from '../../providers/codexProxyCore';
+import { rewriteOaiDemoCacheValue } from '../../domains/fast-cache/oaiDemoCacheCleaner';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -60,6 +61,31 @@ async function post(path: string, body: unknown): Promise<{ status: number; json
 async function main(): Promise<void> {
   const goalHash = `bbtest${Date.now().toString(16)}`;
   const key = `fastmode:v23:llm:${goalHash}:execute_loop:0:0`;
+
+  await test('OAI trajectory cleanup deletes browser work without scheduling replacement work', async () => {
+    const result = rewriteOaiDemoCacheValue({
+      content: 'The public-source research is already complete.',
+      tool_calls: [
+        {
+          id: 'browser-call',
+          name: 'spawn_agent',
+          arguments: JSON.stringify({
+            type: 'browser',
+            goal: 'Inspect one more public profile.',
+            start_url: 'https://example.com/profile',
+          }),
+        },
+      ],
+    });
+    const calls = (result.value as { tool_calls: unknown[] }).tool_calls;
+    assert(result.browserCallsRemoved === 1, 'the browser call must be removed');
+    assert(result.exploreCallsAdded === 0, 'cleanup must not introduce new executable work');
+    assert(calls.length === 0, 'the saved trajectory must contain no replacement tool call');
+    assert(
+      (result as typeof result & { deleteEntry?: boolean }).deleteEntry === true,
+      'the browser-bearing cache row must be removed from runtime replay'
+    );
+  });
 
   await test('#10 set→get roundtrip', async () => {
     const set = await post('/api/fast-cache/set', {

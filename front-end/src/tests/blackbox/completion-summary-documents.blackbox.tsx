@@ -3,7 +3,7 @@
  * and render file contents (HTML srcDoc, spreadsheet tables, text, etc.).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
@@ -213,6 +213,25 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     expect(screen.queryByTestId('document-preview-drawer')).not.toBeInTheDocument();
   });
 
+  it('renders file previews without redundant output labels or white row wrappers', async () => {
+    const file = makeFile({ original_filename: 'report.html', mime_type: 'text/html' });
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'doc', label: 'Weekly Engagement Target Creators', value: file }],
+        }}
+      />,
+    );
+
+    await screen.findByTestId('file-pointer-mini-html');
+    const preview = screen.getByTestId('file-pointer-chip-wrap');
+    expect(screen.queryByText('Output')).not.toBeInTheDocument();
+    expect(screen.queryByText('Weekly Engagement Target Creators')).not.toBeInTheDocument();
+    expect(preview.parentElement).not.toHaveClass('bg-card');
+    expect(preview).toHaveClass('border-border', 'shadow-sm');
+  });
+
   it('shows spreadsheet mini-preview cells in the summary', async () => {
     const file = makeFile({
       original_filename: 'budget.xlsx',
@@ -259,6 +278,41 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     expect(iframe.getAttribute('sandbox') ?? '').toContain('allow-scripts');
     expect(iframe.getAttribute('sandbox') ?? '').not.toContain('allow-same-origin');
     expect(downloadTextMock).toHaveBeenCalled();
+  });
+
+  it('keeps an open document mounted when polling returns an equivalent file pointer', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({ original_filename: 'report.html', mime_type: 'text/html' });
+    const { rerender } = renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'doc', label: 'Document', value: file }],
+        }}
+      />,
+    );
+
+    await screen.findByTestId('file-pointer-mini-html');
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    const originalIframe = await within(drawer).findByTestId('document-preview-html');
+    expect(downloadTextMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      rerender(
+        <CompletionSummaryCard
+          data={{
+            summary: 'Done',
+            outputs: [{ key: 'doc', label: 'Document', value: { ...file } }],
+          }}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(downloadTextMock).toHaveBeenCalledTimes(2);
+    expect(within(drawer).getByTestId('document-preview-html')).toBe(originalIframe);
   });
 
   it('renders Excel cell contents in the drawer table', async () => {
