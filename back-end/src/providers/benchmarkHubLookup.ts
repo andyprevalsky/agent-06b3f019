@@ -7,7 +7,7 @@
  * aligned with the live index so a later GET cannot serve a deleted run.
  */
 import { getRunBundle, listRuns, type HubAgentView, type HubRunSummary } from './benchmarkHubStore';
-import { canonicalAgentTree, getRunAgent } from './benchmarkHubView';
+import { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
 
 const agentRunCache = new Map<string, string>();
 const agentRunMissCache = new Set<string>();
@@ -187,7 +187,7 @@ export async function findTreeAcrossRuns(
 ): Promise<Array<Record<string, unknown>> | null> {
   const view = await findAgentAcrossRuns(busId);
   if (view === null) return null;
-  return view.tree.map((node) => ({
+  const mapped = view.tree.map((node) => ({
     ...node,
     tokens_in: Number(node.tokens_in ?? 0),
     tokens_out: Number(node.tokens_out ?? 0),
@@ -197,4 +197,5 @@ export async function findTreeAcrossRuns(
     created_at: null,
     updated_at: null,
   }));
+  return subtreeAgentsForBus(mapped, busId);
 }

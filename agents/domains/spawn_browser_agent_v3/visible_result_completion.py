@@ -7,9 +7,9 @@ return that visible score and verdict, not to keep retrying proof-of-work.
 
 A later smoke failure (agent b234cfa8) stated Risk Score 0.11 + the same bot
 verdict, then burned the 420s cap on scroll/screenshot loops instead of wait.
-Rewrite post-submit idle actions (`wait`, `scroll`, …) into
-`attempt_completion` so the parent can finish instead of burning the harness
-timeout.
+Rewrite post-submit idle actions (`wait`, `scroll`, `read_browser_state`, …)
+into `attempt_completion` so the parent can finish instead of burning the
+harness timeout.
 
 Page-changing actions after the last submit invalidate prior visible-result
 evidence — a scroll on a later page must not complete against a stale score.
@@ -23,6 +23,7 @@ from typing import Any, Iterable
 
 _RISK_SCORE_RE = re.compile(r"\brisk\s+score\b", re.IGNORECASE)
 _FCAPTCHA_SCORE_RE = re.compile(r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b", re.IGNORECASE)
+_NUMERIC_SCORE_RE = re.compile(r"\b\d+\.\d+\b")
 _VERDICT_MARKERS = (
     "bot detected",
     "form blocked",
@@ -39,9 +40,12 @@ _POST_RESULT_IDLE_ACTIONS = frozenset(
         "scroll",
         "scroll_to",
         "scroll_until",
+        "scroll_down",
+        "scroll_up",
         "page_up",
         "page_down",
         "screenshot",
+        "read_browser_state",
         "noop",
         "sleep",
         "move",
@@ -64,14 +68,22 @@ _NAVIGATION_MARKERS = (
 
 
 def reasoning_states_visible_fcaptcha_result(text: str) -> bool:
-    """True when the agent already reported the visible score/verdict."""
+    """True when the agent already reported the visible score or verdict.
+
+    Agent 6ba2a6bd stated a numeric risk score after Submit but never named a
+    verdict marker, then scrolled/waited out the 420s cap. A numeric score is
+    enough: the task asks to return that visible number.
+    """
     blob = str(text or "")
     if not blob.strip():
         return False
     has_score = bool(_RISK_SCORE_RE.search(blob) or _FCAPTCHA_SCORE_RE.search(blob))
+    if not has_score:
+        return False
     lowered = blob.lower()
     has_verdict = any(marker in lowered for marker in _VERDICT_MARKERS)
-    return has_score and has_verdict
+    has_numeric = bool(_NUMERIC_SCORE_RE.search(blob))
+    return has_verdict or has_numeric
 
 
 def _entry_blob(entry: Any) -> str:

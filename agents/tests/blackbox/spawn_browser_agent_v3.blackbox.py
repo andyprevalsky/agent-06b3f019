@@ -459,6 +459,31 @@ def test_visible_result_completion_does_not_rewrite_before_submit():
     )
 
 
+def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
+    """6ba2a6bd stated numeric score 0.11 after Submit, then scrolled/waited.
+
+    The earlier helper required a verdict marker and only rewrote `wait`, so
+    this trajectory burned the remaining 420s cap after the score was already
+    visible. Score-only + idle observation after submit must complete.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        forced_visible_result_completion_action,
+        should_force_visible_result_completion,
+    )
+
+    stated = "A risk score of 0.11 appeared. Let me scroll down to see the full result."
+    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
+    for action_name in ("scroll_down", "wait", "screenshot"):
+        assert should_force_visible_result_completion(
+            action_name=action_name,
+            last_reasoning=stated,
+            action_summaries=prior_submit,
+        ), action_name
+    forced = forced_visible_result_completion_action(stated)
+    assert forced["action"] == "attempt_completion"
+    assert "0.11" in forced["params"]["reasoning"]
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -19395,6 +19420,10 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_does_not_rewrite_before_submit",
         test_visible_result_completion_does_not_rewrite_before_submit,
+    )
+    r.record(
+        "visible_result_completion_rewrites_post_submit_score_without_verdict",
+        test_visible_result_completion_rewrites_post_submit_score_without_verdict,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)

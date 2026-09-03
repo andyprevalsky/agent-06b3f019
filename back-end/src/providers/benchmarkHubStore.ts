@@ -44,7 +44,7 @@ export {
   resolveHubRunIdFromIndexes,
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
-export { canonicalAgentTree, getRunAgent } from './benchmarkHubView';
+export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
 
 const log = createLogger('BenchmarkHubStore');
 

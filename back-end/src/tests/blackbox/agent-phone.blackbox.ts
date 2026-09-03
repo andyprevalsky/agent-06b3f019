@@ -173,6 +173,23 @@ test('outbound Agent SMS enforces auth, validation, and configured sender identi
       body: JSON.stringify(outboundPayload(userId, 'no-identity')),
     });
     assert(noIdentity.status === 409, `expected missing sender 409, got ${noIdentity.status}`);
+
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phone: '+19125550100',
+        phoneProvider: 'agentphone',
+        phoneProviderAgentId: 'provider-agent-1',
+        phoneProviderNumberId: 'number-1',
+      },
+    });
+    const foreignAgent = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(outboundPayload(userId, 'foreign-agent', 'not-owned-agent')),
+    });
+    assert(foreignAgent.status === 403, `expected foreign agent 403, got ${foreignAgent.status}`);
   } finally {
     await cleanup(userId);
   }

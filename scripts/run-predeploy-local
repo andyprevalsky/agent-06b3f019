@@ -285,7 +285,13 @@ run_smoke_batch() {
             --max-concurrency "$LOCAL_CONCURRENCY"
         return $?
     fi
+    # Seeded prod users can have Fast Mode on. If the create body omits
+    # fast_mode_cache_enabled, local-cache smokes inherit that default.
+    # Pin the flag off for this batch only; shared/fast_cache:on tasks
+    # keep Fast Mode. This does not change oss-pinned tasks
+    # (browser-biometrics-webdecoy uses rose-1-oss / OpenRouter).
     FAST_MODE_CACHE_USE_LOCAL=1 \
+    BENCHMARK_FAST_MODE_CACHE=0 \
     BENCHMARK_SKIP_WMH_BUILD=1 \
     BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
     BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 \

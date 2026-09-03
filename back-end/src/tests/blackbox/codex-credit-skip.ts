@@ -130,6 +130,16 @@ export function testDetectCreditExhaustion_positive(): void {
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
   );
+  // Verbatim E2B control-plane create rejection observed 2026-09-03: list
+  // still returns 200, but POST /sandboxes is 403
+  // `{"code":403,"message":"team is blocked: missing payment method"}`. The
+  // Codex smoke asserts create→200 before it can read sandbox output, so this
+  // wording must be a funding skip or the gate hard-fails on E2B billing.
+  assert(
+    detectCodexCreditExhaustion('{"error":"403: team is blocked: missing payment method"}', []) !==
+      null,
+    'E2B "team is blocked: missing payment method" must be detected as credit exhaustion'
+  );
   // OpenAI team billing block at session-create time (observed 2026-09-03).
   assert(
     detectCodexCreditExhaustion('403: team is blocked: missing payment method', []) !== null,
@@ -205,6 +215,11 @@ export function testDetectCreditExhaustion_negative(): void {
   assert(
     detectCodexCreditExhaustion('processed 14025 tokens across 3402 spans', []) === null,
     'digits adjacent to 402 must not trigger the out-of-funds signal'
+  );
+  // A generic 403 (GitHub access, auth) is not an E2B/OpenAI funding skip.
+  assert(
+    detectCodexCreditExhaustion('Expected status 200, got 403: {"error":"Forbidden"}', []) === null,
+    'bare HTTP 403 must NOT count as a fundless skip'
   );
 }
 
