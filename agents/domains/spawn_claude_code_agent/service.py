@@ -26,6 +26,7 @@ from domains.spawn_claude_code_agent.config import (
     FATAL_ERROR_PATTERNS,
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
+    SDK_IDLE_TIMEOUT_S,
     SILENCE_TIMEOUT_S,
     code_agent_verifier_disabled,
 )
@@ -756,6 +757,27 @@ async def _run_agentic_loop(  # noqa: C901
                 await _handle_reconnect_exhausted(sandbox_id, agent_id, task_id, action_summary, code_provider)
 
             silence_duration = safe_time() - last_output_time
+
+            # Autonomous CC waits for SDK exit after the first silence observation
+            # (parent-LLM nudge is intentionally skipped). If the CLI then goes
+            # quiet without exit_code, break instead of spinning to MAX_RUNTIME_S.
+            if (
+                silence_duration >= SDK_IDLE_TIMEOUT_S
+                and not pending_output
+                and ws_connected
+                and exit_code is None
+            ):
+                logger.warning(
+                    "[ClaudeCode] SDK idle timeout waiting for exit",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    silence_s=silence_duration,
+                    idle_limit_s=SDK_IDLE_TIMEOUT_S,
+                )
+                action_summary.append(
+                    f"SDK idle timeout ({int(silence_duration)}s with no WebSocket events)"
+                )
+                break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
                 filtered_output = terminal.get_display()

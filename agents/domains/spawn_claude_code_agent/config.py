@@ -21,6 +21,13 @@ def code_agent_verifier_disabled() -> bool:
 # Silence timeout — if no output for this long, Claude Code is "done talking"
 SILENCE_TIMEOUT_S: Final[float] = 1.0
 
+# After the autonomous CC path observes silence and begins waiting for the SDK
+# exit, require a fresh WebSocket event within this window. Without it, a hung
+# CLI (no exit_code, no further events) spins until MAX_RUNTIME_S — seen on
+# cuda-kernel k=3 r12 agent 4e1a84b7 (ScheduleWakeup/Bash then 10m+ of only
+# progress chips). Progress chips do not refresh last_output_time.
+SDK_IDLE_TIMEOUT_S: Final[float] = 180.0  # 3 minutes of no WS events
+
 # Maximum runtime before timeout.
 # Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
 # A 60m cap let hung Claude Code sessions burn the whole bench with no parent

@@ -1709,6 +1709,57 @@ async def test_run_agentic_loop_connect_fail_raises():
             assert "Failed to connect" in str(e)
 
 
+async def test_run_agentic_loop_sdk_idle_timeout_breaks():
+    """Hung CLI with no exit_code must break on SDK idle, not spin to MAX_RUNTIME.
+
+    Repro shape from cuda-kernel k=3 r12: Bash/ScheduleWakeup then only progress
+    chips (which do not refresh last_output_time). After silence flips
+    pending_output=False, autonomous CC waits for SDK exit forever without the
+    idle break.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangAfterOutput(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("partial work", True)
+            # Stay connected with no further events and no on_exit.
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangAfterOutput),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed < 5.0, f"idle break should be fast, took {elapsed:.2f}s"
+    assert any("SDK idle timeout" in s for s in summary), summary
+
+
 def test_log_code_agent_event_promotes_codex_fast_cache_request():
     """Codex proxy events are promoted into worker logs with cache details."""
     from domains.spawn_claude_code_agent import service
@@ -2933,6 +2984,10 @@ async def run_all_tests():
     # _run_agentic_loop
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
+    await r.record_async(
+        "run_agentic_loop_sdk_idle_timeout",
+        test_run_agentic_loop_sdk_idle_timeout_breaks,
+    )
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
     r.record(
         "log_claude_tool_use_event",
