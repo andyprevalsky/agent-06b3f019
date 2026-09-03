@@ -16,6 +16,7 @@ from domains.spawn_agent.config import (
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
     resolve_explore_oai_demo,
+    should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_browser_agent_v3.config import (
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -67,6 +68,17 @@ def test_browser_timeout_and_recording_are_demo_only():
     assert skip_browser_network_recording(fast_mode=True, goal=OAI_DEMO_CHILD_GOAL_PREFIX) is True
     assert skip_browser_network_recording(fast_mode=True, goal="Buy socks") is False
     assert skip_browser_network_recording(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX) is False
+
+
+def test_should_skip_oai_demo_browser_spawn_is_demo_fast_mode_only():
+    demo = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=True)
+    child = SimpleNamespace(goal=OAI_DEMO_CHILD_GOAL_PREFIX, fast_mode_cache_enabled=True)
+    live_fm = SimpleNamespace(goal="Buy socks", fast_mode_cache_enabled=True)
+    demo_live = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=False)
+    assert should_skip_oai_demo_browser_spawn(demo) is True
+    assert should_skip_oai_demo_browser_spawn(child) is True
+    assert should_skip_oai_demo_browser_spawn(live_fm) is False
+    assert should_skip_oai_demo_browser_spawn(demo_live) is False
 
 
 def test_get_max_iterations_reads_positive_env(monkeypatch):

@@ -219,6 +219,20 @@
             "value": "COMPLETED"
           }
         ]
+      },
+      {
+        "id": "no-browser-agents",
+        "method": "static_check",
+        "criteria": [
+          "No browser agents spawn in the root or any child tree"
+        ],
+        "checks": [
+          {
+            "type": "browser_agent_session_count",
+            "min": 0,
+            "max": 0
+          }
+        ]
       }
     ],
     "source": [

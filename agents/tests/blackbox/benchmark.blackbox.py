@@ -3356,6 +3356,82 @@ def test_tree_agent_status_ignores_recovered_error_tool_chips():
     assert "T9:" in reason
 
 
+def test_no_browser_agents_static_ignores_skipped_spawn_and_walks_tree():
+    """Mass-agent no-browser row is tree-wide and ignores FINISH-skipped calls."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "browser_agent_session_count", "min": 0, "max": 0}]}
+    skipped = {
+        "messages": [
+            {
+                "role": "ASSISTANT",
+                "metadata": {
+                    "tool_calls": [
+                        {
+                            "tool": "spawn_agent",
+                            "type": "browser",
+                            "tool_call_id": "tc-skip-browser",
+                        }
+                    ]
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "Research already gathered; skipping browser spawn so the explore tree handles it.",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "tc-skip-browser",
+                    "skippedBrowserSpawn": True,
+                },
+            },
+        ],
+        "_benchmark": {"tree": {}},
+    }
+    assert _run_declared_static_check(evaluator, skipped) == (True, "All declared static checks passed")
+
+    spawned_on_child = {
+        "messages": [{"role": "USER", "message": "root"}],
+        "_benchmark": {
+            "tree": {
+                "root": {"parent_agent_id": None, "status": "COMPLETED", "messages": []},
+                "gp-1": {
+                    "parent_agent_id": "root",
+                    "status": "COMPLETED",
+                    "messages": [
+                        {
+                            "role": "ASSISTANT",
+                            "metadata": {
+                                "tool_calls": [
+                                    {
+                                        "tool": "spawn_agent",
+                                        "type": "browser",
+                                        "tool_call_id": "tc-live-browser",
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "role": "TOOL",
+                            "message": "Starting up a browser",
+                            "metadata": {
+                                "toolName": "spawn_browser_agent",
+                                "toolStatus": "FINISHED",
+                                "toolCallId": "tc-live-browser",
+                                "agentType": "browser",
+                                "task_id": "browser-session-1",
+                            },
+                        },
+                    ],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, spawned_on_child)
+    assert passed is False
+    assert "Browser agent session count was 1" in reason
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -14176,6 +14252,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-real-deliverable",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
+        "no-browser-agents",
     }
     static_by_id = {
         evaluator_id: [check.get("type") for check in evaluator.get("checks", [])]
@@ -14193,7 +14270,15 @@ def test_unified_catalog_delineates_bench_axes():
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t7-real-deliverable": ["root_deliverable_markers"],
         "t9-no-leftover-children": ["tree_agent_status"],
+        "no-browser-agents": ["browser_agent_session_count"],
     }
+    browser_check = next(
+        check
+        for check in evaluators["no-browser-agents"]["checks"]
+        if check.get("type") == "browser_agent_session_count"
+    )
+    assert browser_check.get("min") == 0
+    assert browser_check.get("max") == 0
     explore_check = next(
         check
         for check in evaluators["t3-gp-explore-research-tools"]["checks"]
