@@ -83,6 +83,22 @@ for (const [name, harness] of [
 
 assert.match(
   coverageScript,
+  /dotenv_effective_value/,
+  'coverage must prefer back-end/.env over stale Cursor-injected AgentCard/GitHub secrets'
+);
+assert.match(
+  coverageScript,
+  /AGENTCARD_ORG_OAUTH_CLIENT_ID/,
+  'coverage must re-export AgentCard org OAuth client id from .env for blackbox gates'
+);
+assert.match(
+  coverageScript,
+  /GITHUB_DISPATCH_TOKEN/,
+  'coverage must re-export GITHUB_DISPATCH_TOKEN from .env for external-http blackbox'
+);
+
+assert.match(
+  coverageScript,
   /lsof -tiTCP:"\$candidate" -sTCP:LISTEN/,
   'coverage port preflight must ignore outbound connections using the same local port'
 );
