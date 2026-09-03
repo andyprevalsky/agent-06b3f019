@@ -7,11 +7,13 @@ import { createSteelRecoverySession } from '../steel/sessionRecovery';
 import { waitForProviderSolver } from './challengePageDetect';
 import { applyFingerprintInjection, type FingerprintInjectionData } from './fingerprintInjection';
 import {
-  selectNetworkEntriesForClassifier,
   type ChallengeClassifierBilling,
   type ChallengeClassifierLlmUsage,
-  type NetworkSummaryEntry,
 } from './challengeLlmClassifier';
+import {
+  selectNetworkEntriesForClassifier,
+  type NetworkSummaryEntry,
+} from './challengeClassifierNetwork';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import {

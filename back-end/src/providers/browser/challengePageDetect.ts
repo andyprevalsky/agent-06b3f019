@@ -146,7 +146,7 @@ export async function waitForProviderSolver(
   options?: {
     recoveryReason?: string | null;
     agentDomTree?: string | null;
-    networkEntries?: import('./challengeLlmClassifier').NetworkSummaryEntry[];
+    networkEntries?: import('./challengeClassifierNetwork').NetworkSummaryEntry[];
   }
 ): Promise<{
   clean: boolean;
