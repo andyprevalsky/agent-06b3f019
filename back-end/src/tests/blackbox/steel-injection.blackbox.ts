@@ -291,9 +291,10 @@ test('enabled CookieBundles with only tracking cookies are not selected as auth'
       await prisma.cookie.create({
         data: {
           userId,
-          domain: name.startsWith('ahoy') || name === 'device_uuid' || name === 'privacy_opt_out'
-            ? 'www.instacart.com'
-            : '.instacart.com',
+          domain:
+            name.startsWith('ahoy') || name === 'device_uuid' || name === 'privacy_opt_out'
+              ? 'www.instacart.com'
+              : '.instacart.com',
           name,
           path: '/',
           value: `track-${index}`,

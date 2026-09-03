@@ -144,7 +144,7 @@ async function cookieSummaryForBundle(params: {
   const authCookies = cookies.filter((cookie) => isAuthCredentialCookieName(cookie.name));
   let freshestCookieUtc: bigint | null = null;
   for (const cookie of authCookies) {
-    if (cookie.creationUtc == null) continue;
+    if (cookie.creationUtc === null || cookie.creationUtc === undefined) continue;
     if (freshestCookieUtc === null || cookie.creationUtc > freshestCookieUtc) {
       freshestCookieUtc = cookie.creationUtc;
     }
