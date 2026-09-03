@@ -186,7 +186,9 @@ const tests: Array<[string, () => Promise<void>]> = [
         }
         if (
           connected.status === 502 &&
-          /invalid or expired organization token/i.test(JSON.stringify(connected.data))
+          /invalid or expired organization token|invalid client secret/i.test(
+            JSON.stringify(connected.data)
+          )
         ) {
           writeLine(
             `⚠️  SKIP: AgentCard sandbox org token rejected by provider ` +
