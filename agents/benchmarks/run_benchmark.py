@@ -311,6 +311,21 @@ def _benchmark_env_bool(name: str) -> Optional[bool]:
     raise ValueError(f"{name} must be one of true/false/1/0/yes/no/on/off")
 
 
+def _resolve_write_lock_enabled(task: BenchmarkTask) -> Optional[bool]:
+    """Resolve write-lock for agent create.
+
+    Polar public-web tasks use ``approval_handling=None`` (no required gate).
+    Product write-lock still pauses on Google search / form submits by default,
+    which leaves the harness unable to auto-approve and stalls the suite.
+    Default polar agents to write-lock off unless ``BENCHMARK_WRITE_LOCK_ENABLED``
+    is set explicitly.
+    """
+    write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+    if write_lock_enabled is None and is_polar_bench_task(task):
+        return False
+    return write_lock_enabled
+
+
 def _minted_clear_existing_auth_enabled() -> bool:
     """Non-X minted benches clear saved realm auth unless explicitly disabled."""
     flag = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
@@ -1988,7 +2003,7 @@ async def create_agent(
     if local_task_queue:
         body["task_queue"] = local_task_queue
 
-    write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+    write_lock_enabled = _resolve_write_lock_enabled(task)
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
 

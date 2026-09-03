@@ -27,6 +27,10 @@ Use with skill `.claude/skills/impl-bench/SKILL.md` for the next suite.
    Hub `TasksPane` `GROUPS` includes `polar-bench` for filterable UI.
 8. **Verification** — unit tests for judge isolation + catalog; UI screenshots with
    `polar-bench` filter; full suite run to pass/fail (not queued).
+9. **Write-lock off for polar** — `approval_handling=None` (not `ignore`/`auto_approve`,
+   which require a gate). `create_agent` therefore sets `write_lock_enabled=false` for
+   polar tasks so Google-search / form submits do not pause agents forever. Override
+   with `BENCHMARK_WRITE_LOCK_ENABLED=true` only when intentionally testing locks.
 
 ## Key files
 
@@ -48,5 +52,6 @@ cd agents && source venv/bin/activate
 python -c "from benchmarks.polar_catalog import write_polar_tasks_file; write_polar_tasks_file()"
 python -m pytest benchmarks/polar_evaluator_test.py benchmarks/polar_catalog_test.py -q
 # Prefer --local. Bare scripts/run-bench (no --local) spawns the paid Fly fleet.
-scripts/run-bench --local --suite polar-bench --max-concurrency 5 --keep-services
+# Cloud VMs with broken Docker overlay mounts: force system Postgres.
+ROSE_USE_SYSTEM_PG=true scripts/run-bench --local --suite polar-bench --max-concurrency 8 --keep-services
 ```

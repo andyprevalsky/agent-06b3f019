@@ -85,11 +85,17 @@ Wire method into:
 # Local isolated stack (preferred for cloud agents / cost control).
 # Without --local, scripts/run-bench routes to the paid Fly fleet — do NOT
 # fan out hundreds of live browser tasks onto fleet machines by accident.
-scripts/run-bench --local --suite polar-bench --max-concurrency 5 --keep-services
+# Cloud VMs with broken Docker overlay mounts: force system Postgres.
+ROSE_USE_SYSTEM_PG=true scripts/run-bench --local --suite polar-bench --max-concurrency 8 --keep-services
 
 # Or explicit names
-scripts/run-bench --local polar-odysseys-440ed7f388a2 polar-bu-001
+ROSE_USE_SYSTEM_PG=true scripts/run-bench --local polar-odysseys-440ed7f388a2 polar-bu-001
 ```
+
+Polar note: public-web tasks keep `approval_handling=None` and default
+`write_lock_enabled=false` at agent create (otherwise Google-search write-locks
+pause agents with no harness auto-approve). Do not flip to `ignore`/`auto_approve`
+just to “make approvals work” — those modes require a gate and fail when none fires.
 
 Requirements:
 
@@ -119,7 +125,16 @@ cd agents && source venv/bin/activate
 python -m pytest benchmarks/polar_evaluator_test.py benchmarks/polar_catalog_test.py -q
 python -c "from benchmarks.polar_catalog import build_polar_catalog_tasks; t=build_polar_catalog_tasks(); assert all(e['method']=='polar' for x in t for e in x['evaluators'])"
 # Prefer --local. Bare scripts/run-bench (no --local) spawns the paid Fly fleet.
-scripts/run-bench --local --suite polar-bench --max-concurrency 5 --keep-services
+# Cloud VMs with broken Docker overlay mounts: force system Postgres.
+ROSE_USE_SYSTEM_PG=true scripts/run-bench --local --suite polar-bench --max-concurrency 8 --keep-services
 ```
 
 Then open the Hub Benchmarks UI, click the `polar-bench` group chip, screenshot.
+
+## Polar write-lock stall (RCA class)
+
+Symptom: suite shows `running=300 completed=0` while agents sit `PAUSED` /
+open `AgentAttentionRequest` on Google search. Cause: `approval_handling=None`
+skips harness auto-approve, but product write-lock still arms. Fix: polar
+`create_agent` defaults `write_lock_enabled=false` (see
+`agents/benchmarks/run_benchmark.py`).

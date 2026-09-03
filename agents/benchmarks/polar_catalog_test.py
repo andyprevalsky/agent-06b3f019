@@ -133,3 +133,21 @@ def test_all_tasks_merges_first_party_and_polar():
     assert "polar-bu-001" in names
     # First-party smoke still present
     assert "chat-mode" in names or "test-mass-agent-run-0" in names
+
+
+def test_polar_create_agent_defaults_write_lock_off(monkeypatch):
+    """Polar public-web tasks must not stall on product write-lock pauses."""
+    import benchmarks.run_benchmark as rb
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    polar = get_task_by_name("polar-bu-001")
+    daily = next(t for t in all_tasks() if t.group == "daily" and t.approval_handling is None)
+
+    monkeypatch.delenv("BENCHMARK_WRITE_LOCK_ENABLED", raising=False)
+    assert rb._resolve_write_lock_enabled(polar) is False
+    assert rb._resolve_write_lock_enabled(daily) is None
+
+    monkeypatch.setenv("BENCHMARK_WRITE_LOCK_ENABLED", "true")
+    assert rb._resolve_write_lock_enabled(polar) is True
+    monkeypatch.setenv("BENCHMARK_WRITE_LOCK_ENABLED", "false")
+    assert rb._resolve_write_lock_enabled(polar) is False
