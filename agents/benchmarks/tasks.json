@@ -312,7 +312,8 @@
     },
     "bench": "pipeline-e2e",
     "group": "pre-deploy",
-    "deploy_category": "harness"
+    "deploy_category": "harness",
+    "fast_cache": "off"
   },
   {
     "name": "parallel-tool-calls",
