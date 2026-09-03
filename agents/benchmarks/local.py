@@ -924,7 +924,18 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         if ADMIN_BYPASS_USER_ID not in configured:
             configured.append(ADMIN_BYPASS_USER_ID)
         os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
-    if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
+    # Force Claude Code (not Codex) for tasks that declare requires_claude_code
+    # OR expect spawn_claude_code_agent. Codex sessions were failing this bench
+    # with GitHub clone 403s / sandbox timeouts that trip no_tool_failures.
+    if any(
+        task.name in selected
+        and (
+            task.requires_claude_code
+            or "spawn_claude_code_agent" in (task.expected_tools or [])
+            or (task.min_tool_counts or {}).get("spawn_claude_code_agent", 0) > 0
+        )
+        for task in all_tasks()
+    ):
         os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
     # TEMPORARY: skip post-run Claude Code / Codex dual-agent verifier. The
     # verifier cannot see sandbox files and false-fails complete runs. Re-enable

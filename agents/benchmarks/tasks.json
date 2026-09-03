@@ -5246,7 +5246,7 @@
     "price_limit_cents": 400,
     "no_anthropic_price_limit_cents": 600,
     "requires_browser_agent": false,
-    "requires_claude_code": false,
+    "requires_claude_code": true,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "plan",
