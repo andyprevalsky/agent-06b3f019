@@ -1996,7 +1996,7 @@
     "name": "browser-doordash-food-plan-grocery-cart-reauth",
     "title": "DoorDash Food-Plan Grocery Cart Reauth",
     "description": "Cookie-sync-off cart completeness: fill the full weekly Safeway manifest cart as a guest, then stop at auth/reauth assistance. Success is full cart + auth_assistance, not write_lock.",
-    "prompt": "Use exactly one browser agent on DoorDash to build the complete weekly food-plan grocery cart at Safeway (2811 Middlefield Rd, Palo Alto) for guest checkout without using any saved login. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before hitting auth \u2014 a single-item or partial cart is incorrect. When DoorDash requires login or reauthentication, stop and request auth assistance. do NOT try to login. do NOT place the order. do NOT continue past the auth/reauth wall.",
+    "prompt": "Use exactly one browser agent on DoorDash to build the complete weekly food-plan grocery cart at Safeway (2811 Middlefield Rd, Palo Alto) for guest checkout without using any saved login. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before hitting auth - a single-item or partial cart is incorrect. When DoorDash requires login or reauthentication, stop and request auth assistance. do NOT try to login. do NOT place the order. do NOT continue past the auth/reauth wall.",
     "timeout_seconds": 2700,
     "is_chat_mode": false,
     "expected_tools": [
