@@ -137,6 +137,28 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 
+
+def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
+    """Per-task early-fail silence budget for non-terminal leaves.
+
+    Claude Code sessions update a single in-place progress chip for up to
+    ``MAX_RUNTIME_S`` (30m) without incrementing ``message_count``. The default
+    stall budget (~510s) therefore false-fails healthy code-agent ranking
+    benches mid-session. Raise the limit to cover one full CC runtime plus a
+    small buffer when the task expects / requires Claude Code.
+    """
+    limit = int(AGENT_STALL_SECONDS)
+    expects_cc = "spawn_claude_code_agent" in (getattr(task, "expected_tools", None) or [])
+    requires_cc = bool(getattr(task, "requires_claude_code", False))
+    if expects_cc or requires_cc:
+        try:
+            from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
+        except Exception:  # pragma: no cover - import guard for non-agents layouts
+            MAX_RUNTIME_S = 1800
+        limit = max(limit, int(MAX_RUNTIME_S) + 120)
+    return limit
+
+
 _WORLD_MODEL_UPDATE_EVENTS: list[dict[str, Any]] = []
 _WORLD_MODEL_UPDATE_RESULT: Optional[dict[str, Any]] = None
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
@@ -3488,6 +3510,7 @@ async def poll_agent(
     """
     start = time.time()
     last_activity_time = start  # tracks ANY activity across the entire tree
+    last_cost_change_time = start  # tree LLM cost growth (CC in-place progress)
     prev_tree_message_count = 0
     prev_tree_agent_count = 0
     prev_tree_cost = 0
@@ -3502,6 +3525,7 @@ async def poll_agent(
     # Per-agent stall tracking: agent_id → {count, last_change_time, status}.
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
+    stall_limit_seconds = agent_stall_limit_seconds(task)
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
     validated_payment_receipt_request_id: Optional[str] = None
@@ -3775,6 +3799,7 @@ async def poll_agent(
             if tree_cost > prev_tree_cost:
                 activity_detected = True
                 prev_tree_cost = tree_cost
+                last_cost_change_time = now
 
             if activity_detected:
                 last_activity_time = now
@@ -3845,13 +3870,15 @@ async def poll_agent(
                     leaves.append(aid)
 
             # Tree is stalled only when EVERY non-terminal leaf has been
-            # silent for ≥ AGENT_STALL_SECONDS. If the most-recently-active
-            # leaf still emitted within the threshold, the tree is making
-            # progress somewhere — not stalled.
+            # silent for ≥ stall_limit_seconds AND tree LLM cost has also
+            # stopped growing. Claude Code updates an in-place progress chip
+            # without bumping message_count, so cost is the durable signal
+            # that a long CC session is still alive.
             if leaves:
                 max_leaf_change = max(per_agent_state.get(aid, {}).get("last_change_time", 0.0) for aid in leaves)
                 tree_idle = now - max_leaf_change
-                if tree_idle > AGENT_STALL_SECONDS:
+                cost_idle = now - last_cost_change_time
+                if tree_idle > stall_limit_seconds and cost_idle > stall_limit_seconds:
                     # All leaves silent — pick the staffer leaf (most recent
                     # activity) to surface in the error message.
                     stuck_aid = max(
@@ -3862,7 +3889,8 @@ async def poll_agent(
                     role = "root" if stuck_aid == agent_id else "leaf"
                     reason = (
                         f"tree stalled — newest-active {role} {stuck_aid[:12]} "
-                        f"silent for {tree_idle:.0f}s (threshold={AGENT_STALL_SECONDS}s, "
+                        f"silent for {tree_idle:.0f}s (threshold={stall_limit_seconds}s, "
+                        f"cost_idle={cost_idle:.0f}s, "
                         f"status={stuck_st.get('status', '?')}, "
                         f"messages={stuck_st.get('count', '?')}, "
                         f"non_terminal_leaves={len(leaves)})"
