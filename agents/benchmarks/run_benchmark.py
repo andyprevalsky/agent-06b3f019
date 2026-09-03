@@ -63,7 +63,11 @@ from benchmarks.benchmark_tasks import (
     get_timeout_floor,
     list_all_tasks,
 )
-from benchmarks.polar_catalog import is_polar_bench_task
+from benchmarks.polar_catalog import (
+    is_polar_bench_task,
+    polar_browser_step_budget,
+    polar_wall_clock_disabled,
+)
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
     AMAN_FOOD_PLAN_COOKIE_DOMAINS,
@@ -3764,10 +3768,12 @@ async def poll_agent(
     task._mid_run_feedback_initial_schema = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
+    step_budget = polar_browser_step_budget(task)
 
     while True:
         elapsed = time.time() - start
-        if elapsed > resolved_timeout:
+        if not wall_clock_disabled and resolved_timeout and elapsed > resolved_timeout:
             reason = (
                 f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
                 f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
@@ -3845,6 +3851,34 @@ async def poll_agent(
         if write_lock_prerequisite_request_id:
             data["_benchmark"]["write_lock_prerequisite_auto_approved"] = True
             data["_benchmark"]["write_lock_prerequisite_request_id"] = write_lock_prerequisite_request_id
+
+        if step_budget and status not in TERMINAL_STATUSES:
+            browser_steps = _agent_class_step_counts(data).get("browser", {})
+            used_steps = max(browser_steps.values()) if browser_steps else 0
+            if used_steps >= step_budget:
+                data["_benchmark"]["step_budget_reached"] = True
+                data["_benchmark"]["browser_steps"] = used_steps
+                data["_benchmark"]["browser_step_budget"] = step_budget
+                print(
+                    f"    🧭 Browser step budget reached: {used_steps}/{step_budget} "
+                    f"— pausing for polar judge"
+                )
+                try:
+                    await pause_agent(base_url, agent_id)
+                    data = await get_agent(base_url, agent_id)
+                    data["_benchmark"] = {
+                        **data.get("_benchmark", {}),
+                        "step_budget_reached": True,
+                        "browser_steps": used_steps,
+                        "browser_step_budget": step_budget,
+                        "approvals_triggered": approvals_triggered,
+                        "approvals_resolved": approvals_resolved,
+                        "attention_requests_seen": list(attention_requests_seen),
+                    }
+                except Exception as pause_error:
+                    print(f"    ⚠ Failed to pause after step budget: {pause_error}")
+                # Not an early-fail: Odysseys grades whatever trajectory fit the budget.
+                return data, approvals_triggered, approvals_resolved, None
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -4811,9 +4845,19 @@ def evaluate_task(
         if benchmark_state.get("subscription_webhook_simulated") is not True:
             return False, "Expected simulated subscription webhook after gate"
 
-    # Agent mode: must complete
+    # Agent mode: must complete. Polar step-budget stops pause the agent on
+    # purpose so the Odysseys/BU judge can grade the trajectory (upstream also
+    # stops on max steps, then rubrics — not a wall-clock fail).
     if status != "COMPLETED":
-        return False, f"Agent status: {status} (expected COMPLETED)"
+        benchmark_state = data.get("_benchmark", {}) if isinstance(data, dict) else {}
+        if (
+            status == "PAUSED"
+            and benchmark_state.get("step_budget_reached") is True
+            and is_polar_bench_task(task)
+        ):
+            pass
+        else:
+            return False, f"Agent status: {status} (expected COMPLETED)"
 
     if task.agentcard_setup_action == "complete":
         benchmark_state = data.get("_benchmark", {})
@@ -11010,9 +11054,14 @@ async def run_single_task(
         )
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    step_budget = polar_browser_step_budget(task)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
-    print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
+    if polar_wall_clock_disabled(task) or resolved_timeout in (None, 0):
+        budget_note = f", browser_steps≤{step_budget}" if step_budget else ""
+        print(f"     timeout=disabled (step budget){budget_note}, price_limit={task.effective_price_limit_cents()}c")
+    else:
+        print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
     all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
     if all_attachments:
         print(f"     attachments={all_attachments}")
@@ -12835,6 +12884,14 @@ async def main_async(args):
     # In non-bootstrap mode, incomplete history falls back to the configured task
     # timeout so new or low-sample tasks can still run and accumulate pass data.
     for t in tasks:
+        if polar_wall_clock_disabled(t):
+            budget = polar_browser_step_budget(t)
+            t._resolved_timeout_seconds = 0
+            print(
+                f"  🧭 {t.name} → wall-clock disabled; "
+                f"browser step budget={budget if budget is not None else '—'}"
+            )
+            continue
         if args.bootstrap:
             t._resolved_timeout_seconds = t.timeout_seconds
             s = _history_summary(t.name, max_seconds=get_smoke_cap(t.name))

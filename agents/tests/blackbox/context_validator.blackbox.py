@@ -305,12 +305,13 @@ def test_direct_subagent_parent_result_wins_over_later_child_ui_row():
 
 
 def test_final_orphan_tool_use_matches_llm_repair_path():
-    """Smoke validator should mirror build_llm_messages synthetic tool-result repair.
+    """Smoke validator should mirror build_llm_messages orphan-strip repair.
 
     Completed agents can end with an assistant attempt_completion/verifier tool call
     whose DB TOOL row is absent because the workflow completes immediately after
-    handling it. The provider-facing LLM context repairs that orphan before sending
-    another request; the smoke validator must judge the same repaired context.
+    handling it. The provider-facing LLM context strips that orphan tool_call before
+    sending another request (never invents a fake tool_result); the smoke validator
+    must judge the same repaired context.
     """
     from context_validator import validate_context
 
@@ -339,7 +340,12 @@ def test_final_orphan_tool_use_matches_llm_repair_path():
         v for v in violations
         if v.rule == "tool_result_pairing" and v.severity == "error"
     ]
-    assert not pairing_errors, f"synthetic repair path should satisfy pairing: {pairing_errors}"
+    assert not pairing_errors, f"orphan-strip repair path should satisfy pairing: {pairing_errors}"
+    dup_errors = [
+        v for v in violations
+        if v.rule == "no_duplicate_tool_results" and v.severity == "error"
+    ]
+    assert not dup_errors, f"orphan-strip must not invent duplicate results: {dup_errors}"
 
 
 def test_duplicate_system_messages_are_scoped_to_sub_agent():
