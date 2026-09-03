@@ -28,6 +28,37 @@ from utils.error_utils import extract_error_message
 logger = structlog.get_logger()
 
 
+def _is_recoverable_github_clone_denial(error: BaseException) -> bool:
+    """True when sandbox GitHub clone was denied — agent should retry API-only.
+
+    E2B/Claude Code session create returns HTTP 403 GITHUB_ACCESS_DENIED when
+    ``github_repo_url`` points at a repo the sandbox GitHub app cannot clone.
+    That is recoverable (drop the URL, use REST API) and must not hard-ERROR
+    the tool call — ``no_tool_failures`` would otherwise fail closed ranking
+    benches that only needed metadata discovery.
+    """
+    text = extract_error_message(error).upper()
+    return "GITHUB_ACCESS_DENIED" in text or (
+        "PERMISSION TO CLONE" in text and "GITHUB" in text
+    )
+
+
+def _soft_fail_github_clone_denial_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Dict[str, Any]:
+    detail = extract_error_message(error)
+    return {
+        "success": False,
+        "message": (
+            "Code session could not start because the sandbox GitHub integration "
+            f"denied cloning the requested repo ({detail}). Do not pass "
+            "github_repo_url / github_repo_link. Retry with API-only discovery "
+            "using the provided GitHub token inside a session that has no repo URL."
+        ),
+        "code_provider": code_provider,
+    }
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -163,9 +194,24 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     if isinstance(e, ActivityError) and not isinstance(
                         e.cause, (asyncio.CancelledError, TemporalCancelledError)
                     ):
-                        raise
-                    was_cancelled = True
-                    result = {"status": "cancelled", "message": "Claude Code agent cancelled by user"}
+                        if _is_recoverable_github_clone_denial(e):
+                            logger.warning(
+                                "[ClaudeCode] Recoverable GitHub clone denial; soft-failing tool",
+                                agent_id=agent_id,
+                                code_provider=code_provider,
+                                error=extract_error_message(e),
+                            )
+                            result = _soft_fail_github_clone_denial_result(
+                                code_provider=code_provider, error=e
+                            )
+                        else:
+                            raise
+                    else:
+                        was_cancelled = True
+                        result = {
+                            "status": "cancelled",
+                            "message": "Claude Code agent cancelled by user",
+                        }
 
             if was_cancelled or (result and result.get("status") == "cancelled"):
                 logger.info("[ClaudeCode] Agent cancelled", agent_id=agent_id)
@@ -255,6 +301,31 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
+
+            if _is_recoverable_github_clone_denial(e):
+                logger.warning(
+                    "[ClaudeCode] Recoverable GitHub clone denial; soft-failing tool",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                    error=extract_error_message(e),
+                    error_type=type(e).__name__,
+                )
+                soft = _soft_fail_github_clone_denial_result(
+                    code_provider=code_provider, error=e
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Task Incomplete",
+                    message=soft["message"],
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "action_type": "task_complete",
+                        "success": False,
+                        "code_provider": code_provider,
+                    },
+                )
+                return
 
             logger.error(
                 "[ClaudeCode] Tool failed",

@@ -2602,6 +2602,52 @@ async def test_cc_execute_tool_generic_exception_yields_error():
     assert error.metadata["code_provider"] == "claude"
 
 
+async def test_cc_execute_tool_github_access_denied_soft_fails_finished():
+    """GITHUB_ACCESS_DENIED must FINISH (not ERROR) so no_tool_failures can pass.
+
+    Ranking benches fail closed when spawn_claude_code_agent posts toolStatus=ERROR
+    after a sandbox GitHub clone denial. Soft-fail lets the agent retry API-only.
+    """
+    from temporalio.exceptions import ActivityError
+
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from tools.base import MessageStatus
+
+    activity_error = ActivityError(
+        message=(
+            "Failed to create code session (provider=claude): HTTP 403: "
+            '{"error":"Access denied","code":"GITHUB_ACCESS_DENIED"}'
+        ),
+        scheduled_event_id=1,
+        started_event_id=1,
+        identity="worker",
+        activity_type="spawn_claude_code_activity",
+        activity_id="1",
+        retry_state=None,
+    )
+    handle = _FakeActivityHandle(raise_exc=activity_error)
+    fake = _FakeCCWorkflow(handle)
+    restore = _patch_cc_workflow(fake)
+    try:
+        manager = SpawnClaudeCodeAgentManager()
+        events = await _collect_cc_events(
+            manager.execute_tool(
+                _FakeCCWorkflowInstance(),
+                {"goal": "g", "github_repo_link": "https://github.com/pytorch/pytorch"},
+                "tc-github-denied",
+            )
+        )
+    finally:
+        restore()
+
+    assert not any(getattr(e, "status", None) == MessageStatus.ERROR for e in events)
+    finished = next(e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assert finished.metadata.get("success") is False
+    assert finished.metadata.get("action_type") == "task_complete"
+    assert "GITHUB_ACCESS_DENIED" in finished.message or "denied cloning" in finished.message.lower()
+    assert "github_repo_url" in finished.message or "API-only" in finished.message
+
+
 async def test_cc_execute_tool_paused_cancels_activity():
     """is_paused=True triggers activity_handle.cancel() and chip-terminal cancel."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
@@ -2810,6 +2856,10 @@ async def run_all_tests():
     await r.record_async("cc_exec_cancel_status", test_cc_execute_tool_cancelled_status_yields_error)
     await r.record_async("cc_exec_cancel_error", test_cc_execute_tool_cancelled_error_path)
     await r.record_async("cc_exec_generic_exc", test_cc_execute_tool_generic_exception_yields_error)
+    await r.record_async(
+        "cc_exec_github_access_denied_soft_fail",
+        test_cc_execute_tool_github_access_denied_soft_fails_finished,
+    )
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
     r.record(
         "claude_code_max_runtime_cuda_kernel_headroom",
