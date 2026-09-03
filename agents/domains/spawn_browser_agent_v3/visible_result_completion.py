@@ -10,6 +10,9 @@ verdict, then burned the 420s cap on scroll/screenshot loops instead of wait.
 Rewrite post-submit idle actions (`wait`, `scroll`, …) into
 `attempt_completion` so the parent can finish instead of burning the harness
 timeout.
+
+Page-changing actions after the last submit invalidate prior visible-result
+evidence — a scroll on a later page must not complete against a stale score.
 """
 
 from __future__ import annotations
@@ -45,6 +48,19 @@ _POST_RESULT_IDLE_ACTIONS = frozenset(
         "hover",
     }
 )
+# Actions that leave the page where the score/verdict was observed.
+_NAVIGATION_MARKERS = (
+    "navigate",
+    "goto",
+    "go_to",
+    "open_url",
+    "open_page",
+    "go_back",
+    "go_forward",
+    "new_tab",
+    "switch_tab",
+    "close_tab",
+)
 
 
 def reasoning_states_visible_fcaptcha_result(text: str) -> bool:
@@ -67,16 +83,37 @@ def _entry_blob(entry: Any) -> str:
         return str(entry)
 
 
+def _history_entries(
+    action_summaries: Iterable[Any] | None = None,
+    action_entries: Iterable[Any] | None = None,
+) -> list[str]:
+    return [_entry_blob(entry).lower() for entry in list(action_summaries or []) + list(action_entries or [])]
+
+
 def history_has_submit_click(
     action_summaries: Iterable[Any] | None = None,
     action_entries: Iterable[Any] | None = None,
 ) -> bool:
     """True when a prior click already targeted a Submit control."""
-    for entry in list(action_summaries or []) + list(action_entries or []):
-        blob = _entry_blob(entry).lower()
-        if "submit" in blob and "click" in blob:
-            return True
-    return False
+    return any("submit" in blob and "click" in blob for blob in _history_entries(action_summaries, action_entries))
+
+
+def history_has_navigation_after_submit(
+    action_summaries: Iterable[Any] | None = None,
+    action_entries: Iterable[Any] | None = None,
+) -> bool:
+    """True when a page-changing action follows the latest submit click."""
+    entries = _history_entries(action_summaries, action_entries)
+    last_submit_idx = max(
+        (idx for idx, blob in enumerate(entries) if "submit" in blob and "click" in blob),
+        default=-1,
+    )
+    if last_submit_idx < 0:
+        return False
+    return any(
+        any(marker in blob for marker in _NAVIGATION_MARKERS)
+        for blob in entries[last_submit_idx + 1 :]
+    )
 
 
 def should_force_visible_result_completion(
@@ -91,6 +128,8 @@ def should_force_visible_result_completion(
     if str(action_name or "").strip().lower() not in _POST_RESULT_IDLE_ACTIONS:
         return False
     if not history_has_submit_click(action_summaries, action_entries):
+        return False
+    if history_has_navigation_after_submit(action_summaries, action_entries):
         return False
     candidates = [last_reasoning, *(prior_reasoning_messages or [])]
     return any(reasoning_states_visible_fcaptcha_result(text) for text in candidates)

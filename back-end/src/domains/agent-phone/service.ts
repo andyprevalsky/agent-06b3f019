@@ -19,6 +19,7 @@ const OUTBOUND_OPERATION_TYPE = 'agentphone.message';
 export class AgentPhoneMessageValidationError extends Error {}
 export class AgentPhoneIdentityUnavailableError extends Error {}
 export class AgentPhoneIdempotencyConflictError extends Error {}
+export class AgentPhoneAgentUnauthorizedError extends Error {}
 
 function outboundOperationKey(userId: string, agentId: string, idempotencyKey: string) {
   const digest = createHash('sha256')
@@ -139,6 +140,15 @@ export async function sendOutboundAgentPhoneMessage(params: {
   if (identity?.phoneProvider !== 'agentphone' || (!hasNumberId && !hasAgentId && !hasPhone)) {
     throw new AgentPhoneIdentityUnavailableError(
       'The user does not have an AgentPhone sender configured'
+    );
+  }
+
+  // Bind mock selection to an agent the caller owns. Without this, a valid
+  // sender userId plus an unrelated benchmark agentId would short-circuit to
+  // synthetic success and skip AgentPhone (CodeRabbit finding).
+  if (!(await repo.isAgentOwnedByUser(userId, agentId))) {
+    throw new AgentPhoneAgentUnauthorizedError(
+      'agent_id is not an agent owned by the authenticated user'
     );
   }
 

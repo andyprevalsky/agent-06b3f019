@@ -342,6 +342,24 @@ def test_visible_result_completion_rewrites_post_submit_scroll():
     )
 
 
+def test_visible_result_completion_does_not_rewrite_after_navigation():
+    """Submit → navigate → scroll must not complete against a stale score."""
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stated = 'Risk Score 0.11, Bot detected - form blocked'
+    after_nav = [
+        'click: {"text": "Submit (Protected by Invisible"}',
+        'navigate: https://webdecoy.com/other',
+    ]
+    assert not should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning=stated,
+        action_summaries=after_nav,
+    )
+
+
 def test_visible_result_completion_does_not_rewrite_before_submit():
     from domains.spawn_browser_agent_v3.visible_result_completion import (
         should_force_visible_result_completion,
@@ -19290,6 +19308,10 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_rewrites_post_submit_scroll",
         test_visible_result_completion_rewrites_post_submit_scroll,
+    )
+    r.record(
+        "visible_result_completion_does_not_rewrite_after_navigation",
+        test_visible_result_completion_does_not_rewrite_after_navigation,
     )
     r.record(
         "visible_result_completion_does_not_rewrite_before_submit",
