@@ -9747,7 +9747,8 @@ def _iter_completion_output_file_pointers(outputs: object) -> list[dict]:
 def _response_schema_has_file_pointer_check(data: dict, check: dict) -> tuple[bool, str]:
     """Require the agent's generated response_schema to include a file_pointer field.
 
-    Optionally require file_types to intersect required_file_types (e.g. ["html"]).
+    Format constraints belong on produced FilePointer mime_type/extension
+    (see completion_summary_file_outputs), not a second schema field.
     """
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
     schema = agent.get("response_schema") or agent.get("output_schema") or {}
@@ -9762,31 +9763,7 @@ def _response_schema_has_file_pointer_check(data: dict, check: dict) -> tuple[bo
     if not file_fields:
         types = [str(f.get("type")) for f in fields if isinstance(f, dict)]
         return False, f"response_schema has no file_pointer field (types={types})"
-    required_types = [
-        str(t).strip().lstrip(".").lower()
-        for t in (check.get("required_file_types") or [])
-        if str(t).strip()
-    ]
-    if not required_types:
-        return True, f"Found {len(file_fields)} file_pointer field(s)"
-    matched = []
-    for field in file_fields:
-        declared = [
-            str(t).strip().lstrip(".").lower()
-            for t in (field.get("file_types") or [])
-            if str(t).strip()
-        ]
-        if any(t in declared for t in required_types):
-            matched.append(field.get("name"))
-    if not matched:
-        detail = [
-            f"{f.get('name')}:{list(f.get('file_types') or [])}" for f in file_fields
-        ]
-        return (
-            False,
-            f"file_pointer fields missing required file_types {required_types}; got {detail}",
-        )
-    return True, f"file_pointer field(s) declare required types: {matched}"
+    return True, f"Found {len(file_fields)} file_pointer field(s)"
 
 def _completion_summary_file_outputs_check(data: dict, check: dict) -> tuple[bool, str]:
     """Require Task Complete outputs to include FilePointers matching extension/mime filters."""

@@ -108,12 +108,6 @@ const SchemaFieldSchema = z
       .describe(
         'Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.'
       ),
-    file_types: z
-      .array(z.string())
-      .optional()
-      .describe(
-        'For file_pointer / list[file_pointer] only: required extensions or MIME subtypes the deliverable MUST satisfy (e.g. ["html"], ["pdf"], ["png","jpg"]). Omit when any file type is acceptable.'
-      ),
   })
   .superRefine((field, ctx) => {
     if (
@@ -178,8 +172,6 @@ export type ResponseSchema = {
         | 'session_file_pointer'
         | 'list[session_file_pointer]';
     }>;
-    /** Required extensions/MIME subtypes for file_pointer fields (e.g. html, pdf, png). */
-    file_types?: string[];
   }>;
 };
 
@@ -229,12 +221,7 @@ const RESPONSE_SCHEMA_JSON_SCHEMA = {
             ],
             description: 'Field type',
           },
-          file_types: {
-            type: 'array',
-            items: { type: 'string' },
-            description:
-              'For file_pointer / list[file_pointer] only: required file extensions or MIME subtypes (e.g. ["html"], ["pdf"], ["png"]). Omit when any type is acceptable.',
-          },
+
           properties: {
             type: 'array',
             description:
@@ -337,8 +324,8 @@ Always replace with a goal-anchored name. Examples:
   - list[int]:                  List of integers
   - object:                     Nested object — MUST include properties: [{ name, type }]
   - list[object]:               List of objects — MUST include properties describing each item shape
-  - file_pointer:               Reference to a file produced by the agent (image, doc, etc.). Use for tasks that produce files. The verifier extracts full file metadata: path, id, storage_path, original_filename, mime_type, size_bytes, created_at. When the goal implies a concrete format, ALSO set file_types to the required extensions/MIME subtypes (e.g. ["png"], ["html"], ["pdf"], ["xlsx"]).
-  - list[file_pointer]:         List of file references. Use when multiple files are produced. Same file_types rule when every item must share a format.
+  - file_pointer:               Reference to a file produced by the agent (image, doc, etc.). Use for tasks that produce files. The verifier extracts full file metadata: path, id, storage_path, original_filename, mime_type, size_bytes, created_at. Do NOT invent a separate format field — mime_type on the produced FilePointer is the source of truth for format.
+  - list[file_pointer]:         List of file references. Use when multiple files are produced.
   - session_file_pointer:       Cheap variant of file_pointer for cloud-agent goals (spawn_claude_code_agent / spawn_browser_agent). The verifier extracts ONLY the absolute path from terminal output — the spawning activity handles download/upload, so you avoid the full FilePointer round-trip. Prefer this over file_pointer when the goal is delegated to a cloud sandbox or browser session.
   - list[session_file_pointer]: List of session file references — same use case as session_file_pointer, but for goals producing multiple cloud-session files.
 
@@ -402,25 +389,26 @@ GOOD:
       ] }
   ]
 
-## Example 5 — file output with forced type
+## Example 5 — file output
 
 Goal: "Generate a logo as a PNG."
 
 GOOD:
   fields: [
-    { name: "logo", type: "file_pointer", file_types: ["png"] }
+    { name: "logo", type: "file_pointer" }
   ]
 
-## Example 6 — website deliverable (format inferred)
+## Example 6 — website deliverable
 
 Goal: "Make me a simple one-page website for my coffee shop."
 
 GOOD:
   fields: [
-    { name: "website", type: "file_pointer", file_types: ["html"] }
+    { name: "website", type: "file_pointer" }
   ]
 
-Why file_types=["html"]: a website deliverable is an HTML document even when the user never says "HTML" or "file".
+Why file_pointer (not str): a website is a file deliverable even when the user never says "file". Format is observed later from the FilePointer mime_type (e.g. text/html), not a second schema field.
+
 
 # YOUR JOB
 
@@ -647,7 +635,6 @@ export async function generateResponseSchema(
         type: f.type,
         required: true as const,
         ...(f.properties ? { properties: f.properties } : {}),
-        ...(f.file_types && f.file_types.length > 0 ? { file_types: f.file_types } : {}),
       }));
 
       return {

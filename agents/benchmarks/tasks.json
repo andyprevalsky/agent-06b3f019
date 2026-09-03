@@ -3822,7 +3822,7 @@
     "status": "ready",
     "runner": "agent",
     "bench": "pipeline-e2e",
-    "description": "User asks for a website without naming HTML/file_pointer. Schema generator must force a file_pointer with file_types including html, and the agent must return an HTML file_pointer in Task Complete outputs.",
+    "description": "User asks for a website without naming HTML/file_pointer. Schema generator must force a file_pointer field, and the agent must return an HTML FilePointer (mime_type/extension) in Task Complete outputs.",
     "environment": {
       "mode": "synthetic",
       "db_fixtures": [],
@@ -3830,7 +3830,7 @@
       "services": [],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "No pinned response_schema. Prompt never says HTML/file. Schema-gen must set file_pointer + file_types=[html]; completion outputs must include an HTML deliverable."
+      "context_notes": "No pinned response_schema. Prompt never says HTML/file. Schema-gen must set file_pointer; completion outputs must include an HTML deliverable (mime_type/extension)."
     },
     "enforce_declared_evaluators": true,
     "evaluators": [
@@ -3839,8 +3839,8 @@
         "method": "static_check",
         "criteria": [
           "The root agent reaches COMPLETED",
-          "Generated response_schema includes a file_pointer field with file_types forcing HTML",
-          "Task Complete outputs include at least one HTML file_pointer"
+          "Generated response_schema includes a file_pointer field",
+          "Task Complete outputs include at least one HTML FilePointer (mime_type/extension)"
         ],
         "checks": [
           {
@@ -3848,11 +3848,7 @@
             "value": "COMPLETED"
           },
           {
-            "type": "response_schema_has_file_pointer",
-            "required_file_types": [
-              "html",
-              "htm"
-            ]
+            "type": "response_schema_has_file_pointer"
           },
           {
             "type": "completion_summary_file_outputs",
@@ -3869,8 +3865,7 @@
       }
     ],
     "source": [
-      "feature:summary-document-drawer-html-preview",
-      "feature:response-schema-file-types"
+      "feature:summary-document-drawer-html-preview"
     ],
     "group": "daily"
   },

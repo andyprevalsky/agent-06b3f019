@@ -68,8 +68,6 @@ export interface ResponseSchemaField {
     | 'list[file_pointer]';
   required: boolean;
   description: string;
-  /** Required extensions/MIME subtypes for file_pointer fields (e.g. html, pdf, png). */
-  file_types?: string[];
 }
 
 export interface ResponseSchema {

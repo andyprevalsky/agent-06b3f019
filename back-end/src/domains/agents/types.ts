@@ -51,8 +51,6 @@ export const ResponseSchemaFieldSchema = z
     ]),
     required: z.boolean(),
     properties: z.array(NestedResponseSchemaFieldSchema).optional(),
-    /** Required extensions/MIME subtypes for file_pointer fields (e.g. html, pdf, png). */
-    file_types: z.array(z.string()).optional(),
   })
   .superRefine((field, ctx) => {
     if (

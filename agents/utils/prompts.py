@@ -261,11 +261,7 @@ def format_required_output_schema_user_message(
     def _field_line(f: Dict[str, Any]) -> str:
         req = "required" if f.get("required") else "optional"
         desc = f.get("description") or ""
-        file_types = f.get("file_types") or []
-        type_note = f["type"]
-        if file_types and f.get("type") in ("file_pointer", "list[file_pointer]"):
-            type_note = f'{f["type"]} file_types={list(file_types)}'
-        return f"- {f['name']} ({type_note}, {req}): {desc}"
+        return f"- {f['name']} ({f['type']}, {req}): {desc}"
 
     fields_desc = "\n".join(_field_line(f) for f in response_schema["fields"])
     if for_decomposition:

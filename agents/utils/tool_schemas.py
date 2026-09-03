@@ -173,13 +173,6 @@ class ResponseSchemaFieldConfig(BaseModel):
     )
     required: bool = Field(description="Whether this field is required in the output.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
-    file_types: List[str] = Field(
-        default_factory=list,
-        description=(
-            "For file_pointer / list[file_pointer]: required extensions or MIME subtypes "
-            '(e.g. ["html"], ["pdf"], ["png"]). Empty means any file type is acceptable.'
-        ),
-    )
     properties: List[ResponseSchemaNestedFieldConfig] = Field(
         default_factory=list,
         description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
@@ -190,10 +183,6 @@ class ResponseSchemaFieldConfig(BaseModel):
     def _coerce_null_properties(cls, value: Any) -> Any:
         return [] if value is None else value
 
-    @field_validator("file_types", mode="before")
-    @classmethod
-    def _coerce_null_file_types(cls, value: Any) -> Any:
-        return [] if value is None else value
 
     @model_validator(mode="after")
     def _object_fields_require_properties(self):
