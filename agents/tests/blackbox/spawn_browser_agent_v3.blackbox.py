@@ -6038,7 +6038,7 @@ def test_challenge_recovery_uses_cross_recovery_config_blacklist():
     """
     from pathlib import Path
 
-    repo = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
+    repo = (Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "repo.py").read_text()
     assert "blocked_config_keys" in repo
     assert "failed_config_keys" in repo
     assert "blacklist_expired" in repo
@@ -6049,7 +6049,7 @@ def test_challenge_recovery_live_verifies_after_promote_unless_preloaded():
     """Non-preloaded config winners still live-verify; preloaded winners skip a second LLM gate."""
     from pathlib import Path
 
-    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/handler.py").read_text()
+    source = (Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "handler.py").read_text()
     assert "await verify_live_page_cleared_challenge(" in source
     assert 'config_result.get("storage_state_preloaded")' in source
     assert "probe already verified clean" in source
@@ -6058,7 +6058,7 @@ def test_challenge_recovery_live_verifies_after_promote_unless_preloaded():
 def test_recover_browser_challenge_repo_forwards_blocked_config_keys():
     from pathlib import Path
 
-    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
+    source = (Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "repo.py").read_text()
     assert "blocked_config_keys" in source
     assert 'payload["blocked_config_keys"]' in source or "payload['blocked_config_keys']" in source
 
