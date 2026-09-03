@@ -159,7 +159,12 @@ async function main(): Promise<void> {
       await proactiveRuntime.callTool('list_transfers', { limit: 100 });
       nowMs += 61_000;
       await proactiveRuntime.callTool('list_transfers', { limit: 100 });
-      assert.equal(proactiveTokenRequests, 2, 'the refresh window should trigger a token exchange');
+      // Initial grant + TOKEN_GRANT_MAX_ATTEMPTS (6) retries on the proactive-refresh 5xx.
+      assert.equal(
+        proactiveTokenRequests,
+        7,
+        'proactive refresh retries transient token 5xx then falls back to the cached token'
+      );
       assert.deepEqual(
         proactiveToolTokens,
         ['still-valid-org-token', 'still-valid-org-token'],

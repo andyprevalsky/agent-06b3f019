@@ -242,8 +242,7 @@ async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
   // CDN hard-filter removed — wire fields stay compatibility stubs.
   assert.strictEqual(result.paymentCdnOk, true);
   assert.deepStrictEqual(result.paymentCdnHosts, {});
-  // LLM-only probes still evaluate once for agent DOM capture (not payment CDN).
-  assert.ok(evaluateCalls >= 1, 'probe captures agent DOM via evaluate for classifier parity');
+  assert.strictEqual(cdnEvaluateCalls, 0, 'CDN evaluate must not run on LLM-only probes');
 }
 
 function testBlockedResourceRequiresPaymentCdn(): void {
