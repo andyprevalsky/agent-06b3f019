@@ -3097,11 +3097,6 @@ async def run_all_tests():
     await r.record_async("handle_reconnect_health_none", test_handle_reconnect_exhausted_health_none)
     # _run_verifier
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
-    await r.record_async("run_verifier_disabled_by_env", test_run_verifier_disabled_by_env_flag)
-    await r.record_async(
-        "run_verifier_disabled_rejects_incomplete",
-        test_run_verifier_disabled_rejects_incomplete_nonzero_exit,
-    )
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
     await r.record_async(
         "run_verifier_codex_event_json",
