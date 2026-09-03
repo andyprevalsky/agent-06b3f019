@@ -28,6 +28,7 @@ import {
 } from './codeAgentPrompt';
 import { workDirForGithubRepo } from './e2bWorkDir';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -158,6 +159,27 @@ async function overlayCodexCodeWsServer(
  * @returns Session info including WebSocket URL for terminal streaming
  */
 export async function createClaudeCodeSession(
+  agentId: string,
+  goal: string,
+  attachments?: FilePointer[],
+  githubRepoUrl?: string,
+  userId?: string,
+  fastModeCacheEnabled?: boolean
+): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
+  // Concurrent creates stampede E2B reserve-script redis (see e2bCreateSlot.ts).
+  return withClaudeCodeCreateSlot(() =>
+    createClaudeCodeSessionUnlocked(
+      agentId,
+      goal,
+      attachments,
+      githubRepoUrl,
+      userId,
+      fastModeCacheEnabled
+    )
+  );
+}
+
+async function createClaudeCodeSessionUnlocked(
   agentId: string,
   goal: string,
   attachments?: FilePointer[],

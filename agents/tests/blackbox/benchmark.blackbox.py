@@ -4338,6 +4338,7 @@ def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
     assert checks["agent_status"]["value"] == "COMPLETED"
     assert "Github API token:" in task.prompt
     assert "{GITHUB_DISPATCH_TOKEN}" in task.prompt
+    assert "at most one Claude Code session at a time" in task.prompt
 
 
 def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
