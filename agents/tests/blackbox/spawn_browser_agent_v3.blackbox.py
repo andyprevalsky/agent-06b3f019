@@ -19067,10 +19067,16 @@ async def run_all_tests():
     await r.record_async(
         "challenge_recovery_cross_recovery_config_blacklist",
         test_challenge_recovery_uses_cross_recovery_config_blacklist,
+    )
+    await r.record_async(
         "challenge_recovery_never_live_verifies_after_atomic_promote",
         test_challenge_recovery_never_live_verifies_after_atomic_promote,
+    )
+    await r.record_async(
         "recover_browser_challenge_forwards_blocked_config_keys",
         test_recover_browser_challenge_repo_forwards_blocked_config_keys,
+    )
+    await r.record_async(
         "recover_browser_challenge_current_url_and_state",
         test_recover_browser_challenge_posts_current_url_and_state,
     )
