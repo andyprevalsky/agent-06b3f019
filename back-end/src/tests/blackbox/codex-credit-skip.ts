@@ -35,7 +35,7 @@ export class CredentialExhaustionSkip extends Error {
 // prose reaches the raw output. Both dialects are matched so the skip does not
 // depend on which leg reported the exhaustion.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached|team is blocked|missing payment method/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -130,6 +130,16 @@ export function testDetectCreditExhaustion_positive(): void {
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
   );
+  // Verbatim E2B control-plane create rejection observed 2026-09-03: list
+  // still returns 200, but POST /sandboxes is 403
+  // `{"code":403,"message":"team is blocked: missing payment method"}`. The
+  // Codex smoke asserts create→200 before it can read sandbox output, so this
+  // wording must be a funding skip or the gate hard-fails on E2B billing.
+  assert(
+    detectCodexCreditExhaustion('{"error":"403: team is blocked: missing payment method"}', []) !==
+      null,
+    'E2B "team is blocked: missing payment method" must be detected as credit exhaustion'
+  );
   // OpenAI's CURRENT out-of-funds wording, verbatim from the 2026-08-04 deploy
   // that hard-failed because this exact phrasing was not matched.
   const liveWording =
@@ -200,6 +210,11 @@ export function testDetectCreditExhaustion_negative(): void {
   assert(
     detectCodexCreditExhaustion('processed 14025 tokens across 3402 spans', []) === null,
     'digits adjacent to 402 must not trigger the out-of-funds signal'
+  );
+  // A generic 403 (GitHub access, auth) is not an E2B/OpenAI funding skip.
+  assert(
+    detectCodexCreditExhaustion('Expected status 200, got 403: {"error":"Forbidden"}', []) === null,
+    'bare HTTP 403 must NOT count as a fundless skip'
   );
 }
 

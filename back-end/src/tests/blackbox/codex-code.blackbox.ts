@@ -18,6 +18,7 @@ import {
   testCodexCreditSkip_readsNestedErrorObject,
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
+  testCodexCreditSkip_matchesE2bTeamBlockedWording,
 } from './codex-credit-skip.case';
 import {
   CredentialExhaustionSkip,
@@ -358,6 +359,19 @@ async function testSmoke_codexCompletesE2bTask() {
         goal: 'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.',
       }),
     });
+    // Create-time funding block (E2B team billed/blocked, OpenAI missing
+    // payment method) never produces sandbox output, so the post-run skip
+    // below cannot fire. Classify the create body with the same detector.
+    if (createRes.status !== 200) {
+      const haystack =
+        typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? '');
+      const createSkip = codexSmokeCreditSkipReason(haystack, []);
+      if (createSkip) {
+        throw new CredentialExhaustionSkip(
+          `Codex/E2B create blocked by provider funding; smoke SKIPPED without failing the deploy gate. Signal: ${createSkip}. status=${createRes.status}`
+        );
+      }
+    }
     assertStatus(createRes.status, 200, createRes.data);
 
     const body = createRes.data as { ws_url?: string; task_id?: string; sandbox_id?: string };
@@ -499,6 +513,10 @@ async function runAll() {
     {
       name: 'credit-skip -- auth revocation still fails hard',
       fn: async () => testCodexCreditSkip_authRevocationStillFailsHard(),
+    },
+    {
+      name: 'credit-skip -- E2B team-blocked / missing payment method is recognized',
+      fn: async () => testCodexCreditSkip_matchesE2bTeamBlockedWording(),
     },
     {
       name: 'auth -- throws when no credential and no funded key',
