@@ -14997,7 +14997,19 @@ def test_suite_selection_excludes_incomplete_entries():
         "gate-kyc-card-mint",
         "gate-source-connect-gmail",
     } <= suite_names
-    assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready" and not t.production_only])
+    # polar-bench (Odysseys + BU) is catalogued as ready but opt-in only —
+    # suite_tasks() / `--suite all` exclude it so full-suite runs stay first-party-sized.
+    from benchmarks.polar_catalog import is_polar_bench_task
+
+    assert len(suite_names) == len(
+        [
+            t
+            for t in all_tasks()
+            if t.status == "ready" and not t.production_only and not is_polar_bench_task(t)
+        ]
+    )
+    assert all(not is_polar_bench_task(t) for t in suite_tasks())
+    assert any(is_polar_bench_task(t) for t in all_tasks() if t.status == "ready")
 
 
 def test_dead_subscription_catalog_has_explicit_refund_candidate_contract():

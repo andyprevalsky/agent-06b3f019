@@ -91,6 +91,25 @@ const CATALOG = {
       updated_by: null,
       stats: null,
     },
+    {
+      name: 'polar-bu-001',
+      title: 'Polar BU 001',
+      description: 'polar-bench slice task',
+      prompt: 'browse',
+      status: 'ready',
+      bench: 'rose-bench',
+      group: 'polar-bench',
+      tags: ['polar-bench', 'browser'],
+      timeout_seconds: 900,
+      price_limit_cents: 1000,
+      expected_tools: ['spawn_browser_agent'],
+      min_agent_count: null,
+      is_chat_mode: false,
+      world_model_mode: null,
+      updated_at: '2026-07-10T00:00:00Z',
+      updated_by: null,
+      stats: null,
+    },
   ],
 };
 
@@ -324,6 +343,14 @@ describe('BenchmarksView (in-app hub)', () => {
     expect(screen.queryByTestId('task-row-chat-mode')).not.toBeInTheDocument();
     expect(screen.getByTestId('task-row-broken-task')).toBeInTheDocument();
     fireEvent.click(screen.getByTestId('group-incomplete')); // clear
+
+    // group filter: polar-bench → only polar slice
+    expect(screen.getByTestId('group-polar-bench')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('group-polar-bench'));
+    expect(screen.getByTestId('task-row-polar-bu-001')).toBeInTheDocument();
+    expect(screen.queryByTestId('task-row-chat-mode')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('task-row-broken-task')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('group-polar-bench')); // clear
 
     // tag filter: chat → only chat-mode
     fireEvent.click(screen.getByTestId('tag-chat'));

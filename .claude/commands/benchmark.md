@@ -69,6 +69,7 @@ If Layer 1 fails, Layer 2 is **skipped** (the run already failed).
 | `static_check` | Deterministic facts from run state | Exact checks in `checks[]` (counts, strings, status) |
 | `single_turn_llm_judge` | Semantic criteria against grounded evidence | One LLM judge call; score ≥ `pass_threshold` (default `1.0`) |
 | `agentic_llm_judge` | Same idea, larger / tool-using judge | Codex agentic judge over a full trajectory bundle |
+| `polar` | Odysseys-faithful per-rubric trajectory + screenshots (polar-bench only) | Isolated module `polar_evaluator.py`; perfect score required |
 
 Supported `static_check` `checks[].type` values are listed in
 `agents/benchmarks/long_horizon.py` → `RUNTIME_STATIC_CHECK_TYPES`.

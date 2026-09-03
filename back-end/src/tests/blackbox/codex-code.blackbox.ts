@@ -23,6 +23,7 @@ import {
 import {
   CredentialExhaustionSkip,
   codexSmokeCreditSkipReason,
+  detectCodexCreditExhaustion,
   testCreditExhaustion_neverOverridesSuccessSentinel,
   testDetectCreditExhaustion_negative,
   testDetectCreditExhaustion_observedOpenAiWording,
@@ -359,16 +360,15 @@ async function testSmoke_codexCompletesE2bTask() {
         goal: 'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.',
       }),
     });
-    // Create-time funding block (E2B team billed/blocked, OpenAI missing
-    // payment method) never produces sandbox output, so the post-run skip
-    // below cannot fire. Classify the create body with the same detector.
+    // Create-time funding/billing blocks (OpenAI org or E2B team) never reach a
+    // sandbox — same deploy-approved SKIP as mid-run credential exhaustion.
     if (createRes.status !== 200) {
-      const haystack =
-        typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? '');
-      const createSkip = codexSmokeCreditSkipReason(haystack, []);
+      const createBody =
+        typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
+      const createSkip = detectCodexCreditExhaustion(createBody, []);
       if (createSkip) {
         throw new CredentialExhaustionSkip(
-          `Codex/E2B create blocked by provider funding; smoke SKIPPED without failing the deploy gate. Signal: ${createSkip}. status=${createRes.status}`
+          `Codex/E2B session create blocked by external funding/billing (${createRes.status}); smoke SKIPPED without failing the deploy gate. Signal: ${createSkip}. Body: ${createBody.slice(0, 400)}`
         );
       }
     }

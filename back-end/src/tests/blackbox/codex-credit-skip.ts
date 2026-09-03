@@ -35,7 +35,7 @@ export class CredentialExhaustionSkip extends Error {
 // prose reaches the raw output. Both dialects are matched so the skip does not
 // depend on which leg reported the exhaustion.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached|team is blocked|missing payment method/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached|missing payment method|team is blocked|payment method required|billing_not_active/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -139,6 +139,11 @@ export function testDetectCreditExhaustion_positive(): void {
     detectCodexCreditExhaustion('{"error":"403: team is blocked: missing payment method"}', []) !==
       null,
     'E2B "team is blocked: missing payment method" must be detected as credit exhaustion'
+  );
+  // OpenAI team billing block at session-create time (observed 2026-09-03).
+  assert(
+    detectCodexCreditExhaustion('403: team is blocked: missing payment method', []) !== null,
+    'missing payment method / team is blocked must be detected as out of funds'
   );
   // OpenAI's CURRENT out-of-funds wording, verbatim from the 2026-08-04 deploy
   // that hard-failed because this exact phrasing was not matched.
