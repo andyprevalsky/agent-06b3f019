@@ -667,15 +667,34 @@ async def _capture_preserved_evidence_after_evaluate(
     """
     if dom_service is None:
         return None
-    try:
-        state = await dom_service.get_browser_state(include_screenshot=False)
-    except Exception as exc:
-        logger.warning(
-            "Failed to refresh browser state for preserved evaluate evidence",
-            error=str(exc)[:200],
-        )
-        return None
-    if not isinstance(state, dict):
+    # Bound + one retry: a frozen renderer must not stall the activity past the
+    # supervisor step budget, and a single transient CDP blip should not drop
+    # the only DOM proof the verifier will see after navigation.
+    last_error: Optional[BaseException] = None
+    state: Any = None
+    for attempt in range(2):
+        try:
+            state = await asyncio.wait_for(
+                dom_service.get_browser_state(include_screenshot=False),
+                timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+            )
+            last_error = None
+            break
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            logger.warning(
+                "Timed out refreshing browser state for preserved evaluate evidence",
+                attempt=attempt + 1,
+                timeout_s=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Failed to refresh browser state for preserved evaluate evidence",
+                attempt=attempt + 1,
+                error=str(exc)[:200],
+            )
+    if last_error is not None or not isinstance(state, dict):
         return None
     checkpoint = _browser_ground_truth_checkpoint(
         state,
@@ -736,13 +755,15 @@ def _browser_resume_continuity_state(
     browser_turn_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Serialize compact, browser-sourced continuity for a resumed activity."""
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+
     # Bound the transcript so Temporal resume payloads stay small; keep enough
     # recent tool results (incl. read_browser_state) for the next LLM turn.
     compact_turns = _compact_browser_turn_messages_for_resume(browser_turn_messages)
     return {
         "action_history": action_history.get_entries()[-30:],
         "visited_urls": list(visited_urls[-30:]),
-        "verifier_checkpoints": list(verifier_checkpoints[-3:]),
+        "verifier_checkpoints": list(verifier_checkpoints[-VERIFIER_CHECKPOINT_MAX:]),
         "browser_turn_messages": compact_turns,
     }
 

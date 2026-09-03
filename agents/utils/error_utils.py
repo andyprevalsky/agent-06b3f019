@@ -1,6 +1,6 @@
 """Error handling utilities for unwrapping Temporal error wrappers."""
 
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import ValidationError
 
@@ -59,19 +59,27 @@ def extract_error_message(e: Exception) -> str:
     current = e
     messages = []
     seen: set[int] = set()
+    deepest_specific_type: Optional[str] = None
+    generic_types = {"Exception", "BaseException", "ActivityError", "ApplicationError"}
 
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         msg = _safe_error_text(current)
         if msg and msg not in ("Activity task failed", ""):
             messages.append(msg)
+        type_name = type(current).__name__
+        if type_name and type_name not in generic_types:
+            deepest_specific_type = type_name
 
         current = _next_cause(current)
 
     if messages:
         return messages[-1] if len(messages) > 1 else messages[0]
     # httpx.ReadTimeout and similar often have empty str(e); never hide the type.
+    # Prefer the deepest non-generic type so Temporal wrappers do not mask the leaf.
+    if deepest_specific_type:
+        return deepest_specific_type
     type_name = type(e).__name__
-    if type_name and type_name not in {"Exception", "BaseException"}:
+    if type_name and type_name not in generic_types:
         return type_name
     return _safe_error_text(e) or "Unknown error"

@@ -316,11 +316,11 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     } catch (err) {
       if (loadGeneration === recordingLoadGeneration.current) {
         const message = err instanceof Error ? err.message : '';
-        // 403 from the sign endpoint means this session is not the agent owner
-        // (and not an admin). Dev auto-login can be shadowed by a stale wrong
-        // account — surface that instead of a generic failure.
+        // Ownership failures happen while signing the attachment URL. A later
+        // 403 on the signed recording download is usually an expired URL, not
+        // the wrong account — keep that as a generic load failure.
         setRecordingError(
-          /403|Access denied|Failed to get attachment URL/i.test(message)
+          /Failed to get attachment URL.*\(403\)|Access denied/i.test(message)
             ? 'Sign in as the agent owner to load this recording.'
             : 'Failed to load recording.',
         );

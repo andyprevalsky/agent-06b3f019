@@ -958,6 +958,47 @@ class AgentWorkflow:
         actual_output_price = runtime.get("output_cents_per_1k")
         if isinstance(actual_output_price, (int, float)) and not isinstance(actual_output_price, bool):
             self.output_cents_per_1k = float(actual_output_price)
+        if "cost_limit_wrapup_pending" in runtime:
+            self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
+        if "cost_limit_wrapup_consumed" in runtime:
+            self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+
+    def _maybe_arm_cost_limit_wrapup_after_browser(
+        self,
+        *,
+        tool_name: str,
+        result: Any,
+        paused_before: bool,
+        cost_limit_before: bool,
+    ) -> None:
+        """Allow one attempt_completion turn when browser costs newly trip the limit.
+
+        Only arms when THIS tool caused the cost-limit pause. User/parent pauses
+        that were already active before the tool ran stay intact.
+        """
+        if tool_name != "spawn_browser_agent":
+            return
+        if not isinstance(result, dict):
+            return
+        success = result.get("success") is True or str(result.get("status") or "").lower() in {
+            "completed",
+            "success",
+        }
+        if not success:
+            return
+        if not self._cost_limit_reached or not self.is_paused:
+            return
+        # Tool did not newly trip the limit — do not clear an unrelated pause.
+        if cost_limit_before or paused_before or self._paused_by_parent:
+            return
+        workflow.logger.warning(
+            "💰 Successful spawn_browser_agent tripped the cost limit "
+            f"({self.subtree_cost_cents:.1f}c >= {self.price_limit_cents}c); "
+            "allowing one wrap-up turn for attempt_completion"
+        )
+        self.is_paused = False
+        self._cost_limit_wrapup_pending = True
+        self._cost_limit_wrapup_consumed = False
 
     def _apply_deployment_control_state(self, agent_config: Dict[str, Any]) -> None:
         """Let a pause/resume/limit update that raced cutover win from the DB."""
@@ -1070,6 +1111,8 @@ class AgentWorkflow:
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
                 "fast_cache_goal": self.fast_cache_goal,
+                "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
+                "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
             },
         }
 
@@ -3105,6 +3148,8 @@ class AgentWorkflow:
                         )
 
             executor = TOOL_EXECUTORS[tool_name]
+            paused_before_tool = self.is_paused
+            cost_limit_before_tool = self._cost_limit_reached
 
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
@@ -3168,28 +3213,12 @@ class AgentWorkflow:
                     # Extract actual result for caller
                     result = result.get("result", result)
 
-                # Successful browser runs apply batched LLM costs on tool return.
-                # If that sunk cost trips the price limit, do not strand the agent
-                # on COST_LIMIT_REACHED before attempt_completion can run — the
-                # limit authorizes *future* spend (see _check_cost_limit).
-                if (
-                    tool_name == "spawn_browser_agent"
-                    and self._cost_limit_reached
-                    and self.is_paused
-                    and isinstance(result, dict)
-                    and (
-                        result.get("success") is True
-                        or str(result.get("status") or "").lower() in {"completed", "success"}
-                    )
-                ):
-                    workflow.logger.warning(
-                        "💰 Successful spawn_browser_agent tripped the cost limit "
-                        f"({self.subtree_cost_cents:.1f}c >= {self.price_limit_cents}c); "
-                        "allowing one wrap-up turn for attempt_completion"
-                    )
-                    self.is_paused = False
-                    self._cost_limit_wrapup_pending = True
-                    self._cost_limit_wrapup_consumed = False
+                self._maybe_arm_cost_limit_wrapup_after_browser(
+                    tool_name=tool_name,
+                    result=result,
+                    paused_before=paused_before_tool,
+                    cost_limit_before=cost_limit_before_tool,
+                )
 
                 # Route rotation signals from the per-tool summarizer through
                 # _on_tokens so pool-token rotation kicks in on 401/429/stall
@@ -3241,6 +3270,12 @@ class AgentWorkflow:
                     if original_usage:
                         await self._track_usage(original_usage, tool_name=tool_name)
                     result = executor_result.get("result", executor_result)
+                    self._maybe_arm_cost_limit_wrapup_after_browser(
+                        tool_name=tool_name,
+                        result=result,
+                        paused_before=paused_before_tool,
+                        cost_limit_before=cost_limit_before_tool,
+                    )
                     return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
