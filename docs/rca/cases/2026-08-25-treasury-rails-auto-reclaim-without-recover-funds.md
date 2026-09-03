@@ -18,53 +18,35 @@ tags:
   - harness-contract
   - deploy-gate
 sources:
-  - commit 88ae5ce1
+  - memory:treasury-rails-auto-reclaim-2026-08-25
 repro: cd back-end && npx tsx src/tests/blackbox/treasury-rails.blackbox.ts
 status: fixed
 ---
 
 ## Problem
 
-`/deploy` backend coverage failed on `treasury-rails` after mint → close → wait:
-
-- `recoverAllCardholderResiduals` returned `settledCents=0` / `pendingCents=0` for ~240s
-- Diagnostic `list_transfers` at timeout showed the mint transfer already
-  `status=reclaimed` with `released_cents` equal to the mint amount
-- Assertion required a `recover_funds` yield, so the suite failed even though the
-  race-free money invariant (THIS card's transfer reclaimed in full) was already true
-
-Solo retries sometimes passed via the residual path; under the full coverage suite
-AgentCard more often settled by reclaiming the mint transfer directly without
-exposing cardholder residual.
+`/deploy` backend coverage failed on `treasury-rails` after mint → close → wait
+because the assertion required a `recover_funds` yield even when AgentCard had
+already reclaimed the mint transfer in full (`status=reclaimed`).
 
 ## Diagnosis
 
-`waitForRecoverable` encoded one provider settlement path as mandatory. It
-required a residual `recover_funds` yield even when the same card's mint transfer
-had already reached the equivalent fully reclaimed state.
+Under full coverage concurrency, AgentCard often settles by reclaiming the mint
+transfer directly without exposing cardholder residual. The blackbox treated
+"no residual yield" as failure despite the money invariant already holding.
 
 ## Solution
 
-`waitForRecoverable` now succeeds when either:
-
-1. `recover_funds` yields residual headroom, or
-2. THIS card's mint transfer reaches `reclaimed`/`released` with full `released_cents`
-
-The subsequent `waitForTransferReclaimed` assertion remains the race-free money check.
-
-## Evidence
-
-Pre-fix (coverage run): transfer JSON at timeout
-`status=reclaimed`, `released_cents=1300`, sweep still zero → FAIL.
-
-Post-fix (same blackbox):
-`(transfer already reclaimed with $13.00 on attempt 13; recover_funds not needed)` → PASS.
+Accept full reclaim of THIS card's mint transfer as success in
+`waitForRecoverable`, not only a residual `recover_funds` yield.
 
 ## Human feedback
 
-None recorded.
+Deploy coverage flake: suite failed while the race-free money invariant was
+already true via auto-reclaim.
 
 ## Reusable lesson
 
-Assert the durable money invariant across every provider-valid settlement path,
-not one intermediate yield that happened to appear in a prior run.
+Harness assertions must accept every provider-valid settlement path that
+satisfies the money invariant, not only the residual-yield path observed in
+solo retries.

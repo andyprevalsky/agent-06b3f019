@@ -11,6 +11,7 @@ import {
   looksLikeUtf8ReplacementCorruption,
 } from '../../providers/fetchCapture';
 import { shouldPreferSandboxAnthropicBaseUrlOverFastMode } from '../../providers/e2b';
+import { mockSurgeMessageId } from '../../providers/smsTransportMock';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -246,7 +247,10 @@ async function run(): Promise<void> {
     });
     assert.strictEqual(surge.status, 200);
     const surgeBody = (await surge.json()) as { id?: string };
-    assert.strictEqual(surgeBody.id, 'blackbox-surge-message-7');
+    assert.strictEqual(
+      surgeBody.id,
+      mockSurgeMessageId('capture:{"to":"+15555550100","body":"hello"}')
+    );
 
     const whatsappSuccess = await fetch(
       'https://graph.facebook.com/v21.0/blackbox-phone/messages',
@@ -340,7 +344,10 @@ async function run(): Promise<void> {
       all.captures[6].requestHeaders.Authorization,
       'Bearer surge-sec...[redacted]'
     );
-    assert.strictEqual(all.captures[6].responseBody, '{"id":"blackbox-surge-message-7"}');
+    assert.strictEqual(
+      all.captures[6].responseBody,
+      JSON.stringify({ id: mockSurgeMessageId('capture:{"to":"+15555550100","body":"hello"}') })
+    );
     assert.strictEqual(all.captures[6].cached, false);
     assert.strictEqual(all.captures[7].cached, false);
     assert.strictEqual(all.captures[8].cached, false);

@@ -32,9 +32,22 @@ export async function maybeDispatchGateSms(
   if (phone === null || phone === '') return undefined;
   const body = renderGateSms(gate);
   try {
-    await sendSms(phone, body);
+    const result = await sendSms(phone, body, {
+      archiveRootAgentId: data.agentId,
+      archiveContext: { source: 'attention-gate-sms', user_id: data.userId },
+    });
+    // sendSms returns success:false for eligibility/credential failures without
+    // throwing — do not claim a gate SMS was sent when the transport declined.
+    if (!result.success) {
+      log.error('Failed to dispatch gate SMS', {
+        agent_id: data.agentId,
+        error: result.error ?? 'sendSms returned success=false',
+      });
+      return undefined;
+    }
   } catch (error) {
     log.error('Failed to dispatch gate SMS', { agent_id: data.agentId, error: errMsg(error) });
+    return undefined;
   }
   return body;
 }

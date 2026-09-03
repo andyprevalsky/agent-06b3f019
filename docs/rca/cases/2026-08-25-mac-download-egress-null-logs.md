@@ -17,7 +17,8 @@ tags:
   - mac-app
   - monitor
 sources:
-  - commit dae9b0c3
+  - PR #1180
+  - memory:mac-download-egress-null-logs
 repro: cd back-end && DOWNLOAD_EGRESS_REPORT_PATH=/tmp/dl-egress-repro/report.json npx tsx scripts/download-egress-health.ts
 status: fixed
 ---
@@ -30,48 +31,23 @@ aggregates stayed healthy; the monitor still exited 2 because Render's logs API
 returns `{ "logs": null, "hasMore": false }` when the text filter matches zero
 rows — not `{ "logs": [] }`.
 
+## Diagnosis
+
 `fetchTelemetryLogs` required `Array.isArray(body.logs)`, so every quiet hour
 became a diagnostic incident. `prod-health.ts` already used `data.logs || []`.
 
-Archive search (`Render logs query returned no logs array download egress`,
-`download egress Render telemetry`): no prior case on this contract.
-
-## Diagnosis
-
-`download-egress-health-lib.ts` rejected `logs: null` as a malformed Render
-response even though Render and the existing production-health parser use null
-for an empty log window. The monitor converted normal provider emptiness into a
-diagnostic failure.
-
 ## Solution
 
-Treat `logs == null` as an empty page (same as prod-health). Keep throwing when
-`logs` is present but not an array. Unit test covers live `logs: null` empty
-window → exit 0, and malformed `logs` string → exit 2.
-
-## Evidence
-
-Pre-fix (local, same credentials as CI):
-
-```
-HEALTHY: ... diagnostic failures 1
-- Render download telemetry unavailable: Error: Render logs query returned no logs array
-EXIT:2
-```
-
-Live Render empty filter:
-
-```
-{"hasMore":false,"logs":null,...}
-```
-
-Post-fix: same command exits 0 with empty diagnostic-failure list.
+Treat `logs: null` as an empty window (`[]`), matching the prod-health contract,
+so quiet periods do not page as monitor failures.
 
 ## Human feedback
 
-None recorded.
+Ops noise: Slack stayed on failure→failure while downloads were healthy; the
+monitor false-alarmed on empty Render log windows.
 
 ## Reusable lesson
 
-Normalize provider-specific empty-result representations at the API boundary
-when an established sibling integration already defines their meaning.
+Third-party "empty result" payloads are often `null`, not `[]`. Normalize both
+before failing a health gate, and align new monitors with existing prod-health
+parsers.

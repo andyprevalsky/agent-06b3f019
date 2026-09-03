@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.benchmark_tasks import BenchmarkTask, all_tasks  # noqa: E402
 from benchmarks.long_horizon import validate_catalog  # noqa: E402
+from benchmarks.polar_catalog import POLAR_GROUP, is_polar_bench_task  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -32,10 +33,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 def _print_holding_set(tasks: list[BenchmarkTask]) -> None:
     # retired tasks are dead — never run, never listed (history-only names)
     tasks = [t for t in tasks if t.status != "retired"]
-    rose = [t for t in tasks if t.bench == "rose-bench"]
-    pipeline = [t for t in tasks if t.bench == "pipeline-e2e"]
-    incomplete = [t for t in tasks if t.status == "incomplete"]
-    print(f"\nEval catalog: {len(tasks)} entries (agents/benchmarks/tasks.json)")
+    polar = [t for t in tasks if is_polar_bench_task(t)]
+    non_polar = [t for t in tasks if not is_polar_bench_task(t)]
+    rose = [t for t in non_polar if t.bench == "rose-bench"]
+    pipeline = [t for t in non_polar if t.bench == "pipeline-e2e"]
+    incomplete = [t for t in non_polar if t.status == "incomplete"]
+    print(f"\nEval catalog: {len(tasks)} entries (tasks.json + polar/)")
     print(f"\n  ROSE BENCH ({len(rose)}) — harness-independent capability evals:")
     for t in rose:
         flag = "" if t.status == "ready" else f"  [{t.status}]"
@@ -44,6 +47,15 @@ def _print_holding_set(tasks: list[BenchmarkTask]) -> None:
     for t in pipeline:
         flag = "" if t.status == "ready" else f"  [{t.status}]"
         print(f"    {t.name:<40} {t.title}{flag}")
+    print(
+        f"\n  POLAR BENCH ({len(polar)}) — Odysseys + BU Bench V1 "
+        f"(opt-in via --suite {POLAR_GROUP}; excluded from default suite runs):"
+    )
+    for t in polar[:12]:
+        flag = "" if t.status == "ready" else f"  [{t.status}]"
+        print(f"    {t.name:<40} {t.title}{flag}")
+    if len(polar) > 12:
+        print(f"    … +{len(polar) - 12} more (run: python benchmarks/run_benchmark.py --suite {POLAR_GROUP} --list)")
     print(f"\n  INCOMPLETE ({len(incomplete)}) — missing fixtures/evaluators, excluded from suite runs:")
     for t in incomplete:
         todo = ""
@@ -55,7 +67,11 @@ def _print_holding_set(tasks: list[BenchmarkTask]) -> None:
 
 def _run_agent_tasks(names: list[str], args: argparse.Namespace) -> bool:
     """Run agent evals through run_benchmark.py (the only agent-eval executor)."""
-    ready_agent_names = {t.name for t in all_tasks() if t.status == "ready"}
+    # Default suite excludes polar-bench; keep the ready-name set aligned so
+    # `--suite all` / exclude-task math does not accidentally pull Odysseys/BU in.
+    ready_agent_names = {
+        t.name for t in all_tasks() if t.status == "ready" and not is_polar_bench_task(t)
+    }
     command = [sys.executable, str(Path(__file__).resolve().parent / "run_benchmark.py")]
     if set(names) == ready_agent_names:
         command += ["--suite", "all"]
@@ -104,7 +120,8 @@ def main() -> int:
             return 2
         selected = [by_name[n] for n in names]
     else:
-        selected = [t for t in tasks if t.status == "ready"]
+        # Polar-bench is opt-in (`--suite polar-bench` / explicit --only names).
+        selected = [t for t in tasks if t.status == "ready" and not is_polar_bench_task(t)]
 
     if args.bench:
         selected = [t for t in selected if t.bench == args.bench]

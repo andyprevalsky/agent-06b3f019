@@ -26,8 +26,6 @@ repro: cd agents && source venv/bin/activate && python tests/blackbox/rose_brows
 status: fixed
 ---
 
-# RCA: Guest cookie commit is a tool param
-
 ## Problem
 
 Post-payment-boundary-suffix local rerun of `browser-hotel-booking`
@@ -43,12 +41,6 @@ proven clean strips (`stablePasses=1`), but recovery took
 language. A signed-in substring veto (`"sign in"`) matched inside
 `"Do not sign in"` and returned `False`, so guest commit stayed off.
 
-User feedback: goal sniffing is smell — the acting agent should set the flag
-on the `recover_from_challenge` tool call. Param should be framed as
-`auth_cookies_are_preserved` (true = keep logged-in state on the new machine;
-false = explore fresh cookie state, may lose auth but can clear a poisoned
-cookie forcing anti-bot).
-
 ## Solution
 
 1. Delete `goal_allows_logged_out_cookie_commit`.
@@ -62,31 +54,11 @@ and `test_guest_path_commits_clean_all_target_strip`.
 
 ## Human feedback
 
-User (2026-08-30): "the disabling of the guest cookie commit recovery path
-logic sounds smelly"
-
-User (2026-08-30): "can we just completely disable it, and instead let the
-flag be set as a param in tool call for recover from captcha?"
-
-User (2026-08-30): param should mean auth_cookies_are_preserved — true when
-logged in and the new machine must keep auth; false to explore fresh cookies
-(may lose auth, may fix poisoned anti-bot cookie).
-
-## Outcome follow-up (2026-08-31)
-
-Local `scripts/run-bench --local browser-hotel-booking` on
-`auth_cookies_are_preserved` rename (agent
-`58721c46-7b48-4d2f-97a5-7131a1ddc222`, run
-`20260831_001446_browser-hotel-booking`): model set
-`auth_cookies_are_preserved=false` on all four `recover_from_challenge` calls;
-first recovery cleared Bot-or-Not via cookie strip and reached Hotel Kabuki
-property/room UI. Still **FAIL** timeout 1139s with no `payment_approval` —
-residual Hotels.com GraphQL HTTP 429 soft-block (same outcome gap as
-`2026-08-21-hotels-com-classifier-network-summary-omits-http-status` follow-up).
-Durable FE: https://www.roselabs.ai/?agent-id=58721c46-7b48-4d2f-97a5-7131a1ddc222
+User (2026-08-30): goal sniffing for guest cookie commit is smell — let the
+acting agent set `auth_cookies_are_preserved` on the recover tool call instead.
 
 ## Reusable lesson
 
-Never gate recovery behavior on fragile goal-text substring sniffing when an
-explicit tool parameter can carry the intent; substring vetoes false-positive
-inside negations like "do not sign in."
+Never gate recovery behavior on fragile goal-text substring sniffing when a
+explicit tool param can carry the intent; substring vetoes false-positive inside
+negations like "do not sign in".

@@ -27,53 +27,26 @@ status: fixed
 
 ## Problem
 
-Pre-deploy smoke failed `browser-smoke` (5/6) with:
-
-`Context validation error: [role_alternation] Consecutive assistant messages at OAI indices 3 and 4`
-
-The durable FE agent completed successfully (`Example Domain`), but the
-benchmark aborted while status was still `ACTIVE` because the final message
-list failed context validation.
+Pre-deploy smoke failed `browser-smoke` with role_alternation even though the
+agent completed the example.com heading task successfully.
 
 ## Diagnosis
 
-Timeline on agent `dabeeb92-8607-4a38-8762-61878aa0dfbd`:
-
-1. ASSISTANT declares `spawn_agent` / `toolu_01PCzo…`
-2. Parent-visible FINISHED `"Browser automation complete"` with structured_response
-3. ASSISTANT declares `attempt_completion`
-4. Later FINISHED `"Browser Session Closed"` / `"Browser session closed after teardown"` reuses the same `toolCallId`
-
-`_emit_browser_task_terminal_for_fe` (added to close FE live chips on
-timeout/cancel) intentionally reuses the spawn `tool_call_id` so the panel can
-associate the terminal. It did **not** set `excludeFromModel`.
-
-Latest-FINISHED-per-toolCallId dedup (validator + `collapse_duplicate_tool_results`)
-then kept only the empty teardown row. Because that row's wall timestamp is after
-`attempt_completion`, the unmerged OpenAI view became:
-
-`assistant(spawn) → assistant(attempt_completion)` with no tool result between —
-exactly the dual-write detector's hard error.
-
-Local repro: validate the captured message list → role_alternation. Mark the
-teardown `excludeFromModel=True` and skip excluded rows before dedup → clean.
+FE teardown posted FINISHED on the spawn `toolCallId` without
+`excludeFromModel`, so the model-facing transcript lost the spawn tool result
+and showed consecutive assistant tool-calling turns.
 
 ## Solution
 
-1. `_emit_browser_task_terminal_for_fe` posts `extra_metadata={"excludeFromModel": True}`
-   so the FE chip-close row stays UI-visible but never enters model context.
-2. `context_validator._convert_to_openai_format` drops `excludeFromModel` rows
-   before terminal dedup (mirrors `drop_rows_never_sent_to_model`).
-3. Cemented blackbox: buggy teardown shape fails; excluded teardown passes.
-   Cleanup emitter asserts `excludeFromModel`.
+Mark FE-only browser teardown terminal events `excludeFromModel` so they do not
+mutate the spawn tool result the context validator / model transcript require.
 
 ## Human feedback
 
-None recorded.
+Smoke aborted on context validation while the durable FE agent had already
+succeeded; failure was harness dual-write, not task failure.
 
 ## Reusable lesson
 
-FE-only lifecycle terminals that reuse a real toolCallId must set
-`excludeFromModel` (or use a distinct id that panels can still resolve). Otherwise
-post-completion cleanup silently replaces the model-visible tool result and
-harness validators report corruption that never existed at LLM call time.
+FE-only side effects that reuse a toolCallId must be excluded from the model
+context, or dedup/role_alternation validators will fail a successful agent.

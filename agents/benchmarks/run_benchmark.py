@@ -63,6 +63,7 @@ from benchmarks.benchmark_tasks import (
     get_timeout_floor,
     list_all_tasks,
 )
+from benchmarks.polar_catalog import is_polar_bench_task
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
     LIVE_FIXTURE_NAMES,
@@ -308,6 +309,21 @@ def _benchmark_env_bool(name: str) -> Optional[bool]:
     if normalized in ("0", "false", "no", "off"):
         return False
     raise ValueError(f"{name} must be one of true/false/1/0/yes/no/on/off")
+
+
+def _resolve_write_lock_enabled(task: BenchmarkTask) -> Optional[bool]:
+    """Resolve write-lock for agent create.
+
+    Polar public-web tasks use ``approval_handling=None`` (no required gate).
+    Product write-lock still pauses on Google search / form submits by default,
+    which leaves the harness unable to auto-approve and stalls the suite.
+    Default polar agents to write-lock off unless ``BENCHMARK_WRITE_LOCK_ENABLED``
+    is set explicitly.
+    """
+    write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+    if write_lock_enabled is None and is_polar_bench_task(task):
+        return False
+    return write_lock_enabled
 
 
 def _minted_clear_existing_auth_enabled() -> bool:
@@ -2002,7 +2018,7 @@ async def create_agent(
     if local_task_queue:
         body["task_queue"] = local_task_queue
 
-    write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+    write_lock_enabled = _resolve_write_lock_enabled(task)
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
 
@@ -3018,6 +3034,7 @@ async def _judge_output_recovers_expected_fields(
     if not expected_schema.get("fields"):
         return None
 
+    claude_auth = await _benchmark_judge_claude_auth_kwargs()
     judged = await check_progress(
         context=[
             {
@@ -3034,6 +3051,7 @@ async def _judge_output_recovers_expected_fields(
         response_schema=expected_schema,
         call_site="semantic_output_field_recovery_judge",
         agent_id=root_agent_id,
+        **claude_auth,
     )
     score = float(judged.get("score", 0.0))
     if score >= 1.0:
@@ -8919,6 +8937,35 @@ async def _call_declared_agentic_llm_judge(
     return {"score": score, "reasoning": reasoning, "usage": usage}
 
 
+async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dict:
+    """Fetch Claude OAuth for harness-side judges (declared evaluators / semantic judges).
+
+    Agent workflows already resolve Claude auth via Temporal activities. Harness-side
+    ``check_progress`` calls (post-run judges) previously omitted the token, so Rose
+    fell through OpenAI → Anthropic API key → OpenRouter and failed with 402 when
+    those funded paths were empty — even though the same user's Claude OAuth worked
+    for the agent itself. Pass the OAuth token so judges share the agent auth path.
+    """
+    from helpers.llm import fetch_claude_max_token
+
+    resolved_user_id = (user_id or "").strip() or _current_benchmark_user_id()
+    if not resolved_user_id:
+        return {}
+    try:
+        token_data = await fetch_claude_max_token(resolved_user_id)
+    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+        print(f"    ⚠ Declared-judge Claude auth fetch failed: {exc}")
+        return {}
+    if not token_data or not token_data.get("accessToken"):
+        return {}
+    return {
+        "claude_token": token_data["accessToken"],
+        "claude_token_source": token_data.get("source"),
+        "claude_token_pool_id": token_data.get("poolTokenId"),
+        "claude_token_user_id": resolved_user_id,
+    }
+
+
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
@@ -8945,6 +8992,13 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    judge_user_id = (
+        agent.get("userId")
+        or agent.get("user_id")
+        or _current_benchmark_user_id()
+    )
+    claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
     return await check_progress(
         context=[
             {
@@ -8959,7 +9013,8 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         verifier_system_prompt=verifier_prompt,
         response_schema=None,
         call_site="benchmark_declared_evaluator",
-        agent_id=(data.get("agent") or {}).get("agent_id") or (data.get("agent") or {}).get("id"),
+        agent_id=agent.get("agent_id") or agent.get("id"),
+        **claude_auth,
     )
 
 
@@ -10236,7 +10291,7 @@ async def _run_declared_evaluators(
         await _hydrate_completion_sms_events(data)
 
     needs_tree_evidence = any(
-        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge"}
+        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge", "polar"}
         for evaluator in task.evaluators
     )
     if needs_tree_evidence and base_url:
@@ -10273,6 +10328,20 @@ async def _run_declared_evaluators(
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
                 passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            elif method == "polar":
+                # Isolated Odysseys-faithful path — see benchmarks/polar_evaluator.py.
+                # Does not share prompts/evidence builders with other judge methods.
+                from benchmarks.polar_evaluator import run_polar_evaluator
+
+                judged = await run_polar_evaluator(
+                    task_prompt=task.prompt,
+                    evaluator=evaluator,
+                    data=data,
+                )
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "polar judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
             else:
                 passed = False
                 score = 0.0
@@ -10292,6 +10361,13 @@ async def _run_declared_evaluators(
             result["evidence_mode"] = evidence_mode
         if usage is not None:
             result["usage"] = usage
+        if method == "polar":
+            # Surface per-rubric detail for hub / run JSON without affecting other methods.
+            polar_results = locals().get("judged")
+            if isinstance(polar_results, dict) and polar_results.get("rubric_results") is not None:
+                result["rubric_results"] = polar_results["rubric_results"]
+                result["perfect"] = polar_results.get("perfect")
+                result["num_screenshots_sent"] = polar_results.get("num_screenshots_sent")
         results.append(result)
         if not passed:
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
@@ -11283,7 +11359,10 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             )
     elif args.suite:
         if args.suite == "all":
-            tasks = all_tasks()
+            # Default "all" stays on the first-party catalog. Polar Odysseys +
+            # BU Bench V1 (~300 live browser tasks) are opt-in via
+            # `--suite polar-bench` so full-suite / daily fleets never fan out.
+            tasks = [t for t in all_tasks() if not is_polar_bench_task(t)]
         elif args.suite == "auth":
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
@@ -11294,11 +11373,17 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             # Bench axis: rose-bench = harness-independent capability evals,
             # pipeline-e2e = harness plumbing tests. Orthogonal to tag slices.
-            tasks = [t for t in all_tasks() if t.bench == args.suite]
+            # Polar tasks also declare bench=rose-bench but stay behind the
+            # polar-bench suite tag so this axis stays first-party-sized.
+            tasks = [
+                t
+                for t in all_tasks()
+                if t.bench == args.suite and not is_polar_bench_task(t)
+            ]
         else:
             tasks = get_tasks_by_tag(args.suite)
     else:
-        tasks = all_tasks()
+        tasks = [t for t in all_tasks() if not is_polar_bench_task(t)]
 
     if not explicit_task_names:
         # Suite selection only runs complete benchmark evals. `status == "incomplete"`

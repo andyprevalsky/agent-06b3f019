@@ -398,7 +398,14 @@ async function activityCount(
   handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>
 ): Promise<WorkflowHistoryMetrics> {
   const history = await handle.fetchHistory();
-  return summarizeWorkflowHistory(history.events ?? []);
+  const events = history.events ?? [];
+  const metrics = summarizeWorkflowHistory(events);
+  // Ignore protobuf null placeholders; count only real workflow-task failures.
+  const workflowTaskFailures = events.filter(
+    (event) => event.workflowTaskFailedEventAttributes != null
+  ).length;
+  assert.strictEqual(workflowTaskFailures, metrics.workflowTaskFailures);
+  return metrics;
 }
 
 /**
