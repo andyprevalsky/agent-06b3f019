@@ -45,7 +45,11 @@ def browser_start_to_close_timeout_minutes(
     goal: str = "",
     workflow_instance=None,
 ) -> int:
-    """3m Fast Mode ceiling is demo-only; every other FM browser keeps 30m."""
+    """3m Fast Mode ceiling is demo-only; every other FM browser keeps 30m.
+
+    Polar / high BROWSER_MAX_ITERATIONS runs scale the ceiling with the step
+    budget (~30m per 100 steps, matching Odysseys Opus wall-clock at 100 steps).
+    """
     from domains.spawn_agent.config import is_oai_demo_goal, is_oai_demo_mass_agent_task
 
     demo = is_oai_demo_goal(goal)
@@ -53,6 +57,10 @@ def browser_start_to_close_timeout_minutes(
         demo = demo or is_oai_demo_mass_agent_task(workflow_instance)
     if fast_mode and demo:
         return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
+    steps = get_max_iterations()
+    if steps > DEFAULT_MAX_ITERATIONS:
+        # 100 steps ≈ 30 minutes upstream; keep a small buffer above that ratio.
+        return max(ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)
     return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
 
 
