@@ -35,7 +35,7 @@
       "services": [],
       "secrets": ["FAST_MODE_CACHE_DATABASE_URL"],
       "live_targets": [],
-      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T2/T7-content/T9 are static_check. T1/T3–T6 and T7-schema are single_turn_llm_judge. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T1/T2/T6/T7-content/T9 are static_check. T3–T5 and T7-schema are single_turn_llm_judge. T1/T6 are static so Fast Mode trees cannot flake closed on invented 'tree truncated' LLM reasoning. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
     },
     "evaluators": [
       {
@@ -99,11 +99,15 @@
       },
       {
         "id": "t1-andy-only",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
           "T1: Andy Prevalsky is the principal user (not Aman Gottumukkala). July cache field names like opportunities_for_aman do not fail."
         ],
-        "judge_prompt": "This is a Fast Mode mass-agent research tree, not an ecommerce purchase. Score 1.0 if the root goal, first-level GP goals, and completion card are for Andy Prevalsky / Andy's and Aman Gottumukkala is not the principal user/owner. July replay may keep historical schema keys such as opportunities_for_aman or opportunities_for_aman in cached GP output_schema — that is not Aman-as-principal and must not fail T1. FAIL only if the root goal or completion card presents Aman as the user. Use benchmark_state.tree mentions_andy/mentions_aman plus the completion card. Unsupported assistant claims are not proof."
+        "checks": [
+          {
+            "type": "principal_user_andy"
+          }
+        ]
       },
       {
         "id": "t2-fifty-first-level-gps",
@@ -142,9 +146,13 @@
       },
       {
         "id": "t6-no-nested-gps",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": ["T6: No nested general-purpose children"],
-        "judge_prompt": "Score 1.0 only if no general-purpose child has a parent that is itself a general-purpose, for_each, or explore agent. Explore/browser leaves under first-level GPs are allowed. FAIL any nested general-purpose agent. Use benchmark_state.tree, not assistant claims."
+        "checks": [
+          {
+            "type": "no_nested_general_purpose"
+          }
+        ]
       },
       {
         "id": "t7-real-deliverable",

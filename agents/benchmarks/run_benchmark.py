@@ -8639,6 +8639,9 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
                 "agent_id": agent_id,
                 "status": node.get("status"),
                 "agent_type": node.get("agent_type"),
+                "goal": str(node.get("goal") or "")[:240],
+                "mentions_andy": bool(node.get("mentions_andy")),
+                "mentions_aman": bool(node.get("mentions_aman")),
                 "message_count": int(node.get("message_count") or 0),
                 "research_tool_count": int(node.get("research_tool_count") or 0),
                 "explore_spawn_count": int(node.get("explore_spawn_count") or 0),
@@ -8654,6 +8657,101 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
 
 def _first_level_gps_from_data(data: dict) -> list[dict]:
     return list(_compact_benchmark_state_for_judge(data).get("first_level_gps") or [])
+
+
+def _nested_general_purpose_violations(compact_tree: dict) -> list[dict]:
+    """GPs whose parent is itself GP / for_each / explore — typed evidence for T6."""
+    by_id = {str(agent_id): node for agent_id, node in compact_tree.items() if isinstance(node, dict)}
+    violations: list[dict] = []
+    for agent_id, node in by_id.items():
+        agent_type = str(node.get("agent_type") or "")
+        goal = str(node.get("goal") or "")
+        is_gp = agent_type == "general_purpose" or goal.startswith("You are analyzing ONE creator")
+        if not is_gp:
+            continue
+        parent_id = str(node.get("parent_agent_id") or "")
+        if not parent_id or parent_id not in by_id:
+            continue
+        parent = by_id[parent_id]
+        parent_type = str(parent.get("agent_type") or "")
+        parent_goal = str(parent.get("goal") or "")
+        parent_is_gp = parent_type in {"general_purpose", "for_each"} or parent_goal.startswith(
+            "You are analyzing ONE creator"
+        )
+        parent_is_explore = _is_explore_tree_node(parent)
+        if parent_is_gp or parent_is_explore:
+            violations.append(
+                {
+                    "agent_id": agent_id,
+                    "parent_agent_id": parent_id,
+                    "parent_agent_type": parent_type or ("explore" if parent_is_explore else "general_purpose"),
+                }
+            )
+    return violations
+
+
+def _text_mentions_andy(text: str) -> bool:
+    blob = str(text or "").lower()
+    return "andy prevalsky" in blob or "andy's" in blob or "for andy" in blob
+
+
+def _text_presents_aman_as_user(text: str) -> bool:
+    """True when Aman is framed as the principal user/owner (not schema key leftovers)."""
+    blob = str(text or "").lower()
+    if "aman gottumukkala" not in blob and "aman's" not in blob:
+        return False
+    # Historical July schema keys / phrase leftovers are not Aman-as-principal.
+    if "opportunities_for_aman" in blob or "opportunities for aman" in blob:
+        cleaned = (
+            blob.replace("opportunities_for_aman", " ")
+            .replace("opportunities for aman", " ")
+        )
+        if "aman gottumukkala" not in cleaned and "aman's" not in cleaned:
+            return False
+        blob = cleaned
+    andy_present = _text_mentions_andy(blob)
+    aman_owner_markers = (
+        "for aman gottumukkala",
+        "aman gottumukkala is",
+        "aman's personal brand",
+        "building a personal brand for aman",
+        "principal user",
+    )
+    if any(marker in blob for marker in aman_owner_markers):
+        return True
+    # Aman named without Andy in the same root/completion blob → treat as principal.
+    return not andy_present
+
+
+def _principal_user_andy_check(data: dict) -> tuple[bool, str]:
+    """T1: Andy is principal; Aman is not the user/owner on root goal or completion."""
+    compact = _compact_benchmark_state_for_judge(data)
+    tree = compact.get("tree") if isinstance(compact.get("tree"), dict) else {}
+    root_id = _tree_root_id(tree, data)
+    root = tree.get(str(root_id)) if root_id else None
+    root = root if isinstance(root, dict) else {}
+    root_goal = str(root.get("goal") or "")
+    completion_summary = str(root.get("completion_summary") or "")
+    if not completion_summary:
+        completion_summary = _root_deliverable_blob(data)[:240]
+    first_level = compact.get("first_level_gps") if isinstance(compact.get("first_level_gps"), list) else []
+    gps_mention_andy = any(
+        _text_mentions_andy(str(gp.get("goal") or ""))
+        or bool(gp.get("mentions_andy"))
+        for gp in first_level
+        if isinstance(gp, dict)
+    )
+    andy_ok = (
+        bool(root.get("mentions_andy"))
+        or _text_mentions_andy(root_goal)
+        or _text_mentions_andy(completion_summary)
+        or gps_mention_andy
+    )
+    if _text_presents_aman_as_user(root_goal) or _text_presents_aman_as_user(completion_summary):
+        return False, "T1: root goal or completion presents Aman as the principal user"
+    if not andy_ok:
+        return False, "T1: no Andy Prevalsky principal evidence on root/first-level GPs/completion"
+    return True, "All declared static checks passed"
 
 
 def _judge_source_tree(data: dict) -> dict:
@@ -8720,6 +8818,19 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
             if isinstance(agent, dict)
         ]
     compact["first_level_gps"] = _first_level_gps_from_compact_tree(compact_tree, data)
+    nested_violations = _nested_general_purpose_violations(compact_tree)
+    # Typed T6 evidence so the LLM judge cannot fail closed on "tree truncated"
+    # when parentage is fully available in compact form (mass-agent Fast Mode).
+    compact["nested_general_purpose_count"] = len(nested_violations)
+    compact["nested_general_purpose_violations"] = nested_violations[:20]
+    root_id = _tree_root_id(compact_tree, data)
+    root_node = compact_tree.get(str(root_id)) if root_id else None
+    root_node = root_node if isinstance(root_node, dict) else {}
+    compact["principal_user"] = {
+        "mentions_andy": bool(root_node.get("mentions_andy")),
+        "mentions_aman": bool(root_node.get("mentions_aman")),
+        "completion_summary": str(root_node.get("completion_summary") or "")[:240],
+    }
     compact["usage"] = {
         "cost_cents": data.get("cost_cents") or raw.get("cost_cents") or 0,
         "tokens_out": data.get("tokens_out") or raw.get("tree_tokens_out") or 0,
@@ -10648,6 +10759,27 @@ def _run_declared_static_check(
                     f"T2: {len(real)} first-level GPs with real transcripts "
                     f"(of {len(gps)} first-level GPs); expected >= {minimum}",
                 )
+            continue
+        if check_type == "no_nested_general_purpose":
+            compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
+            violations = _nested_general_purpose_violations(compact_tree)
+            if violations:
+                sample = violations[0]
+                return (
+                    False,
+                    "T6: nested general-purpose "
+                    f"{str(sample.get('agent_id') or '')[:8]} under "
+                    f"{str(sample.get('parent_agent_type') or 'unknown')} "
+                    f"{str(sample.get('parent_agent_id') or '')[:8]} "
+                    f"({len(violations)} total)",
+                )
+            if not compact_tree:
+                return False, "T6: typed tree was empty"
+            continue
+        if check_type == "principal_user_andy":
+            ok, reason = _principal_user_andy_check(data)
+            if not ok:
+                return False, reason
             continue
         if check_type == "approval_request_details_for_seen_kind":
             observed_kind = benchmark_state.get("attention_request_kind_seen")

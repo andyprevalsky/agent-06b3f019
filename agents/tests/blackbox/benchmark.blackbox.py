@@ -3244,6 +3244,182 @@ def test_first_level_gp_count_static_uses_collected_transcripts():
     assert "T2:" in reason
 
 
+def test_no_nested_general_purpose_static_uses_typed_parentage():
+    """T6 is a named static row: nested GP under GP/explore fails; first-level GPs pass."""
+    from benchmarks.run_benchmark import (
+        _compact_benchmark_state_for_judge,
+        _run_declared_static_check,
+    )
+
+    evaluator = {"checks": [{"type": "no_nested_general_purpose"}]}
+    root = "root-mass"
+    gp0 = "gp-0"
+    explore0 = "explore-0"
+    nested = "gp-nested"
+    flat = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [],
+                },
+                gp0: {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+                explore0: {
+                    "parent_agent_id": gp0,
+                    "status": "COMPLETED",
+                    "agent_type": "explore",
+                    "goal": "Explore public posts for Huberman",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "ok",
+                            "metadata": {"toolName": "web_fetch", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, flat) == (True, "All declared static checks passed")
+    compact = _compact_benchmark_state_for_judge(flat)
+    assert compact["nested_general_purpose_count"] == 0
+    assert compact["nested_general_purpose_violations"] == []
+
+    nested_data = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                **flat["_benchmark"]["tree"],
+                nested: {
+                    "parent_agent_id": gp0,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Nested child.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, nested_data)
+    assert passed is False
+    assert "T6:" in reason
+    assert "nested general-purpose" in reason
+    nested_compact = _compact_benchmark_state_for_judge(nested_data)
+    assert nested_compact["nested_general_purpose_count"] == 1
+    assert nested_compact["nested_general_purpose_violations"][0]["agent_id"] == nested
+    assert nested_compact["nested_general_purpose_violations"][0]["parent_agent_id"] == gp0
+
+
+def test_principal_user_andy_static_ignores_schema_key_leftovers():
+    """T1 is a named static row: Andy principal wins; opportunities_for_aman does not fail."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "principal_user_andy"}]}
+    root = "root-mass"
+    good = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Task Complete",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "Andy’s differentiated positioning and 90-day calendar.",
+                        "outputs": [{"name": "opportunities_for_aman", "value": "gap"}],
+                    },
+                },
+            }
+        ],
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Task Complete",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Andy’s differentiated positioning and 90-day calendar.",
+                                    "outputs": [{"name": "opportunities_for_aman", "value": "gap"}],
+                                },
+                            },
+                        }
+                    ],
+                },
+                "gp-0": {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, good) == (True, "All declared static checks passed")
+
+    aman_principal = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Build a personal brand for Aman Gottumukkala across health creators",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Task Complete",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Aman’s personal brand calendar is ready.",
+                                    "outputs": [],
+                                },
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, aman_principal)
+    assert passed is False
+    assert "T1:" in reason
+
+
 def test_root_deliverable_markers_use_dag_assemble_not_stub_card():
     """T7 is a named static row: DAG assemble counts when Task Complete is a stub."""
     from benchmarks.run_benchmark import _run_declared_static_check
@@ -14558,7 +14734,9 @@ def test_unified_catalog_delineates_bench_axes():
             "explore_completion_summary",
         ],
         "t7-completion-summary-length": ["completion_summary_length"],
+        "t1-andy-only": ["principal_user_andy"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
+        "t6-no-nested-gps": ["no_nested_general_purpose"],
         "t7-real-deliverable": ["root_deliverable_markers"],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
@@ -14593,11 +14771,9 @@ def test_unified_catalog_delineates_bench_axes():
         if evaluator["method"] == "single_turn_llm_judge"
     ]
     assert judge_ids == [
-        "t1-andy-only",
         "t3-full-explore-trajectories",
         "t4-full-july-gp-trajectories",
         "t5-zero-live-spend",
-        "t6-no-nested-gps",
         "t7-schema-task-complete",
     ]
     criteria = [criterion for evaluator in mass["evaluators"] for criterion in evaluator["criteria"]]
@@ -17424,6 +17600,14 @@ async def run_all_tests():
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",
         test_first_level_gp_count_static_uses_collected_transcripts,
+    )
+    r.record(
+        "no_nested_general_purpose_static_uses_typed_parentage",
+        test_no_nested_general_purpose_static_uses_typed_parentage,
+    )
+    r.record(
+        "principal_user_andy_static_ignores_schema_key_leftovers",
+        test_principal_user_andy_static_ignores_schema_key_leftovers,
     )
     r.record(
         "root_deliverable_markers_use_dag_assemble_not_stub_card",
