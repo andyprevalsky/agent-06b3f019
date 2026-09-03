@@ -48,6 +48,18 @@ async function createUser() {
   return userId;
 }
 
+async function createOwnedAgent(userId: string) {
+  const agentId = `agent-phone-agent-${RUN_ID}-${randomUUID().slice(0, 8)}`;
+  await prisma.agent.create({
+    data: {
+      id: agentId,
+      userId,
+      goal: 'AgentPhone black-box fixture',
+    },
+  });
+  return agentId;
+}
+
 async function cleanup(userId: string, operationKeys: string[] = []) {
   if (operationKeys.length > 0) {
     await prisma.toolSideEffect.deleteMany({ where: { operationKey: { in: operationKeys } } });
@@ -55,17 +67,6 @@ async function cleanup(userId: string, operationKeys: string[] = []) {
   await prisma.agent.deleteMany({ where: { userId } });
   await prisma.agentIdentity.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
-}
-
-async function createOwnedAgent(userId: string) {
-  return prisma.agent.create({
-    data: {
-      userId,
-      goal: 'agent-phone blackbox',
-      status: 'ACTIVE',
-      source: 'SMS',
-    },
-  });
 }
 
 function headers(userId?: string): Record<string, string> {
@@ -196,9 +197,9 @@ test('outbound Agent SMS enforces auth, validation, and configured sender identi
 
 test('outbound Agent SMS replays completed receipt without another provider send', async () => {
   const userId = await createUser();
-  const agent = await createOwnedAgent(userId);
+  const agentId = await createOwnedAgent(userId);
   const idempotencyKey = 'completed-replay';
-  const operationKey = outboundOperationKey(userId, agent.id, idempotencyKey);
+  const operationKey = outboundOperationKey(userId, agentId, idempotencyKey);
   try {
     await prisma.agentIdentity.create({
       data: {
@@ -226,7 +227,7 @@ test('outbound Agent SMS replays completed receipt without another provider send
         operationType: 'agentphone.message',
         status: 'SUCCEEDED',
         externalId: 'msg-existing',
-        request: outboundPayload(userId, idempotencyKey, agent.id),
+        request: outboundPayload(userId, idempotencyKey, agentId),
         response,
       },
     });
@@ -235,7 +236,7 @@ test('outbound Agent SMS replays completed receipt without another provider send
     const replay = await request(`${BASE_URL}/api/agentphone/messages/send`, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify(outboundPayload(userId, idempotencyKey, agent.id)),
+      body: JSON.stringify(outboundPayload(userId, idempotencyKey, agentId)),
     });
     assert(replay.status === 200, `completed replay failed: ${JSON.stringify(replay.data)}`);
     assert(
@@ -247,7 +248,7 @@ test('outbound Agent SMS replays completed receipt without another provider send
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({
-        ...outboundPayload(userId, idempotencyKey, agent.id),
+        ...outboundPayload(userId, idempotencyKey, agentId),
         message: 'Different payload must not reuse the receipt',
       }),
     });
@@ -264,9 +265,9 @@ test('outbound Agent SMS replays completed receipt without another provider send
 
 test('outbound Agent SMS refuses an ambiguous retry instead of duplicating a text', async () => {
   const userId = await createUser();
-  const agent = await createOwnedAgent(userId);
+  const agentId = await createOwnedAgent(userId);
   const idempotencyKey = 'ambiguous-start';
-  const operationKey = outboundOperationKey(userId, agent.id, idempotencyKey);
+  const operationKey = outboundOperationKey(userId, agentId, idempotencyKey);
   try {
     await prisma.agentIdentity.create({
       data: {
@@ -283,13 +284,13 @@ test('outbound Agent SMS refuses an ambiguous retry instead of duplicating a tex
         operationKey,
         operationType: 'agentphone.message',
         status: 'STARTED',
-        request: outboundPayload(userId, idempotencyKey, agent.id),
+        request: outboundPayload(userId, idempotencyKey, agentId),
       },
     });
     const ambiguous = await request(`${BASE_URL}/api/agentphone/messages/send`, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify(outboundPayload(userId, idempotencyKey, agent.id)),
+      body: JSON.stringify(outboundPayload(userId, idempotencyKey, agentId)),
     });
     assert(ambiguous.status === 409, `expected ambiguous retry 409, got ${ambiguous.status}`);
     assert(
