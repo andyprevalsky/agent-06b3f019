@@ -166,6 +166,20 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
                 f"{item_id}: required_injectable_cookie_domains must be a subset of "
                 f"live_cookie_domains; missing from sync scope: {missing}"
             )
+    # needs_auth marks benches that require a *live* signed-in session (valid auth
+    # token), not merely injectable CookieBundles. Cookie presence is necessary but
+    # not sufficient — stale bundles still inject and the agent then correctly
+    # escalates to auth_assistance, which must be reported as an INFRA/fixture
+    # gap rather than an agent capability miss.
+    needs_auth = env.get("needs_auth")
+    if needs_auth is not None and not isinstance(needs_auth, bool):
+        raise ValueError(f"{item_id}: environment.needs_auth must be a boolean")
+    if needs_auth is True:
+        if not (required_cookie_domains or []):
+            raise ValueError(
+                f"{item_id}: environment.needs_auth=true requires non-empty "
+                f"required_injectable_cookie_domains (live session domains)"
+            )
     return env
 
 
