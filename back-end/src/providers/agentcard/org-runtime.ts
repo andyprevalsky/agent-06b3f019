@@ -1,9 +1,5 @@
 import { AGENTCARD_MCP_RESOURCE } from './config';
-import { mcpCallTool } from './runtime';
 
-const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token';
-const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
-const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
 /**
  * AgentCard throttles the organization MCP per fixed window (observed: 120 requests/minute, shared
  * by EVERY org caller — card issuance, wallet reclaim polling, the minute cron reconciler and the
@@ -37,6 +33,9 @@ const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
 const RATE_LIMIT_RETRY_ATTEMPTS = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
 const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
+const ORG_MCP_TOOL_TIMEOUT_MS = 30_000;
+const ORG_MCP_AUTH_RETRY_ATTEMPTS = 3;
+const ORG_MCP_AUTH_RETRY_DELAY_MS = 250;
 
 /**
  * One rate-limit retry budget, anchored now.
@@ -48,13 +47,6 @@ const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
  */
 export function orgRetryDeadlineAtMs(): number {
   return Date.now() + RATE_LIMIT_TOTAL_DELAY_BUDGET_MS;
-}
-
-function orgTokenTimeoutMs(): number {
-  const raw = process.env.AGENTCARD_ORG_TOKEN_TIMEOUT_MS?.trim();
-  if (!raw) return DEFAULT_ORG_TOKEN_TIMEOUT_MS;
-  const value = Number(raw);
-  return Number.isInteger(value) && value > 0 ? value : DEFAULT_ORG_TOKEN_TIMEOUT_MS;
 }
 
 type FetchLike = typeof fetch;
@@ -172,6 +164,96 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * AgentCard Organization MCP authenticates with the `acs_…` client secret as the
+ * Bearer token (the token endpoint's JWT is `scope: api` and MCP rejects it).
+ * `initialize` 401s on a healthy secret while `tools/call` succeeds, so the org
+ * runtime posts JSON-RPC tools/call directly instead of using the MCP SDK session.
+ */
+function parseMcpJsonRpcBody(bodyText: string): Record<string, unknown> {
+  const trimmed = bodyText.trim();
+  if (trimmed.startsWith('{')) {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  }
+  for (const line of trimmed.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice('data:'.length).trim();
+    if (payload === '' || payload === '[DONE]') continue;
+    return JSON.parse(payload) as Record<string, unknown>;
+  }
+  return { message: trimmed };
+}
+
+async function callOrgMcpTool(
+  accessToken: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  fetchImpl: FetchLike = fetch
+): Promise<unknown> {
+  let lastError: AgentCardOrgRuntimeError | undefined;
+  for (let attempt = 1; attempt <= ORG_MCP_AUTH_RETRY_ATTEMPTS; attempt += 1) {
+    const response = await fetchImpl(AGENTCARD_MCP_RESOURCE, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: toolName, arguments: args },
+      }),
+      signal: AbortSignal.timeout(ORG_MCP_TOOL_TIMEOUT_MS),
+    });
+    const bodyText = await response.text();
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseMcpJsonRpcBody(bodyText);
+    } catch {
+      parsed = { message: bodyText };
+    }
+    const rpcError = parsed.error;
+    const errorText =
+      typeof rpcError === 'string'
+        ? rpcError
+        : rpcError && typeof rpcError === 'object' && 'message' in rpcError
+          ? String((rpcError as { message: unknown }).message)
+          : typeof parsed.message === 'string'
+            ? parsed.message
+            : bodyText.slice(0, 200);
+    if (!response.ok || (typeof rpcError === 'string' && rpcError.length > 0)) {
+      lastError = new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP ${toolName} failed: ${errorText}`,
+        response.status >= 400 && response.status < 500 ? response.status : 502,
+        response.status === 401 || response.status === 403
+          ? 'agentcard_org_mcp_unauthorized'
+          : 'agentcard_org_mcp_unavailable',
+        { status: response.status, error: rpcError, message: parsed.message }
+      );
+      if (
+        attempt === ORG_MCP_AUTH_RETRY_ATTEMPTS ||
+        (response.status !== 401 && response.status !== 403)
+      ) {
+        throw lastError;
+      }
+      await delay(ORG_MCP_AUTH_RETRY_DELAY_MS);
+      continue;
+    }
+    if ('result' in parsed) return parsed.result;
+    return parsed;
+  }
+  throw (
+    lastError ??
+    new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} failed`,
+      502,
+      'agentcard_org_mcp_unavailable'
+    )
+  );
+}
+
+/**
  * Organization tools that only READ provider state. Two identical reads issued while one is still
  * in flight cannot observe different data, so they are coalesced into a single request. Mutations
  * (`create_card`, `close_card`, `confirm_collection`, `test_charge`, the KYC/onboarding starters)
@@ -206,16 +288,6 @@ function detachedCopy(value: unknown): unknown {
 }
 
 export class AgentCardOrgRuntime {
-  private cachedToken?: { accessToken: string; expiresAtMs: number };
-  /**
-   * Client-credential tokens can enter their refresh window while several org
-   * reads are fanned out together (for example, the payment lifecycle reads a
-   * card and two transfer views concurrently). Coalesce that burst into one
-   * token exchange. Besides avoiding needless load, this prevents one member
-   * of the burst timing out after its siblings have already refreshed the same
-   * credential.
-   */
-  private inFlightToken?: Promise<string>;
   /**
    * In-flight idempotent reads, keyed by tool + args. The organization MCP throttle is shared by
    * EVERY org caller at 120 requests/minute, and Rose fans identical reads out constantly: each
@@ -225,16 +297,21 @@ export class AgentCardOrgRuntime {
    * concurrent agents grow rather than scaling with them.
    */
   private readonly inFlightReads = new Map<string, Promise<unknown>>();
+  private readonly toolCaller: TokenMcpToolCaller;
+  private readonly fetchImpl: FetchLike;
 
-  constructor(
-    private readonly toolCaller: TokenMcpToolCaller = mcpCallTool,
-    private readonly fetchImpl: FetchLike = fetch
-  ) {}
+  constructor(toolCaller?: TokenMcpToolCaller, fetchImpl: FetchLike = fetch) {
+    this.fetchImpl = fetchImpl;
+    this.toolCaller =
+      toolCaller ??
+      ((accessToken, toolName, args) =>
+        callOrgMcpTool(accessToken, toolName, args, this.fetchImpl));
+  }
 
   /**
    * Calls an organization MCP tool, transparently recovering from the two failure modes that are
-   * expected on a healthy provider: an expired token (refresh once) and a throttled request window
-   * (wait for the window to refill, bounded). Everything else propagates untouched.
+   * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once) and a throttled
+   * request window (wait for the window to refill, bounded). Everything else propagates untouched.
    *
    * A throttle used to escape as a raw transport error, so every caller that lacked its own
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
@@ -298,123 +375,31 @@ export class AgentCardOrgRuntime {
   }
 
   private async callToolOnce(toolName: string, args: Record<string, unknown>): Promise<unknown> {
-    const accessToken = await this.getAccessToken();
+    const accessToken = this.getAccessToken();
     try {
       return await this.toolCaller(accessToken, toolName, args);
     } catch (error) {
       if (!hasClientCredentials() || !looksLikeAuthError(error)) throw error;
-      this.cachedToken = undefined;
-      return this.toolCaller(await this.getAccessToken(true), toolName, args);
+      return this.toolCaller(this.getAccessToken(), toolName, args);
     }
   }
 
-  private async getAccessToken(forceClientCredentials = false): Promise<string> {
+  /**
+   * Organization MCP takes the `acs_…` client secret as Bearer. JWT exchange is
+   * the user-OAuth path; those tokens come back `scope: api` and MCP 401s them.
+   */
+  private getAccessToken(): string {
+    if (hasClientCredentials()) {
+      return requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_SECRET');
+    }
     const direct = directAccessToken();
-    if (!forceClientCredentials && !hasClientCredentials() && direct !== undefined) return direct;
-
-    const cachedToken = this.cachedToken;
-    if (cachedToken !== undefined && cachedToken.expiresAtMs > Date.now() + 60_000) {
-      return cachedToken.accessToken;
-    }
-
-    // A forced refresh must start its OWN exchange. It only ever runs after the MCP rejected the
-    // token we just sent, and an exchange that was already in flight when that rejection arrived
-    // can resolve to that very token (client-credential endpoints re-serve a still-unexpired token
-    // for the same client). Joining it would resend the rejected credential and fail again — the
-    // reachable case being the concurrent read fan-out, where one member of a burst gets a 401
-    // while a sibling's proactive refresh is still pending.
-    let tokenPromise = this.inFlightToken;
-    if (tokenPromise === undefined || forceClientCredentials) {
-      tokenPromise = this.fetchAccessToken().finally(() => {
-        if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
-      });
-      this.inFlightToken = tokenPromise;
-    }
-
-    try {
-      return await tokenPromise;
-    } catch (error) {
-      // A proactive refresh must not turn a still-valid organization token into
-      // an outage when AgentCard's token endpoint is temporarily unavailable.
-      // Forced refreshes follow an MCP auth rejection, so they must never reuse
-      // the rejected token.
-      if (
-        !forceClientCredentials &&
-        cachedToken !== undefined &&
-        cachedToken.expiresAtMs > Date.now() + MIN_STALE_TOKEN_VALIDITY_MS &&
-        error instanceof AgentCardOrgRuntimeError &&
-        error.code === 'agentcard_org_token_unavailable'
-      ) {
-        return cachedToken.accessToken;
-      }
-      throw error;
-    }
-  }
-
-  private async fetchAccessToken(): Promise<string> {
-    let response: Awaited<ReturnType<FetchLike>>;
-    try {
-      response = await this.fetchImpl(
-        process.env.AGENTCARD_ORG_TOKEN_ENDPOINT?.trim() || DEFAULT_ORG_TOKEN_ENDPOINT,
-        {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/x-www-form-urlencoded',
-            accept: 'application/json',
-          },
-          body: new URLSearchParams({
-            grant_type: 'client_credentials',
-            client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID'),
-            client_secret: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_SECRET'),
-            // Bind the token to the MCP audience (RFC 8707), matching the per-user OAuth flow.
-            resource: AGENTCARD_MCP_RESOURCE,
-          }),
-          // Fail fast instead of hanging wallet funding/monitoring/reconciliation if the token
-          // endpoint stalls.
-          signal: AbortSignal.timeout(orgTokenTimeoutMs()),
-        }
-      );
-    } catch (error) {
-      if (error instanceof AgentCardOrgRuntimeError) throw error;
-      const timedOut = error instanceof Error && error.name === 'TimeoutError';
-      throw new AgentCardOrgRuntimeError(
-        timedOut
-          ? 'Timed out acquiring an AgentCard Organization MCP access token'
-          : 'Could not reach the AgentCard Organization MCP token endpoint',
-        timedOut ? 504 : 502,
-        'agentcard_org_token_unavailable',
-        { error: error instanceof Error ? error.message : String(error) }
-      );
-    }
-    const bodyText = await response.text();
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(bodyText) as Record<string, unknown>;
-    } catch {
-      body = { message: bodyText };
-    }
-    if (!response.ok || typeof body.access_token !== 'string') {
-      throw new AgentCardOrgRuntimeError(
-        'Could not obtain an AgentCard Organization MCP access token',
-        response.status >= 400 && response.status < 500 ? response.status : 502,
-        'agentcard_org_token_unavailable',
-        {
-          status: response.status,
-          error: body.error,
-          errorDescription: body.error_description,
-          message: body.message,
-        }
-      );
-    }
-    const expiresInSeconds =
-      typeof body.expires_in === 'number' && Number.isFinite(body.expires_in)
-        ? body.expires_in
-        : 3600;
-    this.cachedToken = {
-      accessToken: body.access_token,
-      expiresAtMs: Date.now() + expiresInSeconds * 1000,
-    };
-    return this.cachedToken.accessToken;
+    if (direct !== undefined) return direct;
+    throw new AgentCardOrgRuntimeError(
+      'Missing AGENTCARD_ORG_OAUTH_CLIENT_ID environment variable for AgentCard Organization MCP',
+      409,
+      'agentcard_org_mcp_unavailable',
+      { missingEnv: 'AGENTCARD_ORG_OAUTH_CLIENT_ID' }
+    );
   }
 }
 

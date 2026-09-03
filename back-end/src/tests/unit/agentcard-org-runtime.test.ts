@@ -1,6 +1,5 @@
 #!/usr/bin/env tsx
 import assert from 'node:assert/strict';
-import { AGENTCARD_MCP_RESOURCE } from '../../providers/agentcard/config';
 import {
   AgentCardOrgRuntime,
   AgentCardOrgRuntimeError,
@@ -16,11 +15,6 @@ const ENV_NAMES = [
   'AGENTCARD_OAUTH_CLIENT_SECRET',
 ] as const;
 
-/** Yields one macrotask so every pending microtask chain settles before the test looks again. */
-function tick(): Promise<void> {
-  return new Promise<void>((resolve) => setImmediate(resolve));
-}
-
 async function main(): Promise<void> {
   const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   try {
@@ -28,209 +22,76 @@ async function main(): Promise<void> {
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'wizard-client';
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'wizard-secret';
 
-    let tokenRequests = 0;
     let calledWithToken = '';
-    const runtime = new AgentCardOrgRuntime(
-      async (accessToken, toolName, args) => {
-        calledWithToken = accessToken;
-        assert.equal(toolName, 'list_transfers');
-        assert.deepEqual(args, { limit: 100 });
-        return { structuredContent: { transfers: [] } };
+    const runtime = new AgentCardOrgRuntime(async (accessToken, toolName, args) => {
+      calledWithToken = accessToken;
+      assert.equal(toolName, 'list_transfers');
+      assert.deepEqual(args, { limit: 100 });
+      return { structuredContent: { transfers: [] } };
+    });
+
+    await runtime.callTool('list_transfers', { limit: 100 });
+    await runtime.callTool('list_transfers', { limit: 100 });
+    assert.equal(
+      calledWithToken,
+      'wizard-secret',
+      'organization MCP must send the acs_ client secret as Bearer, not a token-endpoint JWT'
+    );
+
+    let jsonRpcCalls = 0;
+    const jsonRpcRuntime = new AgentCardOrgRuntime(undefined, async (_input, init) => {
+      jsonRpcCalls += 1;
+      const parsed = JSON.parse(String(init?.body)) as {
+        method?: string;
+        params?: { name?: string };
+      };
+      assert.equal(parsed.method, 'tools/call');
+      assert.equal(parsed.params?.name, 'get_company_wallet');
+      const headerBag = init?.headers as Record<string, string> | undefined;
+      assert.equal(headerBag?.authorization, 'Bearer wizard-secret');
+      return new Response(
+        'event: message\ndata: {"result":{"structuredContent":{"wallet":{"livemode":false,"balance_cents":100,"committed_cents":0,"available_cents":100}}}}\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      );
+    });
+    const wallet = await jsonRpcRuntime.callTool('get_company_wallet', {});
+    assert.deepEqual(wallet, {
+      structuredContent: {
+        wallet: { livemode: false, balance_cents: 100, committed_cents: 0, available_cents: 100 },
       },
-      async (_input, init) => {
-        tokenRequests += 1;
-        const form = new URLSearchParams(String(init?.body));
-        assert.equal(form.get('grant_type'), 'client_credentials');
-        assert.equal(form.get('client_id'), 'wizard-client');
-        assert.equal(form.get('client_secret'), 'wizard-secret');
-        assert.equal(form.get('resource'), AGENTCARD_MCP_RESOURCE);
-        return new Response(JSON.stringify({ access_token: 'fresh-org-token', expires_in: 3600 }), {
-          status: 200,
+    });
+    assert.equal(jsonRpcCalls, 1);
+
+    let authRetries = 0;
+    const authRetryRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      authRetries += 1;
+      if (authRetries < 2) {
+        return new Response(JSON.stringify({ error: 'Invalid or expired organization token' }), {
+          status: 401,
           headers: { 'content-type': 'application/json' },
         });
       }
-    );
-
-    await runtime.callTool('list_transfers', { limit: 100 });
-    await runtime.callTool('list_transfers', { limit: 100 });
-    assert.equal(calledWithToken, 'fresh-org-token');
-    assert.equal(tokenRequests, 1, 'client-credential tokens should be cached until near expiry');
-
-    let concurrentTokenRequests = 0;
-    let releaseTokenRequest: (() => void) | undefined;
-    const tokenRequestReleased = new Promise<void>((resolve) => {
-      releaseTokenRequest = resolve;
+      return new Response(
+        JSON.stringify({
+          result: { structuredContent: { cardholders: [{ id: 'ch-1' }] } },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
     });
-    const concurrentRuntime = new AgentCardOrgRuntime(
-      async () => ({ structuredContent: { transfers: [] } }),
-      async () => {
-        concurrentTokenRequests += 1;
-        await tokenRequestReleased;
-        return new Response(
-          JSON.stringify({ access_token: 'shared-org-token', expires_in: 3600 }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        );
-      }
-    );
-    const concurrentCalls = Promise.all([
-      concurrentRuntime.callTool('get_card', { card_id: 'card-1' }),
-      concurrentRuntime.callTool('list_transfers', { status: 'consumed', limit: 100 }),
-      concurrentRuntime.callTool('list_transfers', { limit: 100 }),
-    ]);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(
-      concurrentTokenRequests,
-      1,
-      'concurrent org reads must share one client-credential token exchange'
-    );
-    releaseTokenRequest?.();
-    await concurrentCalls;
-    assert.equal(concurrentTokenRequests, 1);
+    assert.deepEqual(await authRetryRuntime.callTool('list_cardholders', {}), {
+      structuredContent: { cardholders: [{ id: 'ch-1' }] },
+    });
+    assert.equal(authRetries, 2, 'flaky MCP 401 on tools/call must be retried');
 
-    let retryTokenRequests = 0;
     let toolCalls = 0;
-    const retryingRuntime = new AgentCardOrgRuntime(
-      async (accessToken) => {
-        toolCalls += 1;
-        if (toolCalls === 1) throw new Error('Invalid or expired organization token');
-        assert.equal(accessToken, 'org-token-2');
-        return { structuredContent: { transfers: [] } };
-      },
-      async () => {
-        retryTokenRequests += 1;
-        return new Response(
-          JSON.stringify({ access_token: `org-token-${retryTokenRequests}`, expires_in: 3600 }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        );
-      }
-    );
-    await retryingRuntime.callTool('list_transfers', { limit: 100 });
-    assert.equal(retryTokenRequests, 2, 'an MCP auth rejection must refresh once');
-    assert.equal(toolCalls, 2, 'an MCP auth rejection must retry the tool once');
-
-    const originalDateNow = Date.now;
-    let nowMs = 1_700_000_000_000;
-    let proactiveTokenRequests = 0;
-    const proactiveToolTokens: string[] = [];
-    try {
-      Date.now = () => nowMs;
-      const proactiveRuntime = new AgentCardOrgRuntime(
-        async (accessToken) => {
-          proactiveToolTokens.push(accessToken);
-          return { structuredContent: { transfers: [] } };
-        },
-        async () => {
-          proactiveTokenRequests += 1;
-          if (proactiveTokenRequests === 1) {
-            return new Response(
-              JSON.stringify({ access_token: 'still-valid-org-token', expires_in: 120 }),
-              { status: 200, headers: { 'content-type': 'application/json' } }
-            );
-          }
-          return new Response(JSON.stringify({ error: 'Backend init failed' }), { status: 500 });
-        }
-      );
-
-      await proactiveRuntime.callTool('list_transfers', { limit: 100 });
-      nowMs += 61_000;
-      await proactiveRuntime.callTool('list_transfers', { limit: 100 });
-      assert.equal(proactiveTokenRequests, 2, 'the refresh window should trigger a token exchange');
-      assert.deepEqual(
-        proactiveToolTokens,
-        ['still-valid-org-token', 'still-valid-org-token'],
-        'a transient proactive-refresh failure should reuse the unexpired token'
-      );
-    } finally {
-      Date.now = originalDateNow;
-    }
-
-    // Regression: a FORCED refresh (the one `callToolOnce` runs after the MCP rejects our token)
-    // read `inFlightToken` without consulting `forceClientCredentials`. `callToolOnce` clears
-    // `cachedToken` on an auth rejection but NOT `inFlightToken`, so the forced refresh could join
-    // an exchange that was already in flight when the 401 arrived — and a client-credential
-    // endpoint re-serves the same still-unexpired token, i.e. the very credential the MCP just
-    // rejected — then resend it. Reachable in the concurrent read fan-out: one member of a burst
-    // 401s while a sibling's proactive refresh is still pending.
-    let forcedNowMs = 1_700_000_000_000;
-    let forcedExchanges = 0;
-    const forcedToolTokens: string[] = [];
-    let siblingRead: Promise<unknown> | undefined;
-    let releasePendingExchange: (() => void) | undefined;
-    const pendingExchange = new Promise<void>((resolve) => {
-      releasePendingExchange = resolve;
+    const retryingRuntime = new AgentCardOrgRuntime(async (accessToken) => {
+      toolCalls += 1;
+      if (toolCalls === 1) throw new Error('Invalid or expired organization token');
+      assert.equal(accessToken, 'wizard-secret');
+      return { structuredContent: { transfers: [] } };
     });
-    try {
-      Date.now = () => forcedNowMs;
-      const forcedRuntime: AgentCardOrgRuntime = new AgentCardOrgRuntime(
-        async (accessToken, toolName) => {
-          if (toolName !== 'get_card') return { structuredContent: { cards: [] } };
-          forcedToolTokens.push(accessToken);
-          if (forcedToolTokens.length > 1) return { structuredContent: { card: { id: 'card-1' } } };
-          // Step into the token refresh window and let a SIBLING read open an exchange that is
-          // still in flight when this call's 401 lands.
-          forcedNowMs += 61_000;
-          siblingRead = forcedRuntime.callTool('list_cards', { limit: 1 });
-          await tick();
-          throw new Error('401 Unauthorized: invalid_token');
-        },
-        async () => {
-          forcedExchanges += 1;
-          // Exchange 2 is the sibling's proactive refresh: held open across the 401, and resolving
-          // to the SAME token the MCP rejected.
-          if (forcedExchanges === 2) await pendingExchange;
-          const accessToken = forcedExchanges >= 3 ? 'replacement-org-token' : 'rejected-org-token';
-          return new Response(JSON.stringify({ access_token: accessToken, expires_in: 120 }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          });
-        }
-      );
-
-      await forcedRuntime.callTool('get_company_wallet', {});
-      assert.equal(forcedExchanges, 1);
-      const forcedRead = forcedRuntime.callTool('get_card', { card_id: 'card-forced' });
-      // Let the 401 land and the forced refresh resolve its token before the stale exchange is
-      // allowed to finish — otherwise the stale promise is already settled and cannot be joined.
-      await tick();
-      await tick();
-      await tick();
-      releasePendingExchange?.();
-      await forcedRead;
-      await siblingRead;
-
-      assert.deepEqual(
-        forcedToolTokens,
-        ['rejected-org-token', 'replacement-org-token'],
-        'a forced refresh must never resend the token the MCP just rejected'
-      );
-      assert.equal(
-        forcedExchanges,
-        3,
-        'a forced refresh must start a NEW token exchange, never join the in-flight one'
-      );
-    } finally {
-      Date.now = originalDateNow;
-      releasePendingExchange?.();
-    }
-
-    // A stalled/aborted token endpoint surfaces as an AgentCardOrgRuntimeError, not a raw hang.
-    const timingOutRuntime = new AgentCardOrgRuntime(
-      async () => {
-        throw new Error('tool must not run when the token cannot be acquired');
-      },
-      async () => {
-        const timeout = new Error('The operation was aborted due to timeout');
-        timeout.name = 'TimeoutError';
-        throw timeout;
-      }
-    );
-    await assert.rejects(
-      () => timingOutRuntime.callTool('list_transfers', { limit: 100 }),
-      (error: unknown) =>
-        error instanceof AgentCardOrgRuntimeError &&
-        error.status === 504 &&
-        error.code === 'agentcard_org_token_unavailable'
-    );
+    await retryingRuntime.callTool('list_transfers', { limit: 100 });
+    assert.equal(toolCalls, 2, 'an MCP auth rejection must retry the tool once');
 
     for (const name of ENV_NAMES) delete process.env[name];
     process.env.AGENTCARD_API_KEY = 'sk_test_retired';
