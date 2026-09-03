@@ -17,10 +17,7 @@ and persists ToolUsage rows.
 from __future__ import annotations
 
 import asyncio
-import json
-import re
 from typing import Any, Dict, List, Optional, Sequence
-from urllib.parse import urlparse
 
 import structlog
 from pydantic import BaseModel, Field
@@ -31,91 +28,37 @@ CHALLENGE_LLM_MODEL = "rose-labs/rose-1-mini"
 CHALLENGE_LLM_SETTLE_MS = 60_000
 CHALLENGE_LLM_CALL_SITE = "challenge_llm_classifier"
 _DOM_CHAR_CAP = 12_000
-# Parity with BrowserNetworkRecorder / BROWSER_AGENT_NETWORK_MAX_ENTRIES default.
-_NETWORK_ENTRY_CAP = 600
+_NETWORK_ENTRY_CAP = 40
 _NETWORK_BODY_CHAR_CAP = 200
 _NETWORK_SUMMARY_CHAR_CAP = 4_000
 
 CHALLENGE_LLM_SYSTEM_PROMPT = """You are a binary page-state classifier for a browser agent.
 
-Decide whether the CURRENT page is still blocked by an anti-bot challenge (CAPTCHA, bot check, access denied, blank soft-wall, rate-limit interstitial, "checking your browser", vendor challenge widget, empty shell that is not the real site UI) OR whether the real destination page is usable for the agent task.
+Decide whether the CURRENT page is still blocked by an anti-bot challenge (CAPTCHA, bot check, access denied, blank soft-wall, rate-limit interstitial, "checking your browser", vendor challenge widget, empty shell that is not the real site UI) OR whether the real destination page is usable.
 
-Return challenged=true when ANY of these hold:
+Return challenged=true when:
 - A challenge / CAPTCHA / human-verification interstitial is visible or dominating the page
 - The document is an empty/blank soft-wall, error gateway, or host-only shell without the real product UI
 - Navigation failed into a block page even if some marketing text leaked into the DOM
 - Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
 - The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
 
-Return challenged=false ONLY when ALL of these hold:
+Return challenged=false ONLY when:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
-- AND if an agent recovery reason is provided, that specific failure mode is cleared in network + DOM evidence
+- AND if an agent recovery reason is provided, that specific failure mode is cleared (network + DOM evidence)
 
-Critical anti-pattern (do NOT do this):
-- Do NOT return challenged=false just because the screenshot looks like the real product site.
-- A painted / partially hydrated UI may still be blocked — weigh DOM and network evidence, not screenshot alone.
-
-Evidence priority when a recovery reason is present:
-1) Network metadata for the cited failure
-2) DOM evidence that the failure mode cleared
-3) Screenshot as supporting visual context only
-
-Prefer challenged=true when uncertain. Do not overfit to one vendor."""
+Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use the agent DOM tree + network metadata (including HTTP status and truncated response bodies) as supporting evidence. Prefer challenged=true when uncertain."""
 
 
 class ChallengePageClassification(BaseModel):
     challenged: bool = Field(
         description=(
-            "True when the page is still challenged/unusable for the task "
-            "(including uncleared recovery soft-blocks). False only when the real "
-            "destination UI is usable AND any recovery reason is cleared in "
-            "network+DOM evidence — not merely because the screenshot looks fine."
+            "True when the page is still an anti-bot / CAPTCHA / access wall or "
+            "otherwise unusable for the intended site task. False only when the "
+            "real destination UI is visible and interactive."
         )
     )
     reason: str = Field(description="One short sentence explaining the challenged/clean decision.")
-
-
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
-_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
-
-
-def _parse_challenge_classification(content: str) -> ChallengePageClassification:
-    """Parse classifier JSON, tolerating markdown fences and leading prose."""
-    text = (content or "").strip()
-    if not text:
-        raise ValueError("empty classifier response")
-
-    candidates = [text]
-    fence_match = _JSON_FENCE_RE.search(text)
-    if fence_match:
-        candidates.insert(0, fence_match.group(1).strip())
-    for match in _JSON_OBJECT_RE.finditer(text):
-        candidates.append(match.group(0).strip())
-
-    seen: set[str] = set()
-    last_error: Exception | None = None
-    for candidate in candidates:
-        if not candidate or candidate in seen:
-            continue
-        seen.add(candidate)
-        try:
-            return ChallengePageClassification.model_validate_json(candidate)
-        except Exception as exc:
-            last_error = exc
-            try:
-                payload = json.loads(candidate)
-            except Exception:
-                continue
-            if isinstance(payload, dict) and "challenged" in payload:
-                return ChallengePageClassification.model_validate(payload)
-
-    lowered = text.lower()
-    if '"challenged": false' in lowered or "'challenged': false" in lowered:
-        return ChallengePageClassification(challenged=False, reason="parsed from partial classifier text")
-    if '"challenged": true' in lowered or "'challenged': true" in lowered:
-        return ChallengePageClassification(challenged=True, reason="parsed from partial classifier text")
-
-    raise ValueError(f"unable to parse classifier JSON: {last_error}")
 
 
 async def wait_for_dom_settled(page: Any, timeout_ms: float = CHALLENGE_LLM_SETTLE_MS) -> None:
@@ -181,66 +124,6 @@ def _truncate_body(text: str, cap: int = _NETWORK_BODY_CHAR_CAP) -> tuple[str, b
     return raw[:cap], True
 
 
-from domains.spawn_browser_agent_v3.challenge_recovery import urls_cited_in_recovery_reason
-
-
-def cited_network_hosts(recovery_reason: str | None) -> tuple[str, ...]:
-    hosts: List[str] = []
-    seen: set[str] = set()
-    for url in urls_cited_in_recovery_reason(recovery_reason):
-        host = (urlparse(url).hostname or "").lower()
-        if not host or host in seen:
-            continue
-        seen.add(host)
-        hosts.append(host)
-    return tuple(hosts)
-
-
-def _entry_matches_cited(
-    entry: Dict[str, Any],
-    cited_urls: Sequence[str],
-    cited_hosts: Sequence[str],
-) -> bool:
-    url = str(entry.get("url") or entry.get("name") or "").lower()
-    if not url:
-        return False
-    for host in cited_hosts:
-        if host in url:
-            return True
-    for cited in cited_urls:
-        needle = str(cited).lower()
-        if needle in url or url in needle:
-            return True
-    return False
-
-
-def select_network_entries_for_classifier(
-    entries: Sequence[Dict[str, Any]],
-    *,
-    recovery_reason: str | None = None,
-    cap: int = _NETWORK_ENTRY_CAP,
-) -> List[Dict[str, Any]]:
-    if not entries:
-        return []
-    cited_urls = urls_cited_in_recovery_reason(recovery_reason)
-    cited_host_list = cited_network_hosts(recovery_reason)
-    pinned: List[Dict[str, Any]] = []
-    rest: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        key = str(entry.get("url") or entry.get("name") or "").lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        if _entry_matches_cited(entry, cited_urls, cited_host_list):
-            pinned.append(entry)
-        else:
-            rest.append(entry)
-    return (pinned + rest)[: max(1, int(cap))]
-
-
 def format_network_summary_lines(entries: Sequence[Dict[str, Any]]) -> str:
     """Format network rows with HTTP status and clearly-marked truncated bodies."""
     lines: List[str] = []
@@ -299,55 +182,25 @@ def network_entries_from_recorder(
     *,
     limit: int = _NETWORK_ENTRY_CAP,
     max_body_chars: int = _NETWORK_BODY_CHAR_CAP,
-    recovery_reason: str | None = None,
 ) -> List[Dict[str, Any]]:
-    """Pull CDP recorder rows (status + truncated bodies), pinning cited recovery hosts."""
+    """Pull recent CDP recorder rows (status + truncated bodies) when available."""
     if network_recorder is None:
         return []
     query = getattr(network_recorder, "query_requests", None)
     if not callable(query):
         return []
-    rows: List[Dict[str, Any]] = []
-    seen_urls: set[str] = set()
-
-    def _append_rows(batch: Sequence[Any]) -> None:
-        for row in batch or ():
-            if not isinstance(row, dict):
-                continue
-            url = str(row.get("url") or "").lower()
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            rows.append(row)
-
-    for host in cited_network_hosts(recovery_reason):
-        try:
-            host_rows = query(
-                limit=limit,
-                include_bodies=True,
-                max_body_chars=max_body_chars,
-                url_pattern=host,
-            )
-            _append_rows(host_rows if isinstance(host_rows, list) else [])
-        except Exception as exc:
-            logger.warning(
-                "Challenge classifier cited-host network query failed",
-                host=host,
-                error=str(exc),
-            )
-
     try:
-        recent_rows = query(
-            limit=max(limit * 2, limit),
+        rows = query(
+            limit=limit,
             include_bodies=True,
             max_body_chars=max_body_chars,
         )
-        _append_rows(recent_rows if isinstance(recent_rows, list) else [])
     except Exception as exc:
         logger.warning("Challenge classifier network recorder query failed", error=str(exc))
         return []
-
-    return select_network_entries_for_classifier(rows, recovery_reason=recovery_reason, cap=limit)
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 async def capture_network_summary(
@@ -355,7 +208,6 @@ async def capture_network_summary(
     *,
     network_recorder: Any = None,
     network_entries: Sequence[Dict[str, Any]] | None = None,
-    recovery_reason: str | None = None,
 ) -> str:
     """Build classifier network summary with HTTP status when available.
 
@@ -365,17 +217,9 @@ async def capture_network_summary(
     3. Performance Resource Timing fallback (may omit status — probes without CDP)
     """
     if network_entries:
-        return format_network_summary_lines(
-            select_network_entries_for_classifier(
-                list(network_entries),
-                recovery_reason=recovery_reason,
-            )
-        )
+        return format_network_summary_lines(list(network_entries)[-_NETWORK_ENTRY_CAP:])
 
-    recorder_rows = network_entries_from_recorder(
-        network_recorder,
-        recovery_reason=recovery_reason,
-    )
+    recorder_rows = network_entries_from_recorder(network_recorder)
     if recorder_rows:
         return format_network_summary_lines(recorder_rows)
 
@@ -458,7 +302,6 @@ def recovery_soft_block_still_present(
     )
 
 
-
 async def capture_challenge_classifier_context(
     page: Any,
     response: Any = None,
@@ -482,7 +325,6 @@ async def capture_challenge_classifier_context(
         page,
         network_recorder=network_recorder,
         network_entries=network_entries,
-        recovery_reason=recovery_reason,
     )
     title, cleaned_dom, network_summary = await asyncio.gather(
         title_task, cleaned_task, network_task, return_exceptions=True
@@ -528,8 +370,11 @@ def build_challenge_classifier_messages(context: Dict[str, Any]) -> List[Dict[st
     recovery_lines: List[str] = []
     if recovery_reason:
         recovery_lines = [
-            "Agent recovery reason (for context):",
-            str(recovery_reason),
+            f"Agent recover_from_challenge reason: {recovery_reason}",
+            (
+                "Return challenged=false only if this specific failure mode is cleared "
+                "in DOM + network evidence (not merely because the HTML shell looks fine)."
+            ),
             "",
         ]
     text_block = "\n".join(
@@ -546,11 +391,7 @@ def build_challenge_classifier_messages(context: Dict[str, Any]) -> List[Dict[st
             "DOM tree (same stripped page text the browser agent uses; scripts/styles removed):",
             context.get("cleaned_dom") or "(empty)",
             "",
-            (
-                "Screenshot follows as visual context only. Classify challenged true/false."
-                if recovery_reason
-                else "Classify challenged true/false for this page state."
-            ),
+            "Classify challenged true/false for this page state.",
         ]
     )
     user_content: List[Dict[str, Any]] = [{"type": "text", "text": text_block}]
@@ -599,17 +440,14 @@ async def classify_challenge_with_llm(
     """Fail closed: errors ⇒ challenged=True so probes cannot promote on outage."""
     from helpers.llm import call_llm
 
-    recovery_reason = (
-        context.get("recovery_reason")
-        if isinstance(context.get("recovery_reason"), str)
-        else None
-    )
-    network_summary = str(context.get("network_summary") or "")
-    if recovery_soft_block_still_present(network_summary, recovery_reason):
+    if recovery_soft_block_still_present(
+        str(context.get("network_summary") or ""),
+        context.get("recovery_reason") if isinstance(context.get("recovery_reason"), str) else None,
+    ):
         logger.info(
             "Challenge LLM classifier forced challenged — recovery soft-block still in network",
             url=str(context.get("url") or "")[:200],
-            recovery_reason=str(recovery_reason or "")[:200],
+            recovery_reason=str(context.get("recovery_reason") or "")[:200],
             agent_id=agent_id,
         )
         return {
@@ -620,13 +458,14 @@ async def classify_challenge_with_llm(
             ),
             "usage": empty_classifier_usage(),
         }
+
     usage_out = empty_classifier_usage()
     try:
         result = await call_llm(
             messages=build_challenge_classifier_messages(context),
             model=CHALLENGE_LLM_MODEL,
             temperature=0,
-            max_tokens=256,
+            max_tokens=200,
             response_model=ChallengePageClassification,
             claude_token=claude_token,
             claude_token_source=claude_token_source,
@@ -653,7 +492,7 @@ async def classify_challenge_with_llm(
             "from_fast_cache": bool(usage.get("from_fast_cache")),
             "call_site": CHALLENGE_LLM_CALL_SITE,
         }
-        parsed = _parse_challenge_classification(content)
+        parsed = ChallengePageClassification.model_validate_json(content)
         logger.info(
             "Challenge LLM classifier result",
             challenged=parsed.challenged,

@@ -28,17 +28,15 @@ const log = createLogger('ChallengeLlmClassifier');
 export const CHALLENGE_LLM_MODEL = 'rose-labs/rose-1-mini';
 export const CHALLENGE_LLM_SETTLE_MS = 60_000;
 const CLEANED_DOM_CHAR_CAP = 12_000;
-/** Parity with agents BrowserNetworkRecorder / BROWSER_AGENT_NETWORK_MAX_ENTRIES. */
-export const NETWORK_ENTRY_CAP = 600;
+const NETWORK_ENTRY_CAP = 40;
 const NETWORK_BODY_CHAR_CAP = 200;
 const NETWORK_SUMMARY_CHAR_CAP = 4_000;
-const URL_IN_TEXT_RE = /https?:\/\/[^\s)\]"'<>]+/gi;
 
 const ChallengeClassificationSchema = z.object({
   challenged: z
     .boolean()
     .describe(
-      'True when the page is still challenged/unusable for the task (including uncleared recovery soft-blocks). False only when the real destination UI is usable AND any recovery reason is cleared in network+DOM evidence — not merely because the screenshot looks fine.'
+      'True when the page is still an anti-bot / CAPTCHA / access wall or otherwise unusable for the intended site task. False only when the real destination UI is visible and interactive.'
     ),
   reason: z.string().describe('One short sentence explaining the challenged/clean decision.'),
 });
@@ -58,29 +56,22 @@ export interface ChallengeClassifierLlmUsage {
 
 export const CHALLENGE_LLM_SYSTEM_PROMPT = `You are a binary page-state classifier for a browser agent.
 
-Decide whether the CURRENT page is still blocked by an anti-bot challenge (CAPTCHA, bot check, access denied, blank soft-wall, rate-limit interstitial, "checking your browser", vendor challenge widget, empty shell that is not the real site UI) OR whether the real destination page is usable for the agent task.
+Decide whether the CURRENT page is still blocked by an anti-bot challenge (CAPTCHA, bot check, access denied, blank soft-wall, rate-limit interstitial, "checking your browser", vendor challenge widget, empty shell that is not the real site UI) OR whether the real destination page is usable.
 
-Return challenged=true when ANY of these hold:
+Return challenged=true when:
 - A challenge / CAPTCHA / human-verification interstitial is visible or dominating the page
 - The document is an empty/blank soft-wall, error gateway, or host-only shell without the real product UI
 - Navigation failed into a block page even if some marketing text leaked into the DOM
 - Network metadata still shows the soft-block described in the agent recovery reason (e.g. HTTP 429 / rate-limit on GraphQL or product APIs) even if the HTML shell looks fine
 - The agent recovery reason is uncleared (product content still Loading, offers missing, cited endpoint still failing)
+- A blocked third-party resource cited in the recovery reason (payment script/CDN, required widget) is still missing or failing in network evidence
 
-Return challenged=false ONLY when ALL of these hold:
+Return challenged=false ONLY when:
 - The real destination site UI for the target URL is visibly present and usable (navigation, primary content, interactive controls for the task)
-- AND if an agent recovery reason is provided, that specific failure mode is cleared in network + DOM evidence
+- AND if an agent recovery reason is provided, that specific failure mode is cleared (network + DOM evidence)
+- AND any cited blocked third-party resource is no longer failing in the provided evidence
 
-Critical anti-pattern (do NOT do this):
-- Do NOT return challenged=false just because the screenshot looks like the real product site.
-- A painted / partially hydrated UI may still be blocked — weigh DOM and network evidence, not screenshot alone.
-
-Evidence priority when a recovery reason is present:
-1) Network metadata for the cited failure
-2) DOM evidence that the failure mode cleared
-3) Screenshot as supporting visual context only
-
-Prefer challenged=true when uncertain. Do not overfit to one vendor.`;
+Do not overfit to one vendor. Use the screenshot as ground truth for what a human would see; use the agent DOM tree + network metadata (including HTTP status and truncated response bodies) as supporting evidence. Prefer challenged=true when uncertain.`;
 
 export interface ChallengeClassifierContext {
   url: string;
@@ -171,7 +162,7 @@ export async function captureCleanedDom(page: Page): Promise<string> {
   }
 }
 
-export type NetworkSummaryEntry = {
+type NetworkSummaryEntry = {
   url?: string;
   name?: string;
   status?: number | null;
@@ -194,82 +185,6 @@ function truncateBody(
 } {
   if (text.length <= cap) return { snippet: text, truncated: false };
   return { snippet: text.slice(0, cap), truncated: true };
-}
-
-export function urlsCitedInRecoveryReason(recoveryReason?: string | null): string[] {
-  const text = (recoveryReason || '').trim();
-  if (!text) return [];
-  const seen = new Set<string>();
-  const urls: string[] = [];
-  for (const match of text.matchAll(URL_IN_TEXT_RE)) {
-    const raw = String(match[0] || '').replace(/[.,;]+$/, '');
-    try {
-      const parsed = new URL(raw);
-      if (!parsed.hostname) continue;
-      const normalized = `${parsed.protocol}//${parsed.hostname.toLowerCase()}${parsed.pathname || '/'}`;
-      if (seen.has(normalized)) continue;
-      seen.add(normalized);
-      urls.push(normalized);
-    } catch {
-      /* ignore malformed URL tokens */
-    }
-  }
-  return urls;
-}
-
-export function citedNetworkHosts(recoveryReason?: string | null): string[] {
-  const hosts: string[] = [];
-  const seen = new Set<string>();
-  for (const url of urlsCitedInRecoveryReason(recoveryReason)) {
-    try {
-      const host = new URL(url).hostname.toLowerCase();
-      if (!host || seen.has(host)) continue;
-      seen.add(host);
-      hosts.push(host);
-    } catch {
-      /* ignore */
-    }
-  }
-  return hosts;
-}
-
-function entryMatchesCited(
-  entry: NetworkSummaryEntry,
-  citedUrls: string[],
-  citedHosts: string[]
-): boolean {
-  const url = String(entry.url || entry.name || '').toLowerCase();
-  if (!url) return false;
-  for (const host of citedHosts) {
-    if (url.includes(host)) return true;
-  }
-  for (const cited of citedUrls) {
-    const needle = cited.toLowerCase();
-    if (url.includes(needle) || needle.includes(url)) return true;
-  }
-  return false;
-}
-
-export function selectNetworkEntriesForClassifier(
-  entries: NetworkSummaryEntry[],
-  options?: { recoveryReason?: string | null; cap?: number }
-): NetworkSummaryEntry[] {
-  const cap = options?.cap ?? NETWORK_ENTRY_CAP;
-  if (entries.length === 0) return [];
-  const citedUrls = urlsCitedInRecoveryReason(options?.recoveryReason);
-  const citedHostList = citedNetworkHosts(options?.recoveryReason);
-  const pinned: NetworkSummaryEntry[] = [];
-  const rest: NetworkSummaryEntry[] = [];
-  const seen = new Set<string>();
-  for (const entry of entries) {
-    const key = String(entry.url || entry.name || '').toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    if (entryMatchesCited(entry, citedUrls, citedHostList)) pinned.push(entry);
-    else rest.push(entry);
-  }
-  const merged = [...pinned, ...rest];
-  return merged.slice(0, cap);
 }
 
 export function formatNetworkSummaryLines(entries: NetworkSummaryEntry[]): string {
@@ -333,20 +248,14 @@ export function recoverySoftBlockStillPresent(
   );
 }
 
-
 export async function captureNetworkSummary(
   page: Page,
   options?: {
     networkEntries?: NetworkSummaryEntry[];
-    recoveryReason?: string | null;
   }
 ): Promise<string> {
   if (options?.networkEntries && options.networkEntries.length > 0) {
-    return formatNetworkSummaryLines(
-      selectNetworkEntriesForClassifier(options.networkEntries, {
-        recoveryReason: options.recoveryReason,
-      })
-    );
+    return formatNetworkSummaryLines(options.networkEntries.slice(-NETWORK_ENTRY_CAP));
   }
   try {
     const entries = await page.evaluate(
@@ -399,10 +308,7 @@ export async function captureChallengeClassifierContext(
   const [title, cleanedDom, networkSummary] = await Promise.all([
     page.title().catch(() => ''),
     agentDom ? Promise.resolve(agentDom) : captureCleanedDom(page),
-    captureNetworkSummary(page, {
-      networkEntries: options?.networkEntries,
-      recoveryReason: options?.recoveryReason,
-    }),
+    captureNetworkSummary(page, { networkEntries: options?.networkEntries }),
   ]);
   let screenshotBase64Png: string | null = null;
   try {
@@ -429,7 +335,11 @@ export function buildChallengeClassifierMessages(
 ): CompletionMessage[] {
   const recoveryLines =
     context.recoveryReason && context.recoveryReason.trim()
-      ? ['Agent recovery reason (for context):', context.recoveryReason.trim(), '']
+      ? [
+          `Agent recover_from_challenge reason: ${context.recoveryReason}`,
+          'Return challenged=false only if this specific failure mode is cleared in DOM + network evidence (not merely because the HTML shell looks fine).',
+          '',
+        ]
       : [];
   const textBlock = [
     `Target URL: ${context.url}`,
@@ -443,9 +353,7 @@ export function buildChallengeClassifierMessages(
     'DOM tree (same stripped page text the browser agent uses; scripts/styles removed):',
     context.cleanedDom || '(empty)',
     '',
-    context.recoveryReason && context.recoveryReason.trim()
-      ? 'Screenshot follows as visual context only. Classify challenged true/false.'
-      : 'Classify challenged true/false for this page state.',
+    'Classify challenged true/false for this page state.',
   ].join('\n');
 
   const userContent: CompletionMessage['content'] = [{ type: 'text', text: textBlock }];
