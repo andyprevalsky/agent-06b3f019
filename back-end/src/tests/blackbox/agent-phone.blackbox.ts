@@ -52,8 +52,20 @@ async function cleanup(userId: string, operationKeys: string[] = []) {
   if (operationKeys.length > 0) {
     await prisma.toolSideEffect.deleteMany({ where: { operationKey: { in: operationKeys } } });
   }
+  await prisma.agent.deleteMany({ where: { userId } });
   await prisma.agentIdentity.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
+}
+
+async function createOwnedAgent(userId: string) {
+  return prisma.agent.create({
+    data: {
+      userId,
+      goal: 'agent-phone blackbox',
+      status: 'ACTIVE',
+      source: 'SMS',
+    },
+  });
 }
 
 function headers(userId?: string): Record<string, string> {
@@ -70,10 +82,10 @@ function outboundOperationKey(userId: string, agentId: string, idempotencyKey: s
   return `agentphone.message:${digest}`;
 }
 
-function outboundPayload(userId: string, idempotencyKey: string) {
+function outboundPayload(userId: string, idempotencyKey: string, agentId = 'agent-1') {
   return {
     user_id: userId,
-    agent_id: 'agent-1',
+    agent_id: agentId,
     idempotency_key: idempotencyKey,
     phone_number: '+19729777432',
     message: 'Immediate AgentPhone boundary test',
@@ -160,6 +172,23 @@ test('outbound Agent SMS enforces auth, validation, and configured sender identi
       body: JSON.stringify(outboundPayload(userId, 'no-identity')),
     });
     assert(noIdentity.status === 409, `expected missing sender 409, got ${noIdentity.status}`);
+
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phone: '+19125550100',
+        phoneProvider: 'agentphone',
+        phoneProviderAgentId: 'provider-agent-1',
+        phoneProviderNumberId: 'number-1',
+      },
+    });
+    const foreignAgent = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(outboundPayload(userId, 'foreign-agent', 'not-owned-agent')),
+    });
+    assert(foreignAgent.status === 403, `expected foreign agent 403, got ${foreignAgent.status}`);
   } finally {
     await cleanup(userId);
   }
@@ -167,8 +196,9 @@ test('outbound Agent SMS enforces auth, validation, and configured sender identi
 
 test('outbound Agent SMS replays completed receipt without another provider send', async () => {
   const userId = await createUser();
+  const agent = await createOwnedAgent(userId);
   const idempotencyKey = 'completed-replay';
-  const operationKey = outboundOperationKey(userId, 'agent-1', idempotencyKey);
+  const operationKey = outboundOperationKey(userId, agent.id, idempotencyKey);
   try {
     await prisma.agentIdentity.create({
       data: {
@@ -196,7 +226,7 @@ test('outbound Agent SMS replays completed receipt without another provider send
         operationType: 'agentphone.message',
         status: 'SUCCEEDED',
         externalId: 'msg-existing',
-        request: outboundPayload(userId, idempotencyKey),
+        request: outboundPayload(userId, idempotencyKey, agent.id),
         response,
       },
     });
@@ -205,7 +235,7 @@ test('outbound Agent SMS replays completed receipt without another provider send
     const replay = await request(`${BASE_URL}/api/agentphone/messages/send`, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify(outboundPayload(userId, idempotencyKey)),
+      body: JSON.stringify(outboundPayload(userId, idempotencyKey, agent.id)),
     });
     assert(replay.status === 200, `completed replay failed: ${JSON.stringify(replay.data)}`);
     assert(
@@ -217,7 +247,7 @@ test('outbound Agent SMS replays completed receipt without another provider send
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({
-        ...outboundPayload(userId, idempotencyKey),
+        ...outboundPayload(userId, idempotencyKey, agent.id),
         message: 'Different payload must not reuse the receipt',
       }),
     });
@@ -234,8 +264,9 @@ test('outbound Agent SMS replays completed receipt without another provider send
 
 test('outbound Agent SMS refuses an ambiguous retry instead of duplicating a text', async () => {
   const userId = await createUser();
+  const agent = await createOwnedAgent(userId);
   const idempotencyKey = 'ambiguous-start';
-  const operationKey = outboundOperationKey(userId, 'agent-1', idempotencyKey);
+  const operationKey = outboundOperationKey(userId, agent.id, idempotencyKey);
   try {
     await prisma.agentIdentity.create({
       data: {
@@ -252,13 +283,13 @@ test('outbound Agent SMS refuses an ambiguous retry instead of duplicating a tex
         operationKey,
         operationType: 'agentphone.message',
         status: 'STARTED',
-        request: outboundPayload(userId, idempotencyKey),
+        request: outboundPayload(userId, idempotencyKey, agent.id),
       },
     });
     const ambiguous = await request(`${BASE_URL}/api/agentphone/messages/send`, {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify(outboundPayload(userId, idempotencyKey)),
+      body: JSON.stringify(outboundPayload(userId, idempotencyKey, agent.id)),
     });
     assert(ambiguous.status === 409, `expected ambiguous retry 409, got ${ambiguous.status}`);
     assert(
