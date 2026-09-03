@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- purchase lookup, reuse, recovery, and minting share one transactional lifecycle */
 import {
   createCardProviderForAgent,
   isCardLive,

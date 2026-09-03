@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- request validation, retry, redirect, and bounded response handling form one security boundary */
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
@@ -249,10 +250,7 @@ function buildFetchInit(request: ExternalHttpRequestBody): RequestInit {
   return init;
 }
 
-async function fetchWithValidatedRedirects(
-  startUrl: string,
-  init: RequestInit
-): Promise<Response> {
+async function fetchWithValidatedRedirects(startUrl: string, init: RequestInit): Promise<Response> {
   let currentUrl = startUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
