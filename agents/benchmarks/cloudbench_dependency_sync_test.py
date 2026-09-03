@@ -39,6 +39,7 @@ CLOUDBENCH_RESULT_SCRIPT = ROOT / "scripts" / "cloudbench_result.py"
 AGENT_LINK_SERVER = ROOT / "agents" / "benchmarks" / "agent_link_server.py"
 PORT_LEASE_SCRIPT = ROOT / "scripts" / "cloudbench-port-lease.py"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
+TASKS_JSON = ROOT / "agents" / "benchmarks" / "tasks.json"
 PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
 PREDEPLOY_METRICS_SCRIPT = ROOT / "agents" / "benchmarks" / "predeploy_metrics.py"
 LOGGED_COMMAND_SCRIPT = ROOT / "scripts" / "run_logged_command.py"
@@ -799,7 +800,10 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
     assert "returning claimed pool machine" in fleet
 
 
-def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
+def test_predeploy_cloud_runner_selects_via_predeploy_selector() -> None:
+    """Cloud --list must match select_predeploy_benches(surface=cloud)."""
+    from benchmarks.select_predeploy_benches import select_predeploy_benches
+
     result = subprocess.run(
         ["bash", str(PREDEPLOY_SCRIPT), "--list"],
         cwd=ROOT,
@@ -807,16 +811,17 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
         capture_output=True,
         check=False,
     )
-
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [
-        "chat-mode",
-        "spawn-sub-agents",
-        "parallel-tool-calls",
-        "claude-code-agent",
-        "browser-smoke",
-        "browser-biometrics-webdecoy",
-    ]
+    expected = select_predeploy_benches(
+        catalog=TASKS_JSON,
+        changed_files=[],
+        surface="cloud",
+        cap=20,
+        repo_root=ROOT,
+    ).selected
+    assert result.stdout.splitlines() == expected
+    assert "select_predeploy_benches.py" in PREDEPLOY_SCRIPT.read_text()
+
 
 
 def test_cloud_hub_poller_supervises_fleet_until_final_bundle(tmp_path: Path) -> None:
@@ -944,7 +949,10 @@ def test_cloud_hub_poller_supervises_fleet_until_final_bundle(tmp_path: Path) ->
     assert terminal == [{"action": "complete", "run_id": f"hub-{request_id}"}]
 
 
-def test_predeploy_local_runner_selects_the_catalog_smoke_group() -> None:
+def test_predeploy_local_runner_selects_via_predeploy_selector() -> None:
+    """Local --list must match select_predeploy_benches(surface=local)."""
+    from benchmarks.select_predeploy_benches import select_predeploy_benches
+
     result = subprocess.run(
         ["bash", str(PREDEPLOY_LOCAL_SCRIPT), "--list"],
         cwd=ROOT,
@@ -952,16 +960,18 @@ def test_predeploy_local_runner_selects_the_catalog_smoke_group() -> None:
         capture_output=True,
         check=False,
     )
-
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [
-        "chat-mode",
-        "spawn-sub-agents",
-        "parallel-tool-calls",
-        "claude-code-agent",
-        "browser-smoke",
-        "browser-biometrics-webdecoy",
-    ]
+    expected = select_predeploy_benches(
+        catalog=TASKS_JSON,
+        changed_files=[],
+        surface="local",
+        cap=20,
+        repo_root=ROOT,
+    ).selected
+    assert result.stdout.splitlines() == expected
+    assert "select_predeploy_benches.py" in PREDEPLOY_LOCAL_SCRIPT.read_text()
+    assert "PREDEPLOY_BENCH_CAP" in PREDEPLOY_LOCAL_SCRIPT.read_text()
+
 
 
 def test_cloudbench_result_allows_only_approved_claude_credential_skip(tmp_path: Path) -> None:
@@ -1098,7 +1108,13 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "ALL non-skipped Pre-Deploy smoke benchmarks must pass" in step
     assert "deploy-approved smoke skip is a Claude Code benchmark" in step
     assert "skippable by future deploys without additional human approval" in step
-    assert "every catalog entry tagged `smoke`" in step
+    assert "select_predeploy_benches.py" in PREDEPLOY_LOCAL_SCRIPT.read_text()
+    assert "PREDEPLOY_BENCH_CAP" in PREDEPLOY_LOCAL_SCRIPT.read_text()
+    assert (
+        "select_predeploy_benches" in step
+        or "category floor" in step.lower()
+        or "hard cap" in step.lower()
+    )
     assert "every non-skipped task" in step
     assert "every requested task passes" in step
     assert ".context/predeploy-runs/<run-id>/runner.log" in step
@@ -6709,7 +6725,16 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
     (fixture / "scripts" / "run_logged_command.py").write_text(LOGGED_COMMAND_SCRIPT.read_text())
     (fixture / "agents" / "benchmarks" / "predeploy_metrics.py").write_text(PREDEPLOY_METRICS_SCRIPT.read_text())
     (fixture / "agents" / "benchmarks" / "tasks.json").write_text(
-        json.dumps([{"name": "smoke-fixture", "tags": ["smoke"]}])
+        json.dumps([
+            {"name": "smoke-fixture", "tags": ["smoke"], "timeout_seconds": 60, "deploy_category": "harness"},
+            {"name": "payment-fixture", "tags": ["payment"], "timeout_seconds": 60, "deploy_category": "payment", "deploy_canary": True},
+            {"name": "grep-fixture", "tags": ["grep"], "timeout_seconds": 60, "deploy_category": "grep", "deploy_canary": True},
+            {"name": "sms-fixture", "tags": ["sms"], "timeout_seconds": 60, "deploy_category": "sms", "deploy_canary": True},
+            {"name": "browser-toast-nopa-write-lock", "tags": ["browser"], "timeout_seconds": 60, "deploy_category": "browser_stateful", "deploy_canary": True},
+        ])
+    )
+    (fixture / "agents" / "benchmarks" / "select_predeploy_benches.py").write_text(
+        (ROOT / "agents" / "benchmarks" / "select_predeploy_benches.py").read_text()
     )
     capture = fixture / "capture"
     (fixture / "scripts" / "run-bench").write_text(
@@ -6729,7 +6754,21 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert capture.read_text().splitlines() == ["1", "--local smoke-fixture --max-concurrency 2"]
+    capture_lines = capture.read_text().splitlines()
+    assert capture_lines[0] == "1"
+    # Second line is the run-bench argv. Require every selected fixture task and
+    # the local concurrency flag; order may follow the predeploy scheduler.
+    argv = capture_lines[1]
+    assert argv.startswith("--local ")
+    assert "--max-concurrency 2" in argv
+    for task_name in (
+        "smoke-fixture",
+        "payment-fixture",
+        "grep-fixture",
+        "sms-fixture",
+        "browser-toast-nopa-write-lock",
+    ):
+        assert task_name in argv.split(), argv
 
     wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
     wmh_root = tmp_path / "wmh"

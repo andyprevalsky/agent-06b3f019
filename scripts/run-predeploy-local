@@ -5,42 +5,66 @@
 # cloud fleet (`run-predeploy-cloud`) leaks paid Fly machines when killed and is
 # frequently rate-limited / volume-capacity-starved, so local is the reliable gate.
 #
-# Smoke task set is derived from `agents/benchmarks/tasks.json` entries tagged
-# `smoke` — identical selection to `run-predeploy-cloud`, so the two paths can
-# never drift. `run-bench --local` exits non-zero unless every requested task
+# Task set comes from `agents/benchmarks/select_predeploy_benches.py` — category
+# floor (smoke + one canary per floor category) plus path-triggered depth, hard
+# capped at 20. Identical selection to `run-predeploy-cloud`, so the two paths
+# cannot drift. `run-bench --local` exits non-zero unless every requested task
 # passes, so this script IS the gate.
 #
 # Usage:
-#   scripts/run-predeploy-local            # run the smoke group locally
-#   scripts/run-predeploy-local --list     # print the smoke task set and exit
+#   scripts/run-predeploy-local            # run the selected predeploy set locally
+#   scripts/run-predeploy-local --list     # print the selected task set and exit
 #   scripts/run-predeploy-local --history  # print task + end-to-end timing history
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 METRICS_SCRIPT="$ROOT_DIR/agents/benchmarks/predeploy_metrics.py"
+SELECTOR_SCRIPT="$ROOT_DIR/agents/benchmarks/select_predeploy_benches.py"
 LOGGED_COMMAND="$ROOT_DIR/scripts/run_logged_command.py"
 HISTORY_FILE="$ROOT_DIR/agents/benchmarks/history/task_durations.jsonl"
 RUN_ROOT="$ROOT_DIR/.context/predeploy-runs"
+PREDEPLOY_BENCH_CAP="${PREDEPLOY_BENCH_CAP:-20}"
+
+# Prints the human selection report to stdout, then yields selected names on
+# stdout after the machine delimiter. Callers that need names-only use --list.
+read_predeploy_selection() {
+    local format="${1:-names-and-report}"
+    PREDEPLOY_BENCH_CAP="$PREDEPLOY_BENCH_CAP" \
+        python3 "$SELECTOR_SCRIPT" \
+            --catalog "$ROOT_DIR/agents/benchmarks/tasks.json" \
+            --surface local \
+            --cap "$PREDEPLOY_BENCH_CAP" \
+            --format "$format" \
+            --repo-root "$ROOT_DIR"
+}
 
 read_predeploy_tasks() {
-    python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1]) as handle:
-    tasks = json.load(handle)
-for task in tasks:
-    if "smoke" in (task.get("tags") or []):
-        print(task["name"])
-PY
+    read_predeploy_selection names
 }
 
 PREDEPLOY_TASKS=()
-while IFS= read -r task; do
-    [ -n "$task" ] && PREDEPLOY_TASKS+=("$task")
-done < <(read_predeploy_tasks)
-[ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no smoke-tagged benchmark tasks found" >&2; exit 1; }
+SELECTION_REPORT=""
+if [ "${1:-}" = "--list" ] || [ "${1:-}" = "--history" ]; then
+    while IFS= read -r task; do
+        [ -n "$task" ] && PREDEPLOY_TASKS+=("$task")
+    done < <(read_predeploy_tasks)
+else
+    SELECTION_OUTPUT="$(read_predeploy_selection names-and-report)"
+    printf '%s\n' "$SELECTION_OUTPUT"
+    SELECTION_REPORT="$SELECTION_OUTPUT"
+    while IFS= read -r task; do
+        [ -n "$task" ] && PREDEPLOY_TASKS+=("$task")
+    done < <(
+        printf '%s\n' "$SELECTION_OUTPUT" \
+            | sed -n '/^---PREDEPLOY_BENCH_NAMES---$/,/^---END_PREDEPLOY_BENCH_NAMES---$/p' \
+            | sed '1d;$d'
+    )
+fi
+[ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no predeploy benchmark tasks selected" >&2; exit 1; }
+if [ "${#PREDEPLOY_TASKS[@]}" -ge "$PREDEPLOY_BENCH_CAP" ]; then
+    echo "🚨 PREDEPLOY BENCH COUNT AT HARD CAP: ${#PREDEPLOY_TASKS[@]}/$PREDEPLOY_BENCH_CAP" >&2
+fi
 
 # Whether ANY selected smoke task actually exercises Codex (gpt_code). The
 # per-task compute-token seed (seed-local.ts) is strict on a usable gpt_code
