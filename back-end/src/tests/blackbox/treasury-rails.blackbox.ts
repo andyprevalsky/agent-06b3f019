@@ -191,9 +191,13 @@ async function main(): Promise<void> {
     wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (/invalid or expired organization token/i.test(message)) {
+    if (
+      /invalid or expired organization token/i.test(message) ||
+      /Could not obtain an AgentCard Organization MCP access token/i.test(message) ||
+      /Timed out acquiring an AgentCard Organization MCP access token/i.test(message)
+    ) {
       console.log(
-        'SKIP treasury-rails: AgentCard org token rejected by provider (credential-infra precondition)'
+        'SKIP treasury-rails: AgentCard org MCP token unavailable (credential-infra precondition)'
       );
       return;
     }

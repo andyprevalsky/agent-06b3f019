@@ -3,7 +3,7 @@
  */
 
 import { prisma } from '../database';
-import { isAuthCredentialCookieName } from '../../domains/integrations/config';
+import { isAuthCredentialCookieName } from '../authCookies';
 import { canonicalAuthRealm } from '../authRealm';
 import { cookieSelectionWhere } from '../browserCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
