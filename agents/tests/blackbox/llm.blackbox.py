@@ -5019,6 +5019,79 @@ async def test_resolve_verifier_file_evidence_uses_cached_text_file_content():
     assert "2026-07-06,YouTube" in payload["result"]
 
 
+async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
+    """Verifier file evidence keeps deliverables; demotes huge intermediate dumps.
+
+    Regression for cuda-kernel top100: intermediate ranking JSONs (100KB–300KB)
+    were fully inlined into verifier_execute, Rose hit the attempt deadline
+    mid-JSON, soft-failed score=0.5, and the finished agent looped on CC spawns.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
+        _resolve_verifier_file_evidence,
+    )
+
+    intermediate = "x" * 80_000
+    # ~30k deliverable so truncated intermediate (40k) cannot also fit in 48k budget.
+    deliverable = '{"repos":[' + ",".join(
+        f'{{"name":"repo_{i:03d}","url":"https://github.com/org/repo_{i:03d}","stars":{10000-i},"desc":"cuda kernels for workload {i:03d}"}}'
+        for i in range(350)
+    ) + "]}"
+    assert 20_000 < len(deliverable) < VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
+
+    ctx = [
+        {
+            "role": "ASSISTANT",
+            "message_id": "msg-intermediate",
+            "text": "",
+            "file_pointer": {
+                "id": "file-intermediate",
+                "storage_path": "user/cuda_repo_candidates.json",
+                "original_filename": "cuda_repo_candidates.json",
+                "mime_type": "application/json",
+                "size_bytes": len(intermediate),
+                "created_at": "2026-09-03T07:00:00Z",
+            },
+            "metadata": {},
+        },
+        {
+            "role": "ASSISTANT",
+            "message_id": "msg-deliverable",
+            "text": "",
+            "file_pointer": {
+                "id": "file-deliverable",
+                "storage_path": "user/top_100_cuda_repos.json",
+                "original_filename": "top_100_cuda_repos.json",
+                "mime_type": "application/json",
+                "size_bytes": len(deliverable),
+                "created_at": "2026-09-03T07:01:00Z",
+            },
+            "metadata": {},
+        },
+    ]
+
+    def _fake_cached(file_id):
+        if file_id == "file-intermediate":
+            return (intermediate.encode(), {})
+        if file_id == "file-deliverable":
+            return (deliverable.encode(), {})
+        return None
+
+    with patch("helpers.llm.get_cached_file", side_effect=_fake_cached):
+        evidence = await _resolve_verifier_file_evidence(ctx)
+
+    inter = evidence["msg-intermediate"][0]
+    final = evidence["msg-deliverable"][0]
+    assert final["content_inlined"] is True
+    assert "repo_000" in final["result"]
+    assert inter["content_inlined"] is False, "huge intermediate dump must be demoted to metadata"
+    assert "Omitted from verifier inline" in inter["result"]
+    total_inlined = sum(
+        len(p["result"]) for payloads in evidence.values() for p in payloads if p.get("content_inlined")
+    )
+    assert total_inlined <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
+
+
 async def test_build_verifier_context_messages_self_closes_trailing_refs():
     """Verifier context should not expand terminal message refs inside JSON/batches."""
     from helpers.context_pointers import resolve_pointers_in_messages
@@ -7562,6 +7635,10 @@ async def run_all_tests():
     await r.record_async(
         "verifier_file_evidence_cached_text",
         test_resolve_verifier_file_evidence_uses_cached_text_file_content,
+    )
+    await r.record_async(
+        "verifier_file_evidence_budget_prefers_deliverable",
+        test_resolve_verifier_file_evidence_budget_prefers_deliverable,
     )
     await r.record_async(
         "verifier_ctx_self_closes_trailing_refs",

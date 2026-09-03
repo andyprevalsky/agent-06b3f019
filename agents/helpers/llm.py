@@ -1107,6 +1107,102 @@ def _verifier_file_metadata(fp: FilePointer) -> Dict[str, Any]:
     }
 
 
+# Main-agent INLINE_THRESHOLD is 20MB — fine for the acting agent, catastrophic for
+# verifier_execute: intermediate ranking dumps (100KB–300KB+) get fully inlined,
+# Rose streams mid-JSON past the attempt deadline, soft-fails score=0.5, and the
+# finished agent is bounced back into execute (cuda-kernel top100). Cap verifier
+# inlining separately; prefer deliverable-looking filenames within the budget.
+VERIFIER_MAX_INLINE_FILE_CHARS = 40_000
+VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 48_000
+_VERIFIER_DELIVERABLE_FILENAME_RE = re.compile(
+    r"(top[_\-]?\d+|final|result|output|repos|deliverable|answer)",
+    re.IGNORECASE,
+)
+
+
+def _truncate_text_for_verifier_inline(text: str, *, max_chars: int, filename: str) -> str:
+    """Keep head+tail when a single file exceeds the verifier per-file cap."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    marker = f"\n\n...[verifier truncated {len(text) - max_chars} chars from {filename}]...\n\n"
+    keep = max_chars - len(marker)
+    if keep < 64:
+        return text[:max_chars]
+    head = keep // 2
+    tail = keep - head
+    return text[:head] + marker + text[-tail:]
+
+
+def _verifier_file_inline_priority(filename: str) -> int:
+    """Lower sorts first. Deliverable-looking names beat intermediate dumps."""
+    return 0 if _VERIFIER_DELIVERABLE_FILENAME_RE.search(filename or "") else 1
+
+
+def _verifier_omitted_file_metadata_text(artifact: Dict[str, Any]) -> str:
+    filename = artifact.get("original_filename") or "file"
+    size_bytes = artifact.get("size_bytes") or 0
+    mime_type = artifact.get("mime_type") or "application/octet-stream"
+    return (
+        "file_pointer:\n"
+        f"  original_filename: {filename}\n"
+        f"  mime_type: {mime_type}\n"
+        f"  size_bytes: {size_bytes}\n"
+        "  note: Omitted from verifier inline (file-evidence budget); "
+        "prefer newest deliverable artifacts already inlined above/below."
+    )
+
+
+def _apply_verifier_file_evidence_budget(
+    evidence_by_message: Dict[str, List[Dict[str, Any]]],
+    context: List[Dict[str, Any]],
+) -> None:
+    """Keep deliverables; demote older/intermediate inlines that blow the budget."""
+    indexed: List[Tuple[int, int, str, int, Dict[str, Any]]] = []
+    for msg_index, msg in enumerate(context):
+        if not isinstance(msg, dict):
+            continue
+        key = _verifier_file_evidence_key(msg)
+        payloads = evidence_by_message.get(key) or []
+        for payload_index, payload in enumerate(payloads):
+            if not payload.get("content_inlined"):
+                continue
+            artifact = payload.get("artifact") or {}
+            filename = str(artifact.get("original_filename") or "")
+            indexed.append(
+                (
+                    _verifier_file_inline_priority(filename),
+                    -msg_index,  # newer messages first among same priority
+                    key,
+                    payload_index,
+                    payload,
+                )
+            )
+
+    indexed.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    used = 0
+    kept = 0
+    demoted = 0
+    for _prio, _neg_idx, _key, _pidx, payload in indexed:
+        n = len(str(payload.get("result") or ""))
+        if used + n <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS:
+            used += n
+            kept += 1
+            continue
+        artifact = payload.get("artifact") or {}
+        payload["result"] = _verifier_omitted_file_metadata_text(artifact)
+        payload["content_inlined"] = False
+        demoted += 1
+
+    if demoted:
+        logger.info(
+            "Verifier file-evidence budget applied",
+            kept_inlined=kept,
+            demoted_to_metadata=demoted,
+            used_chars=used,
+            budget_chars=VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
+        )
+
+
 async def _resolve_verifier_file_evidence(
     context: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -1115,6 +1211,9 @@ async def _resolve_verifier_file_evidence(
     This mirrors the main-agent attachment loading policy: use the module cache
     first, download only from activity context, inline small text files, and
     fall back to metadata for large/binary/unavailable files.
+
+    Verifier inlining is further capped (per-file + total budget) so intermediate
+    artifact dumps cannot inflate verifier_execute past Rose attempt deadlines.
     """
     evidence_by_message: Dict[str, List[Dict[str, Any]]] = {}
     for msg in context:
@@ -1147,6 +1246,11 @@ async def _resolve_verifier_file_evidence(
                 if file_content is not None and fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
+                        text_content = _truncate_text_for_verifier_inline(
+                            text_content,
+                            max_chars=VERIFIER_MAX_INLINE_FILE_CHARS,
+                            filename=fp.original_filename,
+                        )
                         result_text = build_attachment_text_content(fp, text_content)
                         content_inlined = True
                     except UnicodeDecodeError:
@@ -1163,6 +1267,8 @@ async def _resolve_verifier_file_evidence(
 
         if payloads:
             evidence_by_message[_verifier_file_evidence_key(msg)] = payloads
+
+    _apply_verifier_file_evidence_budget(evidence_by_message, context)
     return evidence_by_message
 
 
