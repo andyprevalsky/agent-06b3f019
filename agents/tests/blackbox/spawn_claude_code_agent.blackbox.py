@@ -1312,13 +1312,21 @@ async def test_run_verifier_happy_path():
 
 
 async def test_run_verifier_disabled_by_env_flag():
-    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex."""
+    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex.
+
+    SUCCESS requires extractable output artifacts (bare exit_code==0 is not enough).
+    """
     from domains.spawn_claude_code_agent import service
     from utils.terminal_filter import TerminalFilter
 
     terminal = TerminalFilter(cols=80, rows=50)
     terminal.feed("done")
     called = {"check_progress": 0}
+    artifact = {
+        "path": "/home/user/output/cuda_kernel_repo_pool.json",
+        "content": '{"repos":[]}',
+        "name": "cuda_kernel_repo_pool.json",
+    }
 
     async def fake_activity(*a, **kw):
         called["check_progress"] += 1
@@ -1342,11 +1350,10 @@ async def test_run_verifier_disabled_by_env_flag():
                 claude_token=None,
                 exit_code=0,
                 code_provider=provider,
-                output_files=[],
+                output_files=[artifact],
             )
             assert score == 1.0, provider
-            assert "verifier disabled" in reasoning.lower(), reasoning
-            assert struct is None
+            assert "verifier disabled" in reasoning.lower() or "accepting session" in reasoning.lower(), reasoning
             assert itok == 0 and otok == 0
 
     assert called["check_progress"] == 0
@@ -1419,6 +1426,28 @@ async def test_run_verifier_disabled_rejects_incomplete_nonzero_exit():
         )
     assert score2 == 1.0
     assert "accepting session" in reasoning2.lower()
+
+    # r18 agent2: bare exit_code==0 with no files must NOT be SUCCESS.
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score3, reasoning3, _, _, _ = await service._run_verifier(
+            agent_id="a",
+            task_id="t",
+            goal="g",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=["Agentic loop finished: 0 interactions"],
+            output_schema={"fields": []},
+            claude_token=None,
+            exit_code=0,
+            code_provider="claude",
+            output_files=[],
+        )
+    assert score3 == 0.0
+    assert "incomplete" in reasoning3.lower()
 
 
 async def test_run_verifier_exception_fallback():
