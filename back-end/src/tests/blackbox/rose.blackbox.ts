@@ -537,6 +537,58 @@ async function testGptAuth_happyPathUsesCodexResponses() {
   }
 }
 
+
+async function testGptAuth_codex404FallsThroughToWaterfall() {
+  // Codex Cloudflare/edge 404 (empty body — same for garbage tokens) must NOT
+  // fail the whole createStreamingCompletion() call. It must raise
+  // RoseServerError (isFallThroughError) so the client walks openai-api-key /
+  // OpenRouter waterfall. Regression: bare RoseError on 404 aborted
+  // spawn-subagents smoke with `RoseError: Codex 404:` and never fell through.
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  delete process.env.GPT_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  let codexCalls = 0;
+  let openAiCalls = 0;
+  let openrouterCalls = 0;
+  installFetchStub((url) => {
+    if (url === CODEX_API_URL) {
+      codexCalls++;
+      return errorResponse(404, '');
+    }
+    if (url === OPENAI_RESPONSES_API_URL) {
+      openAiCalls++;
+      return errorResponse(500, 'openai key must not be required for this regression');
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [{ role: 'user', content: 'hi' }],
+      gpt_token: 'blocked-codex-token',
+      gpt_account_id: 'acct_404',
+    });
+    const chunks = await collect(stream);
+
+    assert(codexCalls >= 1, 'Codex route must be attempted');
+    assertEqual(openrouterCalls, 1, 'OpenRouter waterfall must serve after Codex 404');
+    assert(chunks.length > 0, 'chunks emitted from waterfall after Codex 404');
+    const first = chunks[0];
+    assert(
+      !String(first.actual_model ?? '').endsWith('-codex') &&
+        !String(first.actual_model ?? '').endsWith('-openai'),
+      `actual_model should be waterfall (not codex/openai), got ${first.actual_model}`
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
 async function testGptAuth_buildBodyPreservesToolHistoryAndMultimodal() {
   const body = buildCodexResponsesBody({
     poolSpec: getPool('rose-1-lite'),
@@ -3406,6 +3458,10 @@ async function main(): Promise<void> {
     {
       name: 'gptAuth / happy path uses Codex Responses',
       fn: testGptAuth_happyPathUsesCodexResponses,
+    },
+    {
+      name: 'gptAuth / Codex 404 falls through to waterfall',
+      fn: testGptAuth_codex404FallsThroughToWaterfall,
     },
     {
       name: 'gptAuth / body preserves tool history and multimodal input',

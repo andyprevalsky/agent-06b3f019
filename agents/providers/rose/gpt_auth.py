@@ -625,7 +625,9 @@ async def openai_api_key_complete(
                         continue
                     raise RoseServerError(f"OpenAI {status}: {error_body[:2000]}", status=status)
 
-                raise RoseError(f"OpenAI {status}: {error_body[:2000]}", status=status)
+                # Mirror Codex: unexpected statuses (incl. 404) fall through as
+                # RoseServerError, never bare RoseError (not in _FALL_THROUGH_ERRORS).
+                raise RoseServerError(f"OpenAI {status}: {error_body[:2000]}", status=status)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
@@ -720,7 +722,13 @@ async def _attempt_with_token(
                         continue
                     raise RoseServerError(f"Codex {status}: {error_body[:2000]}", status=status)
 
-                raise RoseError(f"Codex {status}: {error_body[:2000]}", status=status)
+                # 404 (and any other unexpected non-2xx) must be RoseServerError so
+                # RoseClient._FALL_THROUGH_ERRORS catches it and walks openai-api-key
+                # / waterfall. A bare RoseError is NOT in that tuple — that gap made
+                # Cloudflare/edge 404s (empty body, same response for garbage tokens)
+                # fail the whole agent 3× instead of falling through. Do not retry
+                # 404 in-place: the same egress IP keeps getting blocked.
+                raise RoseServerError(f"Codex {status}: {error_body[:2000]}", status=status)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
