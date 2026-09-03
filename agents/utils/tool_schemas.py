@@ -173,7 +173,7 @@ class ResponseSchemaFieldConfig(BaseModel):
     )
     required: bool = Field(description="Whether this field is required in the output.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
-        file_types: List[str] = Field(
+    file_types: List[str] = Field(
         default_factory=list,
         description=(
             "For file_pointer / list[file_pointer]: required extensions or MIME subtypes "
