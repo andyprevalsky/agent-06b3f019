@@ -29,6 +29,7 @@ import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fastForward as ff } from '@with-logic/fast-forward';
 import { NonBlockingFileCache } from './nonBlockingFetchCache';
+import { mockAgentPhoneMessageId, mockSurgeMessageId } from './smsTransportMock';
 
 /**
  * AsyncLocalStorage for propagating a capture token from inbound HTTP requests
@@ -484,7 +485,11 @@ export function installFetchCapture(): Router {
           headers: { 'content-type': 'text/plain' },
         });
       }
-      const body = JSON.stringify({ id: `blackbox-surge-message-${id}` });
+      // Seed from request body only — the process-wide capture counter makes
+      // identical SMS payloads get different fake IDs across unrelated traffic.
+      const body = JSON.stringify({
+        id: mockSurgeMessageId(`capture:${requestBody ?? ''}`),
+      });
       entry.durationMs = Date.now() - start;
       entry.responseStatus = 200;
       entry.responseBody = body;
@@ -516,6 +521,51 @@ export function installFetchCapture(): Router {
       return new globalThis.Response(body, {
         status,
         statusText: unavailable ? 'Service Unavailable' : 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    const agentPhoneHost = new URL(url).hostname;
+    if (
+      process.env.BLACKBOX_TEST_FAKE_AGENTPHONE === '1' &&
+      (agentPhoneHost === 'agentphone.ai' ||
+        agentPhoneHost === 'api.agentphone.ai' ||
+        agentPhoneHost.endsWith('.agentphone.ai')) &&
+      new URL(url).pathname.endsWith('/messages') &&
+      method.toUpperCase() === 'POST'
+    ) {
+      let parsedBody: Record<string, unknown> = {};
+      if (requestBody) {
+        try {
+          const parsed: unknown = JSON.parse(requestBody);
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            parsedBody = parsed as Record<string, unknown>;
+          }
+        } catch {
+          parsedBody = {};
+        }
+      }
+      const toNumber =
+        typeof parsedBody.to_number === 'string' ? parsedBody.to_number : '+10000000000';
+      const fromNumber =
+        typeof parsedBody.from_number === 'string' ? parsedBody.from_number : '+10000000001';
+      const messageId = mockAgentPhoneMessageId(`capture:${requestBody ?? ''}`);
+      const body = JSON.stringify({
+        id: messageId,
+        status: 'sent',
+        channel: 'sms',
+        from_number: fromNumber,
+        to_number: toNumber,
+        conversation_id: `conv_${messageId.slice(-8)}`,
+      });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = 200;
+      entry.responseBody = body;
+      captures.push(entry);
+
+      return new globalThis.Response(body, {
+        status: 200,
+        statusText: 'OK',
         headers: { 'content-type': 'application/json' },
       });
     }

@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { listInboundMessagesForNumber, sendAgentPhoneMessage } from '../../providers/agentPhone';
 import {
+  buildMockAgentPhoneSendResult,
+  shouldMockBenchmarkSmsSend,
+} from '../../providers/smsTransportMock';
+import {
   claimToolSideEffect,
   markToolSideEffectFailed,
   markToolSideEffectSucceeded,
@@ -15,6 +19,7 @@ const OUTBOUND_OPERATION_TYPE = 'agentphone.message';
 export class AgentPhoneMessageValidationError extends Error {}
 export class AgentPhoneIdentityUnavailableError extends Error {}
 export class AgentPhoneIdempotencyConflictError extends Error {}
+export class AgentPhoneAgentUnauthorizedError extends Error {}
 
 function outboundOperationKey(userId: string, agentId: string, idempotencyKey: string) {
   const digest = createHash('sha256')
@@ -67,6 +72,49 @@ function validateOutboundRequest(params: {
   };
 }
 
+function buildAgentPhoneOutboundResponse(receipt: {
+  status: string;
+  id: string;
+  channel: string;
+  fromNumber: string;
+  toNumber: string;
+  conversationId: string | null;
+}) {
+  return {
+    success: true,
+    status: receipt.status,
+    message_id: receipt.id,
+    provider: 'agentphone',
+    provider_channel: receipt.channel,
+    from_number: receipt.fromNumber,
+    to_number: receipt.toNumber,
+    conversation_id: receipt.conversationId,
+  };
+}
+
+async function deliverAgentPhoneOutbound(params: {
+  agentId: string;
+  idempotencyKey: string;
+  phoneNumber: string;
+  message: string;
+  identity: NonNullable<Awaited<ReturnType<typeof repo.findAgentIdentityForMessages>>>;
+}) {
+  const mockSeed = `${params.agentId}:${params.idempotencyKey}:${params.phoneNumber}:${params.message}`;
+  return (await shouldMockBenchmarkSmsSend(params.agentId))
+    ? buildMockAgentPhoneSendResult({
+        fromNumber: params.identity.phone ?? '+10000000000',
+        toNumber: params.phoneNumber,
+        seed: mockSeed,
+      })
+    : sendAgentPhoneMessage({
+        agentId: params.identity.phoneProviderAgentId,
+        numberId: params.identity.phoneProviderNumberId,
+        fromNumber: params.identity.phone,
+        toNumber: params.phoneNumber,
+        body: params.message,
+      });
+}
+
 export async function sendOutboundAgentPhoneMessage(params: {
   userId: unknown;
   agentId: unknown;
@@ -95,6 +143,15 @@ export async function sendOutboundAgentPhoneMessage(params: {
     );
   }
 
+  // Bind mock selection to an agent the caller owns. Without this, a valid
+  // sender userId plus an unrelated benchmark agentId would short-circuit to
+  // synthetic success and skip AgentPhone (CodeRabbit finding).
+  if (!(await repo.isAgentOwnedByUser(userId, agentId))) {
+    throw new AgentPhoneAgentUnauthorizedError(
+      'agent_id is not an agent owned by the authenticated user'
+    );
+  }
+
   const operationKey = outboundOperationKey(userId, agentId, idempotencyKey);
   const claim = await claimToolSideEffect({
     operationKey,
@@ -116,23 +173,14 @@ export async function sendOutboundAgentPhoneMessage(params: {
   }
 
   try {
-    const receipt = await sendAgentPhoneMessage({
-      agentId: identity.phoneProviderAgentId,
-      numberId: identity.phoneProviderNumberId,
-      fromNumber: identity.phone,
-      toNumber: phoneNumber,
-      body: message,
+    const receipt = await deliverAgentPhoneOutbound({
+      agentId,
+      idempotencyKey,
+      phoneNumber,
+      message,
+      identity,
     });
-    const response = {
-      success: true,
-      status: receipt.status,
-      message_id: receipt.id,
-      provider: 'agentphone',
-      provider_channel: receipt.channel,
-      from_number: receipt.fromNumber,
-      to_number: receipt.toNumber,
-      conversation_id: receipt.conversationId,
-    };
+    const response = buildAgentPhoneOutboundResponse(receipt);
     await markToolSideEffectSucceeded({
       operationKey,
       externalId: receipt.id,
