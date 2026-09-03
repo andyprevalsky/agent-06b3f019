@@ -1,6 +1,6 @@
 /** Config search + promote for browser challenge recovery (split for max-lines). */
 import type { Prisma } from '@prisma/client';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
 import type {
@@ -187,7 +187,7 @@ export async function searchAndPromoteBrowserConfig(
       return probe;
     },
     promote: async ({ config, session }) => {
-      const updated = await prisma.$transaction(async (tx) => {
+      const updated = await runTransactionWithRetry(async (tx) => {
         const replaced = await tx.browserSession.updateMany({
           where: { id: current.id, sessionId: current.sessionId },
           data: {
