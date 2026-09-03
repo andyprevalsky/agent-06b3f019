@@ -765,7 +765,7 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
         challenge_rule = (
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
             "are not authentication. recover_from_challenge is a relatively expensive way to "
-            "force-open a blocked page or service - do not use it when an alternate path can "
+            "force-open a blocked page or service — do not use it when an alternate path can "
             "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
             "to solve challenge widgets yourself. Never call "
             "request_user_assistance_for_authentication while a challenge interstitial is "
@@ -774,7 +774,7 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     else:
         challenge_rule = (
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. No challenge-recovery tool is available - wait briefly "
+            "are not authentication. No challenge-recovery tool is available — wait briefly "
             "for the provider auto-solver, try an alternate URL or path to complete the "
             "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
             "challenge widgets yourself. Never call "
