@@ -113,6 +113,14 @@ another; each consumer still scopes its final React setter. Cursor callbacks req
 task identity, and payload `agentId`; their final state updater and animation
 frames recheck that owner.
 
+Reconnect reconciliation retains the preceding channel's realtime values until
+the replacement REST snapshot lands, while recording replacement-channel events
+in a new generation map. The snapshot therefore cannot visibly regress newer
+status, progress, or cost, and old values do not survive indefinitely across
+later reconnects. The shared empty-tree singleton is exposed as a `ReadonlyMap`
+and guarded by a runtime proxy, so a cast or untyped caller cannot mutate empty
+state shared by every hook instance.
+
 The regression coverage preserves every realtime handler after unsubscribe,
 updater-after-switch, delayed subscription resolution, connected and
 disconnected backfills, stream-cleanup timeout, mismatched response, delayed
@@ -123,6 +131,8 @@ fails against the old implementation rather than passing on a caught fixture
 error. Additional review regressions cover sub-agent animation-buffer switches,
 missing-model reset, stable empty-tree identity, hung disconnected fetches, and
 initial API tree snapshots racing newer realtime nodes.
+Review regressions also cover a stale reconnect snapshot racing the preceding
+channel's latest event and attempted runtime mutation of the shared empty tree.
 
 Selection transitions and stale-work discards now emit identity-only console
 diagnostics (`previousAgentId`, `nextAgentId`, owner, active ID, and surface),

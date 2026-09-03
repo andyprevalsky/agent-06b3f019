@@ -215,6 +215,10 @@ describe('useAgentTree helpers', () => {
       expect(result.current.size).toBe(0);
       rerender();
       expect(result.current).toBe(emptyTree);
+      expect(() => (result.current as Map<string, TreeNode>).set('leak', {} as TreeNode)).toThrow(
+        'The shared empty agent tree is read-only',
+      );
+      expect(result.current.size).toBe(0);
     });
 
     it('populates nodes from initial fetch and applies AGENT_STATE_CHANGED updates', async () => {

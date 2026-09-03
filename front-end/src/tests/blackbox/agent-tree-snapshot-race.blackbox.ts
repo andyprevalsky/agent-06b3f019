@@ -98,4 +98,97 @@ describe('agent tree snapshot ordering', () => {
     expect(result.current.get('root')?.goal).toBe('newer realtime state');
     unmount();
   });
+
+  it('preserves the latest realtime node while a reconnect snapshot reconciles', async () => {
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({ access_token: 'test-token', user: { id: 'user-1' } }),
+    );
+    let requestCount = 0;
+    let releaseReconnectSnapshot!: () => void;
+    const reconnectSnapshotBlocked = new Promise<void>((resolve) => {
+      releaseReconnectSnapshot = resolve;
+    });
+    let markReconnectSnapshotStarted!: () => void;
+    const reconnectSnapshotStarted = new Promise<void>((resolve) => {
+      markReconnectSnapshotStarted = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/agents/tree`, async () => {
+        requestCount += 1;
+        const currentRequest = requestCount;
+        if (currentRequest === 2) {
+          markReconnectSnapshotStarted();
+          await reconnectSnapshotBlocked;
+        }
+        return HttpResponse.json({
+          agents: [
+            {
+              agent_id: 'root',
+              parent_agent_id: null,
+              goal: currentRequest === 1 ? 'initial API state' : 'stale reconnect snapshot',
+              status: 'ACTIVE',
+              progress: 0,
+              tools_in_use: [],
+              message_count: 0,
+              tree_cost_cents: 0,
+            },
+            ...(currentRequest === 2
+              ? [
+                  {
+                    agent_id: 'reconnect-snapshot-only',
+                    parent_agent_id: 'root',
+                    goal: 'proves reconnect snapshot landed',
+                    status: 'ACTIVE',
+                    progress: 0,
+                    tools_in_use: [],
+                    message_count: 0,
+                    tree_cost_cents: 0,
+                  },
+                ]
+              : []),
+          ],
+        });
+      }),
+    );
+    const handlerGenerations: Parameters<typeof RealtimeMod.subscribeToBus>[1][] = [];
+    vi.mocked(RealtimeMod.subscribeToBus).mockImplementation(async (_busId, handlers) => {
+      handlerGenerations.push(handlers);
+      return fakeChannel();
+    });
+    const { result, unmount } = renderHook(() => useAgentTree('reconnect-race-bus'));
+    await waitFor(() => expect(result.current.get('root')?.goal).toBe('initial API state'));
+    await waitFor(() => expect(handlerGenerations).toHaveLength(1));
+
+    act(() => {
+      handlerGenerations[0].onAgentStateChanged?.({
+        agentId: 'root',
+        parentAgentId: null,
+        goal: 'newer realtime state',
+        status: 'ACTIVE',
+        progress: 0.5,
+        toolsInUse: [],
+        messageCount: 1,
+        costCents: 1,
+      });
+    });
+    expect(result.current.get('root')?.goal).toBe('newer realtime state');
+
+    let reconnect!: () => void;
+    const timeoutSpy = vi.spyOn(window, 'setTimeout').mockImplementation(((
+      callback: TimerHandler,
+    ) => {
+      reconnect = callback as () => void;
+      return 1;
+    }) as typeof window.setTimeout);
+    act(() => handlerGenerations[0].onDisconnect?.());
+    act(() => reconnect());
+    await reconnectSnapshotStarted;
+    timeoutSpy.mockRestore();
+    releaseReconnectSnapshot();
+
+    await waitFor(() => expect(result.current.has('reconnect-snapshot-only')).toBe(true));
+    expect(result.current.get('root')?.goal).toBe('newer realtime state');
+    unmount();
+  });
 });

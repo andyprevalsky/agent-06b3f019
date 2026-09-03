@@ -3,7 +3,18 @@ import { listenToAgentTree, type TreeNode } from './agentTreeSubscription';
 
 export type { TreeNode } from './agentTreeSubscription';
 
-const EMPTY_TREE = new Map<string, TreeNode>();
+const EMPTY_TREE_SOURCE = new Map<string, TreeNode>();
+const EMPTY_TREE = new Proxy(EMPTY_TREE_SOURCE, {
+  get(target, property) {
+    if (property === 'set' || property === 'delete' || property === 'clear') {
+      return () => {
+        throw new TypeError('The shared empty agent tree is read-only');
+      };
+    }
+    const value = Reflect.get(target, property, target) as unknown;
+    return typeof value === 'function' ? value.bind(target) : value;
+  },
+}) as ReadonlyMap<string, TreeNode>;
 
 /**
  * Subscribe to the shared sub-agent tree for one root bus.
@@ -11,10 +22,10 @@ const EMPTY_TREE = new Map<string, TreeNode>();
  * The shared transport is generation-owned by the bus entry. This hook owns
  * only its listener, whose final React setter verifies the live bus identity.
  */
-export function useAgentTree(busId: string | null): Map<string, TreeNode> {
+export function useAgentTree(busId: string | null): ReadonlyMap<string, TreeNode> {
   const [treeState, setTreeState] = useState<{
     busId: string | null;
-    nodes: Map<string, TreeNode>;
+    nodes: ReadonlyMap<string, TreeNode>;
   }>({ busId, nodes: EMPTY_TREE });
   const liveBusIdRef = useRef(busId);
   liveBusIdRef.current = busId;
@@ -33,7 +44,7 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
 
 /** Filter tree nodes to the named spawn roots and all their descendants. */
 export function filterTreeBySpawn(
-  allNodes: Map<string, TreeNode>,
+  allNodes: ReadonlyMap<string, TreeNode>,
   subAgentIds: string[],
 ): Map<string, TreeNode> {
   const relevant = new Map<string, TreeNode>();

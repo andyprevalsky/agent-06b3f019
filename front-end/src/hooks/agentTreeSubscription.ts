@@ -103,7 +103,12 @@ function scheduleReconnect(busId: string, subscription: BusSubscription) {
   }, delay);
 }
 
-function fetchInitialTree(busId: string, subscription: BusSubscription, generation: number) {
+function fetchInitialTree(
+  busId: string,
+  subscription: BusSubscription,
+  generation: number,
+  reconciliationNodes: ReadonlyMap<string, TreeNode>,
+) {
   void fetchTreeState(busId)
     .then((agents) => {
       if (!isLiveGeneration(busId, subscription, generation)) {
@@ -112,6 +117,7 @@ function fetchInitialTree(busId: string, subscription: BusSubscription, generati
       }
       const nodes = new Map<string, TreeNode>();
       agents.forEach((agent) => nodes.set(agent.agent_id, apiToTreeNode(agent)));
+      reconciliationNodes.forEach((node, agentId) => nodes.set(agentId, node));
       subscription.realtimeNodes.forEach((node, agentId) => nodes.set(agentId, node));
       publishNodes(subscription, nodes);
     })
@@ -162,11 +168,15 @@ function connectBus(busId: string, subscription: BusSubscription) {
   }
   subscription.connecting = true;
   subscription.generation += 1;
+  // Preserve the preceding channel's realtime values only until this
+  // generation's REST snapshot is reconciled. New events are tracked
+  // separately so only replacement-channel data survives another reconnect.
+  const reconciliationNodes = subscription.realtimeNodes;
   subscription.realtimeNodes = new Map();
   const generation = subscription.generation;
   if (subscription.channel) unsubscribe(subscription.channel);
   subscription.channel = null;
-  fetchInitialTree(busId, subscription, generation);
+  fetchInitialTree(busId, subscription, generation, reconciliationNodes);
   void subscribeToBus(busId, createHandlers(busId, subscription, generation))
     .then((channel) => {
       if (!isLiveGeneration(busId, subscription, generation)) {
