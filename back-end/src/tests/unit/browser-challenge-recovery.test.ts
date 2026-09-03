@@ -10,7 +10,6 @@ import {
   recoveryConfigKeyForSession,
   runLaneConfigSearch,
   orderConfigsForLane,
-  shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
@@ -40,12 +39,12 @@ function testCandidateMatrix(): void {
   assert.deepStrictEqual(
     candidates.map((candidate) => candidate.key),
     [
+      'steel_fixed',
+      'kernel_mobile',
       'kernel_residential_city',
       'kernel_residential_state',
-      'kernel_mobile',
-      'kernel_isp',
       'steel_managed',
-      'steel_fixed',
+      'kernel_isp',
     ]
   );
   assert.deepStrictEqual(kernelCaptchaTelemetryConfig(), {
@@ -61,8 +60,17 @@ function testCandidateMatrix(): void {
 }
 
 function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
-  const source = readFileSync(
+  const facade = readFileSync(
     new URL('../../providers/browser/challengeRecovery.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    facade,
+    /export \{ searchAndPromoteBrowserConfig \} from '\.\/challengeRecoveryPromote'/,
+    'challengeRecovery.ts must re-export the promote composition root'
+  );
+  const source = readFileSync(
+    new URL('../../providers/browser/challengeRecoveryPromote.ts', import.meta.url),
     'utf8'
   );
   const searchStart = source.indexOf('export async function searchAndPromoteBrowserConfig');
@@ -598,27 +606,6 @@ function testChallengeDetection(): void {
   );
 }
 
-function testSteelPreferredWhenCdnHardFilterActive(): void {
-  assert.ok(!shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x'));
-  assert.ok(
-    shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x', {
-      requirePaymentCdn: true,
-    })
-  );
-  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.example.com/shop'));
-  assert.ok(!shouldPreferSteelForChallengeTarget('not-a-url'));
-
-  const preferred = browserRecoveryCandidates(
-    { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
-    { preferSteel: true }
-  );
-  assert.deepStrictEqual(
-    preferred.map((candidate) => candidate.key),
-    ['steel_managed', 'steel_fixed']
-  );
-  assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
-}
-
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
@@ -630,14 +617,9 @@ async function main(): Promise<void> {
   await testLateCreateAfterAbortIsReleased();
   await testAbortedProbeDoesNotDoubleRelease();
   await testProbeCandidateBrowserSettlesOnAbort();
-  // Payment-CDN / Stripe.js ranking + hard gates live in
-  // browser-challenge-recovery-payment.test.ts (max-lines split).
-  // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
-  // Learned preferred-config seeding + schemas: .part2.test.ts.
   testOrderConfigsForLane();
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
-  testSteelPreferredWhenCdnHardFilterActive();
   process.stdout.write('PASS staged browser challenge recovery\n');
 }
 

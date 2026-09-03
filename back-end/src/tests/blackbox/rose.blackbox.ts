@@ -449,7 +449,7 @@ async function testGptAuth_happyPathUsesCodexResponses() {
     assert(!('temperature' in (capturedBody ?? {})), 'temperature omitted for Codex backend');
     assertEqual(
       (capturedBody?.reasoning as Record<string, unknown>)?.effort,
-      'medium',
+      'xhigh',
       'default reasoning effort'
     );
     assert(
@@ -1641,7 +1641,7 @@ async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig
     assertEqual(capturedBody.instructions, 'router-system-prompt', 'system prompt');
     assertEqual(
       JSON.stringify(capturedBody.reasoning),
-      JSON.stringify({ effort: 'medium', summary: 'auto' }),
+      JSON.stringify({ effort: 'xhigh', summary: 'auto' }),
       'reasoning config'
     );
     const text = capturedBody.text as { format?: { name?: string; strict?: boolean } };
@@ -1962,6 +1962,154 @@ async function testClient_dumpContextWritesRequestAndOutput() {
 }
 
 // ==================== WATERFALL TESTS ====================
+
+async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
+  // EVERY Rose LLM body builder must stamp effort on the wire:
+  //   Anthropic → output_config.effort (default xhigh)
+  //   OpenAI/Codex Responses → reasoning.effort (default xhigh)
+  //   OpenRouter waterfall → reasoning.effort (default xhigh)
+  //   OpenRouter fast chat → reasoning.effort (default xhigh)
+  //   Cerebras direct → reasoning_effort: 'none' (latency path; still set)
+  //   OpenRouter→Cerebras → reasoning.effort: 'none' (latency path; still set)
+  const messages: CompletionMessage[] = [
+    { role: 'system', content: 'be helpful' },
+    { role: 'user', content: 'hi' },
+  ];
+  const pool = getPool('rose-1-lite');
+
+  const anthropic = buildAnthropicBody({ poolSpec: pool, messages });
+  assertEqual(
+    (anthropic.output_config as Record<string, unknown>).effort,
+    'xhigh',
+    'anthropic default effort'
+  );
+
+  const anthropicMax = buildAnthropicBody({ poolSpec: pool, messages, effort: 'max' });
+  assertEqual(
+    (anthropicMax.output_config as Record<string, unknown>).effort,
+    'xhigh',
+    'anthropic max → xhigh'
+  );
+
+  const anthropicMed = buildAnthropicBody({
+    poolSpec: pool,
+    messages,
+    effort: 'medium',
+  });
+  assertEqual(
+    (anthropicMed.output_config as Record<string, unknown>).effort,
+    'medium',
+    'anthropic explicit medium'
+  );
+
+  const anthropicMinimal = buildAnthropicBody({
+    poolSpec: pool,
+    messages,
+    effort: 'minimal',
+  });
+  assertEqual(
+    (anthropicMinimal.output_config as Record<string, unknown>).effort,
+    'low',
+    'anthropic minimal → low'
+  );
+
+  const codex = buildCodexResponsesBody({
+    poolSpec: pool,
+    messages,
+    requestId: 'effort-default',
+  });
+  assertEqual((codex.reasoning as Record<string, unknown>).effort, 'xhigh', 'codex default effort');
+
+  const openrouter = buildOpenRouterBody({
+    model: 'openai/gpt-5.6-sol',
+    messages,
+  });
+  assertEqual(
+    (openrouter.reasoning as Record<string, unknown>).effort,
+    'xhigh',
+    'openrouter default effort'
+  );
+
+  const openrouterHigh = buildOpenRouterBody({
+    model: 'openai/gpt-5.6-sol',
+    messages,
+    reasoningEffort: 'high',
+  });
+  assertEqual(
+    (openrouterHigh.reasoning as Record<string, unknown>).effort,
+    'high',
+    'openrouter explicit high'
+  );
+
+  const openrouterMinimal = buildOpenRouterBody({
+    model: 'openai/gpt-5.6-sol',
+    messages,
+    reasoningEffort: 'minimal',
+  });
+  assertEqual(
+    (openrouterMinimal.reasoning as Record<string, unknown>).effort,
+    'low',
+    'openrouter minimal → low'
+  );
+
+  // Every waterfall step for the browser-use pool must stamp effort.
+  const browserPool = getPool('rose-1-browser-use');
+  for (const model of browserPool.waterfall) {
+    const stepBody = buildOpenRouterBody({ model, messages });
+    assert(
+      typeof (stepBody.reasoning as Record<string, unknown> | undefined)?.effort === 'string',
+      `effort present on ${model}`
+    );
+    assertEqual(
+      (stepBody.reasoning as Record<string, unknown>).effort,
+      'xhigh',
+      `effort=xhigh on ${model}`
+    );
+  }
+
+  // Latency chat routes: effort still ALWAYS set (none for Cerebras; xhigh default for OR-fast).
+  const cerebras = buildCerebrasChatBody({ messages });
+  assertEqual(cerebras.reasoning_effort, 'none', 'cerebras stamps reasoning_effort=none');
+
+  const orCerebras = buildOpenRouterCerebrasBody({ messages });
+  assertEqual(
+    (orCerebras.reasoning as Record<string, unknown>).effort,
+    'none',
+    'openrouter→cerebras stamps reasoning.effort=none'
+  );
+
+  const orFast = buildOpenRouterFastChatBody({ messages });
+  assertEqual(
+    (orFast.reasoning as Record<string, unknown>).effort,
+    'xhigh',
+    'openrouter-fast default effort=xhigh'
+  );
+  const orFastMinimal = buildOpenRouterFastChatBody({ messages, effort: 'minimal' });
+  assertEqual(
+    (orFastMinimal.reasoning as Record<string, unknown>).effort,
+    'low',
+    'openrouter-fast minimal → low'
+  );
+
+  // Inventory: every exported body builder in this suite stamps a non-empty effort.
+  const inventory: Array<{ label: string; effort: unknown }> = [
+    { label: 'anthropic', effort: (anthropic.output_config as Record<string, unknown>).effort },
+    { label: 'codex', effort: (codex.reasoning as Record<string, unknown>).effort },
+    { label: 'openrouter', effort: (openrouter.reasoning as Record<string, unknown>).effort },
+    { label: 'cerebras', effort: cerebras.reasoning_effort },
+    {
+      label: 'openrouter-cerebras',
+      effort: (orCerebras.reasoning as Record<string, unknown>).effort,
+    },
+    { label: 'openrouter-fast', effort: (orFast.reasoning as Record<string, unknown>).effort },
+  ];
+  for (const { label, effort } of inventory) {
+    assert(
+      typeof effort === 'string' && effort.length > 0,
+      `${label} must stamp non-empty effort (got ${JSON.stringify(effort)})`
+    );
+  }
+}
 
 async function testWaterfall_firstFailsSecondSucceeds() {
   process.env.OPENROUTER_API_KEY = 'or-test-key';
@@ -3296,7 +3444,7 @@ async function testClient_lastUserMessageGetsCacheBreakpoint() {
 
 async function testClient_responseFormatTransformedToOutputConfig() {
   // OpenAI-shape response_format becomes Anthropic-shape output_config on
-  // the claudeAuth path. claudeAuth.ts also pins output_config.effort='high'
+  // the claudeAuth path. claudeAuth.ts also pins output_config.effort='xhigh'
   // — both must be present in the outbound body.
   let capturedBody: Record<string, unknown> | null = null;
   installFetchStub((url, init) => {
@@ -3329,7 +3477,7 @@ async function testClient_responseFormatTransformedToOutputConfig() {
     assert(capturedBody !== null, 'captured body');
     const oc = (capturedBody as { output_config?: Record<string, unknown> }).output_config;
     assert(oc !== undefined, 'output_config present');
-    assertEqual(oc!.effort, 'high', 'effort=high pinned');
+    assertEqual(oc!.effort, 'xhigh', 'effort=xhigh pinned');
     const fmt = oc!.format as Record<string, unknown>;
     assertEqual(fmt.type, 'json_schema', 'format.type=json_schema');
     const schema = fmt.schema as Record<string, unknown>;
@@ -3571,6 +3719,10 @@ async function main(): Promise<void> {
       name: 'client / dump context writes request and output',
       fn: testClient_dumpContextWritesRequestAndOutput,
     },
+    {
+      name: 'waterfall / body builders always stamp effort=xhigh',
+      fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh,
+    },
     { name: 'waterfall / first 500 → second succeeds', fn: testWaterfall_firstFailsSecondSucceeds },
     { name: 'waterfall / all fail → RoseAllFailed', fn: testWaterfall_allFailRaisesRoseAllFailed },
     {
@@ -3719,7 +3871,7 @@ async function main(): Promise<void> {
       fn: testClient_lastUserMessageGetsCacheBreakpoint,
     },
     {
-      name: 'client / response_format → output_config (effort=high)',
+      name: 'client / response_format → output_config (effort=xhigh)',
       fn: testClient_responseFormatTransformedToOutputConfig,
     },
     {

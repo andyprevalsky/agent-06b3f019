@@ -290,7 +290,7 @@ function buildPromptCacheKey(opts: BuildBodyOptions, instructions?: string): str
 function normalizeReasoningEffort(effort?: string): string {
   if (effort === 'minimal') return 'low';
   if (effort === 'max') return 'xhigh';
-  return effort ?? 'medium';
+  return effort ?? 'xhigh';
 }
 
 export function buildCodexResponsesBody(opts: BuildBodyOptions): Record<string, unknown> {

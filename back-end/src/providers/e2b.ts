@@ -23,9 +23,11 @@ import {
 } from './gptCredentials';
 import {
   buildCodeAgentSystemPrompt,
+  buildCodexHarnessSystemPrompt,
   CODE_AGENT_ATTACHMENTS_DIR,
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
+import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
@@ -479,7 +481,11 @@ export async function createCodexCodeSession(
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
+  fastModeCacheEnabled?: boolean,
+  harnessOptions?: {
+    harnessMode?: 'code' | 'rose';
+    roseApiBaseUrl?: string;
+  }
 ): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
@@ -493,16 +499,25 @@ export async function createCodexCodeSession(
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
   const model = process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
+  const harnessMode = harnessOptions?.harnessMode ?? 'code';
+  const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const runtimeFingerprint = [
     `template:${templateId}`,
     `wrapper:${fileHash(findLocalCodexCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl,
-    workDir,
-  });
+  const systemPrompt =
+    harnessMode === 'rose' && roseApiBaseUrl
+      ? buildCodexHarnessSystemPrompt({
+          roseApiBaseUrl,
+          roseUserId: userId,
+          anchorAgentId: agentId,
+        })
+      : buildCodeAgentSystemPrompt({
+          githubRepoUrl,
+          workDir,
+        });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
@@ -524,7 +539,18 @@ export async function createCodexCodeSession(
     ...authEnvs,
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    CODE_AGENT_HARNESS_MODE: harnessMode,
   };
+  if (harnessMode === 'rose' && roseApiBaseUrl) {
+    const apiKey = process.env.BACKEND_API_KEY ?? '';
+    if (!apiKey) {
+      throw new Error('BACKEND_API_KEY is required for Codex rose harness sessions');
+    }
+    envs.ROSE_API_BASE_URL = roseApiBaseUrl;
+    envs.ROSE_API_KEY = apiKey;
+    envs.ROSE_USER_ID = userId!;
+    envs.ROSE_ANCHOR_AGENT_ID = agentId;
+  }
   if (credentialMeta) {
     log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);
   } else {
@@ -595,6 +621,9 @@ export async function createCodexCodeSession(
 
   log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
   await overlayCodexCodeWsServer(sandbox);
+  if (harnessMode === 'rose') {
+    await overlayCodexRoseBridge(sandbox);
+  }
 
   const uploadedFiles: string[] = [];
   if (attachments && attachments.length > 0) {
