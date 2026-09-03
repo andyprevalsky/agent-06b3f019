@@ -132,7 +132,7 @@ function agentSummaryFromTask(
  * busId column; hub previously returned every node because getRunAgent always
  * attaches the root tree.
  */
-export function subtreeAgentsForBus<T extends { agent_id?: unknown; parent_agent_id?: unknown }>(
+export function subtreeAgentsForBus<T extends Record<string, unknown>>(
   tree: T[],
   busId: string
 ): T[] {

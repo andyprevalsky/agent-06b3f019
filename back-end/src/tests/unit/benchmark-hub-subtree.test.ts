@@ -52,6 +52,21 @@ test('unknown busId leaves the tree unchanged', () => {
   assert.deepEqual(ids, ['root', 'gp-a', 'gp-b', 'explore-a']);
 });
 
+test('hub GET /tree mapping still filters a child bus', () => {
+  const mapped = tree.map((node) => ({
+    ...node,
+    tokens_in: 0,
+    tokens_out: 0,
+    output_schema: null,
+    structured_output: null,
+    failure_context: undefined,
+    created_at: null,
+    updated_at: null,
+  }));
+  const ids = subtreeAgentsForBus(mapped, 'gp-a').map((node) => node.agent_id);
+  assert.deepEqual(ids, ['gp-a', 'explore-a']);
+});
+
 if (failures.length > 0) {
   for (const failure of failures) process.stderr.write(`  - ${failure}\n`);
   process.exit(1);
