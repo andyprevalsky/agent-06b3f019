@@ -48,8 +48,12 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
   const fileKey = documentPreviewFileKey(file);
   const loadState = useDocumentPreview(file, open, { activeSheet: selectedSheet });
 
+  // Reset on close AND on file change. `fileKey` was already a dependency, but
+  // clearing only on close meant switching files in an open drawer carried the
+  // previous sheet name into the new workbook — if that name also exists there,
+  // the preview silently opens on the wrong sheet.
   useEffect(() => {
-    if (!open) setSelectedSheet(undefined);
+    setSelectedSheet(undefined);
   }, [open, fileKey]);
 
   const kind = file ? documentPreviewKind(file) : 'download';

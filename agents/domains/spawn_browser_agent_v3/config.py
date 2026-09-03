@@ -154,6 +154,12 @@ BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS = int(
 BROWSER_SUPERVISOR_MAX_RECOVERIES = int(os.getenv("BROWSER_SUPERVISOR_MAX_RECOVERIES", "8"))
 BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS = float(os.getenv("BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS", "5"))
 
+# Verifier DOM checkpoints retained across the browser activity (evaluate
+# always-on preserved_evidence + pre-write approval snapshots). Bounded so
+# long sessions cannot unbounded-grow verifier prompts; 20 covers multi-item
+# cart flows that must checkpoint each listing before navigating away.
+VERIFIER_CHECKPOINT_MAX = int(os.getenv("VERIFIER_CHECKPOINT_MAX", "20"))
+
 # MIME type mappings for file downloads
 MIME_TYPE_MAP = {
     "pdf": "application/pdf",

@@ -3,8 +3,11 @@
  *
  * Dry-run by default. With --apply, each target row is archived in place under
  * a non-runtime key/kind. This removes the no-longer-valid trajectory slot
- * without copying the row's potentially sensitive provider accounting fields,
- * and remains exactly reversible by stripping the archive-key prefix.
+ * without copying the row's potentially sensitive provider accounting fields.
+ * Reversal takes two steps, because the archival rewrites both columns: strip
+ * the archive-key prefix from `key` AND restore `kind` to 'llm'. Runtime
+ * lookups filter on kind = 'llm', so a prefix-strip alone leaves the row
+ * archived and invisible.
  *
  * Usage:
  *   npx tsx scripts/clean-oai-demo-browser-cache.ts
@@ -44,6 +47,8 @@ type ArchivePatch = {
   archive_key: string;
   goal_hash: string;
   original_value: unknown;
+  /** Exact bytes read during the scan; pins the UPDATE against a racing writer. */
+  current_value: unknown;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -58,7 +63,11 @@ function backupOriginals(rows: BackupRow[]): Map<string, Record<string, unknown>
     const backup = asRecord(row.value);
     const originalKey = typeof backup?.original_key === 'string' ? backup.original_key : '';
     const originalFields = asRecord(backup?.original_fields);
-    if (originalKey && originalFields) originals.set(originalKey, originalFields);
+    if (!originalKey || !originalFields) continue;
+    // Earliest-wins: v1 holds the pristine value, v2 holds one v1 already
+    // rewrote. Paired with the query's ORDER BY, the restored original is
+    // stable across runs instead of depending on row order.
+    if (!originals.has(originalKey)) originals.set(originalKey, originalFields);
   }
   return originals;
 }
@@ -97,6 +106,7 @@ function buildArchivePatches(
       archive_key: `${ARCHIVE_KEY_PREFIX}${row.key}`,
       goal_hash: row.goalHash,
       original_value: sourceValue,
+      current_value: row.value,
     });
   }
   return { patches, browserCallsRemoved, restoredRows };
@@ -121,7 +131,8 @@ async function main(): Promise<void> {
        FROM "FastModeCacheEntry"
        WHERE kind = 'oai_demo_backup'
          AND "goalHash" = ANY($1::text[])
-         AND value->>'cleanup' = ANY($2::text[])`,
+         AND value->>'cleanup' = ANY($2::text[])
+       ORDER BY array_position($2::text[], value->>'cleanup'), key`,
       [...TARGET_GOAL_HASHES],
       [...PREVIOUS_CLEANUP_VERSIONS]
     );
@@ -151,21 +162,34 @@ async function main(): Promise<void> {
       return;
     }
 
-    const archived = await prisma.$executeRawUnsafe(
-      `UPDATE "FastModeCacheEntry" AS entry
-       SET key = patch.archive_key,
-           kind = 'oai_demo_backup',
-           value = patch.original_value
-       FROM jsonb_to_recordset($1::jsonb)
-         AS patch(original_key text, archive_key text, goal_hash text, original_value jsonb)
-       WHERE entry.key = patch.original_key
-         AND entry.kind = 'llm'
-         AND entry."goalHash" = patch.goal_hash`,
-      JSON.stringify(result.patches)
-    );
-    if (archived !== result.patches.length) {
-      throw new Error(`Expected to archive ${result.patches.length} rows, archived ${archived}`);
-    }
+    // The read above, the in-memory patch build, and this UPDATE must be one
+    // atomic unit: `current_value` pins each row to the exact bytes that were
+    // read, so a cache writer racing us fails the match instead of losing its
+    // fresh write, and a count mismatch rolls the whole archival back rather
+    // than throwing after a partial commit.
+    const archived = await prisma.$transaction(async (tx) => {
+      const updated = await tx.$executeRawUnsafe(
+        `UPDATE "FastModeCacheEntry" AS entry
+         SET key = patch.archive_key,
+             kind = 'oai_demo_backup',
+             value = patch.original_value
+         FROM jsonb_to_recordset($1::jsonb)
+           AS patch(original_key text, archive_key text, goal_hash text,
+                    original_value jsonb, current_value jsonb)
+         WHERE entry.key = patch.original_key
+           AND entry.kind = 'llm'
+           AND entry."goalHash" = patch.goal_hash
+           AND entry.value = patch.current_value`,
+        JSON.stringify(result.patches)
+      );
+      if (updated !== result.patches.length) {
+        throw new Error(
+          `Expected to archive ${result.patches.length} rows, archived ${updated}. ` +
+            'The cache changed under the scan; no rows were archived. Re-run the script.'
+        );
+      }
+      return updated;
+    });
     console.log(
       `Archived ${archived} browser-bearing rows outside the runtime namespace; no rows were copied.`
     );

@@ -3,7 +3,7 @@
  * No React — side-effect free so blackbox tests can import them directly.
  */
 
-import type { FilePointer } from '../hooks';
+import type { FilePointer } from '@/lib/api/types';
 
 export type DocumentPreviewKind =
   | 'html'
@@ -51,7 +51,10 @@ const TEXT_MIME_TYPES = new Set([
 ]);
 
 const TYPE_LABELS: Array<{ test: (mime: string, name: string) => boolean; label: string }> = [
-  { test: (m, n) => m.includes('html') || n.endsWith('.html') || n.endsWith('.htm'), label: 'HTML' },
+  {
+    test: (m, n) => m.includes('html') || n.endsWith('.html') || n.endsWith('.htm'),
+    label: 'HTML',
+  },
   { test: (m) => m.startsWith('image/'), label: 'Image' },
   { test: (m, n) => m === 'application/pdf' || n.endsWith('.pdf'), label: 'PDF' },
   {
@@ -83,16 +86,22 @@ const TYPE_LABELS: Array<{ test: (mime: string, name: string) => boolean; label:
   { test: (m, n) => m.includes('apple.pages') || n.endsWith('.pages'), label: 'Pages' },
   {
     test: (m, n) =>
-      m === 'text/csv' || m === 'text/tab-separated-values' || n.endsWith('.csv') || n.endsWith('.tsv'),
+      m === 'text/csv' ||
+      m === 'text/tab-separated-values' ||
+      n.endsWith('.csv') ||
+      n.endsWith('.tsv'),
     label: 'CSV',
   },
   {
-    test: (m, n) => MARKDOWN_MIME_TYPES.has(m) || MARKDOWN_EXTENSIONS.some((ext) => n.endsWith(ext)),
+    test: (m, n) =>
+      MARKDOWN_MIME_TYPES.has(m) || MARKDOWN_EXTENSIONS.some((ext) => n.endsWith(ext)),
     label: 'Markdown',
   },
   {
     test: (m, n) =>
-      m.startsWith('text/') || TEXT_MIME_TYPES.has(m) || TEXT_EXTENSIONS.some((ext) => n.endsWith(ext)),
+      m.startsWith('text/') ||
+      TEXT_MIME_TYPES.has(m) ||
+      TEXT_EXTENSIONS.some((ext) => n.endsWith(ext)),
     label: 'Text',
   },
 ];

@@ -1265,6 +1265,14 @@ def start_services(
         assert stack.base_port
         env["BENCHMARK_ISOLATED_RUN"] = "true"
         env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
+        # Cloud/Linux VMs often cannot create Docker overlay mounts; system Postgres is
+        # the supported local benchmark path (see CLAUDE.md Cursor Cloud section).
+        if os.name != "nt" and os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() not in {
+            "1",
+            "true",
+            "yes",
+        }:
+            env["ROSE_USE_SYSTEM_PG"] = "true"
         # macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy
         # that silently intercepts Node/Prisma outbound and breaks the prod cold-sync
         # + compute-token fetch — it surfaces as a phantom "Can't reach database

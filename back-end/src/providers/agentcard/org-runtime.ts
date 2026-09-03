@@ -4,6 +4,10 @@ import { mcpCallTool } from './runtime';
 const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token';
 const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
 const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
+/** AgentCard's client-credentials grant intermittently returns 5xx ("Token grant failed"). */
+const TOKEN_GRANT_MAX_ATTEMPTS = 10;
+const TOKEN_GRANT_BASE_DELAY_MS = 200;
+const TOKEN_GRANT_MAX_DELAY_MS = 1_000;
 /**
  * AgentCard throttles the organization MCP per fixed window (observed: 120 requests/minute, shared
  * by EVERY org caller — card issuance, wallet reclaim polling, the minute cron reconciler and the
@@ -323,9 +327,19 @@ export class AgentCardOrgRuntime {
     // for the same client). Joining it would resend the rejected credential and fail again — the
     // reachable case being the concurrent read fan-out, where one member of a burst gets a 401
     // while a sibling's proactive refresh is still pending.
+    //
+    // When a still-valid cached token can cover this call, proactive refresh is best-effort: one
+    // attempt, then fall back. Retrying 5xx here only burns the shared org token budget and delays
+    // every lifecycle fanout that can already succeed on the cache. Cold start and forced refresh
+    // keep the full retry budget — those have no usable fallback.
+    const canFallBackToCache =
+      !forceClientCredentials &&
+      cachedToken !== undefined &&
+      cachedToken.expiresAtMs > Date.now() + MIN_STALE_TOKEN_VALIDITY_MS;
+    const maxAttempts = canFallBackToCache ? 1 : TOKEN_GRANT_MAX_ATTEMPTS;
     let tokenPromise = this.inFlightToken;
     if (tokenPromise === undefined || forceClientCredentials) {
-      tokenPromise = this.fetchAccessToken().finally(() => {
+      tokenPromise = this.fetchAccessToken(maxAttempts).finally(() => {
         if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
       });
       this.inFlightToken = tokenPromise;
@@ -351,7 +365,34 @@ export class AgentCardOrgRuntime {
     }
   }
 
-  private async fetchAccessToken(): Promise<string> {
+  private async fetchAccessToken(maxAttempts = TOKEN_GRANT_MAX_ATTEMPTS): Promise<string> {
+    const attempts = Math.max(1, Math.min(maxAttempts, TOKEN_GRANT_MAX_ATTEMPTS));
+    let lastError: AgentCardOrgRuntimeError | undefined;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await this.fetchAccessTokenOnce();
+      } catch (error) {
+        if (!(error instanceof AgentCardOrgRuntimeError)) throw error;
+        lastError = error;
+        if (!isRetryableOrgTokenError(error) || attempt === attempts) {
+          throw error;
+        }
+        await delay(
+          Math.min(TOKEN_GRANT_MAX_DELAY_MS, TOKEN_GRANT_BASE_DELAY_MS * 2 ** (attempt - 1))
+        );
+      }
+    }
+    throw (
+      lastError ??
+      new AgentCardOrgRuntimeError(
+        'Could not obtain an AgentCard Organization MCP access token',
+        502,
+        'agentcard_org_token_unavailable'
+      )
+    );
+  }
+
+  private async fetchAccessTokenOnce(): Promise<string> {
     let response: Awaited<ReturnType<FetchLike>>;
     try {
       response = await this.fetchImpl(
@@ -367,7 +408,11 @@ export class AgentCardOrgRuntime {
             client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID'),
             client_secret: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_SECRET'),
             // Bind the token to the MCP audience (RFC 8707), matching the per-user OAuth flow.
-            resource: AGENTCARD_MCP_RESOURCE,
+            // Prefer live env so a late dotenv load cannot freeze a wrong module-init default.
+            resource: (process.env.AGENTCARD_MCP_URL?.trim() || AGENTCARD_MCP_RESOURCE).replace(
+              /\/+$/,
+              ''
+            ),
           }),
           // Fail fast instead of hanging wallet funding/monitoring/reconciliation if the token
           // endpoint stalls.
@@ -416,6 +461,12 @@ export class AgentCardOrgRuntime {
     };
     return this.cachedToken.accessToken;
   }
+}
+
+function isRetryableOrgTokenError(error: AgentCardOrgRuntimeError): boolean {
+  if (error.code !== 'agentcard_org_token_unavailable') return false;
+  // Provider 5xx is remapped to 502; timeouts are 504. Do not retry auth/config 4xx.
+  return error.status === 502 || error.status === 503 || error.status === 504;
 }
 
 const runtime = new AgentCardOrgRuntime();
