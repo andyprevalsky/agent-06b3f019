@@ -2019,23 +2019,41 @@ def _run_doordash_food_plan_fixture(action: str) -> dict:
 
 
 def _doordash_food_plan_frozen_fixture() -> dict | None:
+    """Resolve execute_prompt + checkout_manifest for agent override / judge context.
+
+    Live ``apply`` caches a summary row (``benchmark_goal``, ``*_chars``) rather than the
+    full checkout table. Prefer that goal for the agent prompt when present, but still load
+    ``checkout_manifest`` from the frozen JSON so the judge keeps the authoritative table.
+    """
+    frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
+    file_execute = ""
+    file_checkout = ""
+    if frozen_path.is_file():
+        data = json.loads(frozen_path.read_text())
+        raw_execute = data.get("execute_prompt")
+        if isinstance(raw_execute, str) and raw_execute.strip():
+            file_execute = raw_execute.strip()
+        raw_checkout = data.get("checkout_manifest")
+        if isinstance(raw_checkout, str) and raw_checkout.strip():
+            file_checkout = raw_checkout.strip()
+
     manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
     if manifest and manifest.get("benchmark_goal"):
+        cached_checkout = manifest.get("checkout_manifest")
+        checkout = (
+            cached_checkout.strip()
+            if isinstance(cached_checkout, str) and cached_checkout.strip()
+            else file_checkout
+        )
         return {
-            "execute_prompt": manifest["benchmark_goal"],
-            "checkout_manifest": "",
+            "execute_prompt": str(manifest["benchmark_goal"]),
+            "checkout_manifest": checkout,
         }
-    frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
-    if not frozen_path.is_file():
+    if not file_execute:
         return None
-    data = json.loads(frozen_path.read_text())
-    execute_prompt = data.get("execute_prompt")
-    if not isinstance(execute_prompt, str) or not execute_prompt.strip():
-        return None
-    checkout_manifest = data.get("checkout_manifest")
     return {
-        "execute_prompt": execute_prompt.strip(),
-        "checkout_manifest": checkout_manifest.strip() if isinstance(checkout_manifest, str) else "",
+        "execute_prompt": file_execute,
+        "checkout_manifest": file_checkout,
     }
 
 

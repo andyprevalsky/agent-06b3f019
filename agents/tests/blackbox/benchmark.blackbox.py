@@ -3675,6 +3675,14 @@ def test_doordash_food_plan_grocery_repro_contract():
         manifest_lower = manifest_context.lower()
         assert "checkout-ready one-week manifest" in manifest_lower
         assert "93/7 lean ground beef" in manifest_lower
+        # Live apply caches summary metadata (benchmark_goal / *_chars) without the
+        # checkout table body. The frozen JSON still holds the authoritative table —
+        # judge context must keep it (regression: apply-cache path used to force "").
+        frozen = bench._doordash_food_plan_frozen_fixture()
+        assert frozen is not None
+        if frozen.get("checkout_manifest"):
+            assert frozen["checkout_manifest"] in manifest_context
+            assert "authoritative checkout manifest table" in manifest_lower
     finally:
         bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
         bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.update(prior_cache)
