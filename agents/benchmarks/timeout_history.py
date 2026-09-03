@@ -84,6 +84,48 @@ def record_pass(
 ATTEMPTS_FILE = os.path.join(HISTORY_DIR, "task_attempts.jsonl")
 
 
+# Suites that must never feed predeploy history-gate eligibility. Kept in sync
+# with `select_predeploy_benches.ELIGIBILITY_EXCLUDED_SUITES`.
+_ELIGIBILITY_EXCLUDED_SUITES = frozenset(
+    {
+        "predeploy",
+        "pre-deploy",
+        "predeploy-local",
+        "predeploy-cloud",
+        "deploy-smoke",
+    }
+)
+
+
+def _resolve_attempt_suite(suite: Optional[str]) -> Optional[str]:
+    resolved = (suite if suite is not None else os.environ.get("BENCHMARK_ATTEMPT_SUITE", "")).strip()
+    return resolved or None
+
+
+def _resolve_counts_for_deploy_eligibility(
+    *,
+    suite: Optional[str],
+    counts_for_deploy_eligibility: Optional[bool],
+) -> bool:
+    """Decide whether this attempt may affect the predeploy 3-pass canary gate.
+
+    Predeploy / active-worktree smoke sets
+    `BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0` (and/or
+    `BENCHMARK_ATTEMPT_SUITE=predeploy`) so assigning a canary cannot be
+    invalidated by the worktree run that just selected it.
+    """
+    if counts_for_deploy_eligibility is not None:
+        return bool(counts_for_deploy_eligibility)
+    env_flag = os.environ.get("BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY", "").strip().lower()
+    if env_flag in {"0", "false", "no"}:
+        return False
+    if env_flag in {"1", "true", "yes"}:
+        return True
+    if suite and suite.strip().lower() in _ELIGIBILITY_EXCLUDED_SUITES:
+        return False
+    return True
+
+
 def record_attempt(
     task_name: str,
     passed: bool,
@@ -94,6 +136,8 @@ def record_attempt(
     failure_reason: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
     timestamp: Optional[str] = None,
+    suite: Optional[str] = None,
+    counts_for_deploy_eligibility: Optional[bool] = None,
 ) -> None:
     """Append EVERY completed run (pass or fail, local or prod) to the attempts ledger.
 
@@ -102,9 +146,19 @@ def record_attempt(
     record: attempt counts, failure rates, and failure reasons per task. Full
     trajectories for each attempt live in `runs/*.json` (message transcripts +
     logs) and `.llm-dumps/<agent_id>/` (full LLM calls, always-on locally).
+
+    Predeploy / active-worktree runs still append (for timing/history) but mark
+    `counts_for_deploy_eligibility=false` so they cannot break a canary's
+    last-3-pass streak after it is assigned into smoke.
+
     Best-effort, O_APPEND, never raises.
     """
     os.makedirs(HISTORY_DIR, exist_ok=True)
+    resolved_suite = _resolve_attempt_suite(suite)
+    eligibility = _resolve_counts_for_deploy_eligibility(
+        suite=resolved_suite,
+        counts_for_deploy_eligibility=counts_for_deploy_eligibility,
+    )
     entry = {
         "task": task_name,
         "passed": bool(passed),
@@ -115,7 +169,10 @@ def record_attempt(
         "agent_id": agent_id,
         "failure_reason": (failure_reason or "")[:200] or None,
         "fast_mode_cache": bool(fast_mode_cache_enabled),
+        "counts_for_deploy_eligibility": eligibility,
     }
+    if resolved_suite:
+        entry["suite"] = resolved_suite
     try:
         with open(ATTEMPTS_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")

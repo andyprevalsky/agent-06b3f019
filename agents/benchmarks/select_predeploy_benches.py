@@ -3,12 +3,15 @@
 
 Deploy cannot run the full daily suite. Selection rules:
 
-1. Floor — every history-qualified `smoke` harness task, plus one canary per floor category
+1. Floor — every existing `smoke` harness task (no history gate), plus one canary
+   per floor category
 2. Path extras — more category depth when the git diff touches matching paths
 3. Hard cap — default 20. Floor must always fit; extras truncate with a scream
-4. History gate — a task is eligible only when its last 3 historic attempts all
-   passed (`history/task_attempts.jsonl`). Short or failing streaks are skipped
-   and reported; floor categories with no qualified canary are marked uncovered.
+4. History gate — ONLY for tasks being *added* to smoke (floor canaries + path
+   extras). A canary/extra is eligible only when its last 3 *eligibility*
+   attempts all passed. Existing `smoke`-tagged tasks always run. Attempts from
+   predeploy / active-worktree runs are excluded from the streak so a selected
+   canary cannot be invalidated by the deploy run that just assigned it.
 
 New catalog tasks auto-attach via `deploy_category` (or derived tags). Preferred
 canary order: `deploy_canary: true` → `pre-deploy`/`smoke` → `pipeline-e2e` →
@@ -30,10 +33,21 @@ from typing import Any, Sequence
 DEFAULT_CAP = 20
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "tasks.json"
 DEFAULT_ATTEMPTS = Path(__file__).resolve().parent / "history" / "task_attempts.jsonl"
-# Only select a bench when its last N completed attempts all passed. New or
-# flaky tasks stay out of /deploy until they earn this streak on the daily (or
-# explicit) path.
+# Canaries / path extras only: require last N eligibility attempts all passed.
+# Existing smoke tasks bypass this gate. New or flaky canaries stay off /deploy
+# until they earn this streak on the daily (or explicit non-predeploy) path.
 DEFAULT_PASS_STREAK = 3
+# Suites whose attempts must never feed deploy eligibility (predeploy /
+# active-worktree smoke must not invalidate a canary after it is assigned).
+ELIGIBILITY_EXCLUDED_SUITES = frozenset(
+    {
+        "predeploy",
+        "pre-deploy",
+        "predeploy-local",
+        "predeploy-cloud",
+        "deploy-smoke",
+    }
+)
 
 FLOOR_CATEGORIES: tuple[str, ...] = (
     "payment",
@@ -290,12 +304,32 @@ def _eligible(task: TaskRef, surface: str) -> bool:
     return True
 
 
+def counts_for_deploy_eligibility(entry: dict[str, Any]) -> bool:
+    """Whether an attempts-ledger row may affect the predeploy history gate.
+
+    Predeploy / active-worktree runs set `counts_for_deploy_eligibility=false`
+    (and/or `suite=predeploy`) so assigning a canary into smoke cannot be
+    invalidated by the worktree run that just selected it. Legacy rows with no
+    field still count (daily / explicit history).
+    """
+    flag = entry.get("counts_for_deploy_eligibility")
+    if flag is False:
+        return False
+    if flag is True:
+        return True
+    suite = str(entry.get("suite") or "").strip().lower()
+    if suite in ELIGIBILITY_EXCLUDED_SUITES:
+        return False
+    return True
+
+
 def load_attempt_passes(attempts_file: Path) -> dict[str, list[bool]]:
     """Return chronological pass/fail lists keyed by task name.
 
     Reads `history/task_attempts.jsonl` (append-only). Entries are ordered by
     file order, then by timestamp when present so out-of-order appends still
-    yield a stable recent window.
+    yield a stable recent window. Rows that do not count for deploy eligibility
+    (predeploy / active-worktree) are omitted.
     """
     if not attempts_file.exists():
         return {}
@@ -308,6 +342,8 @@ def load_attempt_passes(attempts_file: Path) -> dict[str, list[bool]]:
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not counts_for_deploy_eligibility(entry):
                 continue
             task = entry.get("task")
             if not isinstance(task, str) or not task:
@@ -419,16 +455,11 @@ def select_predeploy_benches(
         reasons.setdefault(name, []).append(reason)
         return True
 
+    # Existing smoke tags always run — history gate applies only to canaries /
+    # path extras being *added* into the predeploy smoke set.
     smoke_tasks = [t for t in tasks if t.is_smoke and _eligible(t, surface)]
     smoke_selected = 0
     for task in smoke_tasks:
-        if not has_pass_streak(task.name, attempt_passes, streak=pass_streak):
-            if task.name not in skipped_history:
-                skipped_history.append(task.name)
-            reasons.setdefault(task.name, []).append(
-                f"skipped:history:<{pass_streak}-pass-streak"
-            )
-            continue
         if not _add(task.name, floor, "floor:smoke"):
             raise SystemExit(
                 f"PREDEPLOY FLOOR smoke set cannot fit in hard cap ({cap}). "
@@ -532,7 +563,9 @@ def format_report(selection: Selection) -> str:
         "========== PREDEPLOY BENCH SELECTION ==========",
         f"Surface: {selection.surface}",
         f"Hard cap: {selection.cap}",
-        f"Pass streak required: last {selection.pass_streak_required} historic runs all passed",
+        f"Pass streak required for added canaries/path extras (not existing smoke): "
+        f"last {selection.pass_streak_required} eligibility runs all passed "
+        f"(predeploy/worktree attempts excluded)",
         f"Changed files: {len(selection.changed_files)}",
         f"Path-triggered categories: {', '.join(selection.triggered_categories) or '(none)'}",
         f"Categories covered: {', '.join(selection.categories_covered) or '(none)'}",

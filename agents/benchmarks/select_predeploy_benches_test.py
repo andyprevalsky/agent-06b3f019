@@ -27,25 +27,36 @@ from benchmarks.select_predeploy_benches import (  # noqa: E402
 )
 
 
-def _write_attempts(path: Path, rows: list[tuple[str, bool]]) -> None:
+def _write_attempts(
+    path: Path,
+    rows: list[tuple[str, bool] | tuple[str, bool, dict]],
+) -> None:
     lines = []
-    for index, (task, passed) in enumerate(rows):
-        lines.append(
-            json.dumps(
-                {
-                    "task": task,
-                    "passed": passed,
-                    "status": "COMPLETED" if passed else "FAILED",
-                    "duration_seconds": 1.0,
-                    "cost_cents": 0.0,
-                    "timestamp": f"2026-01-01T00:00:{index:02d}+00:00",
-                    "agent_id": f"a{index}",
-                    "failure_reason": None,
-                    "fast_mode_cache": False,
-                }
-            )
-        )
+    for index, row in enumerate(rows):
+        task, passed = row[0], row[1]
+        extra = row[2] if len(row) == 3 else {}
+        entry = {
+            "task": task,
+            "passed": passed,
+            "status": "COMPLETED" if passed else "FAILED",
+            "duration_seconds": 1.0,
+            "cost_cents": 0.0,
+            "timestamp": f"2026-01-01T00:00:{index:02d}+00:00",
+            "agent_id": f"a{index}",
+            "failure_reason": None,
+            "fast_mode_cache": False,
+        }
+        entry.update(extra)
+        lines.append(json.dumps(entry))
     path.write_text("\n".join(lines) + "\n")
+
+
+def _smoke_names(catalog: Path) -> set[str]:
+    return {
+        task["name"]
+        for task in json.loads(catalog.read_text())
+        if "smoke" in (task.get("tags") or [])
+    }
 
 
 def test_default_cap_and_pass_streak() -> None:
@@ -53,7 +64,7 @@ def test_default_cap_and_pass_streak() -> None:
     assert DEFAULT_PASS_STREAK == 3
 
 
-def test_selected_tasks_all_have_last_three_historic_passes() -> None:
+def test_smoke_always_selected_canaries_need_last_three_passes() -> None:
     selection = select_predeploy_benches(
         catalog=CATALOG,
         changed_files=["README.md"],
@@ -64,14 +75,19 @@ def test_selected_tasks_all_have_last_three_historic_passes() -> None:
         pass_streak=3,
     )
     passes = load_attempt_passes(ATTEMPTS)
+    smoke = _smoke_names(CATALOG)
     assert selection.selected
+    # Existing smoke always runs — even without a 3-pass streak.
+    assert "test-mass-agent-run-0" in selection.selected
+    assert "browser-biometrics-webdecoy" in selection.selected
+    assert "test-mass-agent-run-0" not in selection.skipped_history
+    assert "browser-biometrics-webdecoy" not in selection.skipped_history
+    # Only *added* canaries/path extras must clear the history gate.
     for name in selection.selected:
+        if name in smoke:
+            continue
         assert has_pass_streak(name, passes, streak=3), name
     assert selection.pass_streak_required == 3
-    # Smoke tasks without a 3-pass streak must be reported as skipped.
-    assert "test-mass-agent-run-0" in selection.skipped_history
-    assert "browser-biometrics-webdecoy" in selection.skipped_history
-    # Floor categories with no qualified canary are uncovered, not filled with flaky tasks.
     assert "sms" in selection.uncovered_categories
     assert "browser_stateful" in selection.uncovered_categories
     assert "payment" in selection.categories_covered
@@ -92,14 +108,18 @@ def test_path_triggers_only_add_history_qualified_depth() -> None:
         attempts_file=ATTEMPTS,
     )
     passes = load_attempt_passes(ATTEMPTS)
+    smoke = _smoke_names(CATALOG)
     assert "browser" in selection.triggered_categories
     assert "payment" in selection.triggered_categories
     assert "sms" in selection.triggered_categories
     for name in selection.selected:
+        if name in smoke:
+            continue
         assert has_pass_streak(name, passes, streak=3), name
     # SMS has no 3-pass canary, so path trigger must not invent one.
     assert "sms" not in selection.categories_covered or all(
-        has_pass_streak(n, passes, streak=3) for n in selection.selected
+        name in smoke or has_pass_streak(name, passes, streak=3)
+        for name in selection.selected
     )
 
 
@@ -193,7 +213,7 @@ def test_history_gate_picks_next_canary_with_pass_streak(tmp_path: Path) -> None
     assert "browser-toast-nopa-write-lock" in selection.selected
 
 
-def test_task_with_fewer_than_three_attempts_is_skipped(tmp_path: Path) -> None:
+def test_existing_smoke_without_three_attempts_still_selected(tmp_path: Path) -> None:
     catalog = tmp_path / "tasks.json"
     attempts = tmp_path / "attempts.jsonl"
     catalog.write_text(
@@ -217,8 +237,114 @@ def test_task_with_fewer_than_three_attempts_is_skipped(tmp_path: Path) -> None:
         repo_root=ROOT,
         attempts_file=attempts,
     )
-    assert selection.selected == []
-    assert selection.skipped_history == ["new-smoke"]
+    assert selection.selected == ["new-smoke"]
+    assert selection.skipped_history == []
+
+
+def test_canary_without_three_attempts_is_skipped(tmp_path: Path) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    catalog.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "harness-smoke",
+                    "tags": ["smoke"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "harness",
+                },
+                {
+                    "name": "new-payment",
+                    "tags": ["payment"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "payment",
+                    "deploy_canary": True,
+                },
+            ]
+        )
+    )
+    _write_attempts(
+        attempts,
+        [
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("new-payment", True),
+            ("new-payment", True),
+        ],
+    )
+    selection = select_predeploy_benches(
+        catalog=catalog,
+        changed_files=[],
+        surface="local",
+        cap=20,
+        repo_root=ROOT,
+        attempts_file=attempts,
+    )
+    assert "harness-smoke" in selection.selected
+    assert "new-payment" not in selection.selected
+    assert "new-payment" in selection.skipped_history
+    assert "payment" in selection.uncovered_categories
+
+
+def test_predeploy_worktree_attempts_do_not_invalidate_canary_streak(
+    tmp_path: Path,
+) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    catalog.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "harness-smoke",
+                    "tags": ["smoke"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "harness",
+                },
+                {
+                    "name": "stable-payment",
+                    "tags": ["payment"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "payment",
+                    "deploy_canary": True,
+                },
+            ]
+        )
+    )
+    # Three daily passes earn eligibility; later predeploy/worktree failures
+    # must not wipe the streak after the canary is assigned into smoke.
+    _write_attempts(
+        attempts,
+        [
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("stable-payment", True),
+            ("stable-payment", True),
+            ("stable-payment", True),
+            (
+                "stable-payment",
+                False,
+                {"suite": "predeploy", "counts_for_deploy_eligibility": False},
+            ),
+            (
+                "stable-payment",
+                False,
+                {"suite": "predeploy", "counts_for_deploy_eligibility": False},
+            ),
+        ],
+    )
+    selection = select_predeploy_benches(
+        catalog=catalog,
+        changed_files=[],
+        surface="local",
+        cap=20,
+        repo_root=ROOT,
+        attempts_file=attempts,
+    )
+    assert "stable-payment" in selection.selected
+    assert "stable-payment" not in selection.skipped_history
+    assert "payment" in selection.categories_covered
 
 
 def test_hard_cap_screams_when_history_qualified_extras_overflow(tmp_path: Path) -> None:

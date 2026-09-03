@@ -5,8 +5,9 @@
 #
 # Task set comes from `agents/benchmarks/select_predeploy_benches.py` (same
 # algorithm as `run-predeploy-local`, surface=cloud so local-only canaries are
-# excluded) — last-3-historic-pass gate, then category floor + path-triggered
-# depth, hard capped at 20.
+# excluded) — existing smoke always; last-3-eligibility-pass gate for added
+# canaries/path extras only (predeploy/worktree attempts excluded); then
+# category floor + path-triggered depth, hard capped at 20.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -138,6 +139,8 @@ BACKEND_API_KEY="$BACKEND_API_KEY" \
 HUB_CLAIM_SCOPE="$scope" \
 HUB_SKIP_CATALOG_EXPORT=1 \
 BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
+BENCHMARK_ATTEMPT_SUITE=predeploy \
+BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
 "$HUB_POLLER_BIN" --once &
 POLLER_PID=$!
 wait "$POLLER_PID"

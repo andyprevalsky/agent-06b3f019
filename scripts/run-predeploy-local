@@ -5,12 +5,12 @@
 # cloud fleet (`run-predeploy-cloud`) leaks paid Fly machines when killed and is
 # frequently rate-limited / volume-capacity-starved, so local is the reliable gate.
 #
-# Task set comes from `agents/benchmarks/select_predeploy_benches.py` — only
-# tasks whose last 3 historic attempts all passed, then category floor (smoke +
-# one canary per floor category) plus path-triggered depth, hard capped at 20.
-# Identical selection to `run-predeploy-cloud`, so the two paths cannot drift.
-# `run-bench --local` exits non-zero unless every requested task passes, so
-# this script IS the gate.
+# Task set comes from `agents/benchmarks/select_predeploy_benches.py` — existing
+# smoke always runs; last-3-eligibility-pass gate applies only to added floor
+# canaries / path extras (predeploy/worktree attempts do not count), then
+# category floor + path-triggered depth, hard capped at 20. Identical selection
+# to `run-predeploy-cloud`, so the two paths cannot drift. `run-bench --local`
+# exits non-zero unless every requested task passes, so this script IS the gate.
 #
 # Usage:
 #   scripts/run-predeploy-local            # run the selected predeploy set locally
@@ -305,6 +305,8 @@ run_smoke_batch() {
         BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
         BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 \
         BENCHMARK_COMPUTE_TOKEN_TYPE=claude \
+        BENCHMARK_ATTEMPT_SUITE=predeploy \
+        BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
         python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
             bash "$ROOT_DIR/scripts/run-bench" --local "${batch[@]}" \
             --max-concurrency "$LOCAL_CONCURRENCY"
@@ -315,6 +317,8 @@ run_smoke_batch() {
     BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
     BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 \
     BENCHMARK_COMPUTE_TOKEN_TYPE=claude \
+    BENCHMARK_ATTEMPT_SUITE=predeploy \
+    BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
     python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
         bash "$ROOT_DIR/scripts/run-bench" --local "${batch[@]}" \
         --max-concurrency "$LOCAL_CONCURRENCY"
