@@ -209,6 +209,18 @@ def test_stateful_browser_activity_has_one_thirty_minute_attempt():
     assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
 
 
+def test_browser_spawn_goal_uses_tool_call_goal_verbatim():
+    """spawn_browser_agent must use the tool-call goal as-is — no parent-goal injection."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    assert 'goal = tool_call.get("goal", "")' in source
+    assert "_browser_spawn_goal_from_parent" not in source
+    assert "BENCHMARK EXECUTION CONTRACT" not in source
+
+
 def test_browser_fast_mode_timeout_is_demo_only():
     """Live Fast Mode purchases keep 30m; only the OAi demo gets the 3m ceiling."""
     from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
@@ -288,6 +300,82 @@ def test_transient_session_init_failure_classification():
 # These tests are the regression guard: on the pre-fix code the two helpers
 # don't exist (ImportError) and the guarantees below don't hold.
 # ============================================================================
+
+# ============================================================================
+# RCA repro — read_browser_state must not burn the action step budget
+# ----------------------------------------------------------------------------
+# Bug (before): d5b79a331 replaced free per-turn DOM injection with an explicit
+# `read_browser_state` tool but still incremented MAX_ITERATIONS for every call.
+# Smoke agent b4b36b53 (browser-biometrics-webdecoy) spent 16/60 steps on
+# read_browser_state, hit max steps on the Submit click, and never read the
+# visible FCaptcha score before the 420s harness pause.
+#
+# Fix (after): adjust_iteration_after_action refunds the step for
+# read_browser_state (capped consecutive so a stuck model still terminates).
+# ============================================================================
+
+
+def test_read_browser_state_does_not_consume_step_budget():
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, consecutive = 5, 0
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="read_browser_state",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 4
+    assert consecutive == 1
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="Read_Browser_State",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 3
+    assert consecutive == 2
+
+
+def test_read_browser_state_budget_refund_caps_consecutive_observations():
+    from domains.spawn_browser_agent_v3.config import (
+        MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS,
+        adjust_iteration_after_action,
+    )
+
+    iteration, consecutive = 20, 0
+    for _ in range(MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS):
+        iteration, consecutive = adjust_iteration_after_action(
+            iteration=iteration,
+            action_name="read_browser_state",
+            consecutive_budget_free=consecutive,
+        )
+    assert iteration == 20 - MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    assert consecutive == MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    # Next observation consumes budget so the loop cannot spin forever.
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="read_browser_state",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 20 - MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    assert consecutive == MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS + 1
+
+
+def test_click_resets_budget_free_observation_streak():
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=3,
+        action_name="read_browser_state",
+        consecutive_budget_free=0,
+    )
+    assert iteration == 2 and consecutive == 1
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration + 1,  # loop already incremented for the click turn
+        action_name="click",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 3 and consecutive == 0
+
 
 def test_visible_result_completion_rewrites_post_submit_wait():
     """c3762be3 already stated score 0.07 + bot verdict, then waited 6–10s.
@@ -594,9 +682,81 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert "PRESERVED PAGE EVIDENCE" in ctx[0]["text"]
     assert "Six-foot cable; supports 100 watts" in ctx[0]["text"]
     assert "browser ground truth, not an agent claim" in ctx[0]["text"]
+    assert "after a successful evaluate" in ctx[0]["text"]
     # Final-state screenshot rides through as a multimodal image reference.
     screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
+
+
+async def test_evaluate_always_preserves_browser_evidence_checkpoint():
+    """Every successful evaluate snapshots live DOM for the verifier — no flag."""
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+    from domains.spawn_browser_agent_v3.handler import (
+        _append_bounded_verifier_checkpoint,
+        _capture_preserved_evidence_after_evaluate,
+    )
+
+    class _FakeDom:
+        async def get_browser_state(self, include_screenshot=False):
+            assert include_screenshot is False
+            return {
+                "url": "https://shop.example/item/cable",
+                "title": "Cable",
+                "dom_tree": "<main>Six-foot cable; supports 100 watts; $19.99</main>",
+            }
+
+    checkpoints: list = []
+    state = await _capture_preserved_evidence_after_evaluate(
+        dom_service=_FakeDom(),
+        verifier_checkpoints=checkpoints,
+        current_url="https://shop.example/item/cable",
+    )
+    assert state is not None
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["kind"] == "preserved_evidence"
+    assert "100 watts" in checkpoints[0]["dom_tree"]
+    assert "preserve_evidence" not in str(checkpoints)
+
+    # Cap retains the most recent VERIFIER_CHECKPOINT_MAX distinct snapshots.
+    for i in range(VERIFIER_CHECKPOINT_MAX + 5):
+        _append_bounded_verifier_checkpoint(
+            checkpoints,
+            {
+                "url": f"https://shop.example/item/{i}",
+                "title": f"Item {i}",
+                "dom_tree": f"<main>product-{i}</main>",
+                "kind": "preserved_evidence",
+            },
+        )
+    assert len(checkpoints) == VERIFIER_CHECKPOINT_MAX
+    assert checkpoints[0]["dom_tree"] == f"<main>product-{5}</main>"
+    assert checkpoints[-1]["dom_tree"] == f"<main>product-{VERIFIER_CHECKPOINT_MAX + 4}</main>"
+
+
+def test_evaluate_tool_schema_has_no_preserve_evidence_flag():
+    from browser_tools.schemas import EvaluateTool
+    from providers.rose.browser_use import BROWSER_USE_TOOLS, build_browser_use_system_prompt, build_browser_use_tools
+
+    fields = EvaluateTool.model_fields
+    assert "preserve_evidence" not in fields
+    assert "always retains" in fields["code"].description.lower() or "snapshot" in fields["code"].description.lower()
+
+    evaluate_desc = BROWSER_USE_TOOLS["evaluate"]["description"]
+    assert "preserve_evidence" not in evaluate_desc
+    assert "bounded browser-extracted DOM snapshot" in evaluate_desc
+    assert "use `extract`" not in evaluate_desc
+    assert "NOT for extracting visible content" not in evaluate_desc
+
+    tools = build_browser_use_tools(["evaluate"])
+    assert len(tools) == 1
+    assert "preserve_evidence" not in tools[0]["input_schema"].get("properties", {})
+    assert "bounded browser-extracted DOM snapshot" in tools[0]["description"]
+    assert "use `extract`" not in tools[0]["description"]
+
+    prompt = build_browser_use_system_prompt([])
+    assert "# Evidence Retention" in prompt
+    assert "preserve flag" in prompt.lower() or "do not pass a preserve flag" in prompt
+    assert "preserve_evidence=true" not in prompt
 
 
 def test_action_history_restores_across_activity_boundary():
@@ -5944,6 +6104,42 @@ async def test_resume_browser_session_rate_limited():
     out = await resume_browser_session(cfg, "t1")
     assert out["rate_limited"] is True
 
+
+def test_challenge_recovery_uses_cross_recovery_config_blacklist():
+    """Repo still accepts blocked_config_keys for backend blacklist filtering.
+
+    Tip intentionally reverted the in-handler dead_browser_config_keys set when
+    restoring challenge recovery to main. Keep the API contract that the Python
+    client can forward blocked keys and read failed_config_keys / blacklist_expired.
+    """
+    from pathlib import Path
+
+    repo = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
+    assert "blocked_config_keys" in repo
+    assert "failed_config_keys" in repo
+    assert "blacklist_expired" in repo
+    assert 'payload["blocked_config_keys"]' in repo or "payload['blocked_config_keys']" in repo
+
+
+def test_challenge_recovery_live_verifies_after_promote_unless_preloaded():
+    """Non-preloaded config winners still live-verify; preloaded winners skip a second LLM gate."""
+    from pathlib import Path
+
+    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "await verify_live_page_cleared_challenge(" in source
+    assert 'config_result.get("storage_state_preloaded")' in source
+    assert "probe already verified clean" in source
+
+
+def test_recover_browser_challenge_repo_forwards_blocked_config_keys():
+    from pathlib import Path
+
+    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
+    assert "blocked_config_keys" in source
+    assert 'payload["blocked_config_keys"]' in source or "payload['blocked_config_keys']" in source
+
+
+
 async def test_recover_browser_challenge_posts_current_url_and_state():
     from domains.spawn_browser_agent_v3.repo import recover_browser_challenge
 
@@ -6139,6 +6335,124 @@ async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_mo
     browser_stream.finish_tools.assert_awaited_once_with(status="ERROR")
     assert browser_turn_messages[-1]["role"] == "tool"
     assert "timed out after 0.01s" in browser_turn_messages[-1]["content"]
+
+
+def test_post_verifier_rejection_browser_state_fetch_is_bounded():
+    """After a durable verifier rejection, refreshing browser state must stay soft-bounded.
+
+    polar-odysseys-440ed7f388a2 TREE STALL: challenge freeze left CDP hung, so
+    the post-reject `get_browser_state` burned the full 300s BrowserStateRequest
+    timeout with no further durable messages while Temporal keepalive heartbeats
+    kept the activity alive. Tree-stall correctly paused at ~510s of silence.
+    The rejection message was already persisted — this refresh is optional and
+    must go through `_get_browser_state_soft` (≈10s × 2), never a bare CDP await
+    inside the verifier try/except.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from domains.spawn_browser_agent_v3 import config, handler
+
+    assert config.BROWSER_STATE_SOFT_TIMEOUT_SECONDS == 10.0
+    assert config.BROWSER_STATE_SOFT_ATTEMPTS == 2
+
+    source = textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real))
+    tree = ast.parse(source)
+    reject_title_nodes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.JoinedStr)
+        and any(
+            isinstance(part, ast.Constant) and "Verifier rejected" in str(part.value)
+            for part in node.values
+        )
+    ]
+    assert reject_title_nodes, "expected Verifier rejected title in attempt_completion path"
+    reject_lineno = min(node.lineno for node in reject_title_nodes)
+
+    soft_calls = []
+    bare_gets = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Await) or node.lineno < reject_lineno:
+            continue
+        if node.lineno >= reject_lineno + 80:
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if isinstance(func, ast.Name) and func.id == "_get_browser_state_soft":
+            soft_calls.append(node.lineno)
+            continue
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "get_browser_state"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "dom_service"
+        ):
+            bare_gets.append(node.lineno)
+
+    assert soft_calls, (
+        "post-verifier-rejection path must await _get_browser_state_soft; "
+        "found none after Verifier rejected"
+    )
+    assert not bare_gets, (
+        "post-verifier-rejection path must not bare-await get_browser_state; "
+        f"found unbounded await at line(s) {bare_gets}"
+    )
+
+
+async def test_get_browser_state_soft_retries_then_returns_none_on_hang():
+    """Soft fetch times out per attempt, retries once, then returns None."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _get_browser_state_soft
+
+    calls = {"n": 0}
+
+    async def hang(*, include_screenshot: bool = False):
+        calls["n"] += 1
+        await asyncio.Event().wait()
+
+    started = asyncio.get_event_loop().time()
+    out = await _get_browser_state_soft(
+        SimpleNamespace(get_browser_state=hang),
+        include_screenshot=False,
+        timeout_seconds=0.05,
+        attempts=2,
+    )
+    elapsed = asyncio.get_event_loop().time() - started
+    assert out is None
+    assert calls["n"] == 2
+    assert 0.08 <= elapsed < 0.5, elapsed
+
+
+async def test_get_browser_state_soft_retries_after_timeout_then_succeeds():
+    """A single soft timeout is retried and can still return state."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _get_browser_state_soft
+
+    calls = {"n": 0}
+
+    async def flaky(*, include_screenshot: bool = False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.sleep(1)
+        return {"url": "https://example.com", "screenshot": None}
+
+    out = await _get_browser_state_soft(
+        SimpleNamespace(get_browser_state=flaky),
+        include_screenshot=False,
+        timeout_seconds=0.05,
+        attempts=2,
+    )
+    assert out == {"url": "https://example.com", "screenshot": None}
+    assert calls["n"] == 2
+
 
 async def test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite():
     """Helper still supports restore_cookies=False for non-recovery callers."""
@@ -8725,6 +9039,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     assert hasattr(BrowserNetworkRecorder, "query_requests")
     assert hasattr(BrowserNetworkRecorder, "close")
     assert hasattr(BrowserNetworkRecorder, "export_diagnostics_bundle_bytes")
+    assert hasattr(BrowserNetworkRecorder, "pop_provider_exit_rejection")
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
@@ -9112,757 +9427,6 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
     recorder.query_requests(clear=True)
     recorder.query_requests(clear=True)
     assert recorder._ignored_request_ids == set()
-
-async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_per_browser():
-    """Only the exact structured detector verdict may trigger provider search.
-
-    Duplicate responses from one browser and late bodies from a discarded browser
-    must not schedule extra recovery runs.
-    """
-    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
-
-    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    recorder._closed = False
-    recorder._max_body_bytes = 262_144
-    recorder._body_index = 0
-    recorder._started_at = 0.0
-    recorder._network_generation = 4
-    recorder._provider_exit_rejections = []
-    recorder._rejected_network_generations = set()
-    recorder._bodies = {}
-    recorder._body_byte_sizes = {}
-    recorder._body_bytes = 0
-    recorder._max_total_body_bytes = 1_000_000
-    recorder.persists_network_log = False
-    recorder.agent_id = "agent"
-    recorder.task_id = "task"
-    recorder.entries = {
-        "4:r1": {
-            "browser_generation": 4,
-            "mime_type": "application/json",
-            "url": "https://shop.test/verify?token=secret",
-        }
-    }
-    poison_body = {
-        "score": 0.087,
-        "detections": [
-            {
-                "category": "fingerprint",
-                "reason": "IP has used many different fingerprints",
-            }
-        ],
-    }
-    get_body = AsyncMock(return_value={"body": json.dumps(poison_body), "base64Encoded": False})
-    client = SimpleNamespace(send=SimpleNamespace(Network=SimpleNamespace(getResponseBody=get_body)))
-
-    await recorder._fetch_response_body("4:r1", "r1", "cdp-4", client)
-    rejection = recorder.pop_provider_exit_rejection()
-    assert rejection == {
-        "reason": "ip has used many different fingerprints",
-        "url": "https://shop.test/verify",
-        "browser_generation": 4,
-    }
-    # Monitor-only sessions keep request metadata so read_network_requests works
-    # in prod; growth is bounded by entry eviction + the body byte budget rather
-    # than by discarding every entry.
-    assert "4:r1" in recorder.entries
-    assert recorder.pop_provider_exit_rejection() is None
-
-    # A duplicate verdict on the same exit is one recovery signal, not a loop.
-    await recorder._fetch_response_body("4:r1", "r1", "cdp-4", client)
-    assert recorder.pop_provider_exit_rejection() is None
-
-    # A late body from the outgoing generation cannot poison the promoted one.
-    recorder._network_generation = 5
-    recorder._rejected_network_generations.clear()
-    await recorder._fetch_response_body("4:r1", "r1", "cdp-4", client)
-    assert recorder.pop_provider_exit_rejection() is None
-
-    # Scores and prose alone are intentionally insufficient.
-    recorder.entries["5:r2"] = {
-        "browser_generation": 5,
-        "mime_type": "application/json",
-        "url": "https://shop.test/score",
-    }
-    get_body.return_value = {
-        "body": json.dumps({"score": 0.9, "message": "IP has used many different fingerprints"}),
-        "base64Encoded": False,
-    }
-    await recorder._fetch_response_body("5:r2", "r2", "cdp-5", client)
-    assert recorder.pop_provider_exit_rejection() is None
-    assert "5:r2" in recorder.entries
-
-async def test_network_recorder_does_not_reject_successful_fingerprint_warning():
-    """A detector warning inside an accepted response is not a provider exit.
-
-    This is the exact response shape captured from FCaptcha immediately before
-    the browser runtime unnecessarily replaced its next action with challenge
-    recovery.
-    """
-    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
-
-    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    recorder._closed = False
-    recorder._max_body_bytes = 262_144
-    recorder._body_index = 0
-    recorder._started_at = 0.0
-    recorder._network_generation = 1
-    recorder._provider_exit_rejections = []
-    recorder._rejected_network_generations = set()
-    recorder._bodies = {}
-    recorder._body_byte_sizes = {}
-    recorder._body_bytes = 0
-    recorder._max_total_body_bytes = 1_000_000
-    recorder.persists_network_log = False
-    recorder.agent_id = "agent"
-    recorder.task_id = "task"
-    recorder.entries = {
-        "1:r1": {
-            "browser_generation": 1,
-            "mime_type": "application/json",
-            "url": "https://fcaptcha.webdecoy.com/api/verify",
-        }
-    }
-    accepted_body = {
-        "success": True,
-        "score": 0.087,
-        "recommendation": "allow",
-        "categoryScores": {"fingerprint": 0.6},
-        "detections": [
-            {
-                "category": "fingerprint",
-                "score": 0.6,
-                "confidence": 0.6,
-                "reason": "IP has used many different fingerprints",
-            }
-        ],
-    }
-    get_body = AsyncMock(return_value={"body": json.dumps(accepted_body), "base64Encoded": False})
-    client = SimpleNamespace(send=SimpleNamespace(Network=SimpleNamespace(getResponseBody=get_body)))
-
-    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", client)
-
-    assert recorder.pop_provider_exit_rejection() is None
-    assert recorder._rejected_network_generations == set()
-    assert "1:r1" in recorder.entries
-
-    recorder.entries["1:r2"] = {
-        "browser_generation": 1,
-        "mime_type": "application/json",
-        "url": "https://shop.test/provider-exit",
-    }
-    get_body.return_value = {
-        "body": json.dumps(
-            {
-                **accepted_body,
-                "providerExit": {
-                    "category": "fingerprint",
-                    "reason": "IP has used many different fingerprints",
-                },
-            }
-        ),
-        "base64Encoded": False,
-    }
-    await recorder._fetch_response_body("1:r2", "r2", "cdp-1", client)
-
-    assert recorder.pop_provider_exit_rejection() == {
-        "reason": "ip has used many different fingerprints",
-        "url": "https://shop.test/provider-exit",
-        "browser_generation": 1,
-    }
-
-
-def test_api_challenge_html_large_cart_interstitial_without_classic_markers():
-    """Eventim custom 403 interstitial is large HTML without classic CF markers."""
-    from domains.spawn_browser_agent_v3.recording import _is_api_challenge_html_response
-
-    large_html = (
-        b"<!doctype html><html lang='en'><head><title>page title</title></head>"
-        + (b"x" * 25_000)
-        + b"<body>blocked</body></html>"
-    )
-    assert _is_api_challenge_html_response(
-        status=403,
-        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        resource_type="xhr",
-        mime_type="text/html; charset=utf-8",
-        body_bytes=large_html,
-    )
-    assert _is_api_challenge_html_response(
-        status=403,
-        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        resource_type="xhr",
-        mime_type="text/html; charset=utf-8",
-        body_bytes=large_html,
-        document_url="https://wl.eventim.us/checkout",
-    )
-    assert not _is_api_challenge_html_response(
-        status=403,
-        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        resource_type="xhr",
-        mime_type="text/html; charset=utf-8",
-        body_bytes=large_html,
-        document_url="https://cdn.attacker.example/frame",
-    )
-    assert not _is_api_challenge_html_response(
-        status=403,
-        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        resource_type="xhr",
-        mime_type="text/html",
-        body_bytes=b"<html><body>forbidden</body></html>",
-    )
-    assert not _is_api_challenge_html_response(
-        status=403,
-        url="https://cdn.example.com/assets/font.woff2",
-        resource_type="xhr",
-        mime_type="text/html",
-        body_bytes=large_html,
-    )
-
-
-async def test_api_challenge_html_triggers_provider_exit_rejection():
-    """403 challenge HTML on checkaddtocart must rotate exit (cookie GET probes miss it)."""
-    from domains.spawn_browser_agent_v3.recording import (
-        BrowserNetworkRecorder,
-        _API_CHALLENGE_HTML_REASON,
-        _is_api_challenge_html_response,
-    )
-
-    challenge_html = (
-        b"<!DOCTYPE html><html><body>Access Denied. "
-        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
-        b"</body></html>"
-    )
-    assert _is_api_challenge_html_response(
-        status=403,
-        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        resource_type="xhr",
-        mime_type="text/html",
-        body_bytes=challenge_html,
-    )
-    assert not _is_api_challenge_html_response(
-        status=200,
-        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        resource_type="xhr",
-        mime_type="text/html",
-        body_bytes=challenge_html,
-    )
-    assert not _is_api_challenge_html_response(
-        status=403,
-        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        resource_type="image",
-        mime_type="text/html",
-        body_bytes=challenge_html,
-    )
-
-    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    recorder._closed = False
-    recorder._network_generation = 1
-    recorder._provider_exit_rejections = []
-    recorder._rejected_network_generations = set()
-    recorder._api_challenge_provider_exits = 0
-    recorder._started_at = 0.0
-    recorder._max_body_bytes = 1_000_000
-    recorder._max_total_body_bytes = 10_000_000
-    recorder._body_index = 0
-    recorder._bodies = {}
-    recorder._body_byte_sizes = {}
-    recorder._body_bytes = 0
-    recorder.persists_network_log = False
-    recorder.agent_id = "agent"
-    recorder.task_id = "task"
-    recorder.entries = {
-        "1:r1": {
-            "browser_generation": 1,
-            "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-            "resource_type": "xhr",
-            "mime_type": "text/html",
-            "status": 403,
-        }
-    }
-
-    class _FakeCdp:
-        class send:
-            class Network:
-                @staticmethod
-                async def getResponseBody(params=None, session_id=None):
-                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
-
-    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp())
-    assert recorder.pop_provider_exit_rejection() == {
-        "reason": _API_CHALLENGE_HTML_REASON,
-        "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        "browser_generation": 1,
-        "status": 403,
-    }
-
-
-def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
-    """js.stripe.com ERR_TUNNEL / ORB must rotate the provider exit (Eventim card fields)."""
-    from domains.spawn_browser_agent_v3.recording import (
-        BrowserNetworkRecorder,
-        _document_warrants_payment_cdn_exit,
-        _is_critical_resource_block,
-        _is_payment_cdn_tunnel_failure,
-    )
-
-    assert _is_payment_cdn_tunnel_failure(
-        "https://js.stripe.com/v3/",
-        "net::ERR_TUNNEL_CONNECTION_FAILED",
-    )
-    assert _is_critical_resource_block(
-        "https://js.stripe.com/v3/",
-        "net::ERR_BLOCKED_BY_ORB",
-        resource_type="script",
-    )
-    assert _is_critical_resource_block(
-        "https://cdn.example/checkout-widget.js",
-        "net::ERR_TUNNEL_CONNECTION_FAILED",
-        resource_type="script",
-    )
-    assert _is_critical_resource_block(
-        "https://cdn.example/checkout-widget.js",
-        "net::ERR_TUNNEL_CONNECTION_FAILED",
-        resource_type="script",
-        document_url="https://checkout.eventim.us/pay",
-    )
-    assert not _is_critical_resource_block(
-        "https://checkout.eventim.us/static/app.js",
-        "net::ERR_TUNNEL_CONNECTION_FAILED",
-        resource_type="script",
-        document_url="https://checkout.eventim.us/pay",
-    )
-    assert _is_critical_resource_block(
-        "https://js.stripe.com/v3/",
-        "net::ERR_BLOCKED_BY_ORB",
-        resource_type="script",
-        document_url="https://checkout.eventim.us/pay",
-    )
-    assert not _is_critical_resource_block(
-        "https://www.google-analytics.com/analytics.js",
-        "net::ERR_BLOCKED_BY_CLIENT",
-        resource_type="script",
-    )
-    # Non-js.* hosts are not the sticky script-CDN tunnel class (generic script path).
-    assert not _is_payment_cdn_tunnel_failure(
-        "https://wl.eventim.us/asset.js",
-        "net::ERR_TUNNEL_CONNECTION_FAILED",
-    )
-    assert not _is_payment_cdn_tunnel_failure(
-        "https://js.stripe.com/v3/",
-        "net::ERR_NAME_NOT_RESOLVED",
-    )
-    assert _document_warrants_payment_cdn_exit("https://wl.eventim.us/checkout/abc")
-    # Inventory paths are no longer excluded — exit caps bound thrash instead.
-    assert _document_warrants_payment_cdn_exit(
-        "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom"
-    )
-    assert not _document_warrants_payment_cdn_exit("")
-
-    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    recorder._network_generation = 3
-    recorder._provider_exit_rejections = []
-    recorder._rejected_network_generations = set()
-    recorder._payment_cdn_provider_exits = 0
-    recorder._generic_script_provider_exits = 0
-    recorder._ignored_request_ids = set()
-    recorder._active_request_ids = set()
-    recorder.agent_id = "agent"
-    recorder.task_id = "task"
-    recorder.entries = {
-        "3:r1": {
-            "browser_generation": 3,
-            "url": "https://js.stripe.com/v3/",
-            "document_url": "https://wl.eventim.us/checkout/order-1",
-        }
-    }
-    recorder._on_loading_failed(
-        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
-        session_id="cdp-3",
-        generation=3,
-    )
-    assert recorder.pop_provider_exit_rejection() == {
-        "reason": "critical third-party resource blocked",
-        "url": "https://js.stripe.com/v3/",
-        "browser_generation": 3,
-        "document_url": "https://wl.eventim.us/checkout/order-1",
-    }
-    from domains.spawn_browser_agent_v3.recording import blocked_resource_url_for_recovery
-
-    assert (
-        blocked_resource_url_for_recovery(
-            {
-                "reason": "critical third-party resource blocked",
-                "url": "https://js.stripe.com/v3/",
-            }
-        )
-        == "https://js.stripe.com/v3/"
-    )
-    # Same-origin API-challenge exits must not hard-fail promote re-verify.
-    assert (
-        blocked_resource_url_for_recovery(
-            {
-                "reason": "same-origin API returned Cloudflare challenge HTML",
-                "url": "https://wl.eventim.us/event/_/686363/order/checkaddtocart",
-            }
-        )
-        is None
-    )
-    # One signal per browser generation — no recovery loop on repeated stripe fails.
-    recorder._on_loading_failed(
-        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
-        session_id="cdp-3",
-        generation=3,
-    )
-    assert recorder.pop_provider_exit_rejection() is None
-
-    # api.stripe.com/healthcheck must NOT rotate exits: steel often fails it
-    # while Stripe.js loads (paymentCdnOk). Burning the slot stranded Eventim.
-    api_only = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    api_only._network_generation = 4
-    api_only._provider_exit_rejections = []
-    api_only._rejected_network_generations = set()
-    api_only._payment_cdn_provider_exits = 0
-    api_only._generic_script_provider_exits = 0
-    api_only._ignored_request_ids = set()
-    api_only._active_request_ids = set()
-    api_only.agent_id = "agent"
-    api_only.task_id = "task"
-    api_only.entries = {
-        "4:r-api": {
-            "browser_generation": 4,
-            "url": "https://api.stripe.com/healthcheck",
-            "document_url": "https://checkout.eventim.us/",
-            "resource_type": "xhr",
-        }
-    }
-    api_only._on_loading_failed(
-        {"requestId": "r-api", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
-        session_id="cdp-4",
-        generation=4,
-    )
-    assert api_only.pop_provider_exit_rejection() is None
-    assert api_only._payment_cdn_provider_exits == 0
-
-    # Cap=2: a second browser generation may still rotate on js.stripe.com after
-    # the first Kernel→Steel promote consumed exit #1.
-    second_gen = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    second_gen._network_generation = 5
-    second_gen._provider_exit_rejections = []
-    second_gen._rejected_network_generations = {3}
-    second_gen._payment_cdn_provider_exits = 1
-    second_gen._generic_script_provider_exits = 0
-    second_gen._ignored_request_ids = set()
-    second_gen._active_request_ids = set()
-    second_gen.agent_id = "agent"
-    second_gen.task_id = "task"
-    second_gen.entries = {
-        "5:r3": {
-            "browser_generation": 5,
-            "url": "https://js.stripe.com/v3/",
-            "document_url": "https://checkout.eventim.us/",
-        }
-    }
-    second_gen._on_loading_failed(
-        {"requestId": "r3", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
-        session_id="cdp-5",
-        generation=5,
-    )
-    assert second_gen.pop_provider_exit_rejection() == {
-        "reason": "critical third-party resource blocked",
-        "url": "https://js.stripe.com/v3/",
-        "browser_generation": 5,
-        "document_url": "https://checkout.eventim.us/",
-    }
-    assert second_gen._payment_cdn_provider_exits == 2
-
-    # Ticket/event browse pages may still rotate on critical script CDN blocks;
-    # exit caps (not path allowlists) bound thrash.
-    browse = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    browse._network_generation = 1
-    browse._provider_exit_rejections = []
-    browse._rejected_network_generations = set()
-    browse._payment_cdn_provider_exits = 0
-    browse._generic_script_provider_exits = 0
-    browse._ignored_request_ids = set()
-    browse._active_request_ids = set()
-    browse.agent_id = "agent"
-    browse.task_id = "task"
-    browse.entries = {
-        "1:r2": {
-            "browser_generation": 1,
-            "url": "https://js.cdn.example/v3/",
-            "document_url": "https://shop.example.com/event/lyny/692405",
-        }
-    }
-    browse._on_loading_failed(
-        {"requestId": "r2", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
-        session_id="cdp-1",
-        generation=1,
-    )
-    assert browse.pop_provider_exit_rejection() == {
-        "reason": "critical third-party resource blocked",
-        "url": "https://js.cdn.example/v3/",
-        "browser_generation": 1,
-        "document_url": "https://shop.example.com/event/lyny/692405",
-    }
-
-    # Consent/chat widget script blocks must not consume the payment-CDN budget.
-    widget = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    widget._network_generation = 7
-    widget._provider_exit_rejections = []
-    widget._rejected_network_generations = set()
-    widget._payment_cdn_provider_exits = 0
-    widget._generic_script_provider_exits = 0
-    widget._ignored_request_ids = set()
-    widget._active_request_ids = set()
-    widget.agent_id = "agent"
-    widget.task_id = "task"
-    widget.entries = {
-        "7:r-widget": {
-            "browser_generation": 7,
-            "url": "https://cdn.consentmanager.net/delivery/cmp.js",
-            "document_url": "https://checkout.eventim.us/",
-            "resource_type": "script",
-        }
-    }
-    widget._on_loading_failed(
-        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_CLIENT"},
-        session_id="cdp-7",
-        generation=7,
-    )
-    assert widget.pop_provider_exit_rejection() is not None
-    assert widget._generic_script_provider_exits == 1
-    assert widget._payment_cdn_provider_exits == 0
-    # A later Stripe block on a new generation still has its reserved budget.
-    widget._network_generation = 8
-    widget.entries = {
-        "8:r-stripe": {
-            "browser_generation": 8,
-            "url": "https://js.stripe.com/v3/",
-            "document_url": "https://checkout.eventim.us/",
-            "resource_type": "script",
-        }
-    }
-    widget._on_loading_failed(
-        {"requestId": "r-stripe", "errorText": "net::ERR_BLOCKED_BY_ORB"},
-        session_id="cdp-8",
-        generation=8,
-    )
-    assert widget.pop_provider_exit_rejection() == {
-        "reason": "critical third-party resource blocked",
-        "url": "https://js.stripe.com/v3/",
-        "browser_generation": 8,
-        "document_url": "https://checkout.eventim.us/",
-    }
-    assert widget._payment_cdn_provider_exits == 1
-    assert widget._generic_script_provider_exits == 1
-
-    # Non-js.* cross-origin scripts charge the generic budget (no vendor hosts).
-    mobile = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    mobile._network_generation = 9
-    mobile._provider_exit_rejections = []
-    mobile._rejected_network_generations = set()
-    mobile._payment_cdn_provider_exits = 0
-    mobile._generic_script_provider_exits = 0
-    mobile._ignored_request_ids = set()
-    mobile._active_request_ids = set()
-    mobile.agent_id = "agent"
-    mobile.task_id = "task"
-    mobile._network_generation += 1
-    generation = mobile._network_generation
-    mobile.entries = {
-        f"{generation}:r-widget": {
-            "browser_generation": generation,
-            "url": "https://cdn.widgets.example/inner-script.js",
-            "document_url": "https://checkout.example.com/",
-            "resource_type": "script",
-        }
-    }
-    mobile._on_loading_failed(
-        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_ORB"},
-        session_id=f"cdp-{generation}",
-        generation=generation,
-    )
-    assert mobile.pop_provider_exit_rejection() is not None
-    assert mobile._payment_cdn_provider_exits == 0
-    assert mobile._generic_script_provider_exits == 1
-
-    # js.* hosts charge the script-CDN budget.
-    js_cdn = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    js_cdn._network_generation = 11
-    js_cdn._provider_exit_rejections = []
-    js_cdn._rejected_network_generations = set()
-    js_cdn._payment_cdn_provider_exits = 0
-    js_cdn._generic_script_provider_exits = 0
-    js_cdn._ignored_request_ids = set()
-    js_cdn._active_request_ids = set()
-    js_cdn.agent_id = "agent"
-    js_cdn.task_id = "task"
-    js_cdn.entries = {
-        "11:r-js": {
-            "browser_generation": 11,
-            "url": "https://js.cdn.example/v3/",
-            "document_url": "https://checkout.example.com/",
-            "resource_type": "script",
-        }
-    }
-    js_cdn._on_loading_failed(
-        {"requestId": "r-js", "errorText": "net::ERR_BLOCKED_BY_ORB"},
-        session_id="cdp-11",
-        generation=11,
-    )
-    assert js_cdn.pop_provider_exit_rejection() is not None
-    assert js_cdn._payment_cdn_provider_exits == 1
-    assert js_cdn._generic_script_provider_exits == 0
-
-
-def test_evicted_critical_request_meta_still_rejects_network_generation():
-    """Entry eviction must not drop provider-exit classification for in-flight critical scripts.
-
-    With a 1-entry capture buffer, a later request evicts js.stripe.com from
-    ``entries`` before loadingFailed arrives. The active meta map must retain
-    enough fields for the failure event to reject the network generation.
-    """
-    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
-
-    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
-    recorder._network_generation = 3
-    recorder._max_entries = 1
-    recorder._max_active_request_meta = 256
-    recorder._provider_exit_rejections = []
-    recorder._rejected_network_generations = set()
-    recorder._payment_cdn_provider_exits = 0
-    recorder._generic_script_provider_exits = 0
-    recorder._ignored_request_ids = set()
-    recorder._active_request_ids = set()
-    recorder._active_request_meta = {}
-    recorder._patterns = []
-    recorder._bodies = {}
-    recorder._body_byte_sizes = {}
-    recorder._body_bytes = 0
-    recorder._started_at = 0.0
-    recorder._max_body_bytes = 262144
-    recorder.agent_id = "agent"
-    recorder.task_id = "task"
-    recorder.entries = {}
-
-    recorder._on_request_will_be_sent(
-        {
-            "requestId": "stripe",
-            "type": "Script",
-            "documentURL": "https://checkout.eventim.us/pay",
-            "request": {"url": "https://js.stripe.com/v3/", "method": "GET"},
-        },
-        session_id="cdp-3",
-        generation=3,
-    )
-    stripe_key = "3:stripe"
-    assert stripe_key in recorder.entries
-    assert stripe_key in recorder._active_request_meta
-
-    # Later request fills the 1-entry buffer and evicts the Stripe capture row.
-    recorder._on_request_will_be_sent(
-        {
-            "requestId": "other",
-            "type": "XHR",
-            "documentURL": "https://checkout.eventim.us/pay",
-            "request": {"url": "https://checkout.eventim.us/api/ping", "method": "GET"},
-        },
-        session_id="cdp-3",
-        generation=3,
-    )
-    assert "3:other" in recorder.entries
-    assert stripe_key not in recorder.entries
-    assert stripe_key in recorder._active_request_meta
-    assert recorder._active_request_meta[stripe_key]["url"] == "https://js.stripe.com/v3/"
-
-    recorder._on_loading_failed(
-        {"requestId": "stripe", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
-        session_id="cdp-3",
-        generation=3,
-    )
-    assert recorder.pop_provider_exit_rejection() == {
-        "reason": "critical third-party resource blocked",
-        "url": "https://js.stripe.com/v3/",
-        "browser_generation": 3,
-        "document_url": "https://checkout.eventim.us/pay",
-    }
-    assert 3 in recorder._rejected_network_generations
-    assert stripe_key not in recorder._active_request_meta
-    assert stripe_key not in recorder._active_request_ids
-
-    # Successful finish for the surviving request also clears its meta.
-    # Point at a binary URL so the finish path skips body fetch (no CDP client).
-    recorder._cdp_client = None
-    recorder._tasks = set()
-    recorder._closed = False
-    recorder.entries["3:other"]["url"] = "https://checkout.eventim.us/static/pixel.png"
-    recorder._on_loading_finished(
-        {"requestId": "other", "encodedDataLength": 12},
-        session_id="cdp-3",
-        generation=3,
-    )
-    assert "3:other" not in recorder._active_request_meta
-    assert "3:other" not in recorder._active_request_ids
-    assert recorder.entries["3:other"].get("terminal") is True
-
-
-async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
-    """Disabling local recordings must not disable the lightweight prod signal."""
-    import tempfile
-
-    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
-
-    register = SimpleNamespace(
-        Network=SimpleNamespace(
-            requestWillBeSent=MagicMock(),
-            responseReceived=MagicMock(),
-            loadingFinished=MagicMock(),
-            loadingFailed=MagicMock(),
-        )
-    )
-    send = SimpleNamespace(Network=SimpleNamespace(enable=AsyncMock()))
-    cdp_client = SimpleNamespace(register=register, send=send)
-    browser_session = SimpleNamespace(
-        cdp_client=cdp_client,
-        get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(session_id="cdp-prod")),
-    )
-    previous = {
-        name: os.environ.get(name)
-        for name in (
-            "BROWSER_AGENT_RECORDINGS",
-            "BROWSER_AGENT_NETWORK_RECORDING",
-            "BROWSER_AGENT_PROVIDER_EXIT_MONITORING",
-        )
-    }
-    try:
-        os.environ["BROWSER_AGENT_RECORDINGS"] = "0"
-        os.environ["BROWSER_AGENT_NETWORK_RECORDING"] = "0"
-        os.environ["BROWSER_AGENT_PROVIDER_EXIT_MONITORING"] = "1"
-        with tempfile.TemporaryDirectory() as tmp:
-            recorder = await BrowserNetworkRecorder.create(
-                browser_session=browser_session,
-                agent_id="agent-prod",
-                task_id="task-prod",
-                session_id="session-prod",
-                output_dir=Path(tmp) / "recording",
-            )
-            assert recorder is not None
-            assert recorder.persists_network_log is False
-            assert recorder.network_dir.exists()
-            assert recorder.console_dir.exists()
-            index_path = await recorder.close()
-            assert index_path == recorder.network_index_path
-            assert index_path.exists()
-            assert recorder.console_index_path.exists()
-            assert sorted(path.name for path in recorder.network_dir.iterdir()) == ["index.json"]
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
 
 async def test_execute_action_read_network_requests():
     """execute_action forwards every filter/detail flag to the recorder and errors
@@ -10771,6 +10335,39 @@ async def test_execute_action_wait_rejects_invalid_and_clamps_huge_values():
     huge = await execute_action(dom, ah, {"action": "wait", "params": {"time_ms": "999999999"}})
     assert huge == {"success": True, "message": ""}
     assert ah.record_action.await_args.kwargs["params"] == {"time_ms": 60_000}
+
+
+async def test_execute_action_wait_honors_schema_max_against_browser_use_cap():
+    """OTP waits request 60s; browser-use WaitEvent defaults max_seconds=10 and would
+    silently clip them. Dispatch must raise the cap to MAX_BROWSER_WAIT_MS and keep
+    event_timeout above the sleep so the handler is not canceled mid-wait.
+    """
+    from browser_tools.schemas import MAX_BROWSER_WAIT_MS
+    from browser_use.browser.events import WaitEvent
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    captured: list[WaitEvent] = []
+
+    def _capture(event):
+        captured.append(event)
+        return _make_awaitable_event(None)
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus(dispatch_side_effect=_capture)
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(dom, ah, {"action": "wait", "params": {"time_ms": 60_000}})
+    assert out == {"success": True, "message": ""}
+    assert len(captured) == 1
+    wait_event = captured[0]
+    assert isinstance(wait_event, WaitEvent)
+    assert wait_event.seconds == 60.0
+    assert wait_event.max_seconds >= MAX_BROWSER_WAIT_MS / 1000.0
+    assert min(wait_event.seconds, wait_event.max_seconds) == 60.0
+    assert wait_event.event_timeout is not None
+    assert wait_event.event_timeout > wait_event.max_seconds
 
 async def test_execute_action_dropdown_options_with_element():
     """Patch the dropdown event class to avoid pydantic node validation."""
@@ -15155,7 +14752,6 @@ def test_recovery_skips_when_live_tab_already_clear():
 
     assert "live_tab_looks_challenged" in recovery_block
     assert "skipped_clean_page" in recovery_block
-    assert "provider_exit_rejected" in recovery_block
     assert "is_hosted_stripe_checkout_url" not in recovery_block
     assert "healthcheck_noise" not in recovery_block
     assert "api.stripe.com" not in recovery_block
@@ -18887,11 +18483,7 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     assert 'if not bool(config_result.get("storage_state_preloaded")):' in recovery_branch
     assert "await _restore_rotation_storage_state(" in recovery_branch
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
-    assert "pop_provider_exit_rejection()" in activity_source
-    assert '"provider_exit_rejected": True' in activity_source
-    # Assignment form (main): provider_exit_rejected = bool(unified_action...)
-    assert "provider_exit_rejected = bool(" in recovery_branch
-    assert 'await browser_stream.finish_tools(status="ERROR")' in activity_source
+    assert "recovery_call_id = _browser_action_tool_call_id(llm_result)" in recovery_branch
 
 async def test_playwright_page_tracks_browser_use_tab_focus():
     """Humanized clicks, recorder, and live view must follow browser-use focus."""
@@ -19394,8 +18986,24 @@ async def run_all_tests():
         test_stateful_browser_activity_has_one_thirty_minute_attempt,
     )
     r.record(
+        "browser_spawn_goal_uses_tool_call_goal_verbatim",
+        test_browser_spawn_goal_uses_tool_call_goal_verbatim,
+    )
+    r.record(
         "browser_fast_mode_timeout_is_demo_only",
         test_browser_fast_mode_timeout_is_demo_only,
+    )
+    r.record(
+        "read_browser_state_does_not_consume_step_budget",
+        test_read_browser_state_does_not_consume_step_budget,
+    )
+    r.record(
+        "read_browser_state_budget_refund_caps_consecutive_observations",
+        test_read_browser_state_budget_refund_caps_consecutive_observations,
+    )
+    r.record(
+        "click_resets_budget_free_observation_streak",
+        test_click_resets_budget_free_observation_streak,
     )
     r.record(
         "visible_result_completion_rewrites_post_submit_wait",
@@ -19433,6 +19041,14 @@ async def run_all_tests():
     )
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
+    )
+    await r.record_async(
+        "evaluate_always_preserves_browser_evidence_checkpoint",
+        test_evaluate_always_preserves_browser_evidence_checkpoint,
+    )
+    r.record(
+        "evaluate_tool_schema_has_no_preserve_evidence_flag",
+        test_evaluate_tool_schema_has_no_preserve_evidence_flag,
     )
     
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
@@ -19761,6 +19377,18 @@ async def run_all_tests():
         test_resume_browser_session_posts_resume_endpoint,
     )
     await r.record_async("resume_browser_session_rate_limited", test_resume_browser_session_rate_limited)
+    r.record(
+        "challenge_recovery_cross_recovery_config_blacklist",
+        test_challenge_recovery_uses_cross_recovery_config_blacklist,
+    )
+    r.record(
+        "challenge_recovery_live_verifies_after_promote_unless_preloaded",
+        test_challenge_recovery_live_verifies_after_promote_unless_preloaded,
+    )
+    r.record(
+        "recover_browser_challenge_forwards_blocked_config_keys",
+        test_recover_browser_challenge_repo_forwards_blocked_config_keys,
+    )
     await r.record_async(
         "recover_browser_challenge_current_url_and_state",
         test_recover_browser_challenge_posts_current_url_and_state,
@@ -19776,6 +19404,18 @@ async def run_all_tests():
     await r.record_async(
         "rotation_storage_timeout_finishes_error",
         test_recovery_storage_timeout_finishes_error_and_returns_control_to_model_loop,
+    )
+    r.record(
+        "post_verifier_rejection_browser_state_fetch_bounded",
+        test_post_verifier_rejection_browser_state_fetch_is_bounded,
+    )
+    await r.record_async(
+        "get_browser_state_soft_retries_then_none",
+        test_get_browser_state_soft_retries_then_returns_none_on_hang,
+    )
+    await r.record_async(
+        "get_browser_state_soft_retries_then_succeeds",
+        test_get_browser_state_soft_retries_after_timeout_then_succeeds,
     )
     await r.record_async(
         "recovery_preloaded_solver_cookies",
@@ -20074,34 +19714,6 @@ async def run_all_tests():
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
     )
-    await r.record_async(
-        "network_recorder_fingerprint_exit_rejection",
-        test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_per_browser,
-    )
-    await r.record_async(
-        "network_recorder_accepted_fingerprint_warning",
-        test_network_recorder_does_not_reject_successful_fingerprint_warning,
-    )
-    r.record(
-        "api_challenge_html_large_cart_interstitial",
-        test_api_challenge_html_large_cart_interstitial_without_classic_markers,
-    )
-    await r.record_async(
-        "api_challenge_html_provider_exit",
-        test_api_challenge_html_triggers_provider_exit_rejection,
-    )
-    r.record(
-        "payment_cdn_tunnel_failure_provider_exit",
-        test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection,
-    )
-    r.record(
-        "evicted_critical_request_meta_provider_exit",
-        test_evicted_critical_request_meta_still_rejects_network_generation,
-    )
-    await r.record_async(
-        "provider_exit_monitor_without_recording",
-        test_provider_exit_monitor_runs_without_production_body_log_persistence,
-    )
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(
         "execute_action_request_payment_card",
@@ -20210,6 +19822,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_wait_rejects_invalid_and_clamps_huge",
         test_execute_action_wait_rejects_invalid_and_clamps_huge_values,
+    )
+    await r.record_async(
+        "execute_action_wait_honors_schema_max_against_browser_use_cap",
+        test_execute_action_wait_honors_schema_max_against_browser_use_cap,
     )
     await r.record_async(
         "execute_action_dropdown_options_with_el",

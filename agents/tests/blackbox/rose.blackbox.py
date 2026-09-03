@@ -2401,7 +2401,7 @@ def test_build_codex_responses_body_contract():
         request_id="no-system",
     )
     assert no_system_body["instructions"] == "You are a helpful assistant."
-    assert "reasoning" not in no_system_body
+    assert no_system_body["reasoning"]["effort"] == "xhigh"
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     split_system_body = build_codex_responses_body(
@@ -3085,6 +3085,7 @@ def test_build_openrouter_body_minimal_omits_optionals():
         provider_fast_mode=False,
     )
     assert body["stream_options"] == {"include_usage": True}
+    assert body["reasoning"]["effort"] == "xhigh"
     assert "tools" not in body
     assert "tool_choice" not in body
     assert "response_format" not in body
@@ -3111,6 +3112,204 @@ def test_build_anthropic_body_defaults_provider_fast_mode_on_for_opus():
     )
     assert body["speed"] == "fast"
 
+
+def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
+    """Every Rose provider body must carry effort; default is xhigh.
+
+    Provider shapes:
+      - Anthropic claudeAuth → output_config.effort (default xhigh)
+      - OpenAI/Codex Responses → reasoning.effort (default xhigh)
+      - OpenRouter waterfall → reasoning.effort (default xhigh)
+    """
+    from providers.rose.claude_auth import DEFAULT_REASONING_EFFORT as CLAUDE_DEFAULT
+    from providers.rose.gpt_auth import DEFAULT_REASONING_EFFORT as GPT_DEFAULT
+    from providers.rose.waterfall import DEFAULT_REASONING_EFFORT as OR_DEFAULT
+
+    assert CLAUDE_DEFAULT == GPT_DEFAULT == OR_DEFAULT == "xhigh"
+
+    pool = get_pool("rose-1-lite")
+    msgs = [
+        {"role": "system", "content": "be helpful"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    anthropic = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+    )
+    assert anthropic["output_config"]["effort"] == "xhigh"
+
+    anthropic_max = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        effort="max",
+    )
+    assert anthropic_max["output_config"]["effort"] == "xhigh"
+
+    anthropic_med = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        effort="medium",
+    )
+    assert anthropic_med["output_config"]["effort"] == "medium"
+
+    anthropic_minimal = build_anthropic_body(
+        pool_spec=pool,
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        effort="minimal",
+    )
+    assert anthropic_minimal["output_config"]["effort"] == "low"
+
+    codex = build_codex_responses_body(
+        pool_spec=pool,
+        messages=msgs,
+        request_id="effort-default",
+    )
+    assert codex["reasoning"]["effort"] == "xhigh"
+
+    codex_max = build_codex_responses_body(
+        pool_spec=pool,
+        messages=msgs,
+        effort="max",
+        request_id="effort-max",
+    )
+    assert codex_max["reasoning"]["effort"] == "xhigh"
+
+    openrouter = build_openrouter_body(
+        model="openai/gpt-5.6-sol",
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    assert openrouter["reasoning"]["effort"] == "xhigh"
+
+    openrouter_high = build_openrouter_body(
+        model="openai/gpt-5.6-sol",
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        effort="high",
+    )
+    assert openrouter_high["reasoning"]["effort"] == "high"
+
+    openrouter_minimal = build_openrouter_body(
+        model="openai/gpt-5.6-sol",
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        effort="minimal",
+    )
+    assert openrouter_minimal["reasoning"]["effort"] == "low"
+
+    # Every model in the browser-use pool must produce a well-formed body when
+    # the waterfall walks it — effort present on each step.
+    browser_pool = get_pool("rose-1-browser-use")
+    for model in browser_pool.waterfall:
+        step_body = build_openrouter_body(
+            model=model,
+            messages=msgs,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            temperature=None,
+            max_tokens=None,
+            seed=None,
+        )
+        assert "reasoning" in step_body, f"missing reasoning on {model}"
+        assert step_body["reasoning"].get("effort") == "xhigh", f"bad effort on {model}"
+
+    # Browser-use dump must record effective effort (xhigh), not None.
+    from providers.rose.client import _browser_use_dump_config
+    from providers.rose.types import RoseResponse
+
+    fake_resp = RoseResponse(
+        content="",
+        tool_calls=[],
+        reasoning="",
+        actual_model="openai/gpt-5.6-sol",
+        pool_name="rose-1-browser-use",
+        request_id="dump-effort",
+        usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    )
+    dump = _browser_use_dump_config(
+        pool_spec=browser_pool,
+        response=fake_resp,
+        mode="waterfall",
+        max_tokens=16000,
+        temperature=1.0,
+        include_screenshot=False,
+        call_site="browser_use_step_4",
+        deadline_s=60.0,
+        claude_auth=None,
+        gpt_auth=None,
+        available_actions=["click"],
+        tools=[],
+        tool_choice="auto",
+    )
+    assert dump["reasoning_effort"] == "xhigh"
+    assert dump["effective_params"]["reasoning_effort"] == "xhigh"
+    assert dump["requested_params"]["reasoning_effort"] is None
+
+    # Inventory: every agents-side body builder stamps non-empty effort.
+    inventory = {
+        "anthropic": anthropic["output_config"]["effort"],
+        "codex": codex["reasoning"]["effort"],
+        "openrouter": openrouter["reasoning"]["effort"],
+    }
+    for label, effort in inventory.items():
+        assert isinstance(effort, str) and effort, f"{label} missing effort: {effort!r}"
+
+
+def test_all_rose_llm_call_sites_rely_on_builder_effort_default():
+    """Structural: every agents RoseClient call path either passes effort or
+    omits it (builder fills xhigh). No call site may pass effort='' / falsy
+    sentinel that would skip stamping.
+    """
+    import ast
+    from pathlib import Path
+
+    agents_root = Path(__file__).resolve().parents[2]
+    # helpers/llm.py is the choke point for agent LLM calls.
+    llm_py = (agents_root / "helpers" / "llm.py").read_text()
+    tree = ast.parse(llm_py)
+    # Collect keyword names used in call_llm / collect / complete invocations
+    # that set effort= — ensure none pass empty string.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "effort" and isinstance(kw.value, ast.Constant):
+                assert kw.value.value not in ("", None), (
+                    f"helpers/llm.py must not pass empty effort at line {node.lineno}"
+                )
 
 async def test_waterfall_falls_through_then_succeeds():
     """First model returns 500 → second model streams clean response."""
@@ -3795,6 +3994,67 @@ async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
     assert str(meta.data.get("actual_model", "")).endswith("-openai")
     # The classified token failure is surfaced so callers can see WHY it fell back.
     assert meta.data.get("gpt_token_error") == "rate_limit"
+
+
+async def test_client_codex_404_falls_through_to_waterfall():
+    """Codex Cloudflare/edge 404 (empty body — same for garbage tokens) must NOT
+    fail the whole complete() call. It must raise RoseServerError (in
+    _FALL_THROUGH_ERRORS) so RoseClient walks openai-api-key / OpenRouter
+    waterfall. Regression: bare RoseError on 404 aborted spawn-subagents smoke
+    3× with `RoseError: Codex 404:` and never reached waterfall.
+    """
+    import os
+
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "waterfall after codex 404"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}},
+            ]
+        )
+    )
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+
+    def handler(req):
+        url = str(req.url)
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            seen["codex"] += 1
+            # Match the live edge failure: HTTP 404, empty body, cf-ray present.
+            return httpx.Response(404, text="", headers={"cf-ray": "test-codex-404"})
+        if url == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(500, text="openai key must not be required for this regression")
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev_gpt = os.environ.pop("GPT_API_KEY", None)
+    prev_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=gpt_auth_from_token("blocked-codex-token", "acct_404"),
+                call_site="test-codex-404-waterfall",
+            )
+        )
+    finally:
+        if prev_gpt is not None:
+            os.environ["GPT_API_KEY"] = prev_gpt
+        if prev_anthropic is not None:
+            os.environ["ANTHROPIC_API_KEY"] = prev_anthropic
+
+    assert seen["codex"] >= 1, "Codex route must be attempted"
+    assert seen["openrouter"] == 1, "OpenRouter waterfall must serve after Codex 404"
+    content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+    assert content == "waterfall after codex 404"
+    meta = next((c for c in chunks if c.kind == "metadata"), None)
+    assert meta is not None
+    assert meta.data.get("gpt_token_error") == "server_error"
+    assert classify_gpt_token_error(RoseServerError("Codex 404: ", status=404)) == "server_error"
 
 
 async def test_client_api_key_tier_402_falls_through_to_waterfall():
@@ -6090,6 +6350,14 @@ async def run_all_tests():
     )
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     r.record(
+        "waterfall_body_builders_always_stamp_effort_xhigh",
+        test_waterfall_body_builders_always_stamp_effort_xhigh_by_default,
+    )
+    r.record(
+        "all_rose_llm_call_sites_rely_on_builder_effort_default",
+        test_all_rose_llm_call_sites_rely_on_builder_effort_default,
+    )
+    r.record(
         "openrouter_body_no_tools_flattens_tool_history",
         test_openrouter_body_without_tools_flattens_tool_history,
     )
@@ -6143,6 +6411,10 @@ async def run_all_tests():
     await r.record_async(
         "gpt_token_usage_limit_to_openai_apikey",
         test_client_gpt_token_usage_limit_falls_back_to_openai_api_key,
+    )
+    await r.record_async(
+        "codex_404_falls_through_to_waterfall",
+        test_client_codex_404_falls_through_to_waterfall,
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall

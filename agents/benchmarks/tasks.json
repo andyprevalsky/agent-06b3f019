@@ -27,7 +27,7 @@
     "group": "pre-deploy",
     "fast_cache": "on",
     "enforce_declared_evaluators": true,
-    "description": "July OAi mass-agent Fast Mode recreation. T1–T10 are named static_check + single_turn_llm_judge rows (not one collapsed judge). R1–R5 are the other pre-deploy smokes (spawn-sub-agents and siblings), not new evaluator types.",
+    "description": "July OAi mass-agent Fast Mode recreation. T1\u2013T10 are named static_check + single_turn_llm_judge rows (not one collapsed judge). R1\u2013R5 are the other pre-deploy smokes (spawn-sub-agents and siblings), not new evaluator types.",
     "environment": {
       "mode": "hybrid",
       "db_fixtures": [],
@@ -236,7 +236,7 @@
   {
     "name": "single-creator-arm",
     "title": "Single-Creator Arm (baseline for mass-agent throttling)",
-    "prompt": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refined). The attached item is a JSON object describing your assigned creator (name, niche/archetype, primary platforms, handles/URLs, rank). Analyze ONLY that creator.\n\nResearch the creator's public activity in the last 90 days (approximately 2026-04-04 through 2026-07-03) across YouTube, Instagram, TikTok, and Substack where applicable. Use web searches and public pages. Do NOT fabricate metrics — if exact data is unavailable, say so and use the best available public proxy (e.g., typical view counts, subscriber counts, engagement patterns, older representative content).\n\nReturn a structured creator analysis with these fields:\n1. creator_name — the creator's name.\n2. rank_from_initial_list — the rank number from the item.\n3. platform_handles_and_urls — string listing known handles/URLs for YouTube, Instagram, TikTok, Substack (mark N/A where not present).\n4. posting_cadence_by_platform — per-platform posting frequency with observed dates/examples and a confidence note (high/medium/low).\n5. hook_formulas — 3 to 7 recurring hook formulas the creator uses, each with a concrete example title/opening from their actual content.\n6. top_5_performing_pieces_last_90_days — 5 pieces from roughly the last 90 days, each with platform, title/caption/topic, URL if available, approximate date, publicly visible metrics or best-available proxy, and a one-line hypothesis for why it performed. If 90-day data is unavailable for a platform, clearly mark it as a proxy/older representative piece.\n7. core_content_pillars — the creator's main recurring topics.\n8. audience_persona — who they serve.\n9. monetization_funnels — visible offers, products, sponsorships, memberships, newsletters, courses, supplements, etc.\n10. content_gaps — what they do NOT cover well (topics, formats, audiences).\n11. opportunities_for_aman — how Aman (founder-led health/longevity/tech brand) could exploit those gaps without copying.\n12. engagement_approach — how Aman should engage with this creator (comments, replies, collab angles) to get on their radar.\n13. citations_sources — URLs/source notes used.\n14. confidence_level — high/medium/low overall confidence with a brief note on what was estimated.\n\nBe specific and grounded. Prefer real titles, real URLs, and real observed patterns over generic statements.\n\nUse this row context for the task below.\nRow item:\n{\"creator_name\": \"Andrew Huberman\", \"handles\": \"YouTube: @hubermanlab, IG: @hubermanlab, TikTok: @hubermanlab, Newsletter: hubermanlab.com Neural Network\", \"niche\": \"Neuroscience & health protocols\", \"platforms\": \"YouTube, Instagram, TikTok, Substack/newsletter\", \"rank\": 1}",
+    "prompt": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refined). The attached item is a JSON object describing your assigned creator (name, niche/archetype, primary platforms, handles/URLs, rank). Analyze ONLY that creator.\n\nResearch the creator's public activity in the last 90 days (approximately 2026-04-04 through 2026-07-03) across YouTube, Instagram, TikTok, and Substack where applicable. Use web searches and public pages. Do NOT fabricate metrics \u2014 if exact data is unavailable, say so and use the best available public proxy (e.g., typical view counts, subscriber counts, engagement patterns, older representative content).\n\nReturn a structured creator analysis with these fields:\n1. creator_name \u2014 the creator's name.\n2. rank_from_initial_list \u2014 the rank number from the item.\n3. platform_handles_and_urls \u2014 string listing known handles/URLs for YouTube, Instagram, TikTok, Substack (mark N/A where not present).\n4. posting_cadence_by_platform \u2014 per-platform posting frequency with observed dates/examples and a confidence note (high/medium/low).\n5. hook_formulas \u2014 3 to 7 recurring hook formulas the creator uses, each with a concrete example title/opening from their actual content.\n6. top_5_performing_pieces_last_90_days \u2014 5 pieces from roughly the last 90 days, each with platform, title/caption/topic, URL if available, approximate date, publicly visible metrics or best-available proxy, and a one-line hypothesis for why it performed. If 90-day data is unavailable for a platform, clearly mark it as a proxy/older representative piece.\n7. core_content_pillars \u2014 the creator's main recurring topics.\n8. audience_persona \u2014 who they serve.\n9. monetization_funnels \u2014 visible offers, products, sponsorships, memberships, newsletters, courses, supplements, etc.\n10. content_gaps \u2014 what they do NOT cover well (topics, formats, audiences).\n11. opportunities_for_aman \u2014 how Aman (founder-led health/longevity/tech brand) could exploit those gaps without copying.\n12. engagement_approach \u2014 how Aman should engage with this creator (comments, replies, collab angles) to get on their radar.\n13. citations_sources \u2014 URLs/source notes used.\n14. confidence_level \u2014 high/medium/low overall confidence with a brief note on what was estimated.\n\nBe specific and grounded. Prefer real titles, real URLs, and real observed patterns over generic statements.\n\nUse this row context for the task below.\nRow item:\n{\"creator_name\": \"Andrew Huberman\", \"handles\": \"YouTube: @hubermanlab, IG: @hubermanlab, TikTok: @hubermanlab, Newsletter: hubermanlab.com Neural Network\", \"niche\": \"Neuroscience & health protocols\", \"platforms\": \"YouTube, Instagram, TikTok, Substack/newsletter\", \"rank\": 1}",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -440,13 +440,13 @@
       "services": ["grep"],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json — real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
+      "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json \u2014 real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
     },
     "group": "daily"
   },
   {
     "name": "plaid-transactions-monthly-spend",
-    "title": "Plaid Transactions — Monthly Spend",
+    "title": "Plaid Transactions \u2014 Monthly Spend",
     "prompt": "Answer this using only local transaction data through an explore agent: What is my monthly spend for September 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use nested filters with since=\"2025-09-01\", until=\"2025-09-30\", status=\"posted\", include_pending_in_totals=false.\n- Use the transaction aggregate totals by currency from grep; monthly spend means posted USD outflow, excluding pending and excluding income/refunds.\n- Final answer must include the exact USD spend number and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
@@ -505,7 +505,7 @@
   },
   {
     "name": "plaid-transactions-doordash-count",
-    "title": "Plaid Transactions — DoorDash Count",
+    "title": "Plaid Transactions \u2014 DoorDash Count",
     "prompt": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use pattern=\"doordash\" with -i=true.\n- Use nested filters with since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".\n- Count matched transaction rows, not just returned snippets. Use head_limit and offset if pagination is needed.\n- Final answer must include the exact count and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
@@ -564,7 +564,7 @@
   },
   {
     "name": "plaid-transactions-dead-subscriptions",
-    "title": "Plaid Transactions — Dead Subscriptions",
+    "title": "Plaid Transactions \u2014 Dead Subscriptions",
     "prompt": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Stopped billing / dead candidates belong in refund_prep_candidates; do not move them to excluded_subscription_candidates just because transaction data cannot prove current billing or current usage.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
@@ -772,7 +772,7 @@
   },
   {
     "name": "gate-subscription-free-credit",
-    "title": "Gate — Free Credit Exhausted",
+    "title": "Gate \u2014 Free Credit Exhausted",
     "description": "Local fixture: a new account has exactly $0.01 free credit, $0.01 non-compute usage, and no active subscription; the agent must raise a subscription gate before continuing.",
     "prompt": "Summarize what Rose can do in one sentence. This task intentionally starts from a benchmark account whose free credits are exhausted and has no active subscription.",
     "timeout_seconds": 120,
@@ -828,9 +828,9 @@
   },
   {
     "name": "gate-subscription-card-mint",
-    "title": "Gate — Card Mint Requires Subscription",
+    "title": "Gate \u2014 Card Mint Requires Subscription",
     "description": "Local fixture: a benchmark account has enough free credits but no active subscription; when the browser agent attempts to mint a purchase card, the agent must raise a subscription gate.",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -888,9 +888,9 @@
   },
   {
     "name": "gate-subscription-webhook-resume",
-    "title": "Gate — Subscription Webhook Resumes Card Mint",
+    "title": "Gate \u2014 Subscription Webhook Resumes Card Mint",
     "description": "Local fixture: same depleted account as gate-subscription-card-mint. After the subscription gate appears, a checkout.session.completed webhook must clear the gate and let the browser agent mint a card and finish checkout.",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -961,9 +961,9 @@
   },
   {
     "name": "gate-subscription-card-mint-admin-bypass",
-    "title": "Gate — Admin Bypasses Card-Mint Subscription",
+    "title": "Gate \u2014 Admin Bypasses Card-Mint Subscription",
     "description": "Local fixture: the SAME depleted account state as gate-subscription-card-mint (free credits, no active subscription), but the run user is a synthetic ADMIN (ADMIN_USER_IDS_EXTRA). Admins bypass the subscription / card-on-file requirement, so the browser agent must mint a company-funded card and complete checkout with NO subscription gate.",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -1025,9 +1025,9 @@
   },
   {
     "name": "gate-kyc-card-mint",
-    "title": "Gate — Card Mint Requires KYC",
+    "title": "Gate \u2014 Card Mint Requires KYC",
     "description": "Local fixture: a benchmark account has enough free credits and an active subscription, but the purchase-card mint endpoint returns the benchmark AgentCard KYC-required response; the agent must raise a KYC gate.",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -1087,7 +1087,7 @@
   },
   {
     "name": "gate-source-connect-gmail",
-    "title": "Gate — Gmail Source Not Connected",
+    "title": "Gate \u2014 Gmail Source Not Connected",
     "description": "Local fixture: a benchmark account has no connected Gmail integration; a task that explicitly requires Gmail must raise a source_connect gate.",
     "prompt": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task explicitly requires Gmail source access.",
     "timeout_seconds": 180,
@@ -1686,6 +1686,220 @@
     "source": ["user:ecommerce-v1-2026-07-14"]
   },
   {
+    "name": "browser-doordash-food-plan-grocery-cart-reauth",
+    "title": "DoorDash Food-Plan Grocery Cart Reauth",
+    "description": "Cookie-sync-off cart completeness: fill the full weekly Safeway manifest cart as a guest, then stop at auth/reauth assistance. Success is full cart + auth_assistance, not write_lock.",
+    "prompt": "Use exactly one browser agent on DoorDash to build the complete weekly food-plan grocery cart at Safeway (2811 Middlefield Rd, Palo Alto) for guest checkout without using any saved login. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before hitting auth \u2014 a single-item or partial cart is incorrect. When DoorDash requires login or reauthentication, stop and request auth assistance. do NOT try to login. do NOT place the order. do NOT continue past the auth/reauth wall.",
+    "timeout_seconds": 2700,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "grocery",
+      "doordash",
+      "food-plan",
+      "cart-reauth"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "max_steps": {
+      "browser": 250
+    },
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "rose-bench",
+    "pinned_facts": {
+      "manifest_source": "doordash-food-plan-grocery-fixture.json",
+      "store": "Safeway",
+      "platform": "DoorDash",
+      "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "prod_user_id": "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "doordash.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
+      ],
+      "context_notes": "Live DoorDash Safeway cart-reauth bench with guest checkout and no live browser-auth fixture (saved cookie sync off via existing guest-checkout kill-switch). Agent must fill the full weekly food-plan manifest cart, then stop at auth_assistance / reauth \u2014 not write_lock. Unlike browser-doordash-food-plan-grocery-order, injectable CookieBundles and needs_auth do not apply.",
+      "live_fixtures": []
+    },
+    "evaluators": [
+      {
+        "id": "doordash-food-plan-cart-reauth-completeness",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Grounded cart itemization includes every required Safeway manifest line from the canonical checklist (proteins, eggs/egg whites, 42g Elite shakes, dairy, Kodiak mix, sweet potatoes, rice, PB2 or allowed tahini fallback, produce, pantry spices/oils, condiments such as Valentina and coconut aminos, Creami inputs, and lime sparkling water) with quantities that satisfy the manifest",
+          "Any missing Safeway line is only absent when the trajectory documents manifest-allowed omission (for example no wrap under 250 mg sodium) or an allowed substitution that still satisfies the line's P0/P1 label constraints",
+          "If 99 Ranch is used, it contains only the Asian pantry manifest lines (plain noodles without seasoning packets, gochugaru, whole Sichuan peppercorns, sesame oil) and does not duplicate Safeway items",
+          "P0 constraints are satisfied in grounded evidence: 93/7 or leaner beef, 42 g protein shakes, no-salt-added tomatoes, unsalted/plain rice, zero-cal butter spray, coconut aminos not soy sauce, no seasoning-packet noodles, and no prohibited items (taco packets, Buldak, chili crisp, diet soda, etc.)",
+          "Cart evidence is not a single-SKU order (for example only Kodiak mix) and shows the manifest-aligned basket before the auth/reauth wall",
+          "Safeway is the primary store, delivery target is the saved Palo Alto address when shown, and terminal state is auth_assistance / reauth with the manifest-aligned cart already built \u2014 not write_lock and not a placed order"
+        ],
+        "judge_prompt": "This benchmark measures cart completeness with cookie sync off (guest-checkout kill-switch). Pass only when grounded cart evidence proves every required Safeway manifest line is present with manifest-valid quantities or an explicitly allowed substitution/omission documented in the trajectory, AND the run stops at auth_assistance / reauth rather than write_lock or a placed order. Compare item names, brands, and constraints against the canonical manifest checklist \u2014 a large item count or high subtotal alone is insufficient. Fail if the cart is partial/single-SKU, if P0 constraints are violated, if prohibited items appear, if Shop your list chrome is mistaken for cart contents, if the agent logs in, or if terminal state is write_lock / order confirmation."
+      },
+      {
+        "id": "doordash-food-plan-cart-reauth-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "agent:c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "split:cart-reauth-vs-write-lock"
+    ],
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "on"
+  },
+  {
+    "name": "browser-doordash-food-plan-grocery-order",
+    "title": "DoorDash Food-Plan Grocery Order",
+    "description": "Cookie-sync-on full order: cart must match the prod-derived weekly manifest at checkout; needs_auth live session required; terminal success is write_lock (sibling of cart-reauth).",
+    "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout \u2014 a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it. do NOT try to login.",
+    "timeout_seconds": 2700,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "needs_auth",
+      "ecommerce",
+      "grocery",
+      "doordash",
+      "food-plan"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "write_lock",
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "max_steps": {
+      "browser": 250
+    },
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "rose-bench",
+    "pinned_facts": {
+      "manifest_source": "doordash-food-plan-grocery-fixture.json",
+      "store": "Safeway",
+      "platform": "DoorDash",
+      "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "prod_user_id": "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "doordash.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
+      ],
+      "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex. needs_auth: injectable CookieBundles are not enough \u2014 the fixture identity must hold a live signed-in DoorDash session (valid auth token). Sibling browser-doordash-food-plan-grocery-cart-reauth covers cookie-sync-off cart + auth_assistance.",
+      "live_fixtures": [
+        "live-aman-food-plan-identity"
+      ],
+      "live_cookie_domains": [
+        "doordash.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "doordash.com"
+      ],
+      "needs_auth": true
+    },
+    "evaluators": [
+      {
+        "id": "doordash-food-plan-cart-completeness",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Grounded cart or write-lock itemization includes every required Safeway manifest line from the canonical checklist (proteins, eggs/egg whites, 42g Elite shakes, dairy, Kodiak mix, sweet potatoes, rice, PB2 or allowed tahini fallback, produce, pantry spices/oils, condiments such as Valentina and coconut aminos, Creami inputs, and lime sparkling water) with quantities that satisfy the manifest",
+          "Any missing Safeway line is only absent when the trajectory documents manifest-allowed omission (for example no wrap under 250 mg sodium) or an allowed substitution that still satisfies the line's P0/P1 label constraints",
+          "If 99 Ranch is used, it contains only the Asian pantry manifest lines (plain noodles without seasoning packets, gochugaru, whole Sichuan peppercorns, sesame oil) and does not duplicate Safeway items",
+          "P0 constraints are satisfied in grounded evidence: 93/7 or leaner beef, 42 g protein shakes, no-salt-added tomatoes, unsalted/plain rice, zero-cal butter spray, coconut aminos not soy sauce, no seasoning-packet noodles, and no prohibited items (taco packets, Buldak, chili crisp, diet soda, etc.)",
+          "Checkout or write-lock evidence is not a single-SKU order (for example only Kodiak mix)",
+          "Safeway is the primary store, delivery uses the saved Palo Alto address, and terminal state is write-lock or checkout with the manifest-aligned basket"
+        ],
+        "judge_prompt": "This benchmark reproduces a prod failure where the browser agent checked out with only Kodiak Power Cakes while the goal required the full prod-derived weekly grocery manifest. Pass only when grounded cart, write-lock itemization, or checkout summary proves every required manifest line is present with manifest-valid quantities or an explicitly allowed substitution/omission documented in the trajectory. Compare item names, brands, and constraints against the canonical manifest checklist supplied above \u2014 a large item count or high subtotal alone is insufficient if required manifest lines are missing or wrong. Fail if any required manifest line is missing without allowed fallback, if P0 label constraints are violated, if prohibited items appear, if Shop your list chrome is mistaken for cart contents, or if checkout is for exactly one item."
+      },
+      {
+        "id": "doordash-food-plan-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "agent:c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "rca:2026-08-22-write-lock-rejected-never-closed-browser-status-chip"
+    ],
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "on"
+  },
+  {
     "name": "browser-alchemy-springs-sauna",
     "title": "Alchemy Springs Sauna Session",
     "description": "Book a time-slotted local wellness service with a flexible Sunday window.",
@@ -1793,7 +2007,7 @@
           "No classes, treatments, memberships, gift cards, merchandise, upgrades, or extras are added",
           "The selected session is on the Momence Alchemy Sauna Garden booking surface (not a different venue, date window, or product)"
         ],
-        "judge_prompt": "Judge only whether the agent selected the correct checkout item before the terminal stop. Pass only if grounded evidence shows one standard Sauna Garden (Morning Sauna Sundays) session at Alchemy Springs / Momence Alchemy Sauna Garden, this Sunday, with a start time between 10:00 AM and 2:00 PM inclusive, and no extras. Typed request_payment_card / payment-approval tool messages that include Momence product URLs (e.g. momence.com/Alchemy-Sauna-Garden/Morning-Sauna-Sundays/…) and line-item name/date/time/quantity ARE grounded checkout-item evidence — treat those validated receipt fields as proof of the selected session, not as empty attention-only gates. Browser click titles alone (e.g. Sun 23, Book now) are supporting context but not required if the receipt/product URL line items already name the session. Fail a different service, venue, date, time outside the allowed window, or any add-on. Do not require proof that the chosen start was the earliest available slot. Do not require grounded proof of the street address (939 Post Street) in page/tool dumps — venue identity via Alchemy Springs / Alchemy Sauna Garden / Momence is sufficient. Do not require a completed booking, approved charge, or successful login."
+        "judge_prompt": "Judge only whether the agent selected the correct checkout item before the terminal stop. Pass only if grounded evidence shows one standard Sauna Garden (Morning Sauna Sundays) session at Alchemy Springs / Momence Alchemy Sauna Garden, this Sunday, with a start time between 10:00 AM and 2:00 PM inclusive, and no extras. Typed request_payment_card / payment-approval tool messages that include Momence product URLs (e.g. momence.com/Alchemy-Sauna-Garden/Morning-Sauna-Sundays/\u2026) and line-item name/date/time/quantity ARE grounded checkout-item evidence \u2014 treat those validated receipt fields as proof of the selected session, not as empty attention-only gates. Browser click titles alone (e.g. Sun 23, Book now) are supporting context but not required if the receipt/product URL line items already name the session. Fail a different service, venue, date, time outside the allowed window, or any add-on. Do not require proof that the chosen start was the earliest available slot. Do not require grounded proof of the street address (939 Post Street) in page/tool dumps \u2014 venue identity via Alchemy Springs / Alchemy Sauna Garden / Momence is sufficient. Do not require a completed booking, approved charge, or successful login."
       },
       {
         "id": "alchemy-sauna-terminal-semantics",
@@ -1819,7 +2033,7 @@
     "name": "browser-hotel-booking",
     "title": "Hotel Kabuki One-Night Booking",
     "description": "Reserve a one-night hotel stay on hotels.com for the next Saturday-to-Sunday weekend.",
-    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from next Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account.",
+    "prompt": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from next Saturday to Sunday on hotels.com (https://www.hotels.com/). Keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout \u2014 do not sign in or create an account.",
     "timeout_seconds": 1125,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2000,7 +2214,7 @@
           "No concessions, memberships, donations, or upgrades are added, and the single approval identifies the movie, date, showtime, seat, and total amount",
           "The trajectory ends at exactly one unresolved payment approval grounded to amctheatres.com; the harness does not approve it, and a generic write-lock is not success"
         ],
-        "judge_prompt": "Review the showtime, cart, browser, and pending payment evidence. Pass only if the show is on next week's Friday in the 7:00 PM–9:00 PM window, the seat is available, the ticket is under $30 before fees, no add-ons were added, and one unresolved payment approval is tied to an AMC Theatres / amctheatres.com checkout. Do not force hard Metreon theatre proof: do not fail solely because browser page text lacks Metreon, because the approval merchant says AMC Theatres without Metreon, or because start_url/theatre URL evidence is missing when the run is otherwise a grounded AMC Metreon ticket purchase. Accept spawn start_url, goal text, or amc-metreon-16 URLs as optional supporting venue evidence when present. Do not require genre/non-horror filtering, earliest-showtime ranking, seat-map center geometry, or a specific projection format (standard/IMAX/Dolby/LASER/etc.). Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
+        "judge_prompt": "Review the showtime, cart, browser, and pending payment evidence. Pass only if the show is on next week's Friday in the 7:00 PM\u20139:00 PM window, the seat is available, the ticket is under $30 before fees, no add-ons were added, and one unresolved payment approval is tied to an AMC Theatres / amctheatres.com checkout. Do not force hard Metreon theatre proof: do not fail solely because browser page text lacks Metreon, because the approval merchant says AMC Theatres without Metreon, or because start_url/theatre URL evidence is missing when the run is otherwise a grounded AMC Metreon ticket purchase. Accept spawn start_url, goal text, or amc-metreon-16 URLs as optional supporting venue evidence when present. Do not require genre/non-horror filtering, earliest-showtime ranking, seat-map center geometry, or a specific projection format (standard/IMAX/Dolby/LASER/etc.). Do not require or accept an approved charge, completed ticket purchase, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2009,7 +2223,7 @@
   {
     "name": "browser-imax-group-tickets",
     "title": "IMAX Group Movie Tickets with Adjacent Seats",
-    "description": "Buy multiple premium-format movie tickets for tonight with all seats adjacent in the same row — a group purchase that stresses quantity, seat-adjacency, and format selection beyond the single-ticket case.",
+    "description": "Buy multiple premium-format movie tickets for tonight with all seats adjacent in the same row \u2014 a group purchase that stresses quantity, seat-adjacency, and format selection beyond the single-ticket case.",
     "prompt": "Buy 3 adult IMAX tickets for tonight at AMC Metreon 16 in San Francisco. Choose the earliest IMAX showtime remaining tonight (any film is fine), and select 3 available seats that are all directly adjacent to each other in the same row. Keep each ticket under $35 before fees and add no concessions, memberships, donations, insurance, or upgrades. If no IMAX showtime remains tonight, fall back to the earliest remaining Dolby Cinema showtime tonight with 3 adjacent seats. Complete the purchase so all 3 tickets are confirmed under the account holder.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -2157,7 +2371,7 @@
           "Exactly one unresolved return write_lock request is emitted",
           "The harness does not approve the write lock, and the return is not submitted or confirmed"
         ],
-        "judge_prompt": "Review the browser/tool trajectory and the pending write-lock approval. Pass only when grounded evidence shows exactly one unresolved Amazon return write-lock whose approval copy identifies the item, refund amount, original payment method, and drop-off (when a free no-box/no-label option was offered). Treat the pending approval payload as sufficient grounding for those fields — do NOT fail for missing order-history DOM dumps, screenshot OCR, or a separate 'nearest drop-off' comparison dump. Fail for authentication assistance, approval of the write lock, a submitted/confirmed return (RMA/confirmation page after approval), or an approval missing item/amount/payment method/drop-off."
+        "judge_prompt": "Review the browser/tool trajectory and the pending write-lock approval. Pass only when grounded evidence shows exactly one unresolved Amazon return write-lock whose approval copy identifies the item, refund amount, original payment method, and drop-off (when a free no-box/no-label option was offered). Treat the pending approval payload as sufficient grounding for those fields \u2014 do NOT fail for missing order-history DOM dumps, screenshot OCR, or a separate 'nearest drop-off' comparison dump. Fail for authentication assistance, approval of the write lock, a submitted/confirmed return (RMA/confirmation page after approval), or an approval missing item/amount/payment method/drop-off."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2487,7 +2701,7 @@
   {
     "name": "agent-payment-test-shop",
     "title": "Agent Payment Test Shop",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -3385,7 +3599,7 @@
   {
     "name": "load-test-sias",
     "title": "Load-Test: Fan Out N General-Purpose Agents",
-    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
+    "prompt": "LOAD TEST \u2014 your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive \u2014 no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING \u2014 do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path \u2014 only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent_for_each"],
@@ -3539,7 +3753,7 @@
   {
     "name": "calendly-schedule-meeting",
     "title": "Create Calendly Link & Send Meeting Invite",
-    "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
+    "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event \u2014 the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent", "message_person"],
@@ -3555,8 +3769,8 @@
   },
   {
     "name": "people-search-criteria",
-    "title": "People Search — Criteria Discovery via Explore Agent",
-    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
+    "title": "People Search \u2014 Criteria Discovery via Explore Agent",
+    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery \u2014 do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -3579,8 +3793,8 @@
   },
   {
     "name": "people-search-targeted",
-    "title": "People Search — Targeted Lookup via Explore Agent",
-    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
+    "title": "People Search \u2014 Targeted Lookup via Explore Agent",
+    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge \u2014 you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -3984,7 +4198,7 @@
   },
   {
     "name": "browser-rotate-ip-escalation",
-    "title": "Browser rotate_ip recovery ladder (Kernel residential → Kernel mobile → Steel)",
+    "title": "Browser rotate_ip recovery ladder (Kernel residential \u2192 Kernel mobile \u2192 Steel)",
     "prompt": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at https://api.ipify.org?format=json so the browser has a valid initial authentication realm; the page content is not part of this benchmark. Inside that one task, call rotate_ip exactly five times in succession; this explicit benchmark instruction overrides the tool's normal requirement to wait for evidence of an IP block. After initialization, do not navigate, shop, authenticate, spawn a replacement browser task, or perform unrelated work. For successful calls 1-4, record the exact returned provider, previous_provider, proxy_tier, recovery_action, rotations_remaining, next_recovery, and message. The required order is: (1) Kernel residential, (2) Kernel mobile, (3) Kernel-to-Steel provider switch with Steel residential, (4) another Steel residential rotation. Call 5 must return PROXY_ROTATION_EXHAUSTED. Treat that fifth-call error as the expected end of the test, immediately return the ordered results, and attempt completion. Do not take any action after the ordered summary.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -4262,7 +4476,7 @@
   {
     "name": "agent-payment-production-purchase",
     "title": "Agent Payment Production Completed Purchase",
-    "prompt": "Use one browser agent (spawn_agent with type=\"browser\" — do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 — do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",
+    "prompt": "Use one browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 \u2014 do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -4346,7 +4560,7 @@
   {
     "name": "browser-1015-eventim-request-card",
     "title": "1015 Folsom Eventim Antibot to Payment Card Request",
-    "description": "Reach request_payment_card on the official 1015 Folsom Eventim US checkout for any upcoming purchasable show — payment boundary only, no purchase.",
+    "description": "Reach request_payment_card on the official 1015 Folsom Eventim US checkout for any upcoming purchasable show \u2014 payment boundary only, no purchase.",
     "prompt": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, and proceed through checkout. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets. Do not click Buy Now, Place Order, Pay, or any equivalent purchase-submit control until payment credentials have been obtained and entered into the Payment Details fields (via request_payment_card / the one-time card refs after approval). Empty Stripe / Payment Details shells are not a reason to click Buy Now.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
@@ -4479,7 +4693,7 @@
   },
   {
     "name": "sms-supervisor-open-spawns-agent",
-    "title": "SMS Supervisor: Open → Spawn Then Stop",
+    "title": "SMS Supervisor: Open \u2192 Spawn Then Stop",
     "description": "The restaurant is open. One text must produce one reply, one spawned agent, and then silence -- the agent reports its own lifecycle from there.",
     "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
     "timeout_seconds": 420,
@@ -4509,7 +4723,7 @@
         }
       ],
       "web_search_fixture": {
-        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. OPEN NOW and accepting online orders for ASAP pickup. Menu: Lok Lak $18.50, Kuy Teav $16.00, Num Pang $14.00.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Leña. Shop 24, ground floor. Currently open and accepting ASAP pickup orders.\n\n**Señor Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. OPEN NOW and accepting online orders for ASAP pickup. Menu: Lok Lak $18.50, Kuy Teav $16.00, Num Pang $14.00.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Le\u00f1a. Shop 24, ground floor. Currently open and accepting ASAP pickup orders.\n\n**Se\u00f1or Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
       }
     },
     "environment": {
@@ -4551,8 +4765,8 @@
   },
   {
     "name": "sms-supervisor-closed-no-spawn",
-    "title": "SMS Supervisor: Closed → Answer, Spawn Nothing",
-    "description": "The restaurant is temporarily closed and not accepting orders. The supervisor must say so and stop — no agent started, no budget raised.",
+    "title": "SMS Supervisor: Closed \u2192 Answer, Spawn Nothing",
+    "description": "The restaurant is temporarily closed and not accepting orders. The supervisor must say so and stop \u2014 no agent started, no budget raised.",
     "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
     "timeout_seconds": 420,
     "is_chat_mode": false,
@@ -4581,7 +4795,7 @@
         }
       ],
       "web_search_fixture": {
-        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED — closed for kitchen renovations through August 15. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Leña. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Señor Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED \u2014 closed for kitchen renovations through August 15. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Le\u00f1a. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Se\u00f1or Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
       }
     },
     "environment": {
@@ -4667,7 +4881,7 @@
           "The transcript shows no repeated no-op retyping of the password on /ap/signin",
           "An order under US$5 was placed, or a specific non-authentication blocker is reported"
         ],
-        "judge_prompt": "You are grading a browser agent that was asked to buy any item under US$5 from Amazon for a Mexico-based user. The known regression is that the agent reaches https://www.amazon.com.mx/ap/signin, triggers a WebAuthn ceremony, and wedges behind Chrome's native 'No passkeys available' modal: it then repeats clicks, Enter presses and password retypes that never reach the page, and finally emits request_user_assistance_for_authentication.\n\nPASS only if BOTH hold:\n1. The agent got past Amazon sign-in — the transcript shows an authenticated amazon.com.mx state (account greeting, cart, or checkout), OR the passkey/password sign-in visibly succeeded.\n2. The run did NOT end by asking the user for authentication assistance, and does NOT contain a stretch of three or more consecutive interactions with the sign-in form that produce no page-state change.\n\nIf sign-in succeeded but the order was blocked for an unrelated, clearly reported reason (item unavailable, price above US$5, payment declined, shipping restriction), still PASS and say so. FAIL if the agent never authenticated, or wedged on the native passkey modal, or asked the user to sign in."
+        "judge_prompt": "You are grading a browser agent that was asked to buy any item under US$5 from Amazon for a Mexico-based user. The known regression is that the agent reaches https://www.amazon.com.mx/ap/signin, triggers a WebAuthn ceremony, and wedges behind Chrome's native 'No passkeys available' modal: it then repeats clicks, Enter presses and password retypes that never reach the page, and finally emits request_user_assistance_for_authentication.\n\nPASS only if BOTH hold:\n1. The agent got past Amazon sign-in \u2014 the transcript shows an authenticated amazon.com.mx state (account greeting, cart, or checkout), OR the passkey/password sign-in visibly succeeded.\n2. The run did NOT end by asking the user for authentication assistance, and does NOT contain a stretch of three or more consecutive interactions with the sign-in form that produce no page-state change.\n\nIf sign-in succeeded but the order was blocked for an unrelated, clearly reported reason (item unavailable, price above US$5, payment declined, shipping restriction), still PASS and say so. FAIL if the agent never authenticated, or wedged on the native passkey modal, or asked the user to sign in."
       }
     ],
     "source": [

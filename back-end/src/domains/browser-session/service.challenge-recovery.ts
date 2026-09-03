@@ -27,6 +27,7 @@ export async function probeBrowserCookieVariant(input: {
   userAgent?: string;
   blockedResourceUrl?: string;
   recoveryReason?: string | null;
+  blockedConfigKeys?: string[];
 }) {
   await requireOwnedTask(input.taskId, input.userId);
   return probeCookieVariant({
@@ -37,6 +38,7 @@ export async function probeBrowserCookieVariant(input: {
     userAgent: input.userAgent,
     blockedResourceUrl: input.blockedResourceUrl,
     recoveryReason: input.recoveryReason,
+    blockedConfigKeys: input.blockedConfigKeys,
   });
 }
 
@@ -51,6 +53,7 @@ export async function recoverBrowserChallenge(input: {
   recoveryReason?: string | null;
   requirePaymentCdn?: boolean;
   preserveAuth?: boolean;
+  blockedConfigKeys?: string[];
 }) {
   await requireOwnedTask(input.taskId, input.userId);
   return searchAndPromoteBrowserConfig({
@@ -64,5 +67,6 @@ export async function recoverBrowserChallenge(input: {
     recoveryReason: input.recoveryReason,
     requirePaymentCdn: input.requirePaymentCdn,
     preserveAuth: input.preserveAuth,
+    blockedConfigKeys: input.blockedConfigKeys,
   });
 }

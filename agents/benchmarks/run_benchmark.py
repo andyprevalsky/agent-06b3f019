@@ -64,9 +64,15 @@ from benchmarks.benchmark_tasks import (
     get_timeout_floor,
     list_all_tasks,
 )
-from benchmarks.polar_catalog import is_polar_bench_task
+from benchmarks.polar_catalog import (
+    is_polar_bench_task,
+    polar_browser_step_budget,
+    polar_wall_clock_disabled,
+)
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
+    AMAN_FOOD_PLAN_COOKIE_DOMAINS,
+    AMAN_FOOD_PLAN_USER_ID,
     LIVE_FIXTURE_NAMES,
     TAMY_IDENTITY_COOKIE_DOMAINS,
     TAMY_IDENTITY_USER_ID,
@@ -173,6 +179,8 @@ MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
+DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
+_DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 # Tasks whose fixtures destructively mutate shared benchmark DB state. The
 # parallel scheduler runs these serially before starting any ordinary task so a
 # retained failed agent tree cannot mutate their fixtures. Each fixture must
@@ -181,6 +189,7 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
     AMAZON_MX_TAMY_TASK_NAME,
+    DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
@@ -783,6 +792,41 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
     return DURABLE_BENCHMARK_FRONTEND_URL
+
+
+def _rose_api_url_for_codex_harness(base_url: str) -> str:
+    """Public Rose API origin reachable from E2B (frontend dev server proxies /api)."""
+    for key in ("BENCHMARK_PUBLIC_API_URL", "BACKEND_API_URL", "PUBLIC_API_URL"):
+        explicit = os.environ.get(key, "").strip()
+        if explicit:
+            return explicit.rstrip("/")
+    services_path = _benchmark_context_path() / "services.json"
+    if services_path.exists():
+        try:
+            urls = (json.loads(services_path.read_text()) or {}).get("urls") or {}
+            for field in ("backend_api", "public", "backend"):
+                candidate = str(urls.get(field) or "").strip()
+                if candidate:
+                    return candidate.rstrip("/")
+        except Exception:
+            pass
+    parsed = urlparse(base_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return base_url.rstrip("/")
+    public_frontend = os.environ.get("PUBLIC_BASE_URL", "").strip()
+    if public_frontend:
+        return public_frontend.rstrip("/")
+    if parsed.port:
+        return f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    return base_url.rstrip("/")
+
+
+def _effective_harness(task: BenchmarkTask) -> str:
+    override = os.environ.get("BENCHMARK_HARNESS", "").strip().lower()
+    if override in {"rose", "codex"}:
+        return override
+    harness = getattr(task, "harness", "rose") or "rose"
+    return harness if harness in {"rose", "codex"} else "rose"
 
 
 def _report_frontend_url_for_benchmark(base_url: str) -> str:
@@ -1429,6 +1473,23 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
 CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
     "Claude Code credentials unavailable: no synced Claude token and no available pool token"
 )
+CODEX_HARNESS_CREDENTIAL_SKIP_REASON = (
+    "Codex harness credentials unavailable: no synced GPT compute token and no funded OpenAI API key"
+)
+
+
+def _codex_harness_credential_skip_result(task: BenchmarkTask) -> TaskResult:
+    return TaskResult(
+        name=task.name,
+        passed=False,
+        agent_id="",
+        status="SKIPPED",
+        progress_score=0,
+        duration_seconds=0,
+        cost_cents=0,
+        message_count=0,
+        failure_reason=CODEX_HARNESS_CREDENTIAL_SKIP_REASON,
+    )
 
 
 def _claude_code_credential_skip_result(task: BenchmarkTask) -> TaskResult:
@@ -1990,12 +2051,183 @@ def _inject_benchmark_prompt_secrets(goal: str) -> str:
         goal = goal.replace("{GITHUB_DISPATCH_TOKEN}", token)
     return goal
 
+def _doordash_food_plan_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for DoorDash food-plan fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = AMAN_FOOD_PLAN_USER_ID
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
+    if source_database_url:
+        env["BENCHMARK_DOORDASH_SOURCE_DATABASE_URL"] = source_database_url
+    return env
+
+
+def _run_doordash_food_plan_fixture(action: str) -> dict:
+    if action == "apply" and action in _DOORDASH_FOOD_PLAN_FIXTURE_CACHE:
+        return dict(_DOORDASH_FOOD_PLAN_FIXTURE_CACHE[action])
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/doordash-food-plan-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_doordash_food_plan_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=240 if action in ("apply", "freeze") else 60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"DoorDash food-plan benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
+        )
+    manifest = _parse_last_json_line(result.stdout)
+    if action == "apply":
+        _DOORDASH_FOOD_PLAN_FIXTURE_CACHE[action] = dict(manifest)
+    elif action == "cleanup":
+        _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+    return manifest
+
+
+def _doordash_food_plan_frozen_fixture() -> dict | None:
+    """Resolve execute_prompt + checkout_manifest for agent override / judge context.
+
+    Live ``apply`` caches a summary row (``benchmark_goal``, ``*_chars``) rather than the
+    full checkout table. Prefer that goal for the agent prompt when present, but still load
+    ``checkout_manifest`` from the frozen JSON so the judge keeps the authoritative table.
+    """
+    frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
+    file_execute = ""
+    file_checkout = ""
+    if frozen_path.is_file():
+        data = json.loads(frozen_path.read_text())
+        raw_execute = data.get("execute_prompt")
+        if isinstance(raw_execute, str) and raw_execute.strip():
+            file_execute = raw_execute.strip()
+        raw_checkout = data.get("checkout_manifest")
+        if isinstance(raw_checkout, str) and raw_checkout.strip():
+            file_checkout = raw_checkout.strip()
+
+    manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
+    if manifest and manifest.get("benchmark_goal"):
+        cached_checkout = manifest.get("checkout_manifest")
+        checkout = (
+            cached_checkout.strip()
+            if isinstance(cached_checkout, str) and cached_checkout.strip()
+            else file_checkout
+        )
+        return {
+            "execute_prompt": str(manifest["benchmark_goal"]),
+            "checkout_manifest": checkout,
+        }
+    if not file_execute:
+        return None
+    return {
+        "execute_prompt": file_execute,
+        "checkout_manifest": file_checkout,
+    }
+
+
+# Fixture execute_prompt is prod-derived and already assumes an authenticated
+# session; still append this classifier so the agent does not fall into login/OTP.
+DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
+
+
+def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        return None
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return None
+    prompt = frozen["execute_prompt"]
+    if DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER.lower() not in prompt.lower():
+        prompt = f"{prompt.rstrip()}\n\n{DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER}"
+    return prompt
+
+
+def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
+    override = _doordash_food_plan_prompt_override(task)
+    return override if override else task.prompt
+
+
+def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        return ""
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return ""
+    sections: list[str] = []
+    if frozen.get("checkout_manifest"):
+        sections.append(
+            "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "
+            "99 Ranch line must be satisfied or manifest-allowed omitted/substituted):\n"
+            + frozen["checkout_manifest"]
+        )
+    sections.append(
+        "Authoritative execute manifest text (same source the agent received):\n"
+        + frozen["execute_prompt"]
+    )
+    return "\n\n".join(sections)
+
+
+def _doordash_food_plan_supplemental_cart_evidence(data: dict) -> str:
+    """Collect full cart itemization from write-lock and browser evaluate dumps.
+
+    DoorDash write-lock approvals often summarize only the first handful of SKUs while
+    reporting a larger cart count. For manifest-exact judging, surface every grounded
+    cart dump the trajectory captured.
+    """
+    snippets: list[str] = []
+    benchmark_state = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    for req in benchmark_state.get("attention_requests_seen") or []:
+        if not isinstance(req, dict):
+            continue
+        question = str(req.get("question") or req.get("message") or "").strip()
+        if len(question) < 80:
+            continue
+        kind = req.get("kind") or "attention"
+        snippets.append(f"Attention request ({kind}):\n{question[:20000]}")
+
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        text = str(message.get("message") or message.get("text") or "").strip()
+        if not text:
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = metadata.get("toolName")
+        action_type = metadata.get("action_type")
+        if tool_name == "request_user_approval":
+            snippets.append(f"Approval tool message:\n{text[:20000]}")
+            continue
+        if action_type != "evaluate":
+            continue
+        lowered = text.lower()
+        if "result:" not in text:
+            continue
+        if (
+            "×" in text
+            or "in cart" in lowered
+            or "ground beef" in lowered
+            or "safeway" in lowered
+        ):
+            snippets.append(f"Browser cart evaluate dump:\n{text[:20000]}")
+
+    if not snippets:
+        return ""
+    return "\n\n---\n\n".join(snippets)
+
+
+
 
 def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     """Resolve the root-agent goal sent to POST /api/agents for a benchmark task."""
     from utils.payment_boundary_goal import payment_boundary_operational_suffix
 
-    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
+    goal = (
+        os.environ.get("BENCHMARK_GOAL_OVERRIDE")
+        or _doordash_food_plan_prompt_override(task)
+        or _prod_user_data_prompt_override(task)
+        or task.prompt
+    )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     goal = _inject_benchmark_prompt_secrets(goal)
@@ -3573,10 +3805,12 @@ async def poll_agent(
     task._mid_run_feedback_initial_schema = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
+    step_budget = polar_browser_step_budget(task)
 
     while True:
         elapsed = time.time() - start
-        if elapsed > resolved_timeout:
+        if not wall_clock_disabled and resolved_timeout and elapsed > resolved_timeout:
             reason = (
                 f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
                 f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
@@ -3654,6 +3888,34 @@ async def poll_agent(
         if write_lock_prerequisite_request_id:
             data["_benchmark"]["write_lock_prerequisite_auto_approved"] = True
             data["_benchmark"]["write_lock_prerequisite_request_id"] = write_lock_prerequisite_request_id
+
+        if step_budget and status not in TERMINAL_STATUSES:
+            browser_steps = _agent_class_step_counts(data).get("browser", {})
+            used_steps = max(browser_steps.values()) if browser_steps else 0
+            if used_steps >= step_budget:
+                data["_benchmark"]["step_budget_reached"] = True
+                data["_benchmark"]["browser_steps"] = used_steps
+                data["_benchmark"]["browser_step_budget"] = step_budget
+                print(
+                    f"    🧭 Browser step budget reached: {used_steps}/{step_budget} "
+                    f"— pausing for polar judge"
+                )
+                try:
+                    await pause_agent(base_url, agent_id)
+                    data = await get_agent(base_url, agent_id)
+                    data["_benchmark"] = {
+                        **data.get("_benchmark", {}),
+                        "step_budget_reached": True,
+                        "browser_steps": used_steps,
+                        "browser_step_budget": step_budget,
+                        "approvals_triggered": approvals_triggered,
+                        "approvals_resolved": approvals_resolved,
+                        "attention_requests_seen": list(attention_requests_seen),
+                    }
+                except Exception as pause_error:
+                    print(f"    ⚠ Failed to pause after step budget: {pause_error}")
+                # Not an early-fail: Odysseys grades whatever trajectory fit the budget.
+                return data, approvals_triggered, approvals_resolved, None
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -4624,9 +4886,19 @@ def evaluate_task(
         if benchmark_state.get("subscription_webhook_simulated") is not True:
             return False, "Expected simulated subscription webhook after gate"
 
-    # Agent mode: must complete
+    # Agent mode: must complete. Polar step-budget stops pause the agent on
+    # purpose so the Odysseys/BU judge can grade the trajectory (upstream also
+    # stops on max steps, then rubrics — not a wall-clock fail).
     if status != "COMPLETED":
-        return False, f"Agent status: {status} (expected COMPLETED)"
+        benchmark_state = data.get("_benchmark", {}) if isinstance(data, dict) else {}
+        if (
+            status == "PAUSED"
+            and benchmark_state.get("step_budget_reached") is True
+            and is_polar_bench_task(task)
+        ):
+            pass
+        else:
+            return False, f"Agent status: {status} (expected COMPLETED)"
 
     if task.agentcard_setup_action == "complete":
         benchmark_state = data.get("_benchmark", {})
@@ -4900,6 +5172,66 @@ def _agent_messages_have_browser_terminal(messages: Optional[List[dict]]) -> boo
     return open_task_ids.issubset(terminal_task_ids)
 
 
+def _recording_attachment_ready(metadata: dict) -> bool:
+    """True when a FINISHED recording row carries a playable FE attachment."""
+    if metadata.get("action_type") != "recording":
+        return False
+    if metadata.get("toolStatus") != "FINISHED":
+        return False
+    view_url = metadata.get("recording_view_url")
+    if isinstance(view_url, str) and view_url.strip():
+        return True
+    view_urls = metadata.get("recording_view_urls")
+    if isinstance(view_urls, list) and any(
+        isinstance(url, str) and url.strip() for url in view_urls
+    ):
+        return True
+    file_pointer = metadata.get("recording_file_pointer")
+    return isinstance(file_pointer, dict) and bool(
+        file_pointer.get("storage_path") or file_pointer.get("id")
+    )
+
+
+def _agent_messages_have_browser_recording_ready(
+    messages: Optional[List[dict]],
+) -> bool:
+    """True when every browser task that started a recording has a playable one.
+
+    Timeout cleanup posts ``session_paused`` / ``task_complete`` and finalizes
+    Kernel replay asynchronously. Hub archives that snapshot as soon as the
+    terminal lands (before the FINISHED recording row) leave the FE Recording
+    tab empty even though Kernel already has the MP4.
+    """
+    started_task_ids: set[str] = set()
+    ready_task_ids: set[str] = set()
+    for message in messages or []:
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent":
+            continue
+        if metadata.get("action_type") != "recording":
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        started_task_ids.add(task_id)
+        if _recording_attachment_ready(metadata):
+            ready_task_ids.add(task_id)
+    if not started_task_ids:
+        return True
+    return started_task_ids.issubset(ready_task_ids)
+
+
+def _agent_messages_ready_for_browser_hub_archive(
+    messages: Optional[List[dict]],
+) -> bool:
+    """Terminal chip close + playable recording — both required for hub FE links."""
+    return _agent_messages_have_browser_terminal(
+        messages
+    ) and _agent_messages_have_browser_recording_ready(messages)
+
+
 async def _refresh_agent_after_pause_for_browser_terminal(
     base_url: str,
     agent_id: str,
@@ -4913,9 +5245,10 @@ async def _refresh_agent_after_pause_for_browser_terminal(
     Timeout/stall paths pause the agent *after* the poll snapshot. Cancel +
     recording cleanup then post ``task_complete`` / ``session_paused`` and finalize
     the recording asynchronously. Archiving the pre-pause snapshot leaves FE links
-    with an IN_PROGRESS browser chip forever.
+    with an IN_PROGRESS browser chip forever. Archiving as soon as ``session_paused``
+    lands (before Kernel replay finalize) leaves the Recording tab empty.
     """
-    if _agent_messages_have_browser_terminal(data.get("messages")):
+    if _agent_messages_ready_for_browser_hub_archive(data.get("messages")):
         return data
     deadline = time.time() + timeout_seconds
     latest = data
@@ -4926,7 +5259,7 @@ async def _refresh_agent_after_pause_for_browser_terminal(
         except Exception as refresh_error:
             print(f"    ⚠ Browser-terminal refresh failed: {refresh_error}")
             continue
-        if _agent_messages_have_browser_terminal(latest.get("messages")):
+        if _agent_messages_ready_for_browser_hub_archive(latest.get("messages")):
             print(
                 f"    ✓ Browser terminal messages landed after pause "
                 f"({len(latest.get('messages') or [])} messages)"
@@ -6135,6 +6468,100 @@ def _describe_unusable_cookie_domain(summary: dict) -> str:
     )
 
 
+def _task_needs_auth(task: "BenchmarkTask") -> bool:
+    """True when the catalog declares environment.needs_auth (live session required)."""
+    return bool((task.environment or {}).get("needs_auth"))
+
+
+def _needs_auth_domains(task: "BenchmarkTask") -> tuple[str, ...]:
+    env = task.environment or {}
+    raw = env.get("required_injectable_cookie_domains") or env.get("live_cookie_domains") or []
+    return tuple(str(d).strip() for d in raw if str(d).strip())
+
+
+def _looks_like_auth_session_failure(
+    failure_reason: Optional[str],
+    data: Optional[dict] = None,
+) -> bool:
+    """Detect auth-assistance / dead-session outcomes that needs_auth benches care about."""
+    text = (failure_reason or "").lower()
+    if any(
+        marker in text
+        for marker in (
+            "auth_assistance",
+            "awaiting_auth_assistance",
+            "auth_failed",
+            "valid auth token",
+        )
+    ):
+        return True
+    if not data:
+        return False
+    benchmark = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    if benchmark.get("unexpected_attention_kind") == "auth_assistance":
+        return True
+    if benchmark.get("attention_request_kind_seen") == "auth_assistance":
+        return True
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    status = str(agent.get("status") or "").lower()
+    return status in {"awaiting_auth_assistance", "auth_failed"}
+
+
+def _annotate_needs_auth_failure(
+    task: "BenchmarkTask",
+    failure_reason: Optional[str],
+    data: Optional[dict] = None,
+) -> Optional[str]:
+    """Rewrite auth-session failures on needs_auth benches into an INFRA/fixture report.
+
+    Diagram::
+
+        catalog needs_auth=true
+                │
+                ▼
+        injectable cookies present? ──no──► preflight INFRA (existing)
+                │ yes
+                ▼
+        live session valid? ──no──► auth_assistance / auth_failed
+                │                      │
+                │                      ▼
+                │            annotate: "bench needs a valid auth token"
+                ▼
+              write_lock / task success
+
+    Injectable CookieBundles prove selection, not liveness. When a needs_auth
+    bench still lands on auth_assistance, report that the fixture needs a valid
+    auth token rather than leaving a bare attention-kind mismatch.
+    """
+    if not failure_reason or not _task_needs_auth(task):
+        return failure_reason
+    if not _looks_like_auth_session_failure(failure_reason, data):
+        return failure_reason
+    if "needs a valid auth token" in failure_reason.lower():
+        if data is not None:
+            data["_benchmark"] = {
+                **(data.get("_benchmark") or {}),
+                "needs_auth": True,
+                "auth_fixture_failure": True,
+            }
+        return failure_reason
+    domains = _needs_auth_domains(task)
+    domain_hint = f" for {', '.join(domains)}" if domains else ""
+    annotated = (
+        f"INFRA/fixture: this bench declares needs_auth and needs a valid auth token"
+        f"{domain_hint} (injectable CookieBundles alone are insufficient — refresh a "
+        f"live signed-in session for the fixture identity, re-sync, then re-run). "
+        f"{failure_reason}"
+    )
+    if data is not None:
+        data["_benchmark"] = {
+            **(data.get("_benchmark") or {}),
+            "needs_auth": True,
+            "auth_fixture_failure": True,
+        }
+    return annotated
+
+
 def _assert_live_cookie_domains_usable(user_id: str, cookie_domains: tuple[str, ...]) -> None:
     """Fail the fixture — loudly, as infra — when the scoped sync produced nothing usable.
 
@@ -6622,8 +7049,11 @@ async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
 
 def _live_fixture_run_user_id(task: "BenchmarkTask") -> Optional[str]:
     """The production identity a task's declared live fixtures make it run as."""
-    if "live-tamy-identity" in resolve_live_fixtures(task.environment):
+    fixtures = resolve_live_fixtures(task.environment)
+    if "live-tamy-identity" in fixtures:
         return TAMY_IDENTITY_USER_ID
+    if "live-aman-food-plan-identity" in fixtures:
+        return AMAN_FOOD_PLAN_USER_ID
     return None
 
 
@@ -6662,9 +7092,30 @@ def _apply_live_tamy_identity_fixture(ctx: LiveFixtureContext) -> dict:
     }
 
 
+def _apply_live_aman_food_plan_identity_fixture(ctx: LiveFixtureContext) -> dict:
+    """Apply the complete live overlay for Aman's DoorDash food-plan repro identity."""
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — skipping the Aman food-plan identity overlay")
+        return {"fixture": "live-aman-food-plan-identity", "skipped": True, "reason": "simulate"}
+    manifest = _apply_live_fixture(
+        replace(
+            ctx,
+            user_id=AMAN_FOOD_PLAN_USER_ID,
+            cookie_domains=AMAN_FOOD_PLAN_COOKIE_DOMAINS,
+        )
+    )
+    print(f"    🛒 Seeded Aman's production identity {AMAN_FOOD_PLAN_USER_ID} into the isolated DB")
+    return {
+        **manifest,
+        "fixture": "live-aman-food-plan-identity",
+        "user_id": AMAN_FOOD_PLAN_USER_ID,
+    }
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
     "live-tamy-identity": _apply_live_tamy_identity_fixture,
+    "live-aman-food-plan-identity": _apply_live_aman_food_plan_identity_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
@@ -6709,6 +7160,13 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
         required_injectable_cookie_domains=required_cookie_domains,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     )
+    if _task_needs_auth(task):
+        domains = _needs_auth_domains(task)
+        domain_hint = f" ({', '.join(domains)})" if domains else ""
+        print(
+            f"    🔐 needs_auth: this bench requires a valid live auth token/session"
+            f"{domain_hint} — injectable CookieBundles alone are not sufficient"
+        )
     manifests: list[dict] = []
     for name in fixtures:
         applier = LIVE_FIXTURE_APPLIERS.get(name)
@@ -9129,6 +9587,17 @@ async def _call_declared_llm_judge(
     from helpers.llm import check_progress
 
     criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    task_requirement = (
+        _doordash_food_plan_task_requirement_for_judge(task)
+        if task.name == DOORDASH_FOOD_PLAN_TASK_NAME
+        else task.prompt
+    )
+    manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
+    manifest_block = (
+        f"\n\nCanonical manifest checklist (ground truth for item matching):\n{manifest_context}"
+        if manifest_context
+        else ""
+    )
     verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
 
 The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
@@ -9138,13 +9607,23 @@ terminal gate; it does not prove item, price, date, address, quantity, or select
 assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
 eligible orders fail unless a criterion explicitly defines that state as success.
 
-Task requirement: {task.prompt}
+Task requirement: {task_requirement}{manifest_block}
 Criteria:
 {criteria}
 Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
+    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+        cart_evidence = _doordash_food_plan_supplemental_cart_evidence(data)
+        if cart_evidence:
+            evidence.append(
+                {
+                    "role": "TOOL",
+                    "text": cart_evidence,
+                    "metadata": {"evidence_type": "doordash_food_plan_cart_itemization"},
+                }
+            )
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
     judge_user_id = (
         agent.get("userId")
@@ -11045,6 +11524,10 @@ async def run_single_task(
         from benchmarks.sms_runner import build_deps_from_module, run_sms_task
 
         return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__]))
+    if _effective_harness(task) == "codex":
+        if not await _check_codex_harness_credentials(base_url):
+            print(f"  ⚠ Codex harness credentials unavailable at task dispatch — skipping: {task.name}")
+            return _codex_harness_credential_skip_result(task)
     # Parallel suites can queue a long-running Claude task for several minutes.
     # A credential that was available during the suite-level preflight may be
     # invalidated or enter cooldown before this task obtains its execution slot.
@@ -11146,6 +11629,12 @@ async def run_single_task(
         doc_count = user_data_manifest.get("document_count", "?")
         provider_count = user_data_manifest.get("provider_count", "?")
         print(f"    📄 Seeded frozen user-data fixture: {doc_count} documents across {provider_count} providers")
+    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        doordash_manifest = _run_doordash_food_plan_fixture("apply")
+        prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
+        print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -11158,9 +11647,14 @@ async def run_single_task(
         )
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    step_budget = polar_browser_step_budget(task)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
-    print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
+    if polar_wall_clock_disabled(task) or resolved_timeout in (None, 0):
+        budget_note = f", browser_steps≤{step_budget}" if step_budget else ""
+        print(f"     timeout=disabled (step budget){budget_note}, price_limit={task.effective_price_limit_cents()}c")
+    else:
+        print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
     all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
     if all_attachments:
         print(f"     attachments={all_attachments}")
@@ -11271,6 +11765,19 @@ async def run_single_task(
                 )
             )
 
+        if _effective_harness(task) == "codex":
+            from benchmarks.codex_runner import build_deps_from_module, run_codex_task
+
+            fast_mode_cache = _resolved_fast_mode_cache(task)
+            benchmark_goal = _benchmark_goal_for_task(task, base_url)
+            return await run_codex_task(
+                base_url,
+                task,
+                build_deps_from_module(sys.modules[__name__]),
+                benchmark_goal,
+                fast_mode_cache_enabled=fast_mode_cache,
+            )
+
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
@@ -11352,6 +11859,7 @@ async def run_single_task(
         data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
             base_url, agent_id, task, realtime_monitor
         )
+        early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
@@ -11721,6 +12229,7 @@ async def run_single_task(
             log_summary.append(f"{label}={len(entries)}")
         log_summary.append(f"messages={len(logs.get('messages', []))}")
         print(f"    Logs collected: {', '.join(log_summary)}")
+        failure_reason = _annotate_needs_auth_failure(task, failure_reason, data)
         archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
             base_url,
             agent_id,
@@ -12628,6 +13137,25 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
         return False
 
 
+async def _check_codex_harness_credentials(base_url: str) -> bool:
+    """Codex harness requires a usable GPT compute token or funded OpenAI API key."""
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{base_url}/api/integrations/gpt-code/credentials/token",
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if bool(data.get("accessToken")):
+                    return True
+        return bool(os.environ.get("GPT_API_KEY", "").strip())
+    except Exception:
+        return False
+
+
 async def _check_claude_code_credentials(base_url: str) -> bool:
     """Check whether Claude Code can actually create a code session.
 
@@ -12967,6 +13495,14 @@ async def main_async(args):
     # In non-bootstrap mode, incomplete history falls back to the configured task
     # timeout so new or low-sample tasks can still run and accumulate pass data.
     for t in tasks:
+        if polar_wall_clock_disabled(t):
+            budget = polar_browser_step_budget(t)
+            t._resolved_timeout_seconds = 0
+            print(
+                f"  🧭 {t.name} → wall-clock disabled; "
+                f"browser step budget={budget if budget is not None else '—'}"
+            )
+            continue
         if args.bootstrap:
             t._resolved_timeout_seconds = t.timeout_seconds
             s = _history_summary(t.name, max_seconds=get_smoke_cap(t.name))
@@ -13574,6 +14110,13 @@ def main():
         default=None,
         help="Optional tree JSON output path for --checkpoint-source-index.",
     )
+    parser.add_argument(
+        "--harness",
+        choices=["rose", "codex"],
+        default=None,
+        help="Override benchmark harness (rose=Temporal agent workflow, codex=Codex E2B orchestrator). "
+        "Also set via BENCHMARK_HARNESS env.",
+    )
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
         "--prod",
@@ -13619,6 +14162,8 @@ def main():
 
     if args.anon:
         _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)
+    if args.harness:
+        os.environ["BENCHMARK_HARNESS"] = args.harness
     _apply_world_model_cli_env(args, parser)
 
     asyncio.run(main_async(args))

@@ -169,7 +169,7 @@ async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
   assert.notStrictEqual(winner.config.key, 'steel_managed');
   assert.deepStrictEqual(promoted, [winner.config.key]);
   // Sequential lane order: first non-avoided full clear wins (not lowest latency).
-  assert.strictEqual(winner.config.key, 'kernel_residential_city');
+  assert.strictEqual(winner.config.key, 'steel_fixed');
 }
 
 async function testHardPaymentCdnFilterKeepsOnlyWorkingConfig(): Promise<void> {
@@ -346,15 +346,13 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
   assert.strictEqual(originStorageRestores, 1, 'origin auth is awaited before the clean probe');
   assert.strictEqual(defaultContextCloseCalls, 0, 'the promoted context must remain alive');
   assert.strictEqual(browserCloseCalls, 1, 'only the validation CDP connection is closed');
-  assert.deepStrictEqual(result, {
-    stablePasses: 1,
-    attempts: 1,
-    latencyMs: result.latencyMs,
-    paymentCdnOk: true,
-    paymentCdnHosts: {},
-    classifierLlmUsage: [],
-    settledUrl: 'https://order.online/store/blue-bottle',
-  });
+  assert.strictEqual(result.stablePasses, 1);
+  assert.strictEqual(result.attempts, 1);
+  assert.strictEqual(result.paymentCdnOk, true);
+  assert.deepStrictEqual(result.paymentCdnHosts, {});
+  assert.deepStrictEqual(result.classifierLlmUsage, []);
+  assert.strictEqual(result.settledUrl, 'https://order.online/store/blue-bottle');
+  assert.strictEqual(result.classifierChallenged, false);
 }
 
 function testPaymentCdnProbeUsesNoCorsForHostFetches(): void {

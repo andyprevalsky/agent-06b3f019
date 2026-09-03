@@ -590,16 +590,16 @@ def test_convert_context_to_messages_one_tool_result_per_tool_use():
     )
 
 
-def test_convert_context_to_messages_pairs_orphan_tool_use():
-    """A tool_use whose terminal TOOL row never landed gets a synthetic result.
+def test_convert_context_to_messages_strips_orphan_tool_use():
+    """A tool_use whose terminal TOOL row never landed is stripped, not faked.
 
     Same captured request as above also declared attempt_completion
-    (dd27bdbb-1e39-4414-bea1-4d1fce95b691) with no terminal row, which
-    Anthropic rejects with "tool_use ids were found without tool_result
-    blocks". build_llm_messages already ran _ensure_tool_result_pairing;
-    convert_context_to_messages did not.
+    (dd27bdbb-1e39-4414-bea1-4d1fce95b691) with no terminal row. Inventing a
+    synthetic tool_result used to create duplicate-result 400s when a late real
+    result arrived after an intervening assistant. Strip the orphan tool_call
+    instead so Anthropic never sees an unpaired tool_use or a fake result.
     """
-    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+    from helpers.llm import convert_context_to_messages
 
     call_id = "dd27bdbb-1e39-4414-bea1-4d1fce95b691"
     context = [
@@ -621,12 +621,9 @@ def test_convert_context_to_messages_pairs_orphan_tool_use():
     messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
 
     tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
-    assert tool_use_ids == [call_id]
-    assert [tid for tid, _ in tool_result_ids] == [call_id], (
-        f"every tool_use needs a tool_result, got {tool_result_ids}"
-    )
-    synthetic = [m for m in messages if m.get("tool_call_id") == call_id]
-    assert synthetic and synthetic[0]["content"] == SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+    assert tool_use_ids == [], f"orphan tool_use must be stripped, got {tool_use_ids}"
+    assert tool_result_ids == [], f"no synthetic tool_result allowed, got {tool_result_ids}"
+    assert not any(m.get("tool_call_id") == call_id for m in messages)
 
 
 def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
@@ -636,7 +633,7 @@ def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
     timestamp. If dedup ran before they were filtered, the internal row would
     win and the real result would be dropped, orphaning the tool_use.
     """
-    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+    from helpers.llm import convert_context_to_messages
 
     call_id = "toolu_dedup_ordering"
     context = [
@@ -670,7 +667,6 @@ def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     assert len(tool_msgs) == 1, tool_msgs
     assert "the real result the model must see" in tool_msgs[0]["content"]
-    assert tool_msgs[0]["content"] != SYNTHETIC_TOOL_RESULT_PLACEHOLDER
     assert "internal sub-agent chatter" not in tool_msgs[0]["content"]
 
 
@@ -680,12 +676,13 @@ def test_convert_context_to_messages_verifier_row_between_call_and_error_result(
     convert_context_to_messages renders verifier TOOL rows as `role: assistant`,
     and _ensure_tool_result_pairing treats every assistant as a run boundary. If
     the ERROR result sorts after that verifier row, the declaring assistant looks
-    uncovered: the pairing pass synthesizes a placeholder AND keeps the real
+    uncovered: the old pairing pass synthesized a placeholder AND kept the real
     result, producing exactly the two-tool_result-blocks 400 this suite exists to
     prevent. Terminal rows are re-anchored to their IN_PROGRESS timestamp --
-    ERROR as well as FINISHED -- so the pair stays contiguous.
+    ERROR as well as FINISHED -- so the pair stays contiguous. When re-anchoring
+    fails, pull-forward still prefers the real result over inventing one.
     """
-    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+    from helpers.llm import convert_context_to_messages
 
     call_id = "tc-verifier-interleave"
     context = [
@@ -724,7 +721,6 @@ def test_convert_context_to_messages_verifier_row_between_call_and_error_result(
     )
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     assert len(tool_msgs) == 1
-    assert tool_msgs[0]["content"] != SYNTHETIC_TOOL_RESULT_PLACEHOLDER
     assert "boom" in tool_msgs[0]["content"]
 
 
@@ -7316,9 +7312,9 @@ async def test_call_llm_structured_streaming_non_dict_choices_continues():
     assert "ok" in result.response, f"Expected 'ok' substring, got {result.response!r}"
 
 
-def test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use():
-    """Orphan assistant tool_use → synthetic tool_result inserted right after."""
-    from helpers.llm import _ensure_tool_result_pairing, SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+def test_ensure_tool_result_pairing_strips_orphan_tool_use():
+    """Orphan assistant tool_use → tool_call stripped; no synthetic tool_result."""
+    from helpers.llm import _ensure_tool_result_pairing
 
     msgs = [
         {"role": "system", "content": "sys"},
@@ -7332,12 +7328,41 @@ def test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use():
         {"role": "assistant", "content": "continuing"},
     ]
     fixed = _ensure_tool_result_pairing(msgs)
-    # Synthetic tool_result is inserted between the orphan assistant and the next user.
+    assert not any(m.get("role") == "tool" for m in fixed), f"no synthetic tool_result allowed: {fixed}"
+    first_assistant = next(m for m in fixed if m.get("role") == "assistant")
+    assert not first_assistant.get("tool_calls"), f"orphan tool_call must be stripped: {first_assistant}"
+
+
+def test_ensure_tool_result_pairing_pulls_late_result_forward():
+    """Late real tool_result after an intervening assistant is pulled forward (no dup).
+
+    Polar false-fail shape: timeout ERROR then pause-cancel FINISHED for the same
+    tool_call_id, with an assistant between them. Dedup keeps the latest; pairing
+    must pull that real result forward to the declaring assistant — never inject a
+    placeholder that would then duplicate the late real result.
+    """
+    from helpers.llm import _ensure_tool_result_pairing
+
+    call_id = "toolu_011uTWNQfc3aDKLLL8RQ68Sg"
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": call_id, "type": "function", "function": {"name": "spawn_browser_agent", "arguments": "{}"}}
+            ],
+        },
+        {"role": "assistant", "content": "intervening verifier/progress"},
+        {"role": "tool", "tool_call_id": call_id, "name": "spawn_browser_agent", "content": "canceled by pause"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
     tool_msgs = [m for m in fixed if m.get("role") == "tool"]
-    assert len(tool_msgs) == 1, f"Expected 1 synthetic tool message, got {len(tool_msgs)}"
-    assert tool_msgs[0]["tool_call_id"] == "tc1"
-    assert tool_msgs[0]["content"] == SYNTHETIC_TOOL_RESULT_PLACEHOLDER
-    assert tool_msgs[0]["name"] == "spawn_agent"
+    assert len(tool_msgs) == 1, f"expected exactly one real tool_result, got {tool_msgs}"
+    assert tool_msgs[0]["content"] == "canceled by pause"
+    # Real result must sit immediately after the declaring assistant.
+    assert fixed[0].get("role") == "assistant" and fixed[0].get("tool_calls")
+    assert fixed[1].get("role") == "tool" and fixed[1].get("tool_call_id") == call_id
+    assert sum(1 for m in fixed if m.get("tool_call_id") == call_id) == 1
 
 
 def test_ensure_tool_result_pairing_strips_orphan_tool_result():
@@ -7435,8 +7460,8 @@ async def run_all_tests():
         test_convert_context_to_messages_one_tool_result_per_tool_use,
     )
     r.record(
-        "convert_context_to_messages_pairs_orphan_tool_use",
-        test_convert_context_to_messages_pairs_orphan_tool_use,
+        "convert_context_to_messages_strips_orphan_tool_use",
+        test_convert_context_to_messages_strips_orphan_tool_use,
     )
     r.record(
         "convert_context_to_messages_subagent_row_cannot_win_the_dedup",
@@ -7952,8 +7977,12 @@ async def run_all_tests():
         "stream_non_dict_choices_continues", test_call_llm_structured_streaming_non_dict_choices_continues
     )
     r.record(
-        "ensure_tool_result_pairing_inserts_synthetic",
-        test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use,
+        "ensure_tool_result_pairing_strips_orphan_tool_use",
+        test_ensure_tool_result_pairing_strips_orphan_tool_use,
+    )
+    r.record(
+        "ensure_tool_result_pairing_pulls_late_result_forward",
+        test_ensure_tool_result_pairing_pulls_late_result_forward,
     )
     r.record(
         "ensure_tool_result_pairing_strips_orphan_tool_result",

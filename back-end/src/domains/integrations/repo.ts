@@ -2,14 +2,14 @@ import { type Prisma, IntegrationType, IntegrationStatus } from '@prisma/client'
 import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
 
-const log = createLogger('Integrations');
+import { AUTH_COOKIE_PATTERNS, FALSE_POSITIVE_COOKIES } from '../../providers/authCookies';
 import {
-  AUTH_COOKIE_PATTERNS,
-  FALSE_POSITIVE_COOKIES,
   AD_TRACKING_DOMAINS,
   CHROME_EPOCH_OFFSET_MICROSECONDS,
   AUTH_DOMAINS_CACHE_TTL_MS,
 } from './config';
+
+const log = createLogger('Integrations');
 
 // Cache authenticated domains per user (5 min TTL)
 const authDomainsCache = new Map<string, { domains: string[]; expiresAt: number }>();

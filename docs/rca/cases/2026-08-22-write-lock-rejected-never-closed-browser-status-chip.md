@@ -121,8 +121,12 @@ length; no new subscriptions or fan-in.
 
 ## Human feedback
 
-User reported chip should only show while tool is in progress; asked deep RCA on
-why checkout happened with one item. None recorded on fix shape.
+- User reported chip should only show while tool is in progress; asked deep RCA on
+  why checkout happened with one item.
+- **2026-08-25:** User did not want the fix merged before a clean `/rca` handoff.
+  Merge landed via autonomous `/deploy` after "Fix 1. And /deploy that" without
+  a separate merge approval step. User asked to revert if merged without approval
+  and requested a formal RCA before any further ship.
 
 ## Reusable lesson
 

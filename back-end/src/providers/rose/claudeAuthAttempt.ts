@@ -61,6 +61,7 @@ export async function* attemptClaudeAuthWithRecovery(
       toolChoice: options.tool_choice,
       maxTokens: options.max_tokens,
       temperature: options.temperature,
+      effort: options.effort,
       auth: { mode: 'oauth', token },
       requestId,
       callSite,

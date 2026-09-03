@@ -54,7 +54,7 @@ const BenchmarkTaskSchema = z.object({
   name: z.string().min(1),
   title: z.string().min(1),
   prompt: z.string().min(1),
-  timeout_seconds: z.number().int().positive(),
+  timeout_seconds: z.number().int().min(0),
   is_chat_mode: z.boolean(),
   expected_tools: z.array(z.string()),
   tags: z.array(z.string().min(1)),
@@ -101,6 +101,7 @@ const BenchmarkTaskSchema = z.object({
     )
     .optional(),
   source: z.array(z.string().min(1)).optional(),
+  max_steps: z.record(z.string(), z.number().int().positive()).optional(),
 });
 
 const TasksResponseSchema = z.object({
@@ -429,13 +430,28 @@ async function testList_reproducibleAcrossThreeRuns() {
 
 // ==================== TASK DATA INVARIANTS ====================
 
-async function testList_timeoutsArePositive() {
+async function testList_timeoutsAreValid() {
   const res = await request(`${BASE_URL}/api/benchmarks`);
   if (res.status !== 200) return;
   const body = res.data as { tasks: BenchmarkTask[] };
   for (const task of body.tasks) {
-    if (task.timeout_seconds <= 0)
-      throw new Error(`Task "${task.name}" has non-positive timeout: ${task.timeout_seconds}`);
+    if (task.timeout_seconds < 0) {
+      throw new Error(`Task "${task.name}" has negative timeout: ${task.timeout_seconds}`);
+    }
+    if (task.timeout_seconds === 0) {
+      const tags = task.tags ?? [];
+      if (!tags.includes('polar-bench')) {
+        throw new Error(
+          `Task "${task.name}" disables wall-clock timeout (0) without polar-bench tag`
+        );
+      }
+      const maxSteps = (task as BenchmarkTask & { max_steps?: Record<string, number> }).max_steps;
+      if (!maxSteps?.browser || maxSteps.browser <= 0) {
+        throw new Error(
+          `Task "${task.name}" disables wall-clock timeout but lacks max_steps.browser`
+        );
+      }
+    }
   }
 }
 
@@ -643,7 +659,7 @@ async function runAll() {
     {
       name: 'Task data invariants',
       tests: [
-        { name: 'timeouts positive', fn: testList_timeoutsArePositive },
+        { name: 'timeouts valid', fn: testList_timeoutsAreValid },
         { name: 'price limits positive', fn: testList_priceLimitsArePositive },
         {
           name: 'chat-mode tasks have null start_phase',

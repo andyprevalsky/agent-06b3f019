@@ -24,16 +24,42 @@ export interface ConfigSearchDependencies {
 export interface LaneConfigSearchOptions {
   /** Deprioritize this candidate key (tried last inside each lane). */
   avoidConfigKey?: string;
+  /**
+   * Cross-recovery blacklist: hard-exclude these keys. When every catalog
+   * entry is blacklisted, the set expires and the full catalog is retried.
+   */
+  blockedConfigKeys?: Iterable<string>;
+}
+
+/**
+ * Drop blacklisted configs. If the blacklist covers the whole catalog,
+ * expire it and return the full list (caller may clear durable state).
+ */
+export function applyConfigBlacklist(
+  configs: BrowserRecoveryConfig[],
+  blockedConfigKeys?: Iterable<string>
+): { configs: BrowserRecoveryConfig[]; blacklistExpired: boolean } {
+  const blocked = new Set(
+    [...(blockedConfigKeys ?? [])].map((key) => String(key || '').trim()).filter(Boolean)
+  );
+  if (blocked.size === 0) return { configs: [...configs], blacklistExpired: false };
+  const remaining = configs.filter((config) => !blocked.has(config.key));
+  if (remaining.length === 0) {
+    return { configs: [...configs], blacklistExpired: true };
+  }
+  return { configs: remaining, blacklistExpired: false };
 }
 
 /** Order configs so the currently-failing exit is tried last within a lane. */
 export function orderConfigsForLane(
   configs: BrowserRecoveryConfig[],
-  avoidConfigKey?: string
+  avoidConfigKey?: string,
+  blockedConfigKeys?: Iterable<string>
 ): BrowserRecoveryConfig[] {
-  if (!avoidConfigKey) return [...configs];
-  const preferred = configs.filter((config) => config.key !== avoidConfigKey);
-  const avoided = configs.filter((config) => config.key === avoidConfigKey);
+  const { configs: pool } = applyConfigBlacklist(configs, blockedConfigKeys);
+  if (!avoidConfigKey) return pool;
+  const preferred = pool.filter((config) => config.key !== avoidConfigKey);
+  const avoided = pool.filter((config) => config.key === avoidConfigKey);
   return [...preferred, ...avoided];
 }
 
@@ -57,7 +83,7 @@ export async function runLaneConfigSearch(
     throw new Error('Challenge recovery requires at least one cookie storage lane');
   }
   const avoidConfigKey = options.avoidConfigKey;
-  const orderedConfigs = orderConfigsForLane(configs, avoidConfigKey);
+  const orderedConfigs = orderConfigsForLane(configs, avoidConfigKey, options.blockedConfigKeys);
   const abort = new AbortController();
   const claimLock = { claimed: false };
   /** Sessions still owned by in-flight sibling lanes — released on winner claim. */

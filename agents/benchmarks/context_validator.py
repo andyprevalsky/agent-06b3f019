@@ -274,19 +274,17 @@ def _convert_to_openai_format(messages: List[Dict], merge_assistants: bool = Tru
     return result
 
 
-SYNTHETIC_TOOL_RESULT_PLACEHOLDER = "[Tool result missing due to internal error]"
-
-
 def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Mirror helpers.llm._ensure_tool_result_pairing without importing the LLM stack.
 
-    build_llm_messages repairs orphan assistant tool calls before any provider call.
-    The benchmark validator must evaluate the same repaired OpenAI view or it will
-    fail completed agents whose final attempt_completion/verifier tool result was
-    not persisted as a DB TOOL row.
+    build_llm_messages repairs orphan assistant tool calls before any provider call
+    by pulling late real results forward and stripping tool_calls that still have
+    no real result. Never invents a fake tool_result placeholder. The benchmark
+    validator must evaluate that same repaired OpenAI view.
     """
     seen_ids: Set[str] = set()
 
+    # Pass 1: dedupe tool_call ids across assistants (same as helpers.llm).
     normalized: List[Dict[str, Any]] = []
     for msg in messages:
         if msg.get("role") != "assistant":
@@ -309,6 +307,10 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             copied.pop("tool_calls", None)
         normalized.append(copied)
 
+    # Pass 2: pull late real results forward; strip orphan tool_calls; drop
+    # duplicate/orphan tool messages. Never synthesize a placeholder result.
+    emitted_results: Set[str] = set()
+    pulled_forward: Set[int] = set()
     result: List[Dict[str, Any]] = []
     declared_at_or_before: Set[str] = set()
     i = 0
@@ -317,12 +319,15 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
         role = msg.get("role")
 
         if role == "assistant":
-            tcs = msg.get("tool_calls") or []
+            tcs = list(msg.get("tool_calls") or [])
             for tc in tcs:
                 tc_id = tc.get("id")
                 if tc_id:
                     declared_at_or_before.add(tc_id)
-            result.append(msg)
+            assistant_msg = dict(msg)
+            if tcs:
+                assistant_msg["tool_calls"] = list(tcs)
+            result.append(assistant_msg)
 
             covered: Set[str] = set()
             tool_run: List[Dict[str, Any]] = []
@@ -330,29 +335,52 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             j = i + 1
             while j < len(normalized) and normalized[j].get("role") != "assistant":
                 m2 = normalized[j]
-                if m2.get("role") == "tool":
+                if id(m2) in pulled_forward:
+                    pass
+                elif m2.get("role") == "tool":
                     tcid = m2.get("tool_call_id")
-                    if tcid and tcid in declared_at_or_before and tcid not in covered:
-                        covered.add(tcid)
-                        tool_run.append(m2)
+                    if tcid and tcid in declared_at_or_before:
+                        if tcid not in emitted_results:
+                            emitted_results.add(tcid)
+                            covered.add(tcid)
+                            tool_run.append(m2)
+                    # else: orphan tool message — drop
                 else:
                     non_tool_run.append(m2)
                 j += 1
 
-            tc_names = {tc.get("id"): tc.get("function", {}).get("name") for tc in tcs}
+            orphan_ids: Set[str] = set()
             for tc in tcs:
                 tc_id = tc.get("id")
-                if not tc_id or tc_id in covered:
+                if not tc_id or tc_id in emitted_results:
                     continue
-                synthetic: Dict[str, Any] = {
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
-                }
-                name = tc_names.get(tc_id)
-                if name:
-                    synthetic["name"] = name
-                tool_run.append(synthetic)
+                straggler = next(
+                    (
+                        later
+                        for later in normalized[j:]
+                        if later.get("role") == "tool"
+                        and later.get("tool_call_id") == tc_id
+                        and id(later) not in pulled_forward
+                    ),
+                    None,
+                )
+                if straggler is not None:
+                    emitted_results.add(tc_id)
+                    pulled_forward.add(id(straggler))
+                    tool_run.append(straggler)
+                    continue
+                orphan_ids.add(tc_id)
+
+            if orphan_ids:
+                remaining = [
+                    tc
+                    for tc in (assistant_msg.get("tool_calls") or [])
+                    if tc.get("id") not in orphan_ids
+                ]
+                if remaining:
+                    assistant_msg["tool_calls"] = remaining
+                else:
+                    assistant_msg.pop("tool_calls", None)
 
             result.extend(tool_run)
             result.extend(non_tool_run)
@@ -361,7 +389,10 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
 
         if role == "tool":
             tcid = msg.get("tool_call_id")
-            if tcid and tcid in declared_at_or_before:
+            if id(msg) in pulled_forward:
+                pass
+            elif tcid and tcid in declared_at_or_before and tcid not in emitted_results:
+                emitted_results.add(tcid)
                 result.append(msg)
             i += 1
             continue

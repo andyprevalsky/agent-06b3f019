@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FORMAT="$ROOT_DIR/.claude/shared/approval-format.md"
 DEPLOY="$ROOT_DIR/.claude/commands/deploy.md"
 RCA="$ROOT_DIR/.claude/commands/rca.md"
+RCA_GUIDE="$ROOT_DIR/docs/root-cause-analysis.md"
 DESCEND="$ROOT_DIR/.claude/commands/descend.md"
 
 fail() {
@@ -113,6 +114,10 @@ require_text "$FORMAT" 'Oops! Page not found' \
   "approval FE links must not cite SPA NotFound paths like undeployed /open-agent"
 require_text "$FORMAT" 'python3 scripts/publish_evidence_links.py' \
   "approval Evidence must publish FE + LLM dumps via publish_evidence_links"
+require_text "$FORMAT" 'every `spawn_browser_agent` task on that agent to be terminated' \
+  "approval FE links must require browser agents terminated with recording attached"
+require_text "$RCA" 'every browser agent on the cited agent must be terminated with its recording attached' \
+  "/rca skill description must require FE browser terminate+recording validation"
 require_text "$FORMAT" '/opt/cursor/artifacts' \
   "approval LLM dumps must land under Cursor artifacts for multi-day reachability"
 require_text "$FORMAT" 'Never link `file://…/.context/rendered-llm-dumps/…`' \
@@ -147,6 +152,16 @@ require_text "$DESCEND" "**<how checked>**" \
   "/descend Stop 1 must name how each evaluator is checked"
 require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
   "/rca approval output must require the Evidence pack"
+require_text "$RCA" "## Autonomous fix-and-deploy default" \
+  "/rca must define the autonomous fix-and-deploy default"
+require_text "$RCA" 'immediately run `/deploy`; drive it fully autonomously' \
+  "/rca must deploy approval-free fixes without an intermediate handoff"
+require_text "$RCA" "Never choose a weaker point fix" \
+  "/rca must not trade correctness for an approval-free diff"
+require_text "$RCA_GUIDE" 'immediately run `/deploy`; drive it fully autonomously' \
+  "the canonical RCA methodology must match the autonomous deploy behavior"
+require_text "$RCA_GUIDE" "If the correct fix is approval-gated" \
+  "the canonical RCA methodology must retain the narrow approval boundary"
 
 if grep -Fq "exact five-part RCA narrative" "$DESCEND"; then
   fail "/descend must not retain its superseded five-part approval narrative"

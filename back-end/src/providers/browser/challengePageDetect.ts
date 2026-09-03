@@ -143,7 +143,11 @@ export async function waitForProviderSolver(
   page: Page,
   response: Response | null,
   billing: ChallengeClassifierBilling = {},
-  options?: { recoveryReason?: string | null }
+  options?: {
+    recoveryReason?: string | null;
+    agentDomTree?: string | null;
+    networkEntries?: import('./challengeClassifierNetwork').NetworkSummaryEntry[];
+  }
 ): Promise<{
   clean: boolean;
   reason: string | null;
@@ -152,6 +156,8 @@ export async function waitForProviderSolver(
 }> {
   const result = await classifyPageAfterSettle(page, response, undefined, billing, {
     recoveryReason: options?.recoveryReason,
+    agentDomTree: options?.agentDomTree,
+    networkEntries: options?.networkEntries,
   });
   return {
     clean: result.clean,

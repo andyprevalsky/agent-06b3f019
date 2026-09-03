@@ -3,10 +3,14 @@
 After the provider solver, cookie variants are probed in one parallel wave
 (≤5) on **ephemeral** provider sessions — never via ``new_context`` on the live
 Kernel desktop (that paints stacked Chromium windows into the debug view).
-Known anti-bot cookie strips that probe clean may be committed to the live
-context; guest / anonymous goals may also commit a clean ``all_target`` strip.
-Opaque / auth-like cookies are never deleted on signed-in paths — those cases
-escalate to ephemeral provider/proxy config search (auth_kept / stripped lanes).
+
+When a known anti-bot cookie strip (or guest ``all_target`` strip) probes clean,
+recovery does **not** strip cookies on the live tab. It hands off through the
+same config-search verifier + promote path used for proxy/IP recovery: an
+ephemeral session carrying the stripped storage is classified with the same
+LLM context and, if clean, atomically promoted. Opaque / auth-like cookies are
+never deleted on signed-in paths — those cases escalate to config search with
+auth_kept / stripped lanes.
 """
 
 from __future__ import annotations
@@ -632,9 +636,7 @@ async def live_tab_looks_challenged(
     """True when the live tab's current document still looks challenged (LLM).
 
     Used by the auth-assistance guard so CAPTCHA walls are not misrouted into
-    request_user_assistance_for_authentication. Does NOT replace provider-exit
-    recovery: callers must still run full recovery when ``provider_exit_rejected``
-    is set.
+    request_user_assistance_for_authentication.
     """
     from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
 
@@ -666,6 +668,24 @@ async def live_tab_looks_challenged(
 def target_looks_like_payment_document(_url: str) -> bool:
     """Deprecated: path allowlists are forbidden. Always False."""
     return False
+
+
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s)\]\"'<>]+", re.IGNORECASE)
+
+
+def urls_cited_in_recovery_reason(recovery_reason: str | None) -> Tuple[str, ...]:
+    """Extract normalized http(s) URLs embedded in the agent recovery reason."""
+    text = (recovery_reason or "").strip()
+    if not text:
+        return ()
+    raw_urls = [match.group(0).rstrip(".,;") for match in _URL_IN_TEXT_RE.finditer(text)]
+    return blocked_resource_urls_for_verify(raw_urls)
+
+
+def blocked_resource_url_from_recovery_reason(recovery_reason: str | None) -> str:
+    """First cited absolute URL to re-verify after promote, if any."""
+    urls = urls_cited_in_recovery_reason(recovery_reason)
+    return urls[0] if urls else ""
 
 
 def blocked_resource_urls_for_verify(urls: Sequence[str] | None) -> Tuple[str, ...]:
@@ -878,18 +898,19 @@ async def recover_from_challenge(
     commit_cookie_removals: CommitCookies,
     search_configs: ConfigSearch,
     progress: Progress,
-    provider_exit_rejected: bool = False,
+    skip_cookie_probes: bool = False,
     allow_logged_out_cookie_commit: bool = False,
 ) -> ChallengeRecoveryResult:
-    """Run solver → ephemeral cookie-probe wave → live commit / config search.
+    """Run solver → ephemeral cookie-probe wave → config-search promote (same verifier + handover).
 
     ``probe`` must hit ephemeral provider sessions (or a test double), **not**
     ``new_context`` on the live Kernel browser — that paints stacked Chromium
-    windows into the debug view. Known anti-bot strips that probe clean may be
-    committed on the live tab; when ``allow_logged_out_cookie_commit`` is true
-    (tool-call param for guest/anonymous tasks), a clean ``all_target`` strip
-    may also be committed. Opaque cookie findings stay diagnostic and escalate
-    to config search.
+    windows into the debug view. Known anti-bot / guest strips that probe clean
+    promote via the same config-search verifier and session handover as proxy
+    recovery (not a live-tab cookie strip). When ``allow_logged_out_cookie_commit``
+    is true (tool-call param for guest/anonymous tasks), prefer a clean
+    ``all_target`` strip over a weaker known-challenge-only strip. Opaque cookie
+    findings stay diagnostic and escalate to config search.
     """
     original_digest = _state_digest(source_state)
 
@@ -934,13 +955,7 @@ async def recover_from_challenge(
     )
     await wait_for_solver()
 
-    # A detector can sometimes identify the network exit itself as the cause
-    # (for example, an IP observed with many unrelated browser fingerprints).
-    # In that case cookie experiments cannot improve the exit's reputation and
-    # only risk wasting time around auth-bearing state. Still give the native
-    # provider solver its normal first chance, then preserve the entire source
-    # state and search fresh provider/IP configurations directly.
-    if provider_exit_rejected:
+    if skip_cookie_probes:
         return await search_with_preserved_auth_state()
 
     cookies = {
@@ -1001,7 +1016,8 @@ async def recover_from_challenge(
     # When fresh-cookie recovery is allowed, prefer the stronger all_target strip
     # over a known-challenge-only strip if both probed clean. Preferring the weak
     # strip first left poisoned non-challenge cookies on the live tab (Hotels.com
-    # GraphQL 429 soft-blocks after Bot-or-Not clear).
+    # GraphQL 429 soft-blocks after Bot-or-Not clear). Promote via config-search
+    # verifier + session handover (same path as proxy recovery) — never live-strip.
     all_target_keys = tuple(target_keys)
     if (
         allow_logged_out_cookie_commit
@@ -1009,22 +1025,24 @@ async def recover_from_challenge(
         and clean_by_label.get("all_target")
     ):
         await progress(
-            "apply_cookie_fix",
-            "Guest path: applying the proven all-target cookie strip on the live tab "
-            "and requiring one clean navigation.",
+            "browser_config_search",
+            "Guest path: all-target cookie strip probed clean on an ephemeral session; "
+            "promoting via the same config-search verifier and session handover "
+            "(not a live-tab cookie strip).",
         )
-        if await commit_cookie_removals(all_target_keys):
-            return ChallengeRecoveryResult("cookies_sanitized", all_target_keys)
+        # Guest allow_logged_out already sets preserve_auth=False, which includes
+        # the fully stripped lane — same promote handover as config search.
         return await search_with_preserved_auth_state()
 
     if known_safe and clean_by_label.get("known_challenge"):
+        # Same verifier + handover as proxy config recovery: do not mutate the
+        # live tab. Promote via config-search with the stripped cookie lane.
         await progress(
-            "apply_cookie_fix",
-            "Applying the proven known-challenge cookie strip on the live tab and "
-            "requiring one clean navigation.",
+            "browser_config_search",
+            "Known-challenge cookie strip probed clean on an ephemeral session; "
+            "promoting via the same config-search verifier and session handover "
+            "(not a live-tab cookie strip).",
         )
-        if await commit_cookie_removals(known_safe):
-            return ChallengeRecoveryResult("cookies_sanitized", known_safe)
         return await search_with_preserved_auth_state(known_safe)
 
     diagnostic_clean = any(

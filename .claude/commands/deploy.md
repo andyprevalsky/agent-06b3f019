@@ -237,7 +237,7 @@ fi
 
 Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before deploy proceeds.** This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
 
-**MANDATORY for EVERY human-approval request in this deploy (Step 0p, Step 0b, and any other escalation): link the file(s) under review.** Whenever you stop for human approval, present each affected item as a clickable `repo-relative/path:line` reference — one per file/hunk — so the human can open and read the exact code before approving. Pasting a snippet is not enough on its own; the link is required. An approval request without file:line links is incomplete — do not ask for approval until you have listed the precise files + line ranges to review.
+**MANDATORY for EVERY human-approval request in this deploy (Step 0p, Step 0b, Step 0c, and any other escalation): link the file(s) under review.** Whenever you stop for human approval, present each affected item as a clickable `repo-relative/path:line` reference — one per file/hunk — so the human can open and read the exact code before approving. Pasting a snippet is not enough on its own; the link is required. An approval request without file:line links is incomplete — do not ask for approval until you have listed the precise files + line ranges to review.
 
 **For prompt / LLM-visible text (Step 0p): also paste the exact diff inline.** A `path:line` link is required but not sufficient. The approval message itself must show the precise unified diff or before/after text being approved (every added/removed line). Do not ask the human to open the file to learn what changed — that is an incomplete prompt approval under `.claude/shared/approval-format.md`.
 
@@ -291,10 +291,33 @@ bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agen
 
 Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard. Record `Agent Behavior Approval Guard | Pass | human approval retrieved for agent-behavior edits` in `TEST_REPORT`.
 
+## Step 0c: LLM trajectory-injection human-approval guard (no skip — always runs)
+
+The prompt guard (Step 0p) catches **compile-time prompt strings** and some runtime prompt construction. Step 0b catches **recovery vs. terminal control-flow** flips. Neither catches harness code that **injects synthetic user/tool turns or mid-run context into the planning LLM's message history** without touching a `*_PROMPT` constant — e.g. provider-exit fabricated tool failures fed back via `browser_turn_messages`, browser-supervisor recovery nudges, OTP/handoff resume user messages, auth-assistance block messages, or classifier recovery constraints wired through `build_challenge_classifier_messages`. Those edits are as consequential as a prompt change but often evade the text-only gate because the strings live inside control flow.
+
+This guard scans the narrow harness layers that own runtime trajectory injection (`agents/domains/spawn_browser_agent_v3/{handler,service}.py`, `challenge_llm_classifier.py`, `back-end/src/providers/browser/challengeLlmClassifier.ts`, `agents/providers/rose/browser_use.py`, `agents/loop/run_agent.py`, `agents/domains/spawn_claude_code_agent/service.py`) for **hunks that add, remove, or rewrite synthetic trajectory the planner reads at runtime** — `_append_browser_turn_messages`, `browser_turn_messages.append/extend`, `_feed_provider_exit_detected_back`, supervisor/OTP/handoff injection helpers, `build_challenge_classifier_messages` recovery lines, `dynamic_system_context` rebuilds, and harness-authored trajectory strings. Comment-only edits are stripped.
+
+Run the guard without the approval flag first:
+
+```bash
+bash scripts/run-deploy-stage llm-trajectory-injection-approval -- bash scripts/check-llm-trajectory-injection-approval.sh
+```
+
+If it passes (no watched-file change, or no trajectory-injection hunk), record `LLM Trajectory Injection Approval Guard | Pass | no trajectory-injection changes detected` in `TEST_REPORT`.
+
+If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** a runtime trajectory-injection change by construction. Stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, what synthetic context the planner will now see (or stop seeing) at runtime. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request llm-trajectory-injection-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change trajectory-injection hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
+
+```bash
+bash scripts/run-deploy-stage llm-trajectory-injection-approval -- bash scripts/check-llm-trajectory-injection-approval.sh mandatory-human-approval-retrieved=true
+```
+
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard. Record `LLM Trajectory Injection Approval Guard | Pass | human approval retrieved for trajectory-injection edits` in `TEST_REPORT`.
+
 **Execution model for Steps 1–4a (run in this order):**
 
 1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
 1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
+1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them, then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
@@ -446,8 +469,10 @@ their assertions or test counts:
 `bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
+`bash scripts/tests/check-llm-trajectory-injection-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/durable-evidence-links.test.sh`,
+`bash scripts/tests/publish_evidence_links_browser_validation.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
@@ -481,7 +506,7 @@ bash scripts/run-deploy-stage canonical-seed-whatsapp-content --reuse-passed -- 
   bash scripts/tests/canonical-seed-whatsapp-content.test.sh
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. `setup-db-concurrency.test.sh` pins that two concurrent `scripts/setup-db.sh` invocations for one workspace serialize their destructive reset/push/seed instead of wiping each other's in-flight prod sync. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. `setup-db-concurrency.test.sh` pins that two concurrent `scripts/setup-db.sh` invocations for one workspace serialize their destructive reset/push/seed instead of wiping each other's in-flight prod sync. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files). `check-llm-trajectory-injection-approval.test.sh` pins the Step 0c guard's detection logic (it fires on runtime trajectory-injection hunks in the browser/main-agent harness layers, passes on comment-only noise and unwatched files).
 The separately logged seed-cache decision suite preserves the atomic shared-dump
 and Prisma-freshness contract introduced before the concurrent structural
 runner. `canonical-seed-whatsapp-content.test.sh` pins that the whatsapp-v2

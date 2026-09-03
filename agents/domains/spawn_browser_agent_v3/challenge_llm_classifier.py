@@ -17,7 +17,10 @@ and persists ToolUsage rows.
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlparse
 
 import structlog
 from pydantic import BaseModel, Field
@@ -31,6 +34,9 @@ _DOM_CHAR_CAP = 12_000
 _NETWORK_ENTRY_CAP = 40
 _NETWORK_BODY_CHAR_CAP = 200
 _NETWORK_SUMMARY_CHAR_CAP = 4_000
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
+_JSON_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
 
 CHALLENGE_LLM_SYSTEM_PROMPT = """You are a binary page-state classifier for a browser agent.
 
@@ -59,6 +65,49 @@ class ChallengePageClassification(BaseModel):
         )
     )
     reason: str = Field(description="One short sentence explaining the challenged/clean decision.")
+
+
+def _parse_challenge_classification(content: str) -> ChallengePageClassification:
+    """Parse classifier JSON, tolerating markdown fences and leading prose."""
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("empty classifier response")
+
+    candidates = [text]
+    fence_match = _JSON_FENCE_RE.search(text)
+    if fence_match:
+        candidates.insert(0, fence_match.group(1).strip())
+    for match in _JSON_OBJECT_RE.finditer(text):
+        candidates.append(match.group(0).strip())
+
+    seen: set[str] = set()
+    last_error: Exception | None = None
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return ChallengePageClassification.model_validate_json(candidate)
+        except Exception as exc:
+            last_error = exc
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(payload, dict) and "challenged" in payload:
+                return ChallengePageClassification.model_validate(payload)
+
+    lowered = text.lower()
+    if '"challenged": false' in lowered or "'challenged': false" in lowered:
+        return ChallengePageClassification(
+            challenged=False, reason="parsed from partial classifier text"
+        )
+    if '"challenged": true' in lowered or "'challenged': true" in lowered:
+        return ChallengePageClassification(
+            challenged=True, reason="parsed from partial classifier text"
+        )
+
+    raise ValueError(f"unable to parse classifier JSON: {last_error}")
 
 
 async def wait_for_dom_settled(page: Any, timeout_ms: float = CHALLENGE_LLM_SETTLE_MS) -> None:
@@ -124,6 +173,68 @@ def _truncate_body(text: str, cap: int = _NETWORK_BODY_CHAR_CAP) -> tuple[str, b
     return raw[:cap], True
 
 
+def cited_network_hosts(recovery_reason: str | None) -> tuple[str, ...]:
+    from domains.spawn_browser_agent_v3.challenge_recovery import urls_cited_in_recovery_reason
+
+    hosts: List[str] = []
+    seen: set[str] = set()
+    for url in urls_cited_in_recovery_reason(recovery_reason):
+        host = (urlparse(url).hostname or "").lower()
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        hosts.append(host)
+    return tuple(hosts)
+
+
+def _entry_matches_cited(
+    entry: Dict[str, Any],
+    cited_urls: Sequence[str],
+    cited_hosts: Sequence[str],
+) -> bool:
+    url = str(entry.get("url") or entry.get("name") or "").lower()
+    if not url:
+        return False
+    for host in cited_hosts:
+        if host in url:
+            return True
+    for cited in cited_urls:
+        needle = str(cited).lower()
+        if needle in url or url in needle:
+            return True
+    return False
+
+
+def select_network_entries_for_classifier(
+    entries: Sequence[Dict[str, Any]],
+    *,
+    recovery_reason: str | None = None,
+    cap: int = _NETWORK_ENTRY_CAP,
+) -> List[Dict[str, Any]]:
+    """Prefer network rows that match hosts/URLs cited in the recovery reason."""
+    from domains.spawn_browser_agent_v3.challenge_recovery import urls_cited_in_recovery_reason
+
+    if not entries:
+        return []
+    cited_urls = urls_cited_in_recovery_reason(recovery_reason)
+    cited_host_list = cited_network_hosts(recovery_reason)
+    pinned: List[Dict[str, Any]] = []
+    rest: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("url") or entry.get("name") or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if _entry_matches_cited(entry, cited_urls, cited_host_list):
+            pinned.append(entry)
+        else:
+            rest.append(entry)
+    return (pinned + rest)[: max(1, int(cap))]
+
+
 def format_network_summary_lines(entries: Sequence[Dict[str, Any]]) -> str:
     """Format network rows with HTTP status and clearly-marked truncated bodies."""
     lines: List[str] = []
@@ -182,6 +293,7 @@ def network_entries_from_recorder(
     *,
     limit: int = _NETWORK_ENTRY_CAP,
     max_body_chars: int = _NETWORK_BODY_CHAR_CAP,
+    recovery_reason: str | None = None,
 ) -> List[Dict[str, Any]]:
     """Pull recent CDP recorder rows (status + truncated bodies) when available."""
     if network_recorder is None:
@@ -191,7 +303,7 @@ def network_entries_from_recorder(
         return []
     try:
         rows = query(
-            limit=limit,
+            limit=max(limit * 2, limit),
             include_bodies=True,
             max_body_chars=max_body_chars,
         )
@@ -200,7 +312,10 @@ def network_entries_from_recorder(
         return []
     if not isinstance(rows, list):
         return []
-    return [row for row in rows if isinstance(row, dict)]
+    typed = [row for row in rows if isinstance(row, dict)]
+    return select_network_entries_for_classifier(
+        typed, recovery_reason=recovery_reason, cap=limit
+    )
 
 
 async def capture_network_summary(
@@ -208,18 +323,27 @@ async def capture_network_summary(
     *,
     network_recorder: Any = None,
     network_entries: Sequence[Dict[str, Any]] | None = None,
+    recovery_reason: str | None = None,
 ) -> str:
     """Build classifier network summary with HTTP status when available.
 
     Preference order:
     1. Explicit ``network_entries`` (e.g. Playwright responses collected during goto)
     2. Live ``BrowserNetworkRecorder.query_requests`` (status + truncated bodies)
-    3. Performance Resource Timing fallback (may omit status — probes without CDP)
+    3. Performance Resource Timing fallback (may omit status - probes without CDP)
     """
     if network_entries:
-        return format_network_summary_lines(list(network_entries)[-_NETWORK_ENTRY_CAP:])
+        return format_network_summary_lines(
+            select_network_entries_for_classifier(
+                list(network_entries),
+                recovery_reason=recovery_reason,
+            )
+        )
 
-    recorder_rows = network_entries_from_recorder(network_recorder)
+    recorder_rows = network_entries_from_recorder(
+        network_recorder,
+        recovery_reason=recovery_reason,
+    )
     if recorder_rows:
         return format_network_summary_lines(recorder_rows)
 
@@ -240,7 +364,7 @@ async def capture_network_summary(
                 return row;
               });
             }""",
-            _NETWORK_ENTRY_CAP,
+            max(_NETWORK_ENTRY_CAP * 2, _NETWORK_ENTRY_CAP),
         )
         if not isinstance(entries, list) or not entries:
             return "(no resource timings)"
@@ -264,7 +388,12 @@ async def capture_network_summary(
                 row["response_body"] = entry.get("response_body")
                 row["response_body_truncated"] = bool(entry.get("response_body_truncated"))
             normalized.append(row)
-        return format_network_summary_lines(normalized)
+        return format_network_summary_lines(
+            select_network_entries_for_classifier(
+                normalized,
+                recovery_reason=recovery_reason,
+            )
+        )
     except Exception:
         return "(network metadata unavailable)"
 
@@ -325,6 +454,7 @@ async def capture_challenge_classifier_context(
         page,
         network_recorder=network_recorder,
         network_entries=network_entries,
+        recovery_reason=recovery_reason,
     )
     title, cleaned_dom, network_summary = await asyncio.gather(
         title_task, cleaned_task, network_task, return_exceptions=True
@@ -492,7 +622,7 @@ async def classify_challenge_with_llm(
             "from_fast_cache": bool(usage.get("from_fast_cache")),
             "call_site": CHALLENGE_LLM_CALL_SITE,
         }
-        parsed = ChallengePageClassification.model_validate_json(content)
+        parsed = _parse_challenge_classification(content)
         logger.info(
             "Challenge LLM classifier result",
             challenged=parsed.challenged,

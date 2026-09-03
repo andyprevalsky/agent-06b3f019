@@ -312,10 +312,16 @@ class SelectDropdownTool(BaseModel):
 
 
 class EvaluateTool(BaseModel):
-    """Execute JavaScript code in the browser console."""
+    """Execute JavaScript in the page; successful calls also retain a verifier DOM snapshot."""
 
     tool: Literal["evaluate"]
-    code: str = Field(description="JavaScript code to execute. Returns the result of the expression.")
+    code: str = Field(
+        description=(
+            "JavaScript code to execute. Returns the result of the expression. "
+            "After success, the runtime always retains a bounded browser-extracted DOM snapshot "
+            "for verification (no preserve flag)."
+        )
+    )
     timeout: Optional[float] = Field(
         default=None,
         ge=0.1,
@@ -441,13 +447,13 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 
 
 class RecoverFromChallengeBrowserTool(BaseModel):
-    """Last-resort staged recovery after the agent failed to clear the challenge itself."""
+    """Relatively expensive staged recovery to force-open a blocked page or service."""
 
     tool: Literal["recover_from_challenge"]
     reason: str = Field(
         description=(
-            "One line of concrete evidence that the anti-bot challenge still persists after "
-            "the agent's own solve attempt"
+            "One line of concrete evidence that this page or service must be force-opened and no "
+            "alternate goal path exists"
         )
     )
     auth_cookies_are_preserved: bool = Field(

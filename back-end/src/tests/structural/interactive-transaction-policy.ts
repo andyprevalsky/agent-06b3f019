@@ -72,12 +72,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'explicit 30-second cross-process advisory-lock policy',
   },
   {
-    file: 'providers/browser/challengeRecovery.ts',
-    scope: 'promote',
-    fingerprint: 'b92ed945d61027b4',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'providers/computeCredentials.ts',
     scope: 'tryAcquireLineageLease',
     fingerprint: 'fccedf4c20360763',
