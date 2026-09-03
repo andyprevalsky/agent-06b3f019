@@ -74,12 +74,9 @@ SUB_ACTIVITY_MAX_ATTEMPTS = 2
 # ── For-each ──
 FOR_EACH_MAX_DEPTH = 4
 FOR_EACH_MAX_INFLIGHT = 5
-# OAi-demo Fast Mode only: fire-and-track explores so a Huberman-class GP
-# (224–336 sequential explores) can overlap instead of paying p50~32s each
-# on the parent execute_loop. Cap is per GP workflow so 50 first-level GPs
-# stay within the isolated worker's ~500 activity slots (50×16=800 queued;
-# Temporal backpressures). Not a shared fan-in — each GP tracks its own
-# handles. Other Fast Mode trees keep the blocking explore path.
+# Legacy inflight cap from the removed fire-and-track path. Fast Mode now
+# waits for each explore like live; this constant is only used by leftover
+# slot helpers that no spawn path calls.
 FM_EXPLORE_INFLIGHT_CAP = 16
 
 # test-mass-agent-run-0 / July OAi demo only. Nested GP skip and the Andy
@@ -111,6 +108,13 @@ def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
         getattr(workflow_instance, "goal", None) or "",
     )
     return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
+
+
+def should_skip_oai_demo_browser_spawn(workflow_instance) -> bool:
+    """Fast Mode test-mass-agent-run-0 must not open browser-agent sessions."""
+    return bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)) and is_oai_demo_mass_agent_task(
+        workflow_instance
+    )
 
 
 def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) -> bool:

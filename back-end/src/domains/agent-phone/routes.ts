@@ -4,6 +4,7 @@ import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { ToolSideEffectAlreadyStartedError } from '../../providers/toolSideEffects';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
+  AgentPhoneAgentUnauthorizedError,
   AgentPhoneIdempotencyConflictError,
   AgentPhoneIdentityUnavailableError,
   AgentPhoneMessageValidationError,
@@ -39,6 +40,10 @@ router.post(
       }
       if (error instanceof AgentPhoneIdentityUnavailableError) {
         res.status(409).json({ error: error.message });
+        return;
+      }
+      if (error instanceof AgentPhoneAgentUnauthorizedError) {
+        res.status(403).json({ error: error.message });
         return;
       }
       if (

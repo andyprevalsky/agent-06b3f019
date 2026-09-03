@@ -48,3 +48,18 @@ export function testCodexCreditSkip_authRevocationStillFailsHard() {
     'auth/OAuth revocation is user-fixable and must remain a hard failure, not a funding skip'
   );
 }
+
+export function testCodexCreditSkip_matchesE2bTeamBlockedWording() {
+  // Verbatim from the 2026-09-03 backend-coverage fail: POST /sandboxes
+  // returns 403 while GET /sandboxes still 200s. The smoke never reaches
+  // CODEX_E2B_DONE, so create-time must skip on this funding signal.
+  const createBody = '{"error":"403: team is blocked: missing payment method"}';
+  assert(
+    codexSmokeCreditSkipReason(createBody, []) !== null,
+    'E2B team-blocked / missing payment method must be recognized as credit exhaustion'
+  );
+  assert(
+    codexSmokeCreditSkipReason('Expected status 200, got 403: {"error":"Forbidden"}', []) === null,
+    'a generic 403 must remain a hard failure, not a funding skip'
+  );
+}

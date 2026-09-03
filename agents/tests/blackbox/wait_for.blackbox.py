@@ -932,8 +932,8 @@ async def test_handler_timestamp_fast_mode_far_future_completes_not_errors():
     assert "31 days" not in events[0].message.lower()
 
 
-async def test_handler_condition_oai_demo_fast_mode_does_not_await_explore():
-    """OAi-demo Fast Mode wait_for must fire-and-track the explore, not capture/await it."""
+async def test_handler_condition_oai_demo_fast_mode_awaits_explore():
+    """OAi-demo Fast Mode wait_for captures + evaluates like live."""
     from domains.wait_for.handler import WaitForManager
     from tools.base import EventType, MessageStatus, ToolEvent
     from tools.spawn_agent import SpawnAgentManager
@@ -951,19 +951,22 @@ async def test_handler_condition_oai_demo_fast_mode_does_not_await_explore():
         capture_tool_results=None,
     ):
         captured["capture"] = capture_tool_results
+        if capture_tool_results is not None:
+            capture_tool_results.append("[web_search] enough evidence")
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title="Explore started",
-            message="Fast Mode parallel replay",
+            title="Explore done",
+            message="Huberman cadence notes.",
             status=MessageStatus.FINISHED,
-            metadata={"agentType": "explore", "taskId": task_id, "fastModeParallel": True},
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"usage": {"llm": [], "service": []}},
         )
 
-    def _eval_should_not_run(*_a, **_k):
+    def _eval_like_live(*_a, **_k):
         captured["evals"] += 1
-        return {"satisfied": False, "reasoning": "should not run"}
+        return {"satisfied": True, "reasoning": "enough evidence"}
 
-    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval_should_not_run})
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval_like_live})
     restore = _patch_handler_workflow(fake)
     orig_spawn = SpawnAgentManager._spawn_explore
     SpawnAgentManager._spawn_explore = fake_spawn_explore
@@ -990,11 +993,12 @@ async def test_handler_condition_oai_demo_fast_mode_does_not_await_explore():
         SpawnAgentManager._spawn_explore = orig_spawn
         restore()
 
-    assert captured["capture"] is None
-    assert captured["evals"] == 0
+    assert captured["capture"] is not None
+    assert captured["capture"] == ["[web_search] enough evidence"]
+    assert captured["evals"] == 1
     finished = [e for e in events if e.status == MessageStatus.FINISHED]
     assert finished
-    assert (finished[-1].metadata or {}).get("fastModeParallel") is True
+    assert (finished[-1].metadata or {}).get("fastModeParallel") is None
     assert (finished[-1].data or {}).get("condition_met") is True
 
 
@@ -1063,8 +1067,8 @@ async def run_all_tests():
         test_handler_timestamp_fast_mode_far_future_completes_not_errors,
     )
     await r.record_async(
-        "handler_cond_oai_demo_fast_mode_parallel",
-        test_handler_condition_oai_demo_fast_mode_does_not_await_explore,
+        "handler_cond_oai_demo_fast_mode_awaits",
+        test_handler_condition_oai_demo_fast_mode_awaits_explore,
     )
     teardown_mock()
     return r.all_passed

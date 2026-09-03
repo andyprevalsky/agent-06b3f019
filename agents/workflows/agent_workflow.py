@@ -30,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         drain_fast_mode_explores,
         spawn_agent,
     )
+    from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
@@ -2759,7 +2760,7 @@ class AgentWorkflow:
                 workflow.logger.error(f"Failed to post message: {e}")
 
     async def _drain_fast_mode_explores(self) -> None:
-        """Wait for fire-and-track OAi-demo explores before terminal status."""
+        """No-op unless leftover explore handles were tracked."""
         if not getattr(self, "fast_mode_cache_enabled", False):
             return
         await drain_fast_mode_explores(self)
@@ -3014,8 +3015,8 @@ class AgentWorkflow:
         (regression: smoke task `parallel-tool-calls`).
         """
         if tool_name == "attempt_completion":
-            # OAi-demo Fast Mode fire-and-track explores must finish before
-            # this agent claims completion (T3 full trajs, T9 no leftovers).
+            # Leftover-safe: Fast Mode waits for explore like live, so this
+            # is a no-op unless something still tracked a handle.
             await self._drain_fast_mode_explores()
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
@@ -4594,8 +4595,7 @@ class AgentWorkflow:
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
-        # Drain fire-and-track explores before latching so leftover ACTIVE
-        # children cannot survive a FAILED parent (T9).
+        # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
@@ -4798,8 +4798,7 @@ class AgentWorkflow:
         """
         await self._await_deferred_startup()
         workflow.logger.info("✓ Marking task complete")
-        # Drain fire-and-track explores before latching COMPLETED so T9 sees
-        # no leftover ACTIVE children under a finished GP.
+        # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST so any late child_cost_update signal
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
@@ -4918,6 +4917,30 @@ class AgentWorkflow:
                     and len(recovered) >= 200
                 ):
                     summary = recovered
+            if (
+                is_oai_demo_mass_agent_task(self)
+                and not self.parent_workflow_id
+                and isinstance(structured_response, dict)
+            ):
+                try:
+                    materialized = await workflow.execute_activity(
+                        materialize_oai_demo_report_files_activity,
+                        args=[self.user_id, structured_response, self.output_schema],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    if isinstance(materialized, dict):
+                        next_response = materialized.get("structured_response")
+                        if isinstance(next_response, dict):
+                            structured_response = next_response
+                        next_schema = materialized.get("output_schema")
+                        if isinstance(next_schema, dict):
+                            self.output_schema = next_schema
+                except Exception as report_exc:
+                    workflow.logger.error(
+                        f"oai demo report file materialization failed, keeping original outputs: {report_exc}"
+                    )
+
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":
                 # the root completion SMS is gated on `summary` being truthy,

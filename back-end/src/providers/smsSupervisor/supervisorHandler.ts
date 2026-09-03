@@ -193,8 +193,8 @@ export async function handleSmsSupervisorMessage(config: {
   // 0. Resolve MMS media: images become multimodal content blocks on the
   // inbound user message; voice notes are transcribed into text lines.
   const media = attachments.length
-    ? await processInboundAttachments(attachments)
-    : { imageBlocks: [], noteLines: [] };
+    ? await processInboundAttachments(attachments, userId)
+    : { imageBlocks: [], noteLines: [], filePointers: [] };
   const inboundText = [inboundMessage, ...media.noteLines].filter((s) => s !== '').join('\n\n');
   const inboundContent: string | ContentBlock[] =
     media.imageBlocks.length > 0
@@ -301,7 +301,7 @@ export async function handleSmsSupervisorMessage(config: {
         return [superseded];
       }
       const queued = pendingWrites.splice(0, pendingWrites.length);
-      const results = await commitPendingWrites(queued, userId, channel);
+      const results = await commitPendingWrites(queued, userId, channel, media.filePointers);
       results.forEach((result, index) => {
         const operation = queued[index];
         recordToolTrace(

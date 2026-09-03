@@ -1103,6 +1103,51 @@ describe('MessageBubble', () => {
     expect(wrapper).not.toBeNull();
   });
 
+  it('hides the parent for_each tree when a listed child is selected', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-sat-parent',
+        toolName: 'spawn_general_purpose_agent_for_each',
+        toolStatus: 'FINISHED',
+        title: '🚀 Spawning cluster',
+        subAgentIds: ['child-1', 'child-2'],
+        busId: 'root-1',
+      },
+    });
+    const { container } = renderBubble(
+      <MessageBubble message={msg} />,
+      makeAgentCtx({ selectedAgentId: 'child-1' }),
+    );
+    await waitFor(() => expect(container.firstChild).toBeNull());
+    expect(screen.queryByText(/Spawning cluster/)).toBeNull();
+    expect(screen.queryByText(/Spawning general-purpose agents\.\.\./)).toBeNull();
+    expect(container.querySelector('div.flex.gap-3')).toBeNull();
+  });
+
+  it('still renders a child-owned spawn tree when that child is selected', async () => {
+    const msg = baseMessage({
+      role: 'TOOL',
+      text: '',
+      metadata: {
+        toolCallId: 'tc-sat-child',
+        toolName: 'spawn_general_purpose_agent',
+        toolStatus: 'FINISHED',
+        title: 'Explore cluster',
+        subAgentIds: ['explore-1'],
+        busId: 'child-1',
+      },
+    });
+    const { container } = renderBubble(
+      <MessageBubble message={msg} />,
+      makeAgentCtx({ selectedAgentId: 'child-1' }),
+    );
+    await waitFor(() => expect(container.firstChild).not.toBeNull());
+    expect(screen.queryByText(/Explore cluster/)).toBeNull();
+    expect(container.querySelector('div.flex.gap-3')).not.toBeNull();
+  });
+
   it('compact prop removes gap-3 container class in completion summary', async () => {
     const msg = baseMessage({
       role: 'TOOL',

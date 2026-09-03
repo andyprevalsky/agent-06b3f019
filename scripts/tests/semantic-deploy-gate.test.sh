@@ -195,6 +195,7 @@ require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_COMPUTE_TOKEN_TYPE=claude' "local
 require_text "$RUN_PREDEPLOY_LOCAL" 'unset FAST_MODE_CACHE_DATABASE_URL' "local predeploy smoke must reject an inherited remote fast-cache database"
 require_text "$RUN_PREDEPLOY_LOCAL" 'grep -E '\''^DATABASE_URL='\''' "local predeploy must derive the shared July cache from prod DATABASE_URL when FAST_MODE_CACHE_DATABASE_URL is missing"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_USE_LOCAL=1 \' "local predeploy smoke must isolate fast-cache schema startup from the production pooler"
+require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_FAST_MODE_CACHE=0 \' "local-cache predeploy smoke must force Fast Mode off so seeded users cannot omit the create-body flag"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH=1' "local predeploy must disable Andy write-through when the July cache is shared"
 require_text "$RUN_PREDEPLOY_LOCAL" 'run_smoke_batch shared' "local predeploy must isolate fast_cache:on smoke onto the shared July cache batch"
 require_text "$ROOT_DIR/agents/benchmarks/tasks.json" '"name": "test-mass-agent-run-0"' "OAi mass-agent bench must remain in the catalog"

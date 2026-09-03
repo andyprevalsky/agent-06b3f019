@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-/** Absolute path to the benchmark task definitions JSON file. */
+/** Absolute path to the first-party benchmark task definitions JSON file. */
 export const TASKS_PATH = path.join(
   __dirname,
   '..',
@@ -13,22 +13,61 @@ export const TASKS_PATH = path.join(
   'tasks.json'
 );
 
+/** Polar Odysseys + BU Bench V1 catalog slice (group/tag = polar-bench). */
+export const POLAR_TASKS_PATH = path.join(
+  __dirname,
+  '..',
+  '..',
+  '..',
+  '..',
+  'agents',
+  'benchmarks',
+  'polar_tasks.json'
+);
+
 /**
  * Reads and parses the benchmark task catalog from disk.
  * File system access lives here per the no-restricted-imports rule
  * (fs is restricted to config.ts / providers).
+ *
+ * Merges tasks.json with polar_tasks.json so the hub / test-prompts picker
+ * sees Odysseys + BU Bench V1 under group `polar-bench` (never `daily`).
  */
 export function readTasksFile(): unknown {
-  return JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8'));
+  const primary = JSON.parse(fs.readFileSync(TASKS_PATH, 'utf-8')) as unknown;
+  if (!Array.isArray(primary)) {
+    return primary;
+  }
+  let polar: unknown = [];
+  try {
+    polar = JSON.parse(fs.readFileSync(POLAR_TASKS_PATH, 'utf-8')) as unknown;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== 'ENOENT') throw err;
+    polar = [];
+  }
+  if (!Array.isArray(polar)) {
+    throw new Error('polar_tasks.json must be a JSON array');
+  }
+  return [...primary, ...polar];
 }
 
-/** ISO timestamp of the last tasks.json modification (for hub catalog metadata). */
+/**
+ * ISO timestamp of the latest catalog file modification (for hub metadata).
+ * Considers both tasks.json and polar_tasks.json so a polar-only edit still
+ * bumps `updated_at`.
+ */
 export function tasksFileUpdatedAtIso(): string {
-  try {
-    return fs.statSync(TASKS_PATH).mtime.toISOString();
-  } catch {
-    return new Date(0).toISOString();
+  let latestMs = 0;
+  for (const catalogPath of [TASKS_PATH, POLAR_TASKS_PATH]) {
+    try {
+      latestMs = Math.max(latestMs, fs.statSync(catalogPath).mtimeMs);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOENT') throw err;
+    }
   }
+  return new Date(latestMs).toISOString();
 }
 
 export function benchmarkAgentPreviewEnabled(): boolean {
@@ -65,6 +104,7 @@ export interface TaskAttempt {
   duration_seconds: number | null;
   fast_mode_cache: boolean;
   timestamp: string;
+  agent_id: string | null;
 }
 
 let attemptsCache: { mtimeMs: number; attempts: TaskAttempt[] } | null = null;
@@ -100,6 +140,8 @@ export function readTaskAttempts(): TaskAttempt[] {
           typeof parsed.duration_seconds === 'number' ? parsed.duration_seconds : null,
         fast_mode_cache: parsed.fast_mode_cache === true,
         timestamp: typeof parsed.timestamp === 'string' ? parsed.timestamp : '',
+        agent_id:
+          typeof parsed.agent_id === 'string' && parsed.agent_id !== '' ? parsed.agent_id : null,
       });
     } catch {
       // skip malformed line

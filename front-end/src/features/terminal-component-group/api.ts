@@ -7,7 +7,7 @@
  */
 
 import { benchmarkAgentPreviewEnabled } from '@/lib/api/agents';
-import { getSession, getStoredSession } from '@/lib/supabase';
+import { getSession, getStoredSession, supabase } from '@/lib/supabase';
 import { API_URL, API_BASE_WITH_PATH } from './config';
 import type { CodeProvider, UsageData } from './types';
 
@@ -120,8 +120,11 @@ export async function fetchPublicAsset(
  * to force a real download. Centralizing the fetch here keeps domain
  * components compliant with the strict lint no-direct-fetch rule.
  */
-export async function downloadAttachmentAsBlob(url: string): Promise<Blob> {
-  const response = await fetch(url);
+export async function downloadAttachmentAsBlob(
+  url: string,
+  options?: { signal?: AbortSignal },
+): Promise<Blob> {
+  const response = await fetch(url, { signal: options?.signal });
   if (!response.ok) {
     throw new Error(`Failed to download attachment (status ${response.status})`);
   }
@@ -129,12 +132,25 @@ export async function downloadAttachmentAsBlob(url: string): Promise<Blob> {
 }
 
 /** Download a signed text attachment body for inline preview rendering. */
-export async function downloadAttachmentAsText(url: string): Promise<string> {
-  const response = await fetch(url);
+export async function downloadAttachmentAsText(
+  url: string,
+  options?: { signal?: AbortSignal },
+): Promise<string> {
+  const response = await fetch(url, { signal: options?.signal });
   if (!response.ok) {
     throw new Error(`Failed to download attachment (status ${response.status})`);
   }
   return response.text();
+}
+
+const SIGNED_ATTACHMENT_URL_TTL_SECONDS = 3600;
+
+/** Create a time-limited download/preview URL for a stored attachment. */
+export async function createAttachmentSignedUrl(storagePath: string): Promise<string | null> {
+  const { data } = await supabase.storage
+    .from('attachments')
+    .createSignedUrl(storagePath, SIGNED_ATTACHMENT_URL_TTL_SECONDS);
+  return data?.signedUrl ?? null;
 }
 
 export interface CatalogTestPrompt {

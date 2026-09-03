@@ -33,8 +33,8 @@ from typing import Any
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
 
 CATALOG_VERSION = "0.1"
-EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
-RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
+EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
+RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge", "polar"}
 RUNTIME_STATIC_CHECK_TYPES = {
     "agent_status",
     "approval_request_count",
@@ -44,6 +44,8 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "browser_agent_session_count",
     "completion_sms_event",
     "completion_summary_length",
+    "completion_summary_file_outputs",
+    "response_schema_has_file_pointer",
     "first_level_gp_count",
     "root_deliverable_markers",
     "tree_agent_status",
@@ -195,6 +197,26 @@ def _validate_evaluator(evaluator: dict[str, Any], item_id: str, index: int) -> 
                 raise ValueError(f"{item_id}: evaluators[{index}].checks[{check_index}].type must be a string")
     if method in {"single_turn_llm_judge", "agentic_llm_judge"} and not evaluator.get("judge_prompt"):
         raise ValueError(f"{item_id}: LLM judges must include judge_prompt")
+    if method == "polar":
+        # Odysseys-faithful judge: rubrics[] preferred; criteria-only allowed as
+        # a synthesized fallback (BU Bench). Fixed system prompt lives in
+        # polar_evaluator — judge_prompt is intentionally not required.
+        rubrics = evaluator.get("rubrics")
+        if rubrics is not None:
+            if not isinstance(rubrics, list) or not rubrics:
+                raise ValueError(f"{item_id}: polar evaluators.rubrics must be a non-empty list")
+            for rubric_index, rubric in enumerate(rubrics):
+                if not isinstance(rubric, dict):
+                    raise ValueError(
+                        f"{item_id}: evaluators[{index}].rubrics[{rubric_index}] must be an object"
+                    )
+                for field in ("id", "requirement", "verification"):
+                    value = rubric.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        raise ValueError(
+                            f"{item_id}: evaluators[{index}].rubrics[{rubric_index}].{field} "
+                            "must be a non-empty string"
+                        )
     pass_threshold = evaluator.get("pass_threshold")
     if pass_threshold is not None and (
         not isinstance(pass_threshold, (int, float))
@@ -341,7 +363,16 @@ def load_raw_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
         data = json.load(f)
     if not isinstance(data, list) or not data:
         raise ValueError(f"{path} must contain a non-empty JSON array of tasks")
-    return data
+    # Merge Polar Odysseys + BU Bench V1 (group/tag = polar-bench) so validation
+    # covers the same catalog run_benchmark / hub serve.
+    from benchmarks.polar_catalog import load_polar_tasks_file
+
+    polar = load_polar_tasks_file()
+    base_names = {t.get("name") for t in data if isinstance(t, dict)}
+    overlap = sorted(base_names & {t["name"] for t in polar})
+    if overlap:
+        raise ValueError(f"{path}: polar catalog name collision: {overlap[:5]}")
+    return [*data, *polar]
 
 
 def validate_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:

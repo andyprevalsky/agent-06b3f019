@@ -64,6 +64,7 @@ from domains.request_user_approval.repo import (
     create_approval_request_activity,
     resolve_attention_request_activity,
 )
+from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     fetch_full_network_metadata,
@@ -1109,6 +1110,7 @@ async def main():
         save_blueprint_activity,
         resolve_attachments_activity,
         mark_finished,
+        materialize_oai_demo_report_files_activity,
         fetch_agent_config,
         fetch_agent_queue_pointer,
         fetch_child_terminal_result_activity,

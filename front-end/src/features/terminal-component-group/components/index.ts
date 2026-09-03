@@ -39,6 +39,8 @@ export { default as BrowserViewPanel } from './BrowserViewPanel';
 export * from './ClaudeCodeChip';
 export { default as ClaudeCodeChip } from './ClaudeCodeChip';
 export * from './FilePointerDisplay';
+export * from './DocumentPreviewDrawer';
+export * from './documentPreview.utils';
 export * from './SchemaChip';
 export * from './StructuredResponseDisplay';
 export * from './CompletionSummaryCard';

@@ -2196,7 +2196,8 @@ def test_partial_cache_degrades_gracefully(mem):
 
 
 def test_get_error_falls_through_to_live(monkeypatch):
-    # #16 a backend read error must NOT break the run — degrade to a live miss.
+    # #16 a backend read error must NOT break the run — degrade to a live miss
+    # for ordinary (non-allowlisted) Fast Mode reads.
     async def boom(key: str):
         raise RuntimeError("backend down")
 
@@ -2204,6 +2205,7 @@ def test_get_error_falls_through_to_live(monkeypatch):
         return True
 
     monkeypatch.setattr(rose_cache.cache_client, "cache_get", boom)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_first", boom)
     monkeypatch.setattr(rose_cache.cache_client, "cache_set", noop_set)
 
     async def body():
@@ -2212,6 +2214,45 @@ def test_get_error_falls_through_to_live(monkeypatch):
         chunks = await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
         assert rose.calls == 1  # soft sites still degrade to live on transport errors
         assert chunks[-1].kind == "done"
+
+    asyncio.run(body())
+
+
+def test_get_error_on_allowlisted_bench_does_not_go_live(monkeypatch):
+    """Mass-agent Fast Mode must not bill live LLM when get-position times out.
+
+    Recurrence of 2026-07-07: a store transport fault is not a semantic miss.
+    Allowlisted reads raise FastCacheLookupError instead of falling through.
+    """
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("ReadTimeout")
+
+    async def noop_set(*a, **k):
+        return True
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get", boom)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_first", boom)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", boom)
+    monkeypatch.setattr(rose_cache.cache_client, "cache_set", noop_set)
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+                write_enabled=False,
+            )
+        )
+        rose = FakeRose(_full_stream())
+        with pytest.raises(rose_cache.FastCacheLookupError):
+            await _drain(
+                rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra")
+            )
+        assert rose.calls == 0
 
     asyncio.run(body())
 
@@ -2422,6 +2463,43 @@ def test_position_fallback_prefetches_upcoming_steps(monkeypatch):
         replay = await cache_client.cache_get_position_fallback("hash-b", "execute_loop", 4)
         assert replay == ({"step": 4}, "k-4")
         assert seen.count(4) == 1
+
+    asyncio.run(body())
+    cache_client.clear_position_memo()
+
+
+def test_position_fallback_retries_timeout_then_hits(monkeypatch):
+    """get-position ReadTimeout must retry like cache_get, not raise on first fault."""
+    import httpx
+
+    import providers.fast_cache.client as cache_client
+
+    cache_client.clear_position_memo()
+    posts = {"n": 0}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"hit": True, "value": {"tool_calls": [{"name": "web_search"}]}, "key": "k-retry"}
+
+    class _Client:
+        async def post(self, *args, **kwargs):
+            del args, kwargs
+            posts["n"] += 1
+            if posts["n"] < 3:
+                raise httpx.ReadTimeout("")
+            return _Resp()
+
+    monkeypatch.setattr(cache_client, "_backend", lambda: ("http://cache.test", "key"))
+    monkeypatch.setattr(cache_client, "_shared_client", lambda: _Client())
+
+    async def body():
+        value, key = await cache_client.cache_get_position_fallback("hash-c", "execute_loop", 1)
+        assert key == "k-retry"
+        assert value == {"tool_calls": [{"name": "web_search"}]}
+        assert posts["n"] == 3
 
     asyncio.run(body())
     cache_client.clear_position_memo()

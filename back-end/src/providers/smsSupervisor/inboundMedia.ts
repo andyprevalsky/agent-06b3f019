@@ -12,6 +12,7 @@
 
 import { createLogger } from '../logger';
 import type { ContentBlock } from '../rose';
+import { processUploadedFile, type FilePointer } from '../storage';
 
 const log = createLogger('SmsInboundMedia');
 
@@ -32,19 +33,24 @@ export interface ProcessedInboundMedia {
   imageBlocks: ContentBlock[];
   /** Transcripts and status notes to append to the inbound message text. */
   noteLines: string[];
+  /** Uploaded image FilePointers for start_new_agent create (same turn). */
+  filePointers: FilePointer[];
 }
 
 /**
  * Download and classify all attachments on an inbound message.
  * Never throws — every attachment resolves to an image block or a note line.
+ * Images are also uploaded so `start_new_agent` can attach FilePointers.
  */
 export async function processInboundAttachments(
-  attachments: SurgeAttachment[]
+  attachments: SurgeAttachment[],
+  userId: string
 ): Promise<ProcessedInboundMedia> {
   const imageBlocks: ContentBlock[] = [];
   const noteLines: string[] = [];
+  const filePointers: FilePointer[] = [];
 
-  for (const attachment of attachments) {
+  for (const [index, attachment] of attachments.entries()) {
     try {
       const downloaded = await downloadAttachment(attachment);
       if (!downloaded) {
@@ -59,6 +65,18 @@ export async function processInboundAttachments(
           type: 'image_url',
           image_url: { url: `data:${mimeType};base64,${buffer.toString('base64')}` },
         });
+        // Same bytes the supervisor LLM already sees — upload once for create.
+        try {
+          const ext = mimeType.split('/')[1] ?? 'bin';
+          filePointers.push(
+            await processUploadedFile(userId, buffer, `sms-inbound-${index}.${ext}`, mimeType)
+          );
+        } catch (uploadError) {
+          log.warn('Inbound image visible to supervisor but upload for agent attach failed', {
+            url: attachment.url.substring(0, 120),
+            error: uploadError instanceof Error ? uploadError.message : String(uploadError),
+          });
+        }
         continue;
       }
 
@@ -87,9 +105,10 @@ export async function processInboundAttachments(
     total: attachments.length,
     images: imageBlocks.length,
     notes: noteLines.length,
+    filePointers: filePointers.length,
   });
 
-  return { imageBlocks, noteLines };
+  return { imageBlocks, noteLines, filePointers };
 }
 
 async function downloadAttachment(

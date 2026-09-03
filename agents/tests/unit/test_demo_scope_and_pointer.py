@@ -16,6 +16,14 @@ from domains.spawn_agent.config import (
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
     resolve_explore_oai_demo,
+    should_skip_oai_demo_browser_spawn,
+)
+from domains.spawn_agent.oai_demo_report_files import (
+    is_file_pointer_value,
+    materialize_oai_demo_report_files_activity,
+    plan_oai_demo_report_files,
+    rewrite_schema_file_pointer_fields,
+    value_to_markdown,
 )
 from domains.spawn_browser_agent_v3.config import (
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -67,6 +75,106 @@ def test_browser_timeout_and_recording_are_demo_only():
     assert skip_browser_network_recording(fast_mode=True, goal=OAI_DEMO_CHILD_GOAL_PREFIX) is True
     assert skip_browser_network_recording(fast_mode=True, goal="Buy socks") is False
     assert skip_browser_network_recording(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX) is False
+
+
+def test_plan_oai_demo_report_files_skips_existing_pointers_and_empty():
+    pointer = {
+        "id": "fp-1",
+        "storage_path": "user/fp-1_positioning-statement.md",
+        "original_filename": "positioning-statement.md",
+    }
+    planned = plan_oai_demo_report_files(
+        {
+            "positioning_statement": pointer,
+            "top_creators_analysis": "",
+            "creator_name": "Andrew Huberman",
+            "ninety_day_content_calendar": "Week 1 / Substack / Founder Health OS",
+        }
+    )
+    assert [item["key"] for item in planned] == ["ninety_day_content_calendar"]
+    assert planned[0]["filename"] == "90-day-content-calendar.md"
+    assert planned[0]["mime_type"] == "text/markdown"
+    assert "Founder Health OS" in planned[0]["content"]
+    assert plan_oai_demo_report_files(None) == []
+    assert is_file_pointer_value(pointer) is True
+    assert is_file_pointer_value("not a file") is False
+
+
+def test_value_to_markdown_and_schema_rewrite_use_file_pointer_types():
+    numbered = value_to_markdown(["first hook", "second hook"])
+    assert numbered == "1. first hook\n2. second hook"
+    creator_md = value_to_markdown(
+        [{"creator_name": "Siim Land", "platform_to_engage_on": "YouTube", "why_selected": "overlap"}]
+    )
+    assert "### 1. Siim Land" in creator_md
+    assert "platform to engage on" in creator_md
+    schema = rewrite_schema_file_pointer_fields(
+        {
+            "fields": [
+                {"name": "positioning_statement", "type": "str", "required": True},
+                {
+                    "name": "ninety_day_content_calendar",
+                    "type": "list[object]",
+                    "properties": [{"name": "day", "type": "int"}],
+                },
+                {"name": "creator_name", "type": "str"},
+            ]
+        },
+        ["positioning_statement", "ninety_day_content_calendar"],
+    )
+    assert schema["fields"][0]["type"] == "file_pointer"
+    assert schema["fields"][1]["type"] == "file_pointer"
+    assert "properties" not in schema["fields"][1]
+    assert schema["fields"][2]["type"] == "str"
+
+
+def test_materialize_oai_demo_report_files_activity_uploads_markdown():
+    uploads: list[tuple[str, bytes, str, str]] = []
+
+    async def _upload(user_id, content, filename, mime_type):
+        uploads.append((user_id, content, filename, mime_type))
+        return {
+            "id": f"fp-{len(uploads)}",
+            "storage_path": f"{user_id}/{filename}",
+            "original_filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(content),
+            "created_at": "2026-09-03T00:00:00Z",
+        }
+
+    async def _run():
+        with patch(
+            "domains.spawn_agent.oai_demo_report_files.upload_to_storage",
+            side_effect=_upload,
+        ):
+            return await materialize_oai_demo_report_files_activity(
+                "user-1",
+                {
+                    "positioning_statement": "Longevity OS for founders.",
+                    "creator_name": "ignored",
+                },
+                {"fields": [{"name": "positioning_statement", "type": "str"}]},
+            )
+
+    result = asyncio.run(_run())
+    assert uploads[0][0] == "user-1"
+    assert uploads[0][2] == "positioning-statement.md"
+    assert uploads[0][3] == "text/markdown"
+    assert result["structured_response"]["positioning_statement"]["original_filename"] == (
+        "positioning-statement.md"
+    )
+    assert result["output_schema"]["fields"][0]["type"] == "file_pointer"
+
+
+def test_should_skip_oai_demo_browser_spawn_is_demo_fast_mode_only():
+    demo = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=True)
+    child = SimpleNamespace(goal=OAI_DEMO_CHILD_GOAL_PREFIX, fast_mode_cache_enabled=True)
+    live_fm = SimpleNamespace(goal="Buy socks", fast_mode_cache_enabled=True)
+    demo_live = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=False)
+    assert should_skip_oai_demo_browser_spawn(demo) is True
+    assert should_skip_oai_demo_browser_spawn(child) is True
+    assert should_skip_oai_demo_browser_spawn(live_fm) is False
+    assert should_skip_oai_demo_browser_spawn(demo_live) is False
 
 
 def test_get_max_iterations_reads_positive_env(monkeypatch):

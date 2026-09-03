@@ -29,6 +29,7 @@ from domains.spawn_agent.config import (
     explore_limits_for_depth,
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
+    should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
 from domains.spawn_agent.service import (
@@ -153,11 +154,10 @@ def track_fast_mode_explore(
 
 
 async def drain_fast_mode_explores(workflow_instance) -> None:
-    """Await fire-and-track Fast Mode explores before this agent completes.
+    """No-op unless leftover handles were tracked (legacy fire-and-track).
 
-    T3 still requires each explore activity to run its full cached trajectory.
-    T9 requires no leftover ACTIVE children, so the parent must drain before
-    attempt_completion / terminal status. Safe when nothing is tracked.
+    Fast Mode now waits for each explore like live, so nothing is tracked.
+    Safe when the list is empty.
     """
     items = list(_fm_explore_handles(workflow_instance))
     _fm_explore_handles(workflow_instance).clear()
@@ -559,6 +559,23 @@ class SpawnAgentManager(ToolManager):
             )
             return
 
+        # Scoped to test-mass-agent-run-0 only: never open a browser-agent
+        # session in the root or any child. Explore/web_search stay live.
+        # Omit agentType so browser_agent_session_count does not treat this
+        # FINISH-skip as a spawned browser instance.
+        if agent_type == "browser" and should_skip_oai_demo_browser_spawn(workflow_instance):
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="spawn_agent complete",
+                message=(
+                    "Research already gathered; skipping browser spawn so the "
+                    "explore tree handles it."
+                ),
+                status=MessageStatus.FINISHED,
+                metadata={"skippedBrowserSpawn": True},
+            )
+            return
+
         blocked_reason = _blocked_research_only_agent_type(workflow_instance, tool_call)
         if blocked_reason:
             # Fast Mode must still spawn general_purpose / for_each so each child
@@ -648,10 +665,9 @@ class SpawnAgentManager(ToolManager):
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
         task_id = task_id or str(uuid_module.uuid4())
-        # One classification for depth, fire-and-track, and the activity's
-        # cancel/evidence wrap-up. Re-resolving inside the activity from the
-        # child goal or Fast Mode root disagrees (truncated explore goals,
-        # resolver failures).
+        # One classification for depth and the activity's cache identity.
+        # Re-resolving inside the activity from the child goal or Fast Mode
+        # root disagrees (truncated explore goals, resolver failures).
         oai_demo = is_oai_demo_mass_agent_task(workflow_instance)
         # Caller-controlled thoroughness → turn cap + activity timeout.
         # Fast Mode promotes quick/missing → deep so July OAi-demo explores can
@@ -665,14 +681,9 @@ class SpawnAgentManager(ToolManager):
         )
         explore_max_iterations, explore_activity_timeout = explore_limits_for_depth(depth)
 
-        # IN_PROGRESS. OAi-demo Fast Mode fire-and-track keeps this chip live
-        # so cached web_search / web_fetch / LLM turns paint the trajectory.
-        # Do not stub-finish with "Research started." — that hid the replay.
-        fire_and_track = (
-            bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-            and capture_tool_results is None
-            and oai_demo
-        )
+        # IN_PROGRESS then wait for the activity — same as live. Fast Mode
+        # only substitutes cached LLM / web_search / web_fetch responses
+        # inside the explore; it does not change spawn orchestration.
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="Exploring",
@@ -682,7 +693,6 @@ class SpawnAgentManager(ToolManager):
                 "agentType": "explore",
                 "taskId": task_id,
                 "fullGoal": ui_goal,
-                **({"fastModeParallel": True} if fire_and_track else {}),
             },
         )
 
@@ -807,25 +817,6 @@ class SpawnAgentManager(ToolManager):
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
-            # OAi-demo Fast Mode: start the explore (T3 full trajectory) but
-            # do not block the parent execute_loop. Chip stays IN_PROGRESS so
-            # cached turns paint; drain posts FINISHED before attempt_completion.
-            # wait_for / capture_tool_results still need the real result.
-            if fire_and_track:
-                # Do not wait for an inflight slot here. A Huberman-class GP
-                # has 224–336 sequential spawn_agent turns; blocking the parent
-                # at cap=16 keeps 336/16 × ~32s on the execute_loop critical
-                # path (~672s) and misses the 900s harness. Start every
-                # explore (Temporal queues past the worker slot budget) and
-                # drain before attempt_completion. T3 still runs full trajs.
-                track_fast_mode_explore(
-                    workflow_instance,
-                    activity_handle,
-                    task_id=task_id,
-                    tool_call_id=tool_call_id,
-                    ui_goal=ui_goal,
-                )
-                return
 
             async with span(
                 "explore_activity_wait",

@@ -11,3 +11,12 @@ export async function findAgentIdentityForMessages(userId: string) {
     },
   });
 }
+
+/** True when `agentId` is an agent owned by `userId` (not soft-deleted). */
+export async function isAgentOwnedByUser(userId: string, agentId: string): Promise<boolean> {
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, userId, deletedAt: null },
+    select: { id: true },
+  });
+  return agent !== null;
+}

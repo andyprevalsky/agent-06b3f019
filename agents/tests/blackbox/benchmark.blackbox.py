@@ -3356,6 +3356,82 @@ def test_tree_agent_status_ignores_recovered_error_tool_chips():
     assert "T9:" in reason
 
 
+def test_no_browser_agents_static_ignores_skipped_spawn_and_walks_tree():
+    """Mass-agent no-browser row is tree-wide and ignores FINISH-skipped calls."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "browser_agent_session_count", "min": 0, "max": 0}]}
+    skipped = {
+        "messages": [
+            {
+                "role": "ASSISTANT",
+                "metadata": {
+                    "tool_calls": [
+                        {
+                            "tool": "spawn_agent",
+                            "type": "browser",
+                            "tool_call_id": "tc-skip-browser",
+                        }
+                    ]
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "Research already gathered; skipping browser spawn so the explore tree handles it.",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "tc-skip-browser",
+                    "skippedBrowserSpawn": True,
+                },
+            },
+        ],
+        "_benchmark": {"tree": {}},
+    }
+    assert _run_declared_static_check(evaluator, skipped) == (True, "All declared static checks passed")
+
+    spawned_on_child = {
+        "messages": [{"role": "USER", "message": "root"}],
+        "_benchmark": {
+            "tree": {
+                "root": {"parent_agent_id": None, "status": "COMPLETED", "messages": []},
+                "gp-1": {
+                    "parent_agent_id": "root",
+                    "status": "COMPLETED",
+                    "messages": [
+                        {
+                            "role": "ASSISTANT",
+                            "metadata": {
+                                "tool_calls": [
+                                    {
+                                        "tool": "spawn_agent",
+                                        "type": "browser",
+                                        "tool_call_id": "tc-live-browser",
+                                    }
+                                ]
+                            },
+                        },
+                        {
+                            "role": "TOOL",
+                            "message": "Starting up a browser",
+                            "metadata": {
+                                "toolName": "spawn_browser_agent",
+                                "toolStatus": "FINISHED",
+                                "toolCallId": "tc-live-browser",
+                                "agentType": "browser",
+                                "task_id": "browser-session-1",
+                            },
+                        },
+                    ],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, spawned_on_child)
+    assert passed is False
+    assert "Browser agent session count was 1" in reason
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -13744,6 +13820,42 @@ def test_phone_call_tasks_define_two_sided_verification():
     assert "use the endCall tool" in payment.phone_persona["system_prompt"]
 
 
+def test_phone_call_ivr_dtmf_task_defines_call_tree_verification():
+    """IVR phone benchmark pairs a keypad-input callee with DTMF navigation checks."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    ivr = get_task_by_name("phone-call-ivr-dtmf")
+    assert ivr.expected_tools == ["call_phone_number"]
+    assert ivr.expected_tool_counts == {"call_phone_number": 1}
+    assert ivr.approval_handling == "auto_approve"
+    assert ivr.group == "daily"
+    assert "phone" in ivr.tags
+    assert "ivr" in ivr.tags
+    assert "{callee_phone_number}" in ivr.prompt
+    assert "exactly once" in ivr.prompt
+    assert "2451338820" in ivr.prompt
+    assert "keypad" in ivr.prompt.lower()
+    assert ivr.pinned_facts == {
+        "tracking_number": "2451338820",
+        "reference_code": "DELIV-9012",
+        "delivery_status": "scheduled for delivery tomorrow",
+    }
+    assert ivr.phone_persona["first_message"]
+    assert ivr.phone_persona["keypad_input_plan"]["enabled"] is True
+    assert ivr.phone_persona["keypad_input_plan"]["delimiters"] == ["#"]
+    assert ivr.phone_persona["keypad_input_plan"]["timeoutSeconds"] == 10
+    assert "No ten digit tracking number was entered" in ivr.phone_persona["system_prompt"]
+    assert "DELIV-9012" in ivr.phone_persona["system_prompt"]
+    assert ivr.callee_checks["menu_option_selected"] == "2"
+    assert ivr.callee_checks["tracking_number_entered"] == "2451338820"
+    assert ivr.callee_checks["dtmf_used_for_menu"] is True
+    assert ivr.callee_checks["dtmf_used_for_tracking"] is True
+    assert ivr.callee_checks["reference_code_given"] is True
+    assert "2451338820" in ivr.expected_call_findings
+    assert "DELIV-9012" in ivr.expected_final_findings
+    assert any("308c7437-b205-45ca-aa47-0a9c6a5c5f0a" in entry for entry in ivr.source)
+
+
 def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
     """Benchmark callees can end completed calls instead of waiting for max duration."""
     from benchmarks.phone_callee import _CALLEE_ASSISTANT_BASE
@@ -14339,6 +14451,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-real-deliverable",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
+        "no-browser-agents",
     }
     static_by_id = {
         evaluator_id: [check.get("type") for check in evaluator.get("checks", [])]
@@ -14356,7 +14469,15 @@ def test_unified_catalog_delineates_bench_axes():
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t7-real-deliverable": ["root_deliverable_markers"],
         "t9-no-leftover-children": ["tree_agent_status"],
+        "no-browser-agents": ["browser_agent_session_count"],
     }
+    browser_check = next(
+        check
+        for check in evaluators["no-browser-agents"]["checks"]
+        if check.get("type") == "browser_agent_session_count"
+    )
+    assert browser_check.get("min") == 0
+    assert browser_check.get("max") == 0
     explore_check = next(
         check
         for check in evaluators["t3-gp-explore-research-tools"]["checks"]
@@ -15064,6 +15185,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "browser-indeed-account-create",
         "phone-call-client-intake",
         "phone-call-payment",
+        "phone-call-ivr-dtmf",
         "response-schema-non-goal-feedback",
     } <= suite_names
     # This branch added four ready gate benchmarks (subscription free-credit,
@@ -15074,7 +15196,19 @@ def test_suite_selection_excludes_incomplete_entries():
         "gate-kyc-card-mint",
         "gate-source-connect-gmail",
     } <= suite_names
-    assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready" and not t.production_only])
+    # polar-bench (Odysseys + BU) is catalogued as ready but opt-in only —
+    # suite_tasks() / `--suite all` exclude it so full-suite runs stay first-party-sized.
+    from benchmarks.polar_catalog import is_polar_bench_task
+
+    assert len(suite_names) == len(
+        [
+            t
+            for t in all_tasks()
+            if t.status == "ready" and not t.production_only and not is_polar_bench_task(t)
+        ]
+    )
+    assert all(not is_polar_bench_task(t) for t in suite_tasks())
+    assert any(is_polar_bench_task(t) for t in all_tasks() if t.status == "ready")
 
 
 def test_dead_subscription_catalog_has_explicit_refund_candidate_contract():
@@ -16467,6 +16601,7 @@ async def run_all_tests():
         test_run_context_normalization_keeps_absolute_workspace_path_single_rooted,
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
+    r.record("phone_call_ivr_dtmf_task", test_phone_call_ivr_dtmf_task_defines_call_tree_verification)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record(
         "phone_callee_session_number_name_contract",
