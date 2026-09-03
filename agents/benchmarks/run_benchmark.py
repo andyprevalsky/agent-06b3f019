@@ -1569,6 +1569,19 @@ def _extract_agent_payment_output_blob(data: dict) -> str:
     return json.dumps(blobs, default=str) if blobs else ""
 
 
+# Grounded test-payment confirmation ids are always `tp_` + exactly 8 lowercase hex chars.
+# Matching this in the populated browser output is sufficient for the shop contract; the LLM
+# judge exists only for key-name-agnostic recovery when the id is present under an unexpected
+# shape that a regex might miss. Prefer the deterministic check so a successful checkout cannot
+# false-fail when the judge waterfall is out of credits (OpenAI/Anthropic/OpenRouter 402).
+_AGENT_PAYMENT_CONFIRMATION_ID_RE = re.compile(r"\btp_[0-9a-f]{8}\b")
+
+
+def agent_payment_blob_has_grounded_confirmation_id(blob: str) -> bool:
+    """True when the agent output already contains a grounded tp_<8 hex> confirmation id."""
+    return bool(_AGENT_PAYMENT_CONFIRMATION_ID_RE.search(blob or ""))
+
+
 async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id: str) -> Optional[str]:
     """Semantic gate for the payment lifecycle's browser-purchase step. The browser agent's populated
     output must let the STANDARD semantic output judge recover a grounded payment confirmation id
@@ -1578,6 +1591,8 @@ async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id
     blob = _extract_agent_payment_output_blob(data)
     if not blob:
         return "agent did not return a grounded browser payment confirmation order id"
+    if agent_payment_blob_has_grounded_confirmation_id(blob):
+        return None
     return await _judge_output_recovers_expected_fields(
         root_agent_id,
         blob,
@@ -9723,6 +9738,86 @@ def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: b
     return cards
 
 
+def _iter_completion_output_file_pointers(outputs: object) -> list[dict]:
+    """Collect FilePointer-shaped values from Task Complete outputs (single or list)."""
+    pointers: list[dict] = []
+    if not isinstance(outputs, list):
+        return pointers
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            filename = candidate.get("original_filename")
+            storage_path = candidate.get("storage_path")
+            if isinstance(filename, str) and filename.strip() and isinstance(storage_path, str) and storage_path.strip():
+                pointers.append(candidate)
+    return pointers
+
+
+
+def _response_schema_has_file_pointer_check(data: dict, check: dict) -> tuple[bool, str]:
+    """Require the agent's generated response_schema to include a file_pointer field.
+
+    Format constraints belong on produced FilePointer mime_type/extension
+    (see completion_summary_file_outputs), not a second schema field.
+    """
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    schema = agent.get("response_schema") or agent.get("output_schema") or {}
+    fields = schema.get("fields") if isinstance(schema, dict) else None
+    if not isinstance(fields, list) or not fields:
+        return False, "response_schema missing fields"
+    file_fields = [
+        f
+        for f in fields
+        if isinstance(f, dict) and f.get("type") in ("file_pointer", "list[file_pointer]")
+    ]
+    if not file_fields:
+        types = [str(f.get("type")) for f in fields if isinstance(f, dict)]
+        return False, f"response_schema has no file_pointer field (types={types})"
+    return True, f"Found {len(file_fields)} file_pointer field(s)"
+
+def _completion_summary_file_outputs_check(data: dict, check: dict) -> tuple[bool, str]:
+    """Require Task Complete outputs to include FilePointers matching extension/mime filters."""
+    cards = _completion_cards_for_static_check(
+        data,
+        include_first_level_gps=bool(check.get("include_first_level_gps")),
+    )
+    if not cards:
+        return False, "No finished completion summary was observed"
+
+    extensions = [
+        str(ext).lower() if str(ext).startswith(".") else f".{str(ext).lower()}"
+        for ext in (check.get("extensions") or [])
+        if str(ext).strip()
+    ]
+    mime_contains = [str(part).lower() for part in (check.get("mime_contains") or []) if str(part).strip()]
+    min_files = int(check.get("min_files", 1))
+
+    matched: list[dict] = []
+    for card in cards:
+        for pointer in _iter_completion_output_file_pointers(card.get("outputs")):
+            filename = str(pointer.get("original_filename") or "").lower()
+            mime = str(pointer.get("mime_type") or "").lower()
+            if extensions and not any(filename.endswith(ext) for ext in extensions):
+                continue
+            if mime_contains and not any(part in mime for part in mime_contains):
+                continue
+            matched.append(pointer)
+
+    if len(matched) < min_files:
+        detail = f"extensions={extensions or ['*']}, mime_contains={mime_contains or ['*']}"
+        return (
+            False,
+            f"Task Complete outputs had {len(matched)} matching file_pointer(s); "
+            f"expected at least {min_files} ({detail})",
+        )
+    return True, f"Found {len(matched)} matching file_pointer output(s)"
+
+
 async def _hydrate_completion_sms_events(data: dict) -> None:
     """Attach durable completion-SMS provider receipts for static evaluators."""
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
@@ -9913,6 +10008,16 @@ def _run_declared_static_check(
                 outputs = card.get("outputs")
                 if require_outputs and (not isinstance(outputs, list) or not outputs):
                     return False, f"T7: {label} Task Complete has no schema outputs"
+            continue
+        if check_type == "completion_summary_file_outputs":
+            ok, reason = _completion_summary_file_outputs_check(data, check)
+            if not ok:
+                return False, reason
+            continue
+        if check_type == "response_schema_has_file_pointer":
+            ok, reason = _response_schema_has_file_pointer_check(data, check)
+            if not ok:
+                return False, reason
             continue
         if check_type == "completion_sms_event":
             events = benchmark_state.get("completion_sms_events") or []

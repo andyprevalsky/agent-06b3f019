@@ -1208,6 +1208,17 @@ function isClaudeSmokeCredentialFailure(output: string): boolean {
   );
 }
 
+/** Provider-funding failures that should skip the E2B smoke, not burn the 240s timeout. */
+function isClaudeSmokeFundingFailure(output: string): boolean {
+  return (
+    /credit balance is too low/i.test(output) ||
+    /requires more credits, or fewer max_tokens/i.test(output) ||
+    /can only afford \d+/i.test(output) ||
+    /API Error:\s*402\b/i.test(output) ||
+    /insufficient credits/i.test(output)
+  );
+}
+
 async function testSmokeCredentialFailureClassifier() {
   assert(
     isClaudeSmokeCredentialFailure(
@@ -1222,6 +1233,20 @@ async function testSmokeCredentialFailureClassifier() {
   assert(
     !isClaudeSmokeCredentialFailure('CLAUDE_E2B_DONE'),
     'a successful smoke sentinel must not classify as a credential skip'
+  );
+  assert(
+    isClaudeSmokeFundingFailure(
+      'API Error: 402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 13672.'
+    ),
+    'OpenRouter 402 / can-only-afford must classify as a funding skip, not a 240s timeout'
+  );
+  assert(
+    isClaudeSmokeFundingFailure('credit balance is too low'),
+    'Anthropic credit-balance copy must still classify as a funding skip'
+  );
+  assert(
+    !isClaudeSmokeFundingFailure('CLAUDE_E2B_DONE'),
+    'a successful smoke sentinel must not classify as a funding skip'
   );
 }
 
@@ -1310,7 +1335,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         if (
           clean.includes('CLAUDE_E2B_DONE') ||
           isClaudeSmokeCredentialFailure(clean) ||
-          /credit balance is too low/i.test(clean)
+          isClaudeSmokeFundingFailure(clean)
         ) {
           clearTimeout(timeout);
           ws.close();
@@ -1340,12 +1365,13 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       );
       return;
     }
-    // Same credential-health class as Anthropic WARN: exhausted API credits are
-    // not a harness regression. Subscription/OAuth tokens are preferred; when
-    // only a depleted API key is available, skip rather than fail /deploy.
-    if (/credit balance is too low/i.test(finalOutput)) {
+    // Same credential-health class as Anthropic WARN: exhausted API / OpenRouter
+    // credits are not a harness regression. Subscription/OAuth tokens are preferred;
+    // when only a depleted funded path is available, skip rather than fail /deploy
+    // (and do not burn the 240s timeout on a known 402).
+    if (isClaudeSmokeFundingFailure(finalOutput)) {
       console.log(
-        '    [skip] Claude E2B smoke reached the SDK server, but Anthropic credits are exhausted'
+        '    [skip] Claude E2B smoke reached the SDK server, but Claude/OpenRouter credits are exhausted'
       );
       return;
     }
