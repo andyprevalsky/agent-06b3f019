@@ -37,10 +37,7 @@ test('isIvrNavigationPrompt ignores base prompt alone but matches IVR briefs', (
     true
   );
   assert.equal(isIvrNavigationPrompt('Call Jordan and collect their mailing address.'), false);
-  assert.equal(
-    isIvrNavigationPrompt('Call the IVR and press 1 for delivery status.'),
-    true
-  );
+  assert.equal(isIvrNavigationPrompt('Call the IVR and press 1 for delivery status.'), true);
 });
 
 test('buildCallAssistantConfig preserves dtmf tool on outbound calls', () => {

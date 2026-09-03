@@ -151,6 +151,22 @@ async function startChatMode(
 // Create agent
 // ---------------------------------------------------------------------------
 
+async function resolveSubAgentBenchmarkFlag(
+  body: CreateAgentBody,
+  userId: string,
+  isBenchmark: boolean
+): Promise<boolean> {
+  if (body.parent_agent_id === undefined) return isBenchmark;
+  // Only inherit benchmark (and mode flags) from a parent the caller owns —
+  // otherwise any UUID would escalate into SMS/WhatsApp transport mocking.
+  const parent = await repo.findAgent(body.parent_agent_id, userId);
+  if (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined) {
+    applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+    applyWorldModelModeInheritance(body, parent?.worldModelMode);
+  }
+  return !isBenchmark && parent?.isBenchmark === true ? true : isBenchmark;
+}
+
 export async function createAgent(
   body: CreateAgentBody,
   userId: string,
@@ -163,17 +179,7 @@ export async function createAgent(
   const isSubAgent = body.parent_agent_id !== undefined;
   applyFastModeDefault(body, userId);
 
-  // Execution settings inherit with one parent lookup, so a 10k fan-out does
-  // not pay separate reads for Fast Mode and world-model mode.
-  if (
-    isSubAgent &&
-    (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined) &&
-    body.parent_agent_id !== undefined
-  ) {
-    const parent = await repo.findAgentById(body.parent_agent_id);
-    applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
-    applyWorldModelModeInheritance(body, parent?.worldModelMode);
-  }
+  const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
   disableFastModeForWorldModel(body);
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
@@ -210,7 +216,7 @@ export async function createAgent(
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
     worldModelMode: body.world_model_mode,
     verifierType: verifier.type,
-    isBenchmark,
+    isBenchmark: benchmarkFlag,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
     temporalWorkflowId: willStartWorkflow ? agentId : null,
     workflowMaxIterations: body.max_iterations,
