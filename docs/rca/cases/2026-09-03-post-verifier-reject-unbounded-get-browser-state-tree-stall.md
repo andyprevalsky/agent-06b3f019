@@ -95,7 +95,7 @@ remains required before marking this case fixed.
 
 ## Human feedback
 
-None recorded.
+Use ~10s (historical p95) timeout for `get_browser_state` on this soft path, and retry.
 
 ## Reusable lesson
 
