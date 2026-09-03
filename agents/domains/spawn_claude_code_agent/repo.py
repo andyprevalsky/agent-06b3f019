@@ -74,7 +74,14 @@ async def save_claude_code_message(
     if completed_turns is not None:
         metadata["completed_turns"] = max(0, int(completed_turns))
 
-    if not is_init_message:
+    # Intermediate chip rows (progress, task_started, system) are child-scoped
+    # UI and must stay out of the parent LLM context via subAgentId.
+    # Parent-facing task_complete terminals reuse the spawn toolCallId — if they
+    # are also marked subAgentId, drop_rows_never_sent_to_model strips them and
+    # the ASSISTANT tool_call is left unpaired (role_alternation). That happens
+    # on cancel/DAG-cancel when the handler never yields a twin ERROR event and
+    # Session Cancelled from this helper is the only terminal for the toolCallId.
+    if not is_init_message and action_type != "task_complete":
         metadata["subAgentId"] = task_id
 
     if status == MessageStatus.ERROR:

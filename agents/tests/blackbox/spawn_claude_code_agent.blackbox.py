@@ -795,7 +795,7 @@ async def test_repo_save_message_posts_json():
 
 
 async def test_repo_save_message_non_init_has_subagent():
-    """Non-init messages include subAgentId=task_id."""
+    """Non-init progress/chip messages include subAgentId=task_id."""
     _setup()
     from domains.spawn_claude_code_agent.repo import save_claude_code_message
     from tools.base import MessageStatus
@@ -811,6 +811,35 @@ async def test_repo_save_message_non_init_has_subagent():
     call = assert_captured_call(url_contains="/api/agents/", method="POST")
     body = json.loads(call["requestBody"])
     assert body["metadata"]["subAgentId"] == "task-99"
+
+
+async def test_repo_save_message_task_complete_omits_subagent():
+    """task_complete terminals omit subAgentId so parent context keeps the result.
+
+    Cancel/DAG-cancel often leaves Session Cancelled (from save_claude_code_message)
+    as the only terminal for the spawn toolCallId. Marking it subAgentId made
+    is_internal_subagent_message drop it → unpaired ASSISTANT → role_alternation.
+    """
+    _setup()
+    from domains.spawn_claude_code_agent.repo import save_claude_code_message
+    from tools.base import MessageStatus
+
+    await save_claude_code_message(
+        agent_id="agent-x",
+        title="Session Cancelled",
+        message="Agent paused by user",
+        status=MessageStatus.FINISHED,
+        task_id="task-cancel",
+        action_type="task_complete",
+        tool_call_id="call_parent_spawn",
+    )
+
+    call = assert_captured_call(url_contains="/api/agents/", method="POST")
+    body = json.loads(call["requestBody"])
+    meta = body["metadata"]
+    assert meta["action_type"] == "task_complete"
+    assert meta["toolCallId"] == "call_parent_spawn"
+    assert "subAgentId" not in meta
 
 
 async def test_repo_save_message_error_flag():
@@ -2836,6 +2865,10 @@ async def run_all_tests():
     # repo
     await r.record_async("repo_save_msg_init", test_repo_save_message_posts_json)
     await r.record_async("repo_save_msg_noninit", test_repo_save_message_non_init_has_subagent)
+    await r.record_async(
+        "repo_save_msg_task_complete_omits_subagent",
+        test_repo_save_message_task_complete_omits_subagent,
+    )
     await r.record_async("repo_save_msg_error", test_repo_save_message_error_flag)
     await r.record_async("repo_save_msg_swallows", test_repo_save_message_swallows_http_errors)
     await r.record_async("repo_create_session_happy", test_repo_create_e2b_session_happy)
