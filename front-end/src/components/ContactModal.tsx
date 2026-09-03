@@ -17,7 +17,7 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface ContactModalProps {
   open: boolean;
@@ -28,7 +28,16 @@ interface ContactModalProps {
 const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
   const { toast } = useToast();
   const [copied, setCopied] = useState(false);
+  const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const email = 'andy@hinavi.ai';
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimeoutRef.current !== null) {
+        clearTimeout(copyResetTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const copyToClipboard = async () => {
     try {
@@ -38,7 +47,10 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
         title: 'Email copied!',
         description: 'The email address has been copied to your clipboard.',
       });
-      setTimeout(() => setCopied(false), 2000);
+      if (copyResetTimeoutRef.current !== null) {
+        clearTimeout(copyResetTimeoutRef.current);
+      }
+      copyResetTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error('Failed to copy email:', err);
       toast({
