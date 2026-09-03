@@ -17,6 +17,7 @@ from helpers.workflow_generation import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from temporalio.exceptions import ApplicationError
 
 logger = structlog.get_logger()
 
@@ -170,9 +171,27 @@ async def create_e2b_session(
                 response_text=response_text,
             )
             detail = f": {response_text}" if response_text else ""
-            raise Exception(
-                f"Failed to create code session (provider={code_provider}): HTTP {response.status_code}{detail}"
+            message = (
+                f"Failed to create code session (provider={code_provider}): "
+                f"HTTP {response.status_code}{detail}"
             )
+            upper = f"{message} {response_text}".upper()
+            billing_markers = (
+                "MISSING PAYMENT METHOD",
+                "TEAM IS BLOCKED",
+                "CREDIT BALANCE IS TOO LOW",
+                "TOO LOW TO ACCESS THE ANTHROPIC API",
+                "YOUR CREDIT BALANCE IS TOO LOW",
+            )
+            if any(m in upper for m in billing_markers):
+                # Permanent billing blocks must not burn activity retries —
+                # the tool manager soft-fails and the agent continues.
+                raise ApplicationError(
+                    message,
+                    type="ClaudeCodeBillingBlocked",
+                    non_retryable=True,
+                )
+            raise Exception(message)
 
         return response.json()
 

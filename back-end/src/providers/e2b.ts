@@ -28,6 +28,11 @@ import {
 } from './codeAgentPrompt';
 import { workDirForGithubRepo } from './e2bWorkDir';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import {
+  createLocalClaudeCodeSession,
+  isE2bTeamBillingBlockError,
+  shouldAllowLocalClaudeCodeFallback,
+} from './claudeCodeLocalSession';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   isRefreshOnlyOauthEnvelope,
@@ -379,16 +384,39 @@ async function createClaudeCodeSessionUnlocked(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  // Create sandbox first (before DB record) to avoid placeholder conflicts
-  const sandbox = await createSandboxWithRetry(
-    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
-    {
-      apiKey: process.env.E2B_API_KEY,
-      timeoutMs: SANDBOX_TIMEOUT_MS,
-      envs,
-    },
-    'Claude Code'
-  );
+  // Create sandbox first (before DB record) to avoid placeholder conflicts.
+  // When E2B team billing blocks creates, fall back to a same-host local
+  // Claude Code ws-server so code-agent benches can still make progress.
+  let sandbox;
+  try {
+    sandbox = await createSandboxWithRetry(
+      process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
+      {
+        apiKey: process.env.E2B_API_KEY,
+        timeoutMs: SANDBOX_TIMEOUT_MS,
+        envs,
+      },
+      'Claude Code'
+    );
+  } catch (err) {
+    if (isE2bTeamBillingBlockError(err) && shouldAllowLocalClaudeCodeFallback()) {
+      log.warn(
+        `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${agentId}`,
+        { error: err instanceof Error ? err.message : String(err) }
+      );
+      return createLocalClaudeCodeSession({
+        taskId,
+        agentId,
+        goal,
+        envs,
+        attachments,
+        claudeTokenSource,
+        claudeTokenIntegrationId:
+          credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+      });
+    }
+    throw err;
+  }
 
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);

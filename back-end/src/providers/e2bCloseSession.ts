@@ -5,6 +5,10 @@ import { randomUUID } from './crypto';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { type FilePointer, uploadToStorage } from './storage';
+import {
+  closeLocalClaudeCodeSession,
+  isLocalClaudeCodeSandboxId,
+} from './claudeCodeLocalSession';
 
 const log = createLogger('E2B');
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
@@ -79,6 +83,11 @@ export async function closeClaudeCodeSession(
 
   if (!session) {
     throw new Error(`Claude Code session not found: ${taskId}`);
+  }
+
+  if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
+    const local = await closeLocalClaudeCodeSession(taskId, userId);
+    return { outputFiles: local.outputFiles };
   }
 
   const outputFiles: FilePointer[] = [];

@@ -88,6 +88,9 @@ def _is_recoverable_claude_billing_failure(error: BaseException) -> bool:
         "CREDIT BALANCE IS TOO LOW",
         "TOO LOW TO ACCESS THE ANTHROPIC API",
         "YOUR CREDIT BALANCE IS TOO LOW",
+        # E2B team billing (same soft-fail class; local fallback should usually
+        # absorb this before the tool sees it).
+        "TEAM IS BLOCKED: MISSING PAYMENT METHOD",
     )
     return any(m in text for m in markers)
 
@@ -131,12 +134,11 @@ def _soft_fail_claude_billing_result(
     return {
         "success": False,
         "message": (
-            "Code session could not start because Claude Code credentials hit an "
-            f"Anthropic billing/payment block ({detail}). Do not treat this as a "
-            "task failure. Retry spawn_claude_code_agent once later if needed, "
-            "prefer a single session at a time, and continue discovery with "
-            "non-code-agent tools (web_search / GitHub API) when Claude Code is "
-            "unavailable."
+            "Code session could not start because Claude Code / sandbox billing "
+            f"is blocked ({detail}). Do not treat this as a task failure. Do NOT "
+            "retry spawn_claude_code_agent for this permanent payment-method / "
+            "team-billing block — continue discovery with non-code-agent tools "
+            "(web_search / GitHub API) instead."
         ),
         "code_provider": code_provider,
     }
