@@ -230,6 +230,64 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertIn("untrusted GitHub host", str(ctx.exception))
         self.assertEqual(calls, [])
 
+    def test_gh_payload_enriches_skipped_description_from_rest(self) -> None:
+        """GraphQL SUCCESS without description must not hide a REST skip."""
+        head = "d" * 40
+
+        def fake_run(command, check=False, capture_output=True, text=True, timeout=None):
+            del check, capture_output, text, timeout
+            if command[-1] == "headRefOid,statusCheckRollup":
+                return MODULE.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=MODULE.json.dumps(
+                        {
+                            "headRefOid": head,
+                            "statusCheckRollup": [
+                                {
+                                    "__typename": "StatusContext",
+                                    "context": "CodeRabbit",
+                                    "state": "SUCCESS",
+                                }
+                            ],
+                        }
+                    ),
+                    stderr="",
+                )
+            raise AssertionError(command)
+
+        original_run = MODULE.subprocess.run
+        original_rollup = MODULE.gh_commit_status_rollup
+
+        def fake_rollup(_head, repo=None, timeout=None):
+            del repo, timeout
+            self.assertEqual(_head, head)
+            return [
+                {
+                    "__typename": "StatusContext",
+                    "context": "CodeRabbit",
+                    "state": "SUCCESS",
+                    "description": "Review skipped: incremental reviews are disabled",
+                }
+            ]
+
+        MODULE.subprocess.run = fake_run
+        MODULE.gh_commit_status_rollup = fake_rollup
+        try:
+            payload = MODULE.gh_payload("1218", repo="acme/rose")
+        finally:
+            MODULE.subprocess.run = original_run
+            MODULE.gh_commit_status_rollup = original_rollup
+
+        entry = MODULE.coderabbit_entry(payload)
+        status = MODULE.normalize_status(entry or {})
+        self.assertEqual(
+            entry and entry.get("description"),
+            "Review skipped: incremental reviews are disabled",
+        )
+        self.assertEqual(status.state, "REVIEW_SKIPPED")
+        self.assertFalse(status.successful)
+
     def test_gh_payload_falls_back_when_status_check_rollup_forbidden(self) -> None:
         head = "c" * 40
         calls: list[list[str]] = []

@@ -173,6 +173,12 @@ BROWSER_STATE_SOFT_TIMEOUT_SECONDS = float(
 )
 BROWSER_STATE_SOFT_ATTEMPTS = int(os.getenv("BROWSER_STATE_SOFT_ATTEMPTS", "2"))
 
+# Verifier DOM checkpoints retained across the browser activity (evaluate
+# always-on preserved_evidence + pre-write approval snapshots). Bounded so
+# long sessions cannot unbounded-grow verifier prompts; 20 covers multi-item
+# cart flows that must checkpoint each listing before navigating away.
+VERIFIER_CHECKPOINT_MAX = int(os.getenv("VERIFIER_CHECKPOINT_MAX", "20"))
+
 # MIME type mappings for file downloads
 MIME_TYPE_MAP = {
     "pdf": "application/pdf",

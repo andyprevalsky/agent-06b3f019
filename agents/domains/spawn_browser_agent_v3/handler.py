@@ -638,15 +638,73 @@ def _browser_ground_truth_checkpoint(
 def _append_bounded_verifier_checkpoint(
     verifier_checkpoints: List[Dict[str, Any]],
     checkpoint: Optional[Dict[str, Any]],
+    *,
+    max_checkpoints: Optional[int] = None,
 ) -> bool:
     """Append distinct browser ground truth while enforcing the verifier payload cap."""
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+
     if not checkpoint:
         return False
     appended = not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
     if appended:
         verifier_checkpoints.append(checkpoint)
-    verifier_checkpoints[:] = verifier_checkpoints[-3:]
+    limit = VERIFIER_CHECKPOINT_MAX if max_checkpoints is None else int(max_checkpoints)
+    if limit < 1:
+        limit = 1
+    verifier_checkpoints[:] = verifier_checkpoints[-limit:]
     return appended
+
+
+async def _capture_preserved_evidence_after_evaluate(
+    *,
+    dom_service: Any,
+    verifier_checkpoints: List[Dict[str, Any]],
+    current_url: str,
+) -> Optional[Dict[str, Any]]:
+    """Always-on: snapshot live DOM after a successful evaluate for the verifier.
+
+    No model flag. The JS return value is not trusted as proof; only the
+    browser-extracted DOM checkpoint is.
+    """
+    if dom_service is None:
+        return None
+    # Bound + one retry: a frozen renderer must not stall the activity past the
+    # supervisor step budget, and a single transient CDP blip should not drop
+    # the only DOM proof the verifier will see after navigation.
+    last_error: Optional[BaseException] = None
+    state: Any = None
+    for attempt in range(2):
+        try:
+            state = await asyncio.wait_for(
+                dom_service.get_browser_state(include_screenshot=False),
+                timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+            )
+            last_error = None
+            break
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            logger.warning(
+                "Timed out refreshing browser state for preserved evaluate evidence",
+                attempt=attempt + 1,
+                timeout_s=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Failed to refresh browser state for preserved evaluate evidence",
+                attempt=attempt + 1,
+                error=str(exc)[:200],
+            )
+    if last_error is not None or not isinstance(state, dict):
+        return None
+    checkpoint = _browser_ground_truth_checkpoint(
+        state,
+        str(state.get("url") or current_url or ""),
+        kind="preserved_evidence",
+    )
+    _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
+    return state
 
 
 
@@ -699,13 +757,15 @@ def _browser_resume_continuity_state(
     browser_turn_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Serialize compact, browser-sourced continuity for a resumed activity."""
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+
     # Bound the transcript so Temporal resume payloads stay small; keep enough
     # recent tool results (incl. read_browser_state) for the next LLM turn.
     compact_turns = _compact_browser_turn_messages_for_resume(browser_turn_messages)
     return {
         "action_history": action_history.get_entries()[-30:],
         "visited_urls": list(visited_urls[-30:]),
-        "verifier_checkpoints": list(verifier_checkpoints[-3:]),
+        "verifier_checkpoints": list(verifier_checkpoints[-VERIFIER_CHECKPOINT_MAX:]),
         "browser_turn_messages": compact_turns,
     }
 
@@ -5555,11 +5615,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
         ][-30:]
+        from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+
         verifier_checkpoints = [
             checkpoint
             for checkpoint in (write_lock_resume_state.get("verifier_checkpoints") or [])
             if isinstance(checkpoint, dict) and checkpoint.get("dom_tree")
-        ][-3:]
+        ][-VERIFIER_CHECKPOINT_MAX:]
         # H-06 heal: payment-card resume must unlock the merchant domain. Older
         # grants keyed Kernel live-view hosts (*.kernel.sh / *.onkernel.com);
         # re-resolve from start_url / visited merchant URLs when needed.
@@ -9315,6 +9377,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     title=title_done,
                     task_id=task_id,
                 )
+                if action_name == "evaluate":
+                    preserved_state = await _capture_preserved_evidence_after_evaluate(
+                        dom_service=dom_service,
+                        verifier_checkpoints=verifier_checkpoints,
+                        current_url=current_url,
+                    )
+                    if preserved_state:
+                        browser_state = preserved_state
+                        current_url = str(preserved_state.get("url") or current_url or "")
                 if input_page and _botsigged_diagnostics_enabled(start_url):
                     with contextlib.suppress(Exception):
                         await _capture_botsigged_diagnostics(

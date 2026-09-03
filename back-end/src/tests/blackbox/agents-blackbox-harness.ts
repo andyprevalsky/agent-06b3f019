@@ -80,6 +80,26 @@ export function isTransientDbError(error: unknown): boolean {
   );
 }
 
+/** Coverage load can reset sockets mid-request (`fetch failed` / UND_ERR). */
+export function isTransientFetchError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause =
+    error instanceof Error && error.cause instanceof Error
+      ? `${error.cause.message} ${error.cause.name}`
+      : error instanceof Error && error.cause !== undefined
+        ? String(error.cause)
+        : '';
+  const haystack = `${message} ${cause}`;
+  return (
+    haystack.includes('fetch failed') ||
+    haystack.includes('other side closed') ||
+    haystack.includes('socket hang up') ||
+    haystack.includes('ECONNRESET') ||
+    haystack.includes('ECONNREFUSED') ||
+    haystack.includes('UND_ERR')
+  );
+}
+
 export async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -119,18 +139,34 @@ export async function request(
   url: string,
   options: RequestOptions = {}
 ): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
-  let data: unknown;
-  const ct = response.headers.get('content-type');
-  if (ct?.includes('application/json')) {
-    data = await response.json();
-  } else {
-    data = await response.text();
+  const maxAttempts = 4;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', ...options.headers },
+      });
+      let data: unknown;
+      const ct = response.headers.get('content-type');
+      if (ct?.includes('application/json')) {
+        data = await response.json();
+      } else {
+        data = await response.text();
+      }
+      return { status: response.status, data, headers: response.headers };
+    } catch (error) {
+      lastError = error;
+      if (!isTransientFetchError(error) || attempt === maxAttempts) throw error;
+      console.warn(
+        `[retry] request ${url} attempt ${attempt}/${maxAttempts}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      await sleep(250 * attempt);
+    }
   }
-  return { status: response.status, data, headers: response.headers };
+  throw lastError;
 }
 
 export async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {

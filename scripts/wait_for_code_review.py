@@ -276,7 +276,7 @@ def gh_payload(
             raise ReviewWaitError("gh pr view returned invalid JSON") from error
         if not isinstance(payload, dict):
             raise ReviewWaitError("gh pr view returned a non-object payload")
-        return payload
+        return _enrich_coderabbit_description(payload, repo, timeout=_remaining())
 
     stderr = completed.stderr.strip()
     # Limited tokens often fail only on statusCheckRollup; recover HEAD alone
@@ -298,6 +298,32 @@ def gh_payload(
         "headRefOid": head,
         "statusCheckRollup": gh_commit_status_rollup(head, repo, timeout=_remaining()),
     }
+
+
+def _enrich_coderabbit_description(
+    payload: dict[str, object],
+    repo: str | None,
+    *,
+    timeout: float | None = None,
+) -> dict[str, object]:
+    """Copy REST StatusContext.description onto GraphQL CodeRabbit successes.
+
+    ``gh pr view --json statusCheckRollup`` omits description, so
+    ``Review skipped: incremental reviews are disabled`` looks like a real
+    SUCCESS and /deploy false-greens. REST ``/commits/{sha}/status`` still
+    has the skip text.
+    """
+    entry = coderabbit_entry(payload)
+    if entry is None or entry.get("description"):
+        return payload
+    head = str(payload.get("headRefOid") or "")
+    if not head:
+        return payload
+    rest = gh_commit_status_rollup(head, repo, timeout=timeout)
+    rest_entry = coderabbit_entry({"statusCheckRollup": rest})
+    if rest_entry and rest_entry.get("description") is not None:
+        entry["description"] = rest_entry["description"]
+    return payload
 
 
 def wait_for_review(

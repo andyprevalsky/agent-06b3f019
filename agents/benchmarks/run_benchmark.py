@@ -9062,10 +9062,54 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
     )
 
 
+def _iter_benchmark_messages(data: dict) -> list[dict]:
+    """Root transcript plus every collected tree-node transcript.
+
+    Browser sessions on this bench spawn from first-level GPs, not the root.
+    Session-count checks must walk the same tree the FE paints.
+    """
+    seen_ids: set[str] = set()
+    out: list[dict] = []
+
+    def add(message: object) -> None:
+        if not isinstance(message, dict):
+            return
+        message_id = str(message.get("message_id") or message.get("id") or "")
+        if message_id:
+            if message_id in seen_ids:
+                return
+            seen_ids.add(message_id)
+        out.append(message)
+
+    for message in data.get("messages") or []:
+        add(message)
+    tree = (data.get("_benchmark") or {}).get("tree") or {}
+    if isinstance(tree, dict):
+        for node in tree.values():
+            if not isinstance(node, dict):
+                continue
+            for message in node.get("messages") or []:
+                add(message)
+    return out
+
+
+def _skipped_browser_spawn_ids(messages: list[dict]) -> set[str]:
+    """Tool-call ids whose browser spawn was FINISH-skipped (never a session)."""
+    skipped: set[str] = set()
+    for message in messages:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict) or not metadata.get("skippedBrowserSpawn"):
+            continue
+        call_id = metadata.get("toolCallId") or metadata.get("tool_call_id")
+        if call_id:
+            skipped.add(str(call_id))
+    return skipped
+
+
 def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     """Return distinct browser attempts and grounded failed lifecycle events."""
     failures: list[str] = []
-    messages = data.get("messages", []) or []
+    messages = _iter_benchmark_messages(data)
     for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
@@ -9079,7 +9123,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
             is_browser = tool_name == "spawn_browser_agent" or (
                 tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
             )
-            if not is_browser:
+            if not is_browser or candidate.get("skippedBrowserSpawn"):
                 continue
             call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
             session_id = (
@@ -9125,7 +9169,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     # turns one seven-step browser into seven "sessions". Reuse the trajectory
     # grouper, which unions orchestration IDs, task IDs, and sub-agent IDs into
     # the stable browser instance while retaining separate browser attempts.
-    browser_instances = _agent_class_step_counts(data).get("browser", {})
+    browser_instances = _agent_class_step_counts({"messages": messages}).get("browser", {})
     return len(browser_instances), failures
 
 
@@ -9177,6 +9221,9 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
             parents[right_root] = left_root
 
     messages = data.get("messages", []) or []
+    skipped_browser_ids = _skipped_browser_spawn_ids(
+        [message for message in messages if isinstance(message, dict)]
+    )
     for message in messages:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
@@ -9185,9 +9232,14 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
             if not isinstance(tool_call, dict):
                 continue
             tool_name = tool_call.get("tool")
+            call_id = tool_call.get("tool_call_id") or tool_call.get("toolCallId")
             agent_class = tool_call.get("type") or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
+            if str(call_id or "") in skipped_browser_ids and (
+                tool_name == "spawn_browser_agent" or agent_class == "browser"
+            ):
+                continue
             if tool_name == "spawn_agent" or tool_name in _AGENT_CLASS_BY_RUNTIME_TOOL:
-                register(agent_class, tool_call.get("tool_call_id") or tool_call.get("toolCallId"))
+                register(agent_class, call_id)
 
     step_events: list[tuple[tuple[str, str], dict, bool]] = []
     for message in messages:
@@ -9198,10 +9250,17 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
         for candidate in candidates:
+            if candidate.get("skippedBrowserSpawn"):
+                continue
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             agent_class = (
                 candidate.get("agentType") or candidate.get("agent_type") or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
             )
+            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if str(tool_call_id or "") in skipped_browser_ids and (
+                tool_name == "spawn_browser_agent" or agent_class == "browser"
+            ):
+                continue
             if not agent_class:
                 continue
             direct_ids = [
@@ -9211,7 +9270,6 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
                 candidate.get("taskId"),
             ]
             nodes = [node for value in direct_ids if (node := register(agent_class, value))]
-            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
             if tool_name in _AGENT_ORCHESTRATION_TOOLS:
                 tool_node = register(agent_class, tool_call_id)
                 if tool_node:

@@ -18,6 +18,7 @@ import {
   testCodexCreditSkip_readsNestedErrorObject,
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
+  testCodexCreditSkip_matchesE2bTeamBlockedWording,
 } from './codex-credit-skip.case';
 import {
   CredentialExhaustionSkip,
@@ -362,7 +363,8 @@ async function testSmoke_codexCompletesE2bTask() {
     // Create-time funding/billing blocks (OpenAI org or E2B team) never reach a
     // sandbox — same deploy-approved SKIP as mid-run credential exhaustion.
     if (createRes.status !== 200) {
-      const createBody = JSON.stringify(createRes.data ?? {});
+      const createBody =
+        typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
       const createSkip = detectCodexCreditExhaustion(createBody, []);
       if (createSkip) {
         throw new CredentialExhaustionSkip(
@@ -511,6 +513,10 @@ async function runAll() {
     {
       name: 'credit-skip -- auth revocation still fails hard',
       fn: async () => testCodexCreditSkip_authRevocationStillFailsHard(),
+    },
+    {
+      name: 'credit-skip -- E2B team-blocked / missing payment method is recognized',
+      fn: async () => testCodexCreditSkip_matchesE2bTeamBlockedWording(),
     },
     {
       name: 'auth -- throws when no credential and no funded key',

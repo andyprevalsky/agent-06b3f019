@@ -6,7 +6,7 @@
  * the API boundary so cross-cutting changes to the client are isolated here.
  */
 
-import { getSession, getStoredSession } from '@/lib/supabase';
+import { getSession, getStoredSession, supabase } from '@/lib/supabase';
 import { API_URL, API_BASE_WITH_PATH } from './config';
 import type { CodeProvider, UsageData } from './types';
 
@@ -123,6 +123,16 @@ export async function downloadAttachmentAsText(
     throw new Error(`Failed to download attachment (status ${response.status})`);
   }
   return response.text();
+}
+
+const SIGNED_ATTACHMENT_URL_TTL_SECONDS = 3600;
+
+/** Create a time-limited download/preview URL for a stored attachment. */
+export async function createAttachmentSignedUrl(storagePath: string): Promise<string | null> {
+  const { data } = await supabase.storage
+    .from('attachments')
+    .createSignedUrl(storagePath, SIGNED_ATTACHMENT_URL_TTL_SECONDS);
+  return data?.signedUrl ?? null;
 }
 
 export interface CatalogTestPrompt {

@@ -459,6 +459,31 @@ def test_visible_result_completion_does_not_rewrite_before_submit():
     )
 
 
+def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
+    """6ba2a6bd stated numeric score 0.11 after Submit, then scrolled/waited.
+
+    The earlier helper required a verdict marker and only rewrote `wait`, so
+    this trajectory burned the remaining 420s cap after the score was already
+    visible. Score-only + idle observation after submit must complete.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        forced_visible_result_completion_action,
+        should_force_visible_result_completion,
+    )
+
+    stated = "A risk score of 0.11 appeared. Let me scroll down to see the full result."
+    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
+    for action_name in ("scroll_down", "wait", "screenshot"):
+        assert should_force_visible_result_completion(
+            action_name=action_name,
+            last_reasoning=stated,
+            action_summaries=prior_submit,
+        ), action_name
+    forced = forced_visible_result_completion_action(stated)
+    assert forced["action"] == "attempt_completion"
+    assert "0.11" in forced["params"]["reasoning"]
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -569,9 +594,81 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert "PRESERVED PAGE EVIDENCE" in ctx[0]["text"]
     assert "Six-foot cable; supports 100 watts" in ctx[0]["text"]
     assert "browser ground truth, not an agent claim" in ctx[0]["text"]
+    assert "after a successful evaluate" in ctx[0]["text"]
     # Final-state screenshot rides through as a multimodal image reference.
     screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
+
+
+async def test_evaluate_always_preserves_browser_evidence_checkpoint():
+    """Every successful evaluate snapshots live DOM for the verifier — no flag."""
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+    from domains.spawn_browser_agent_v3.handler import (
+        _append_bounded_verifier_checkpoint,
+        _capture_preserved_evidence_after_evaluate,
+    )
+
+    class _FakeDom:
+        async def get_browser_state(self, include_screenshot=False):
+            assert include_screenshot is False
+            return {
+                "url": "https://shop.example/item/cable",
+                "title": "Cable",
+                "dom_tree": "<main>Six-foot cable; supports 100 watts; $19.99</main>",
+            }
+
+    checkpoints: list = []
+    state = await _capture_preserved_evidence_after_evaluate(
+        dom_service=_FakeDom(),
+        verifier_checkpoints=checkpoints,
+        current_url="https://shop.example/item/cable",
+    )
+    assert state is not None
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["kind"] == "preserved_evidence"
+    assert "100 watts" in checkpoints[0]["dom_tree"]
+    assert "preserve_evidence" not in str(checkpoints)
+
+    # Cap retains the most recent VERIFIER_CHECKPOINT_MAX distinct snapshots.
+    for i in range(VERIFIER_CHECKPOINT_MAX + 5):
+        _append_bounded_verifier_checkpoint(
+            checkpoints,
+            {
+                "url": f"https://shop.example/item/{i}",
+                "title": f"Item {i}",
+                "dom_tree": f"<main>product-{i}</main>",
+                "kind": "preserved_evidence",
+            },
+        )
+    assert len(checkpoints) == VERIFIER_CHECKPOINT_MAX
+    assert checkpoints[0]["dom_tree"] == f"<main>product-{5}</main>"
+    assert checkpoints[-1]["dom_tree"] == f"<main>product-{VERIFIER_CHECKPOINT_MAX + 4}</main>"
+
+
+def test_evaluate_tool_schema_has_no_preserve_evidence_flag():
+    from browser_tools.schemas import EvaluateTool
+    from providers.rose.browser_use import BROWSER_USE_TOOLS, build_browser_use_system_prompt, build_browser_use_tools
+
+    fields = EvaluateTool.model_fields
+    assert "preserve_evidence" not in fields
+    assert "always retains" in fields["code"].description.lower() or "snapshot" in fields["code"].description.lower()
+
+    evaluate_desc = BROWSER_USE_TOOLS["evaluate"]["description"]
+    assert "preserve_evidence" not in evaluate_desc
+    assert "bounded browser-extracted DOM snapshot" in evaluate_desc
+    assert "use `extract`" not in evaluate_desc
+    assert "NOT for extracting visible content" not in evaluate_desc
+
+    tools = build_browser_use_tools(["evaluate"])
+    assert len(tools) == 1
+    assert "preserve_evidence" not in tools[0]["input_schema"].get("properties", {})
+    assert "bounded browser-extracted DOM snapshot" in tools[0]["description"]
+    assert "use `extract`" not in tools[0]["description"]
+
+    prompt = build_browser_use_system_prompt([])
+    assert "# Evidence Retention" in prompt
+    assert "preserve flag" in prompt.lower() or "do not pass a preserve flag" in prompt
+    assert "preserve_evidence=true" not in prompt
 
 
 def test_action_history_restores_across_activity_boundary():
@@ -10865,6 +10962,39 @@ async def test_execute_action_wait_rejects_invalid_and_clamps_huge_values():
     assert huge == {"success": True, "message": ""}
     assert ah.record_action.await_args.kwargs["params"] == {"time_ms": 60_000}
 
+
+async def test_execute_action_wait_honors_schema_max_against_browser_use_cap():
+    """OTP waits request 60s; browser-use WaitEvent defaults max_seconds=10 and would
+    silently clip them. Dispatch must raise the cap to MAX_BROWSER_WAIT_MS and keep
+    event_timeout above the sleep so the handler is not canceled mid-wait.
+    """
+    from browser_tools.schemas import MAX_BROWSER_WAIT_MS
+    from browser_use.browser.events import WaitEvent
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    captured: list[WaitEvent] = []
+
+    def _capture(event):
+        captured.append(event)
+        return _make_awaitable_event(None)
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus(dispatch_side_effect=_capture)
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(dom, ah, {"action": "wait", "params": {"time_ms": 60_000}})
+    assert out == {"success": True, "message": ""}
+    assert len(captured) == 1
+    wait_event = captured[0]
+    assert isinstance(wait_event, WaitEvent)
+    assert wait_event.seconds == 60.0
+    assert wait_event.max_seconds >= MAX_BROWSER_WAIT_MS / 1000.0
+    assert min(wait_event.seconds, wait_event.max_seconds) == 60.0
+    assert wait_event.event_timeout is not None
+    assert wait_event.event_timeout > wait_event.max_seconds
+
 async def test_execute_action_dropdown_options_with_element():
     """Patch the dropdown event class to avoid pydantic node validation."""
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -19514,6 +19644,10 @@ async def run_all_tests():
         "visible_result_completion_does_not_rewrite_before_submit",
         test_visible_result_completion_does_not_rewrite_before_submit,
     )
+    r.record(
+        "visible_result_completion_rewrites_post_submit_score_without_verdict",
+        test_visible_result_completion_rewrites_post_submit_score_without_verdict,
+    )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
     r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
@@ -19522,6 +19656,14 @@ async def run_all_tests():
     )
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
+    )
+    await r.record_async(
+        "evaluate_always_preserves_browser_evidence_checkpoint",
+        test_evaluate_always_preserves_browser_evidence_checkpoint,
+    )
+    r.record(
+        "evaluate_tool_schema_has_no_preserve_evidence_flag",
+        test_evaluate_tool_schema_has_no_preserve_evidence_flag,
     )
     
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
@@ -20311,6 +20453,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_wait_rejects_invalid_and_clamps_huge",
         test_execute_action_wait_rejects_invalid_and_clamps_huge_values,
+    )
+    await r.record_async(
+        "execute_action_wait_honors_schema_max_against_browser_use_cap",
+        test_execute_action_wait_honors_schema_max_against_browser_use_cap,
     )
     await r.record_async(
         "execute_action_dropdown_options_with_el",

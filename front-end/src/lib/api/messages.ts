@@ -97,7 +97,7 @@ export async function getAttachmentUrl(
   );
 
   if (!response.ok) {
-    throw new Error('Failed to get attachment URL');
+    throw new Error(`Failed to get attachment URL (${response.status})`);
   }
 
   const data = await response.json();

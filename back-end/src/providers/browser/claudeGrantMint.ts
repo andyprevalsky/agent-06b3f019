@@ -189,16 +189,23 @@ const FIND_AUTHORIZE = `(function(){
 export const READ_CODE = `(function(){
   // The authorize request itself carries \`code=true\`, so a naive /code=/ match
   // captures the literal string "true" and the exchange fails with a confusing
-  // invalid_grant. Only accept a code from the CALLBACK, and never "true".
+  // invalid_grant. Every extraction path is therefore gated on Anthropic's exact
+  // callback origin and path; authorize/login-page DOM values are never codes.
+  if (location.origin !== 'https://platform.claude.com' ||
+      location.pathname !== '/oauth/code/callback') return null;
   var m = location.href.match(/[?&]code=([^&#]+)/);
-  if (/oauth\\/code\\/callback/.test(location.href) && m && m[1] !== 'true') {
-    return decodeURIComponent(m[1]);
+  if (m && m[1] !== 'true') {
+    var code = decodeURIComponent(m[1]);
+    var stateMatch = location.href.match(/[?&]state=([^&#]+)/);
+    return stateMatch ? code + '#' + decodeURIComponent(stateMatch[1]) : code;
   }
   // The callback page also RENDERS the code for manual copying, which survives
-  // even when the URL has been rewritten by the SPA.
+  // even when the URL has been rewritten by the SPA. Rendered manual codes carry
+  // their state after '#'; requiring it prevents unrelated long values on the
+  // callback page from being treated as authorization codes.
   var el = document.querySelector('input[value], code, pre');
   var v = el ? (el.value || el.textContent || '').trim() : '';
-  if (/^[A-Za-z0-9_-]{20,}(#[A-Za-z0-9_-]+)?$/.test(v)) return v;
+  if (/^[A-Za-z0-9_-]{20,}#[A-Za-z0-9_-]+$/.test(v)) return v;
   var t = (document.body ? document.body.innerText : '').match(/[A-Za-z0-9_-]{24,}#[A-Za-z0-9_-]{6,}/);
   return t ? t[0] : null;
 })()`;
@@ -266,9 +273,15 @@ export const AUTHORIZE_PAGE_READY = `(function(){
 export async function exchangeAuthorizationCode(
   code: string,
   verifier: string,
-  fallbackState: string
+  expectedState: string
 ): Promise<RemintResult> {
-  const [rawCode, embeddedState] = code.split('#');
+  const stateSeparator = code.lastIndexOf('#');
+  if (stateSeparator <= 0 || stateSeparator === code.length - 1) {
+    throw new Error('Claude OAuth callback omitted state');
+  }
+  const rawCode = code.slice(0, stateSeparator);
+  const callbackState = code.slice(stateSeparator + 1);
+  if (callbackState !== expectedState) throw new Error('Claude OAuth state mismatch');
   const res = await fetch(TOKEN_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'user-agent': UA },
@@ -278,7 +291,7 @@ export async function exchangeAuthorizationCode(
       redirect_uri: MANUAL_REDIRECT_URL,
       client_id: CLIENT_ID,
       code_verifier: verifier,
-      state: embeddedState ?? fallbackState,
+      state: callbackState,
       expires_in: SETUP_TOKEN_EXPIRES_IN,
     }),
   });
@@ -408,36 +421,8 @@ export async function cloudRemint(
       throw new Error(`authorize click produced no code; diag=${diag ?? 'none'}`);
     }
 
-    const [rawCode, embeddedState] = code.split('#');
-    const res = await fetch(TOKEN_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'user-agent': UA },
-      body: JSON.stringify({
-        grant_type: 'authorization_code',
-        code: rawCode,
-        redirect_uri: MANUAL_REDIRECT_URL,
-        client_id: CLIENT_ID,
-        code_verifier: verifier,
-        state: embeddedState ?? state,
-        expires_in: SETUP_TOKEN_EXPIRES_IN,
-      }),
-    });
-    if (!res.ok)
-      throw new Error(`exchange failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const body = (await res.json()) as {
-      access_token: string;
-      expires_in: number;
-      scope: string;
-      account?: { uuid?: string; email_address?: string };
-    };
-    return {
-      accessToken: body.access_token,
-      expiresIn: body.expires_in,
-      scope: body.scope,
-      clickAttempts,
-      accountId: body.account?.uuid,
-      accountEmail: body.account?.email_address,
-    };
+    const minted = await exchangeAuthorizationCode(code, verifier, state);
+    return { ...minted, clickAttempts };
   } finally {
     cdp.close();
   }

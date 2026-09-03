@@ -5564,6 +5564,115 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
+    """Root OAi demo Task Complete outputs become markdown file_pointers."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "oai-demo-root"
+    wf.user_id = "u-demo"
+    wf.goal = OAI_DEMO_ROOT_GOAL_PREFIX
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "positioning_statement", "type": "str"},
+            {"name": "ninety_day_content_calendar", "type": "list[object]"},
+        ]
+    }
+    pointer = {
+        "id": "fp-pos",
+        "storage_path": "u-demo/positioning-statement.md",
+        "original_filename": "positioning-statement.md",
+        "mime_type": "text/markdown",
+        "size_bytes": 12,
+        "created_at": "2026-09-03T00:00:00Z",
+    }
+    calendar_pointer = {
+        **pointer,
+        "id": "fp-cal",
+        "storage_path": "u-demo/90-day-content-calendar.md",
+        "original_filename": "90-day-content-calendar.md",
+    }
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "x" * 200,
+        "tool_counts": {},
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    fake.activity_returns["materialize_oai_demo_report_files_activity"] = {
+        "structured_response": {
+            "positioning_statement": pointer,
+            "ninety_day_content_calendar": calendar_pointer,
+        },
+        "output_schema": {
+            "fields": [
+                {"name": "positioning_statement", "type": "file_pointer"},
+                {"name": "ninety_day_content_calendar", "type": "file_pointer"},
+            ]
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[],
+            structured_response={
+                "positioning_statement": "Longevity OS for founders.",
+                "ninety_day_content_calendar": "Week 1 / Substack",
+            },
+        )
+        names = [name for name, _args in fake.activity_calls]
+        assert "materialize_oai_demo_report_files_activity" in names
+        summary_args = next(
+            args
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        outputs = (summary_args[3] or {}).get("completionSummary", {}).get("outputs") or []
+        by_key = {item["key"]: item["value"] for item in outputs}
+        assert by_key["positioning_statement"]["original_filename"] == "positioning-statement.md"
+        assert by_key["ninety_day_content_calendar"]["original_filename"] == "90-day-content-calendar.md"
+        assert wf.output_schema["fields"][0]["type"] == "file_pointer"
+        finished_args = next(args for name, args in fake.activity_calls if name == "mark_finished")
+        assert finished_args[8]["positioning_statement"]["original_filename"] == "positioning-statement.md"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_skips_report_files_for_oai_demo_child():
+    """Per-creator children keep structured fields; only the root report becomes files."""
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "oai-demo-child"
+    wf.user_id = "u-demo"
+    wf.goal = OAI_DEMO_CHILD_GOAL_PREFIX
+    wf.parent_workflow_id = "oai-demo-root"
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": [{"name": "creator_name", "type": "str"}]}
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "x" * 200,
+        "tool_counts": {},
+        "usage": {},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response={"creator_name": "Huberman"})
+        assert "materialize_oai_demo_report_files_activity" not in [name for name, _args in fake.activity_calls]
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll():
     """Explore chips are subAgentId-tagged; Task Complete still needs their bodies."""
     wf = _bare_workflow_instance()
@@ -7340,6 +7449,14 @@ async def run_all_tests():
         "wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
+    await r.record_async(
+        "wf_mark_complete_materializes_oai_demo_report_files",
+        test_workflow_mark_complete_materializes_oai_demo_root_report_files,
+    )
+    await r.record_async(
+        "wf_mark_complete_skips_report_files_for_oai_demo_child",
+        test_workflow_mark_complete_skips_report_files_for_oai_demo_child,
+    )
     await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
     await r.record_async(
         "wf_mark_complete_survives_summary_failure",

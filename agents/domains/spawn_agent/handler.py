@@ -29,6 +29,7 @@ from domains.spawn_agent.config import (
     explore_limits_for_depth,
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
+    should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
 from domains.spawn_agent.service import (
@@ -555,6 +556,23 @@ class SpawnAgentManager(ToolManager):
                     ),
                 status=MessageStatus.FINISHED,
                 metadata={"agentType": agent_type, "skippedNestedSpawn": True},
+            )
+            return
+
+        # Scoped to test-mass-agent-run-0 only: never open a browser-agent
+        # session in the root or any child. Explore/web_search stay live.
+        # Omit agentType so browser_agent_session_count does not treat this
+        # FINISH-skip as a spawned browser instance.
+        if agent_type == "browser" and should_skip_oai_demo_browser_spawn(workflow_instance):
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="spawn_agent complete",
+                message=(
+                    "Research already gathered; skipping browser spawn so the "
+                    "explore tree handles it."
+                ),
+                status=MessageStatus.FINISHED,
+                metadata={"skippedBrowserSpawn": True},
             )
             return
 

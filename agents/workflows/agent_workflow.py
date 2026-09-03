@@ -30,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         drain_fast_mode_explores,
         spawn_agent,
     )
+    from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
@@ -706,6 +707,12 @@ class AgentWorkflow:
         self.subtree_cost_cents: float = 0.0  # own + sum(children) - what we report to parent
         self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
         self._cost_limit_reached: bool = False  # Flag for cost limit status
+        # When a successful spawn_browser_agent return itself trips the price
+        # limit (batched browser LLM costs applied on tool completion), allow
+        # one more agent turn so attempt_completion can latch COMPLETED instead
+        # of stranding a finished shopping run on COST_LIMIT_REACHED.
+        self._cost_limit_wrapup_pending: bool = False
+        self._cost_limit_wrapup_consumed: bool = False
         self._is_finished: bool = False  # Latched True after _mark_complete/_mark_failed runs
         # Debounce the tree-cost persist + Processing status broadcast. These two
         # activities fire from 4 call sites; unthrottled they flood the backend
@@ -951,6 +958,47 @@ class AgentWorkflow:
         actual_output_price = runtime.get("output_cents_per_1k")
         if isinstance(actual_output_price, (int, float)) and not isinstance(actual_output_price, bool):
             self.output_cents_per_1k = float(actual_output_price)
+        if "cost_limit_wrapup_pending" in runtime:
+            self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
+        if "cost_limit_wrapup_consumed" in runtime:
+            self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+
+    def _maybe_arm_cost_limit_wrapup_after_browser(
+        self,
+        *,
+        tool_name: str,
+        result: Any,
+        paused_before: bool,
+        cost_limit_before: bool,
+    ) -> None:
+        """Allow one attempt_completion turn when browser costs newly trip the limit.
+
+        Only arms when THIS tool caused the cost-limit pause. User/parent pauses
+        that were already active before the tool ran stay intact.
+        """
+        if tool_name != "spawn_browser_agent":
+            return
+        if not isinstance(result, dict):
+            return
+        success = result.get("success") is True or str(result.get("status") or "").lower() in {
+            "completed",
+            "success",
+        }
+        if not success:
+            return
+        if not self._cost_limit_reached or not self.is_paused:
+            return
+        # Tool did not newly trip the limit — do not clear an unrelated pause.
+        if cost_limit_before or paused_before or self._paused_by_parent:
+            return
+        workflow.logger.warning(
+            "💰 Successful spawn_browser_agent tripped the cost limit "
+            f"({self.subtree_cost_cents:.1f}c >= {self.price_limit_cents}c); "
+            "allowing one wrap-up turn for attempt_completion"
+        )
+        self.is_paused = False
+        self._cost_limit_wrapup_pending = True
+        self._cost_limit_wrapup_consumed = False
 
     def _apply_deployment_control_state(self, agent_config: Dict[str, Any]) -> None:
         """Let a pause/resume/limit update that raced cutover win from the DB."""
@@ -1063,6 +1111,8 @@ class AgentWorkflow:
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
                 "fast_cache_goal": self.fast_cache_goal,
+                "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
+                "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
             },
         }
 
@@ -2492,6 +2542,19 @@ class AgentWorkflow:
         await self._check_parent_state()
         # Yield to event loop so Temporal processes any pending signals before we read is_paused
         await asyncio.sleep(0)
+        if (
+            self._cost_limit_wrapup_pending
+            and self._cost_limit_reached
+            and not self._is_finished
+        ):
+            if not self._cost_limit_wrapup_consumed:
+                # First pause-check after arming wrap-up: allow one more turn.
+                self._cost_limit_wrapup_consumed = True
+                return False
+            # Wrap-up turn used without completing — re-assert the cost pause.
+            self.is_paused = True
+            self._cost_limit_wrapup_pending = False
+            return True
         return self.is_paused
 
     async def _check_orphaned(self) -> bool:
@@ -3085,6 +3148,8 @@ class AgentWorkflow:
                         )
 
             executor = TOOL_EXECUTORS[tool_name]
+            paused_before_tool = self.is_paused
+            cost_limit_before_tool = self._cost_limit_reached
 
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
@@ -3148,6 +3213,13 @@ class AgentWorkflow:
                     # Extract actual result for caller
                     result = result.get("result", result)
 
+                self._maybe_arm_cost_limit_wrapup_after_browser(
+                    tool_name=tool_name,
+                    result=result,
+                    paused_before=paused_before_tool,
+                    cost_limit_before=cost_limit_before_tool,
+                )
+
                 # Route rotation signals from the per-tool summarizer through
                 # _on_tokens so pool-token rotation kicks in on 401/429/stall
                 # the same way it would for the main LLM call.
@@ -3198,6 +3270,12 @@ class AgentWorkflow:
                     if original_usage:
                         await self._track_usage(original_usage, tool_name=tool_name)
                     result = executor_result.get("result", executor_result)
+                    self._maybe_arm_cost_limit_wrapup_after_browser(
+                        tool_name=tool_name,
+                        result=result,
+                        paused_before=paused_before_tool,
+                        cost_limit_before=cost_limit_before_tool,
+                    )
                     return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
@@ -4916,6 +4994,30 @@ class AgentWorkflow:
                     and len(recovered) >= 200
                 ):
                     summary = recovered
+            if (
+                is_oai_demo_mass_agent_task(self)
+                and not self.parent_workflow_id
+                and isinstance(structured_response, dict)
+            ):
+                try:
+                    materialized = await workflow.execute_activity(
+                        materialize_oai_demo_report_files_activity,
+                        args=[self.user_id, structured_response, self.output_schema],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    if isinstance(materialized, dict):
+                        next_response = materialized.get("structured_response")
+                        if isinstance(next_response, dict):
+                            structured_response = next_response
+                        next_schema = materialized.get("output_schema")
+                        if isinstance(next_schema, dict):
+                            self.output_schema = next_schema
+                except Exception as report_exc:
+                    workflow.logger.error(
+                        f"oai demo report file materialization failed, keeping original outputs: {report_exc}"
+                    )
+
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":
                 # the root completion SMS is gated on `summary` being truthy,

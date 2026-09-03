@@ -242,6 +242,9 @@ class BenchmarkRun:
                     failure_reason=r.failure_reason,
                     fast_mode_cache_enabled=r.fast_mode_cache_enabled,
                     timestamp=self.timestamp,
+                    # Prefer explicit BENCHMARK_ATTEMPT_SUITE (predeploy scripts)
+                    # so worktree smoke cannot invalidate canary eligibility.
+                    suite=os.environ.get("BENCHMARK_ATTEMPT_SUITE") or self.suite,
                 )
             except Exception as e:
                 print(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")
