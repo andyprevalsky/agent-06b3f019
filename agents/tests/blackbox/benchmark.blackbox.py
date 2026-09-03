@@ -3593,6 +3593,8 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert task.pinned_facts["prod_user_id"] == "1f85ff25-6e29-4c1b-8739-f917bd101a30"
     assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
     assert task.environment["required_injectable_cookie_domains"] == ["doordash.com"]
+    assert task.environment.get("needs_auth") is True
+    assert "needs_auth" in task.tags
     assert task.expected_attention_kind == "write_lock"
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
@@ -15220,6 +15222,55 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
         raised = "required_injectable_cookie_domains" in str(e) and "subset" in str(e)
     assert raised, "required auth domains outside the synchronized scope must fail validation"
 
+    # needs_auth requires injectable cookie domains (live session scopes).
+    needs_auth_without_domains = {**base_env, "needs_auth": True}
+    raised = False
+    try:
+        _validate_environment(needs_auth_without_domains, "t-needs-auth-empty")
+    except ValueError as e:
+        raised = "needs_auth" in str(e) and "required_injectable_cookie_domains" in str(e)
+    assert raised, "needs_auth without injectable cookie domains must fail validation"
+
+    needs_auth_ok = {
+        **base_env,
+        "live_fixtures": ["live"],
+        "live_cookie_domains": ["doordash.com"],
+        "required_injectable_cookie_domains": ["doordash.com"],
+        "needs_auth": True,
+    }
+    assert _validate_environment(needs_auth_ok, "t-needs-auth-ok")["needs_auth"] is True
+
+    raised = False
+    try:
+        _validate_environment({**base_env, "needs_auth": "yes"}, "t-needs-auth-type")
+    except ValueError as e:
+        raised = "needs_auth must be a boolean" in str(e)
+    assert raised, "non-boolean needs_auth must fail validation"
+
+
+def test_needs_auth_failure_reports_valid_auth_token_requirement():
+    """needs_auth benches rewrite auth_assistance mismatches into INFRA auth-token reports."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _annotate_needs_auth_failure
+
+    task = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    assert task.environment.get("needs_auth") is True
+
+    raw = "Expected attention kind write_lock, observed auth_assistance"
+    data = {"_benchmark": {"unexpected_attention_kind": "auth_assistance"}}
+    annotated = _annotate_needs_auth_failure(task, raw, data)
+    assert annotated is not None
+    assert "needs a valid auth token" in annotated
+    assert "INFRA/fixture" in annotated
+    assert "doordash.com" in annotated
+    assert raw in annotated
+    assert data["_benchmark"]["needs_auth"] is True
+    assert data["_benchmark"]["auth_fixture_failure"] is True
+
+    # Non-auth failures stay untouched.
+    other = "Expected attention kind write_lock, observed payment_approval"
+    assert _annotate_needs_auth_failure(task, other, {}) == other
+
 
 def test_tag_slices_still_resolve():
     """Semantic tag slices (e.g. browser auth suite) survive catalog changes."""
@@ -17425,6 +17476,10 @@ async def run_all_tests():
     )
     r.record("live_fixture_is_single_and_explicit", test_live_fixture_is_single_and_explicit)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
+    r.record(
+        "needs_auth_failure_reports_valid_auth_token",
+        test_needs_auth_failure_reports_valid_auth_token_requirement,
+    )
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("eventim_1015_request_card_contract", test_eventim_1015_request_card_benchmark_contract)

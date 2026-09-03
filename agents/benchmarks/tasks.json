@@ -1981,6 +1981,7 @@
     "tags": [
       "browser",
       "auth",
+      "needs_auth",
       "ecommerce",
       "grocery",
       "doordash",
@@ -2025,7 +2026,7 @@
       "live_targets": [
         "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
       ],
-      "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex.",
+      "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex. needs_auth: injectable CookieBundles are not enough — the fixture identity must hold a live signed-in DoorDash session (valid auth token).",
       "live_fixtures": [
         "live-aman-food-plan-identity"
       ],
@@ -2034,7 +2035,8 @@
       ],
       "required_injectable_cookie_domains": [
         "doordash.com"
-      ]
+      ],
+      "needs_auth": true
     },
     "evaluators": [
       {

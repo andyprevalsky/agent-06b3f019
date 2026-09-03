@@ -6271,6 +6271,100 @@ def _describe_unusable_cookie_domain(summary: dict) -> str:
     )
 
 
+def _task_needs_auth(task: "BenchmarkTask") -> bool:
+    """True when the catalog declares environment.needs_auth (live session required)."""
+    return bool((task.environment or {}).get("needs_auth"))
+
+
+def _needs_auth_domains(task: "BenchmarkTask") -> tuple[str, ...]:
+    env = task.environment or {}
+    raw = env.get("required_injectable_cookie_domains") or env.get("live_cookie_domains") or []
+    return tuple(str(d).strip() for d in raw if str(d).strip())
+
+
+def _looks_like_auth_session_failure(
+    failure_reason: Optional[str],
+    data: Optional[dict] = None,
+) -> bool:
+    """Detect auth-assistance / dead-session outcomes that needs_auth benches care about."""
+    text = (failure_reason or "").lower()
+    if any(
+        marker in text
+        for marker in (
+            "auth_assistance",
+            "awaiting_auth_assistance",
+            "auth_failed",
+            "valid auth token",
+        )
+    ):
+        return True
+    if not data:
+        return False
+    benchmark = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    if benchmark.get("unexpected_attention_kind") == "auth_assistance":
+        return True
+    if benchmark.get("attention_request_kind_seen") == "auth_assistance":
+        return True
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    status = str(agent.get("status") or "").lower()
+    return status in {"awaiting_auth_assistance", "auth_failed"}
+
+
+def _annotate_needs_auth_failure(
+    task: "BenchmarkTask",
+    failure_reason: Optional[str],
+    data: Optional[dict] = None,
+) -> Optional[str]:
+    """Rewrite auth-session failures on needs_auth benches into an INFRA/fixture report.
+
+    Diagram::
+
+        catalog needs_auth=true
+                │
+                ▼
+        injectable cookies present? ──no──► preflight INFRA (existing)
+                │ yes
+                ▼
+        live session valid? ──no──► auth_assistance / auth_failed
+                │                      │
+                │                      ▼
+                │            annotate: "bench needs a valid auth token"
+                ▼
+              write_lock / task success
+
+    Injectable CookieBundles prove selection, not liveness. When a needs_auth
+    bench still lands on auth_assistance, report that the fixture needs a valid
+    auth token rather than leaving a bare attention-kind mismatch.
+    """
+    if not failure_reason or not _task_needs_auth(task):
+        return failure_reason
+    if not _looks_like_auth_session_failure(failure_reason, data):
+        return failure_reason
+    if "needs a valid auth token" in failure_reason.lower():
+        if data is not None:
+            data["_benchmark"] = {
+                **(data.get("_benchmark") or {}),
+                "needs_auth": True,
+                "auth_fixture_failure": True,
+            }
+        return failure_reason
+    domains = _needs_auth_domains(task)
+    domain_hint = f" for {', '.join(domains)}" if domains else ""
+    annotated = (
+        f"INFRA/fixture: this bench declares needs_auth and needs a valid auth token"
+        f"{domain_hint} (injectable CookieBundles alone are insufficient — refresh a "
+        f"live signed-in session for the fixture identity, re-sync, then re-run). "
+        f"{failure_reason}"
+    )
+    if data is not None:
+        data["_benchmark"] = {
+            **(data.get("_benchmark") or {}),
+            "needs_auth": True,
+            "auth_fixture_failure": True,
+        }
+    return annotated
+
+
 def _assert_live_cookie_domains_usable(user_id: str, cookie_domains: tuple[str, ...]) -> None:
     """Fail the fixture — loudly, as infra — when the scoped sync produced nothing usable.
 
@@ -6869,6 +6963,13 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
         required_injectable_cookie_domains=required_cookie_domains,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     )
+    if _task_needs_auth(task):
+        domains = _needs_auth_domains(task)
+        domain_hint = f" ({', '.join(domains)})" if domains else ""
+        print(
+            f"    🔐 needs_auth: this bench requires a valid live auth token/session"
+            f"{domain_hint} — injectable CookieBundles alone are not sufficient"
+        )
     manifests: list[dict] = []
     for name in fixtures:
         applier = LIVE_FIXTURE_APPLIERS.get(name)
@@ -10798,6 +10899,7 @@ async def run_single_task(
         data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
             base_url, agent_id, task, realtime_monitor
         )
+        early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
@@ -11149,6 +11251,7 @@ async def run_single_task(
             log_summary.append(f"{label}={len(entries)}")
         log_summary.append(f"messages={len(logs.get('messages', []))}")
         print(f"    Logs collected: {', '.join(log_summary)}")
+        failure_reason = _annotate_needs_auth_failure(task, failure_reason, data)
         archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
             base_url,
             agent_id,
