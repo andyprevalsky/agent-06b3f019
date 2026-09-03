@@ -6115,6 +6115,84 @@ async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_mo
     assert browser_turn_messages[-1]["role"] == "tool"
     assert "timed out after 0.01s" in browser_turn_messages[-1]["content"]
 
+
+def test_post_verifier_rejection_browser_state_fetch_is_bounded():
+    """After a durable verifier rejection, refreshing browser state must stay bounded.
+
+    polar-odysseys-440ed7f388a2 TREE STALL: challenge freeze left CDP hung, so
+    the post-reject `get_browser_state` burned the full 300s BrowserStateRequest
+    timeout with no further durable messages while Temporal keepalive heartbeats
+    kept the activity alive. Tree-stall correctly paused at ~510s of silence.
+    The rejection message was already persisted — this refresh is optional and
+    must not sit inside the verifier try/except as an unbounded CDP await.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real))
+    tree = ast.parse(source)
+    reject_title_nodes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.JoinedStr)
+        and any(
+            isinstance(part, ast.Constant) and "Verifier rejected" in str(part.value)
+            for part in node.values
+        )
+    ]
+    assert reject_title_nodes, "expected Verifier rejected title in attempt_completion path"
+    reject_lineno = min(node.lineno for node in reject_title_nodes)
+
+    unbounded_gets = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Await) or node.lineno < reject_lineno:
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "get_browser_state"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "dom_service"
+        ):
+            continue
+        # Walk parents via lineno window: bounded form is await asyncio.wait_for(...)
+        # Unbounded form is bare await dom_service.get_browser_state(...).
+        parent_wait = None
+        for parent in ast.walk(tree):
+            if not isinstance(parent, ast.Await):
+                continue
+            inner = parent.value
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr == "wait_for"
+                and isinstance(inner.func.value, ast.Name)
+                and inner.func.value.id == "asyncio"
+                and any(
+                    isinstance(arg, ast.Call)
+                    and isinstance(arg.func, ast.Attribute)
+                    and arg.func.attr == "get_browser_state"
+                    for arg in inner.args
+                )
+                and parent.lineno <= node.lineno <= parent.end_lineno
+            ):
+                parent_wait = parent
+                break
+        if parent_wait is None and node.lineno < reject_lineno + 80:
+            unbounded_gets.append(node.lineno)
+
+    assert not unbounded_gets, (
+        "post-verifier-rejection get_browser_state must be wrapped in "
+        f"asyncio.wait_for; found unbounded await at line(s) {unbounded_gets}"
+    )
+
+
 async def test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite():
     """Helper still supports restore_cookies=False for non-recovery callers."""
     from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
@@ -19747,6 +19825,10 @@ async def run_all_tests():
     await r.record_async(
         "rotation_storage_timeout_finishes_error",
         test_recovery_storage_timeout_finishes_error_and_returns_control_to_model_loop,
+    )
+    r.record(
+        "post_verifier_rejection_browser_state_fetch_bounded",
+        test_post_verifier_rejection_browser_state_fetch_is_bounded,
     )
     await r.record_async(
         "recovery_preloaded_solver_cookies",
