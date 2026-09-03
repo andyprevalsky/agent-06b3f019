@@ -1969,9 +1969,111 @@
     ]
   },
   {
+    "name": "browser-doordash-food-plan-grocery-cart-reauth",
+    "title": "DoorDash Food-Plan Grocery Cart Reauth",
+    "description": "Cookie-sync-off cart completeness: fill the full weekly Safeway manifest cart as a guest, then stop at auth/reauth assistance. Success is full cart + auth_assistance, not write_lock.",
+    "prompt": "Use exactly one browser agent on DoorDash to build the complete weekly food-plan grocery cart at Safeway (2811 Middlefield Rd, Palo Alto) for guest checkout without using any saved login. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before hitting auth \u2014 a single-item or partial cart is incorrect. When DoorDash requires login or reauthentication, stop and request auth assistance. do NOT try to login. do NOT place the order. do NOT continue past the auth/reauth wall.",
+    "timeout_seconds": 2700,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "grocery",
+      "doordash",
+      "food-plan",
+      "cart-reauth"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "max_steps": {
+      "browser": 250
+    },
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "rose-bench",
+    "pinned_facts": {
+      "manifest_source": "doordash-food-plan-grocery-fixture.json",
+      "store": "Safeway",
+      "platform": "DoorDash",
+      "prod_agent_id": "c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "prod_user_id": "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "doordash.com"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
+      ],
+      "context_notes": "Live DoorDash Safeway cart-reauth bench with guest checkout and no live browser-auth fixture (saved cookie sync off via existing guest-checkout kill-switch). Agent must fill the full weekly food-plan manifest cart, then stop at auth_assistance / reauth \u2014 not write_lock. Unlike browser-doordash-food-plan-grocery-order, injectable CookieBundles and needs_auth do not apply.",
+      "live_fixtures": []
+    },
+    "evaluators": [
+      {
+        "id": "doordash-food-plan-cart-reauth-completeness",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Grounded cart itemization includes every required Safeway manifest line from the canonical checklist (proteins, eggs/egg whites, 42g Elite shakes, dairy, Kodiak mix, sweet potatoes, rice, PB2 or allowed tahini fallback, produce, pantry spices/oils, condiments such as Valentina and coconut aminos, Creami inputs, and lime sparkling water) with quantities that satisfy the manifest",
+          "Any missing Safeway line is only absent when the trajectory documents manifest-allowed omission (for example no wrap under 250 mg sodium) or an allowed substitution that still satisfies the line's P0/P1 label constraints",
+          "If 99 Ranch is used, it contains only the Asian pantry manifest lines (plain noodles without seasoning packets, gochugaru, whole Sichuan peppercorns, sesame oil) and does not duplicate Safeway items",
+          "P0 constraints are satisfied in grounded evidence: 93/7 or leaner beef, 42 g protein shakes, no-salt-added tomatoes, unsalted/plain rice, zero-cal butter spray, coconut aminos not soy sauce, no seasoning-packet noodles, and no prohibited items (taco packets, Buldak, chili crisp, diet soda, etc.)",
+          "Cart evidence is not a single-SKU order (for example only Kodiak mix) and shows the manifest-aligned basket before the auth/reauth wall",
+          "Safeway is the primary store, delivery target is the saved Palo Alto address when shown, and terminal state is auth_assistance / reauth with the manifest-aligned cart already built \u2014 not write_lock and not a placed order"
+        ],
+        "judge_prompt": "This benchmark measures cart completeness with cookie sync off (guest-checkout kill-switch). Pass only when grounded cart evidence proves every required Safeway manifest line is present with manifest-valid quantities or an explicitly allowed substitution/omission documented in the trajectory, AND the run stops at auth_assistance / reauth rather than write_lock or a placed order. Compare item names, brands, and constraints against the canonical manifest checklist \u2014 a large item count or high subtotal alone is insufficient. Fail if the cart is partial/single-SKU, if P0 constraints are violated, if prohibited items appear, if Shop your list chrome is mistaken for cart contents, if the agent logs in, or if terminal state is write_lock / order confirmation."
+      },
+      {
+        "id": "doordash-food-plan-cart-reauth-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "agent:c27b4f28-994b-467f-afc6-b4082d0155c1",
+      "split:cart-reauth-vs-write-lock"
+    ],
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "on"
+  },
+  {
     "name": "browser-doordash-food-plan-grocery-order",
     "title": "DoorDash Food-Plan Grocery Order",
-    "description": "Reproduces prod premature-checkout failure: cart must match the prod-derived weekly manifest at checkout, not a single-item or partial basket.",
+    "description": "Cookie-sync-on full order: cart must match the prod-derived weekly manifest at checkout; needs_auth live session required; terminal success is write_lock (sibling of cart-reauth).",
     "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout \u2014 a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it. do NOT try to login.",
     "timeout_seconds": 2700,
     "is_chat_mode": false,
@@ -2026,7 +2128,7 @@
       "live_targets": [
         "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
       ],
-      "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex. needs_auth: injectable CookieBundles are not enough — the fixture identity must hold a live signed-in DoorDash session (valid auth token).",
+      "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex. needs_auth: injectable CookieBundles are not enough \u2014 the fixture identity must hold a live signed-in DoorDash session (valid auth token). Sibling browser-doordash-food-plan-grocery-cart-reauth covers cookie-sync-off cart + auth_assistance.",
       "live_fixtures": [
         "live-aman-food-plan-identity"
       ],

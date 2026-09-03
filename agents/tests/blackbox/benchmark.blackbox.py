@@ -3572,6 +3572,48 @@ def test_instacart_catalog_uses_complete_weekly_grocery_basket():
         assert requirement in criteria
 
 
+
+def test_doordash_food_plan_grocery_cart_reauth_contract():
+    """Cookie-sync-off sibling: full manifest cart then auth_assistance via existing guest kill-switch."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.spawn_contract import (
+        should_disable_saved_browser_auth,
+        tasks_require_disabled_saved_browser_auth,
+    )
+
+    task = get_task_by_name("browser-doordash-food-plan-grocery-cart-reauth")
+    assert task.group == "daily"
+    assert task.harness == "rose"
+    assert "exactly one browser agent" in task.prompt.lower()
+    assert "partial cart" in task.prompt.lower()
+    assert "manifest line item" in task.prompt.lower()
+    assert "do not try to login" in task.prompt.lower()
+    assert "auth assistance" in task.prompt.lower() or "reauthentication" in task.prompt.lower()
+    assert task.pinned_facts["manifest_source"] == "doordash-food-plan-grocery-fixture.json"
+    assert task.environment.get("live_fixtures") in (None, [],)
+    assert not task.environment.get("required_injectable_cookie_domains")
+    assert task.environment.get("needs_auth") is not True
+    assert "needs_auth" not in task.tags
+    assert "cart-reauth" in task.tags
+    assert task.expected_attention_kind == "auth_assistance"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.timeout_seconds == 2700
+    assert should_disable_saved_browser_auth(task) is True
+    assert tasks_require_disabled_saved_browser_auth([task.name]) is True
+    # Sibling write_lock bench must keep cookies + needs_auth and must NOT trip the kill-switch.
+    sibling = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    assert sibling.environment.get("needs_auth") is True
+    assert sibling.expected_attention_kind == "write_lock"
+    assert should_disable_saved_browser_auth(sibling) is False
+    cart = task.evaluators[0]
+    assert cart["id"] == "doordash-food-plan-cart-reauth-completeness"
+    joined = " ".join(cart["criteria"]).lower()
+    assert "every required" in joined
+    assert "auth_assistance" in joined or "reauth" in joined
+    assert "write_lock" in joined  # explicitly forbidden terminal
+
+
 def test_doordash_food_plan_grocery_repro_contract():
     """DoorDash food-plan grocery repro requires manifest-exact Safeway cart, not one SKU."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -17084,6 +17126,10 @@ async def run_all_tests():
     r.record(
         "instacart_weekly_grocery_catalog",
         test_instacart_catalog_uses_complete_weekly_grocery_basket,
+    )
+    r.record(
+        "doordash_food_plan_grocery_cart_reauth_contract",
+        test_doordash_food_plan_grocery_cart_reauth_contract,
     )
     r.record(
         "doordash_food_plan_grocery_repro_contract",
