@@ -5090,13 +5090,20 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 VERIFIER_MODEL = "rose-labs/rose-1-ultra"
 VERIFIER_MAX_TOKENS = 16000
 # A verifier is advisory and must never outlive the agent benchmark/activity
-# that requested it. Keep each provider attempt short enough to fall through,
-# while also fencing the entire retry loop so six individually bounded attempts
-# cannot accumulate into a multi-minute zombie.
-VERIFIER_ATTEMPT_DEADLINE_S = 75.0
-VERIFIER_TTFT_TIMEOUT_S = 45.0
-VERIFIER_IDLE_TIMEOUT_S = 45.0
-VERIFIER_TOTAL_TIMEOUT_S = 180.0
+# that requested it. Bound each provider attempt, and fence the retry loop so
+# individually bounded attempts cannot accumulate into a multi-minute zombie.
+#
+# 2026-09-03 RCA (cuda-kernel-github-top100-code-agent k=3): attempt_completion
+# verifier_execute streamed 50–60 content chunks but RoseDeadlineError'd at the
+# old 75s attempt wall with unterminated JSON; the 180s total then soft-failed
+# at score=0.5 and bounced a finished ranking agent back into execute. Long
+# ranking transcripts need headroom for a cold verifier JSON completion (warm
+# cache retries historically finish in ~25s). Keep the fence well under the
+# 4200s task budget.
+VERIFIER_ATTEMPT_DEADLINE_S = 180.0
+VERIFIER_TTFT_TIMEOUT_S = 60.0
+VERIFIER_IDLE_TIMEOUT_S = 90.0
+VERIFIER_TOTAL_TIMEOUT_S = 420.0
 
 
 @activity.defn
