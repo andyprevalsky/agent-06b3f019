@@ -1,14 +1,18 @@
 /**
- * FilePointerDisplay — renders a single FilePointer as a clickable download chip.
+ * FilePointerDisplay — generic files stay a download chip; markdown FilePointers
+ * render as a full-width document preview (OAi demo Task Complete report).
  *
  * STATE MACHINE:
- * [NO URL] --> downloadUrl: null (link disabled)
+ * [NO URL] --> downloadUrl: null (chip disabled / markdown preview loading)
  *     |
  *     v (createSignedUrl resolves)
- * [READY] --> downloadUrl: string (anchor active, download icon shown)
+ * [READY CHIP] --> non-markdown: signed URL + download chip
+ * [MD LOADING] --> markdown: signed URL fetched, body in flight
+ *     |
+ *     +--> [MD READY] --> MarkdownAttachmentCard with decoded text
+ *     +--> [MD ERROR] --> preview error; download still uses the signed URL
  *
- * Silently falls back to the disabled state if the signed URL cannot be created —
- * the user still sees the filename and size.
+ * Silently keeps the chip/filename visible if the signed URL cannot be created.
  */
 
 import { useEffect, useState } from 'react';
@@ -17,11 +21,18 @@ import { cn } from '@/lib/utils';
 import { supabase } from '@/lib/supabase';
 import { type FilePointer } from '../hooks';
 import { formatFileSize } from './claudeCodeChip.utils';
+import { isMarkdownFile } from './message-bubble/attachmentUtils';
+import { MarkdownAttachmentCard } from './message-bubble/MarkdownAttachmentCard';
+import type { MarkdownAttachmentPreview } from './message-bubble/useMarkdownAttachments';
 
 const SIGNED_URL_TTL_SECONDS = 3600;
 
 export function FilePointerDisplay({ file }: { file: FilePointer }) {
+  const markdown = isMarkdownFile(file);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [markdownPreview, setMarkdownPreview] = useState<MarkdownAttachmentPreview | undefined>(
+    markdown ? { status: 'loading' } : undefined,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -30,18 +41,58 @@ export function FilePointerDisplay({ file }: { file: FilePointer }) {
         const { data } = await supabase.storage
           .from('attachments')
           .createSignedUrl(file.storage_path, SIGNED_URL_TTL_SECONDS);
-        if (!cancelled && data?.signedUrl) {
-          setDownloadUrl(data.signedUrl);
+        if (cancelled) return;
+        if (!data?.signedUrl) {
+          if (markdown) {
+            setMarkdownPreview({ status: 'error', message: 'Failed to load preview' });
+          }
+          return;
+        }
+        setDownloadUrl(data.signedUrl);
+        if (!markdown) return;
+        try {
+          const response = await fetch(data.signedUrl);
+          if (!response.ok) throw new Error('Failed to load preview');
+          const text = await response.text();
+          if (!cancelled) setMarkdownPreview({ status: 'ready', text });
+        } catch (error) {
+          if (cancelled) return;
+          const message = error instanceof Error ? error.message : 'Failed to load preview';
+          setMarkdownPreview({ status: 'error', message });
         }
       } catch {
-        // Silently fail — user can still see filename
+        if (!cancelled && markdown) {
+          setMarkdownPreview({ status: 'error', message: 'Failed to load preview' });
+        }
       }
     }
     void getUrl();
     return () => {
       cancelled = true;
     };
-  }, [file.storage_path]);
+  }, [file.storage_path, markdown]);
+
+  const handleDownload = () => {
+    if (!downloadUrl) return;
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = file.original_filename;
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  };
+
+  if (markdown) {
+    return (
+      <MarkdownAttachmentCard
+        fp={file}
+        preview={markdownPreview}
+        onDownload={() => handleDownload()}
+      />
+    );
+  }
 
   return (
     <a

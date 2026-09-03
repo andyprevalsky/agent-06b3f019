@@ -12,6 +12,10 @@
  *     v
  * [COLLAPSED]
  *
+ * FILE POINTER OUTPUTS (delegated to FilePointerDisplay):
+ * [CHIP]                 -- PDF / binary FilePointer --> download chip
+ * [MD LOADING|READY|ERR] -- text/markdown FilePointer --> full-width preview
+ *
  * States:
  * - toolsExpanded: boolean - Whether tool breakdown list is visible
  * - copiedField: string | null - Key of field currently showing "copied" feedback
@@ -24,6 +28,7 @@ import { Check, Copy } from 'lucide-react';
 import { copyToClipboard } from '@/lib/clipboard';
 import { isFilePointer } from './claudeCodeChip.utils';
 import { FilePointerDisplay } from './FilePointerDisplay';
+import { isMarkdownFile } from './message-bubble/attachmentUtils';
 import type { CompletionSummaryData, OutputField } from '../types';
 import type { FilePointer } from '../hooks';
 import { CompletionHeader, FooterStats, ToolUsageSection } from './CompletionSummarySections';
@@ -67,6 +72,14 @@ function isFilePointerValue(value: OutputField['value']): boolean {
   return false;
 }
 
+function isMarkdownFilePointerValue(value: OutputField['value']): boolean {
+  if (isFilePointer(value)) return isMarkdownFile(value);
+  if (Array.isArray(value) && value.length > 0 && value.every(isFilePointer)) {
+    return value.every((item) => isMarkdownFile(item as FilePointer));
+  }
+  return false;
+}
+
 function formatNestedValue(value: unknown): string {
   if (isFilePointer(value)) return value.original_filename;
   if (Array.isArray(value)) {
@@ -107,10 +120,12 @@ function OutputValue({ value }: OutputValueProps) {
     return <FilePointerDisplay file={value} />;
   }
   if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
+    const files = value.filter(isFilePointer);
+    const stackMarkdown = files.some(isMarkdownFile);
     return (
-      <div className="flex flex-wrap gap-1.5">
-        {value.map((fp, idx) => (
-          <FilePointerDisplay key={idx} file={fp as FilePointer} />
+      <div className={stackMarkdown ? 'flex flex-col gap-3 w-full' : 'flex flex-wrap gap-1.5'}>
+        {files.map((fp, idx) => (
+          <FilePointerDisplay key={fp.id || idx} file={fp} />
         ))}
       </div>
     );
@@ -229,6 +244,16 @@ interface OutputRowProps {
 
 function OutputRow({ output, copiedField, onCopy }: OutputRowProps) {
   const showCopy = !isFilePointerValue(output.value);
+  if (isMarkdownFilePointerValue(output.value)) {
+    return (
+      <div className="space-y-1.5">
+        <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+          {output.label}
+        </div>
+        <OutputValue value={output.value} />
+      </div>
+    );
+  }
   return (
     <div className="group bg-card rounded-md px-3 py-2 border border-border/60 hover:border-border transition-colors">
       <div className="flex items-start justify-between gap-2">

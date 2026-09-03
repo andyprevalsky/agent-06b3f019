@@ -2,13 +2,15 @@
  * StructuredResponseDisplay — renders the extracted output of a completed Claude Code task.
  *
  * Stateless: receives a structured response object and an optional schema, then
- * renders each field's value via type-aware formatters (FilePointer → chip, arrays
- * → comma-joined, objects → JSON, null/undefined → em-dash).
+ * renders each field's value via type-aware formatters (FilePointer → download
+ * chip or markdown preview, arrays → comma-joined, objects → JSON,
+ * null/undefined → em-dash).
  */
 
 import { type ResponseSchemaField } from '../hooks';
 import { FilePointerDisplay } from './FilePointerDisplay';
 import { formatFieldType, humanizeFieldKey, isFilePointer } from './claudeCodeChip.utils';
+import { isMarkdownFile } from './message-bubble/attachmentUtils';
 
 function formatPrimitive(value: unknown): string {
   if (Array.isArray(value)) return value.join(', ');
@@ -31,8 +33,9 @@ function FieldValue({
   if (fieldType === 'list[file_pointer]' && Array.isArray(value)) {
     const filePointers = value.filter(isFilePointer);
     if (filePointers.length > 0) {
+      const stackMarkdown = filePointers.some(isMarkdownFile);
       return (
-        <div className="flex flex-wrap gap-1.5">
+        <div className={stackMarkdown ? 'flex flex-col gap-3 w-full' : 'flex flex-wrap gap-1.5'}>
           {filePointers.map((fp) => (
             <FilePointerDisplay key={fp.id} file={fp} />
           ))}
