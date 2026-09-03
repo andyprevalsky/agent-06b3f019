@@ -2,12 +2,12 @@
  * FilePointerDisplay — clickable chip for a FilePointer in summary/structured output.
  *
  * STATE MACHINE:
- * [CHIP] --click--> opens DocumentPreviewDrawer (left Sheet)
+ * [CHIP] --click--> opens DocumentPreviewDrawer (RIGHT Sheet)
  * Drawer load/preview states live in DocumentPreviewDrawer.
  *
- * Any mime type is supported (xlsx, numbers, html, pdf, …). HTML and other
- * previewable types render inside the drawer; office/binary types show a clean
- * download panel.
+ * Any mime type is supported (xlsx, numbers, html, pdf, …). Previewable types
+ * (html/xlsx/csv/pdf/images/text/numbers-with-embedded-csv) render file contents
+ * inside the drawer.
  */
 
 import { useState } from 'react';

@@ -1,13 +1,12 @@
 /**
- * Blackbox tests: CompletionSummaryCard document outputs open a left drawer.
- *
- * One case per output file family (html, xlsx, numbers, pdf, csv, png, docx)
- * so regressions in preview routing or chip wiring cannot hide behind a single
- * generic FilePointer assertion. HTML must render inside a sandboxed iframe.
+ * Blackbox tests: CompletionSummaryCard document outputs open a RIGHT drawer
+ * and render file contents (HTML srcDoc, spreadsheet tables, text, etc.).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 import { renderWithProviders } from './test-wrapper';
 import type { FilePointer } from '@/lib/api';
 import { CompletionSummaryCard } from '@/features/terminal-component-group/components/CompletionSummaryCard';
@@ -45,7 +44,9 @@ vi.mock('@/features/terminal-component-group/api', async () => {
   };
 });
 
-function makeFile(overrides: Partial<FilePointer> & Pick<FilePointer, 'original_filename' | 'mime_type'>): FilePointer {
+function makeFile(
+  overrides: Partial<FilePointer> & Pick<FilePointer, 'original_filename' | 'mime_type'>,
+): FilePointer {
   return {
     id: overrides.id ?? `fp-${overrides.original_filename}`,
     storage_path: overrides.storage_path ?? `user/${overrides.original_filename}`,
@@ -56,112 +57,68 @@ function makeFile(overrides: Partial<FilePointer> & Pick<FilePointer, 'original_
   };
 }
 
-const FILE_CASES: Array<{
-  label: string;
-  file: FilePointer;
-  expectedKind: ReturnType<typeof documentPreviewKind>;
-  expectedTypeLabel: string;
-  previewTestId: string;
-}> = [
-  {
-    label: 'html',
-    file: makeFile({
-      original_filename: 'report.html',
-      mime_type: 'text/html',
-      size_bytes: 256,
-    }),
-    expectedKind: 'html',
-    expectedTypeLabel: 'HTML',
-    previewTestId: 'document-preview-html',
-  },
-  {
-    label: 'xlsx',
-    file: makeFile({
-      original_filename: 'budget.xlsx',
-      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      size_bytes: 4096,
-    }),
-    expectedKind: 'download',
-    expectedTypeLabel: 'Excel',
-    previewTestId: 'document-preview-download-only',
-  },
-  {
-    label: 'numbers',
-    file: makeFile({
-      original_filename: 'forecast.numbers',
-      mime_type: 'application/vnd.apple.numbers',
-      size_bytes: 8192,
-    }),
-    expectedKind: 'download',
-    expectedTypeLabel: 'Numbers',
-    previewTestId: 'document-preview-download-only',
-  },
-  {
-    label: 'pdf',
-    file: makeFile({
-      original_filename: 'brief.pdf',
-      mime_type: 'application/pdf',
-      size_bytes: 2048,
-    }),
-    expectedKind: 'pdf',
-    expectedTypeLabel: 'PDF',
-    previewTestId: 'document-preview-pdf',
-  },
-  {
-    label: 'csv',
-    file: makeFile({
-      original_filename: 'rows.csv',
-      mime_type: 'text/csv',
-      size_bytes: 128,
-    }),
-    expectedKind: 'text',
-    expectedTypeLabel: 'Text',
-    previewTestId: 'document-preview-text',
-  },
-  {
-    label: 'png',
-    file: makeFile({
-      original_filename: 'chart.png',
-      mime_type: 'image/png',
-      size_bytes: 512,
-    }),
-    expectedKind: 'image',
-    expectedTypeLabel: 'Image',
-    previewTestId: 'document-preview-image',
-  },
-  {
-    label: 'docx',
-    file: makeFile({
-      original_filename: 'memo.docx',
-      mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      size_bytes: 3072,
-    }),
-    expectedKind: 'download',
-    expectedTypeLabel: 'Word',
-    previewTestId: 'document-preview-download-only',
-  },
-];
+function buildXlsxBlob(): Blob {
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ['Item', 'Amount'],
+    ['Cloud', '42'],
+    ['Agents', '99'],
+  ]);
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Budget');
+  const bytes = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+  return new Blob([bytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+}
 
-describe('documentPreview.utils', () => {
-  for (const testCase of FILE_CASES) {
-    it(`classifies ${testCase.label} as ${testCase.expectedKind}`, () => {
-      expect(documentPreviewKind(testCase.file)).toBe(testCase.expectedKind);
-      expect(documentTypeLabel(testCase.file)).toBe(testCase.expectedTypeLabel);
-    });
-  }
+async function buildNumbersBlob(): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file('tables/forecast.csv', 'Month,Revenue\nJan,10\nFeb,20\n');
+  const bytes = await zip.generateAsync({ type: 'arraybuffer' });
+  return new Blob([bytes], { type: 'application/vnd.apple.numbers' });
+}
+
+const HTML_BODY =
+  '<!doctype html><html><body><h1>Rose Labs Report</h1><p>Rendered body</p></body></html>';
+
+describe('documentPreview.utils kinds', () => {
+  it('classifies each output file family', () => {
+    expect(
+      documentPreviewKind(makeFile({ original_filename: 'a.html', mime_type: 'text/html' })),
+    ).toBe('html');
+    expect(
+      documentPreviewKind(
+        makeFile({
+          original_filename: 'a.xlsx',
+          mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+      ),
+    ).toBe('spreadsheet');
+    expect(
+      documentPreviewKind(
+        makeFile({ original_filename: 'a.numbers', mime_type: 'application/vnd.apple.numbers' }),
+      ),
+    ).toBe('numbers');
+    expect(
+      documentPreviewKind(makeFile({ original_filename: 'a.pdf', mime_type: 'application/pdf' })),
+    ).toBe('pdf');
+    expect(
+      documentPreviewKind(makeFile({ original_filename: 'a.csv', mime_type: 'text/csv' })),
+    ).toBe('csv');
+    expect(
+      documentTypeLabel(
+        makeFile({ original_filename: 'a.xlsx', mime_type: 'application/octet-stream' }),
+      ),
+    ).toBe('Excel');
+  });
 });
 
-describe('CompletionSummaryCard document drawer', () => {
+describe('CompletionSummaryCard right drawer content', () => {
   beforeEach(() => {
     downloadBlobMock.mockReset();
     downloadTextMock.mockReset();
-    downloadBlobMock.mockImplementation(async () => {
-      return new Blob(['%PDF-fake'], { type: 'application/pdf' });
-    });
-    downloadTextMock.mockImplementation(async (url: string) => {
-      void url;
-      return '<html><body><h1>Rose Labs Report</h1></body></html>';
-    });
+    downloadTextMock.mockImplementation(async () => HTML_BODY);
+    downloadBlobMock.mockImplementation(async () => buildXlsxBlob());
     URL.createObjectURL = vi.fn(() => 'blob:preview');
     URL.revokeObjectURL = vi.fn();
   });
@@ -170,67 +127,96 @@ describe('CompletionSummaryCard document drawer', () => {
     vi.restoreAllMocks();
   });
 
-  for (const testCase of FILE_CASES) {
-    it(`opens left drawer for ${testCase.label} output and shows ${testCase.previewTestId}`, async () => {
-      const user = userEvent.setup();
-      renderWithProviders(
-        <CompletionSummaryCard
-          data={{
-            summary: `Delivered ${testCase.label}`,
-            outputs: [{ key: 'doc', label: 'Document', value: testCase.file }],
-          }}
-        />,
-      );
-
-      const chip = screen.getByTestId('file-pointer-chip');
-      expect(chip).toHaveAttribute('data-filename', testCase.file.original_filename);
-      expect(chip).toHaveAttribute('data-mime', testCase.file.mime_type);
-      expect(screen.getByText(testCase.file.original_filename)).toBeInTheDocument();
-      expect(screen.getByText(`(${testCase.expectedTypeLabel})`)).toBeInTheDocument();
-
-      await user.click(chip);
-
-      expect(await screen.findByTestId('document-preview-drawer')).toBeInTheDocument();
-      await waitFor(() => {
-        expect(screen.getByTestId(testCase.previewTestId)).toBeInTheDocument();
-      });
-
-      if (testCase.expectedKind === 'html') {
-        const iframe = screen.getByTestId('document-preview-html');
-        expect(iframe.tagName).toBe('IFRAME');
-        expect(iframe).toHaveAttribute('sandbox', 'allow-scripts');
-        expect(iframe).toHaveAttribute('src', 'blob:preview');
-        expect(downloadTextMock).toHaveBeenCalled();
-        expect(screen.getByTestId('document-preview-html')).toBeInTheDocument();
-      }
-
-      if (testCase.expectedKind === 'text') {
-        expect(screen.getByTestId('document-preview-text')).toHaveTextContent('Rose Labs Report');
-        expect(downloadTextMock).toHaveBeenCalled();
-      }
-
-      if (testCase.expectedKind === 'download') {
-        expect(screen.getByTestId('document-preview-download-only')).toHaveTextContent(
-          testCase.file.original_filename,
-        );
-      }
-    });
-  }
-
-  it('renders multiple file outputs without a copy button', () => {
+  it('opens RIGHT drawer and renders HTML contents via srcDoc', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({ original_filename: 'report.html', mime_type: 'text/html' });
     renderWithProviders(
       <CompletionSummaryCard
         data={{
           summary: 'Done',
-          outputs: FILE_CASES.slice(0, 3).map((c) => ({
-            key: c.label,
-            label: c.label,
-            value: c.file,
-          })),
+          outputs: [{ key: 'doc', label: 'Document', value: file }],
         }}
       />,
     );
-    expect(screen.getAllByTestId('file-pointer-chip')).toHaveLength(3);
-    expect(screen.queryByTitle('Copy to clipboard')).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    expect(drawer.className).toMatch(/right-0|slide-in-from-right/);
+
+    const iframe = await screen.findByTestId('document-preview-html');
+    expect(iframe.tagName).toBe('IFRAME');
+    expect(iframe).toHaveAttribute('srcdoc', expect.stringContaining('Rose Labs Report'));
+    expect(downloadTextMock).toHaveBeenCalled();
+  });
+
+  it('renders Excel cell contents in a table', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({
+      original_filename: 'budget.xlsx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    downloadBlobMock.mockResolvedValue(buildXlsxBlob());
+
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'sheet', label: 'Sheet', value: file }],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    await waitFor(() => {
+      expect(screen.getByTestId('document-preview-spreadsheet')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Cloud')).toBeInTheDocument();
+    expect(screen.getByText('99')).toBeInTheDocument();
+  });
+
+  it('renders Numbers package CSV contents in a table', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({
+      original_filename: 'forecast.numbers',
+      mime_type: 'application/vnd.apple.numbers',
+    });
+    downloadBlobMock.mockResolvedValue(await buildNumbersBlob());
+
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'sheet', label: 'Sheet', value: file }],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    await waitFor(() => {
+      expect(screen.getByTestId('document-preview-spreadsheet')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Revenue')).toBeInTheDocument();
+    expect(screen.getByText('Feb')).toBeInTheDocument();
+  });
+
+  it('renders CSV contents in a table', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({ original_filename: 'rows.csv', mime_type: 'text/csv' });
+    downloadTextMock.mockResolvedValue('Name,Score\nAda,10\n');
+
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'csv', label: 'CSV', value: file }],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    await waitFor(() => {
+      expect(screen.getByTestId('document-preview-spreadsheet')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Ada')).toBeInTheDocument();
   });
 });

@@ -1,9 +1,9 @@
 /**
- * Isolated harness for CompletionSummaryCard document outputs + left drawer.
+ * Isolated harness for CompletionSummaryCard document outputs + RIGHT drawer.
  * Served at /document-preview-validate.html (no auth/realtime).
  *
- * Patches Supabase signed URLs and window.fetch so HTML renders in the drawer
- * iframe without a live storage backend.
+ * Patches Supabase signed URLs and window.fetch so HTML/xlsx/numbers contents
+ * render without a live storage backend.
  */
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -11,6 +11,8 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import type { FilePointer } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
 import { CompletionSummaryCard } from '@/features/terminal-component-group/components/CompletionSummaryCard';
+import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 import '@/index.css';
 
 const HTML_BODY = `<!doctype html>
@@ -32,21 +34,41 @@ function makeFile(filename: string, mime: string, size: number): FilePointer {
   };
 }
 
+function buildXlsxBytes(): ArrayBuffer {
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ['Item', 'Amount'],
+    ['Cloud', '42'],
+    ['Agents', '99'],
+  ]);
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Budget');
+  return XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+}
+
+async function buildNumbersBytes(): Promise<ArrayBuffer> {
+  const zip = new JSZip();
+  zip.file('tables/forecast.csv', 'Month,Revenue\nJan,10\nFeb,20\n');
+  return zip.generateAsync({ type: 'arraybuffer' });
+}
+
+const XLSX_BYTES = buildXlsxBytes();
+const NUMBERS_BYTES = await buildNumbersBytes();
+
 const FILES = [
   makeFile('report.html', 'text/html', HTML_BODY.length),
   makeFile(
     'budget.xlsx',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    8192,
+    XLSX_BYTES.byteLength,
   ),
-  makeFile('forecast.numbers', 'application/vnd.apple.numbers', 12288),
+  makeFile('forecast.numbers', 'application/vnd.apple.numbers', NUMBERS_BYTES.byteLength),
   makeFile('brief.pdf', 'application/pdf', 4096),
   makeFile('rows.csv', 'text/csv', 64),
 ];
 
 supabase.storage.from = (() => ({
-  createSignedUrl: async () => ({
-    data: { signedUrl: 'https://signed.example/file' },
+  createSignedUrl: async (_path: string) => ({
+    data: { signedUrl: `https://signed.example/${_path}` },
     error: null,
   }),
 })) as typeof supabase.storage.from;
@@ -54,19 +76,43 @@ supabase.storage.from = (() => ({
 const originalFetch = window.fetch.bind(window);
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
-  if (url.includes('signed.example')) {
-    if (url.includes('pdf') || init?.method === 'HEAD') {
-      return new Response('%PDF-1.4 demo', {
-        status: 200,
-        headers: { 'content-type': 'application/pdf' },
-      });
-    }
+  if (!url.includes('signed.example')) {
+    return originalFetch(input, init);
+  }
+  if (url.includes('report.html') || url.endsWith('.html')) {
     return new Response(HTML_BODY, {
       status: 200,
       headers: { 'content-type': 'text/html;charset=utf-8' },
     });
   }
-  return originalFetch(input, init);
+  if (url.includes('budget.xlsx') || url.endsWith('.xlsx')) {
+    return new Response(XLSX_BYTES, {
+      status: 200,
+      headers: {
+        'content-type':
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      },
+    });
+  }
+  if (url.includes('forecast.numbers') || url.endsWith('.numbers')) {
+    return new Response(NUMBERS_BYTES, {
+      status: 200,
+      headers: { 'content-type': 'application/vnd.apple.numbers' },
+    });
+  }
+  if (url.includes('rows.csv') || url.endsWith('.csv')) {
+    return new Response('Name,Score\nAda,10\nGrace,20\n', {
+      status: 200,
+      headers: { 'content-type': 'text/csv' },
+    });
+  }
+  if (url.includes('brief.pdf') || url.endsWith('.pdf')) {
+    return new Response('%PDF-1.4 demo', {
+      status: 200,
+      headers: { 'content-type': 'application/pdf' },
+    });
+  }
+  return new Response(HTML_BODY, { status: 200, headers: { 'content-type': 'text/html' } });
 }) as typeof window.fetch;
 
 const queryClient = new QueryClient();
@@ -77,7 +123,7 @@ createRoot(document.getElementById('root')!).render(
       <div className="min-h-screen bg-[#EEEFF2] p-6 dark:bg-[#111]">
         <div className="mx-auto max-w-lg space-y-3">
           <h1 className="text-sm font-medium text-muted-foreground">
-            Document preview harness — click a chip to open the left drawer
+            Document preview harness — click a chip to open the RIGHT drawer
           </h1>
           <CompletionSummaryCard
             data={{
