@@ -360,6 +360,38 @@ def test_visible_result_completion_does_not_rewrite_after_navigation():
     )
 
 
+def test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit():
+    """submit(A) → score A → navigate(B) → submit(B) → scroll must not use score A.
+
+    history_has_navigation_after_submit is false (no nav after latest submit),
+    but prior reasoning still describes page A. Only post-navigation evidence
+    (current-turn reasoning) may force completion.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stale_score_a = 'Risk Score 0.07, Bot detected - form blocked (page A)'
+    history = [
+        'click: {"text": "Submit (Protected by Invisible"}',
+        'navigate: https://webdecoy.com/page-b',
+        'click: {"text": "Submit (Protected by Invisible"}',
+    ]
+    assert not should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning="Scrolling to inspect page B results.",
+        prior_reasoning_messages=[stale_score_a],
+        action_summaries=history,
+    )
+    # Fresh score stated on the current turn after the later submit is fine.
+    assert should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning='Risk Score 0.11, Bot detected - form blocked on page B',
+        prior_reasoning_messages=[stale_score_a],
+        action_summaries=history,
+    )
+
+
 def test_visible_result_completion_does_not_rewrite_before_submit():
     from domains.spawn_browser_agent_v3.visible_result_completion import (
         should_force_visible_result_completion,

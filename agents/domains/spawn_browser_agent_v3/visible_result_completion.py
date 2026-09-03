@@ -98,22 +98,52 @@ def history_has_submit_click(
     return any("submit" in blob and "click" in blob for blob in _history_entries(action_summaries, action_entries))
 
 
+def _last_submit_index(entries: list[str]) -> int:
+    return max(
+        (idx for idx, blob in enumerate(entries) if "submit" in blob and "click" in blob),
+        default=-1,
+    )
+
+
+def _last_navigation_index(entries: list[str]) -> int:
+    return max(
+        (
+            idx
+            for idx, blob in enumerate(entries)
+            if any(marker in blob for marker in _NAVIGATION_MARKERS)
+        ),
+        default=-1,
+    )
+
+
 def history_has_navigation_after_submit(
     action_summaries: Iterable[Any] | None = None,
     action_entries: Iterable[Any] | None = None,
 ) -> bool:
     """True when a page-changing action follows the latest submit click."""
     entries = _history_entries(action_summaries, action_entries)
-    last_submit_idx = max(
-        (idx for idx, blob in enumerate(entries) if "submit" in blob and "click" in blob),
-        default=-1,
-    )
+    last_submit_idx = _last_submit_index(entries)
     if last_submit_idx < 0:
         return False
-    return any(
-        any(marker in blob for marker in _NAVIGATION_MARKERS)
-        for blob in entries[last_submit_idx + 1 :]
-    )
+    return _last_navigation_index(entries) > last_submit_idx
+
+
+def history_has_navigation_before_latest_submit(
+    action_summaries: Iterable[Any] | None = None,
+    action_entries: Iterable[Any] | None = None,
+) -> bool:
+    """True when a page change precedes the latest submit.
+
+    submit(A) → reason(score A) → navigate(B) → submit(B) leaves score-A text
+    in prior reasoning while the latest submit has no following navigation.
+    Callers must not treat that pre-navigation evidence as belonging to page B.
+    """
+    entries = _history_entries(action_summaries, action_entries)
+    last_submit_idx = _last_submit_index(entries)
+    if last_submit_idx < 0:
+        return False
+    last_nav_idx = _last_navigation_index(entries)
+    return 0 <= last_nav_idx < last_submit_idx
 
 
 def should_force_visible_result_completion(
@@ -135,7 +165,12 @@ def should_force_visible_result_completion(
         return False
     if history_has_navigation_after_submit(summaries, entries):
         return False
-    candidates = [last_reasoning, *(prior_reasoning_messages or [])]
+    # After navigate→submit, prior reasoning may still describe the old page.
+    # Only the current turn's reasoning is trustworthy for the new page.
+    if history_has_navigation_before_latest_submit(summaries, entries):
+        candidates = [last_reasoning]
+    else:
+        candidates = [last_reasoning, *(prior_reasoning_messages or [])]
     return any(reasoning_states_visible_fcaptcha_result(text) for text in candidates)
 
 
