@@ -311,15 +311,18 @@ def counts_for_deploy_eligibility(entry: dict[str, Any]) -> bool:
     (and/or `suite=predeploy`) so assigning a canary into smoke cannot be
     invalidated by the worktree run that just selected it. Legacy rows with no
     field still count (daily / explicit history).
+
+    Exclusion is OR: an excluded suite always drops the row, even if a stale
+    `counts_for_deploy_eligibility: true` was written beside it.
     """
+    suite = str(entry.get("suite") or "").strip().lower()
+    if suite in ELIGIBILITY_EXCLUDED_SUITES:
+        return False
     flag = entry.get("counts_for_deploy_eligibility")
     if flag is False:
         return False
     if flag is True:
         return True
-    suite = str(entry.get("suite") or "").strip().lower()
-    if suite in ELIGIBILITY_EXCLUDED_SUITES:
-        return False
     return True
 
 
@@ -390,12 +393,22 @@ def candidates_for_category(
     attempt_passes: dict[str, list[bool]] | None = None,
     pass_streak: int = DEFAULT_PASS_STREAK,
     skipped_history: list[str] | None = None,
+    require_deploy_canary: bool = False,
 ) -> list[TaskRef]:
+    """History-qualified candidates for a category, preferred-canary first.
+
+    When `require_deploy_canary` is True (category floor), only tasks annotated
+    `deploy_canary: true` may fill the slot. Prefer leaving a floor category
+    uncovered over silently promoting an arbitrary category-tagged heavy.
+    Path extras keep the broader candidate pool.
+    """
     out: list[TaskRef] = []
     for task in tasks:
         if not _eligible(task, surface):
             continue
         if category not in categories_for_task(task):
+            continue
+        if require_deploy_canary and not task.deploy_canary:
             continue
         if attempt_passes is not None and not has_pass_streak(
             task.name, attempt_passes, streak=pass_streak
@@ -478,6 +491,7 @@ def select_predeploy_benches(
             attempt_passes=attempt_passes,
             pass_streak=pass_streak,
             skipped_history=skipped_history,
+            require_deploy_canary=True,
         ):
             if cand.name in selected_set:
                 if category not in categories_covered:

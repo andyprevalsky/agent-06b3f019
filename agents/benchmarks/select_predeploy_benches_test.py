@@ -88,10 +88,17 @@ def test_smoke_always_selected_canaries_need_last_three_passes() -> None:
             continue
         assert has_pass_streak(name, passes, streak=3), name
     assert selection.pass_streak_required == 3
+    # Floor canaries without a 3-pass streak stay uncovered rather than
+    # silently promoting an arbitrary category-tagged heavy.
     assert "sms" in selection.uncovered_categories
     assert "browser_stateful" in selection.uncovered_categories
-    assert "payment" in selection.categories_covered
-    assert "grep" in selection.categories_covered
+    catalog_by_name = {t["name"]: t for t in json.loads(CATALOG.read_text())}
+    for name in selection.selected:
+        if name in smoke:
+            continue
+        task = catalog_by_name.get(name) or {}
+        if task.get("deploy_category") in {"payment", "grep", "sms", "browser_stateful"}:
+            assert task.get("deploy_canary") is True, name
 
 
 def test_path_triggers_only_add_history_qualified_depth() -> None:
@@ -147,6 +154,9 @@ def test_history_gate_picks_next_canary_with_pass_streak(tmp_path: Path) -> None
                     "tags": ["payment"],
                     "timeout_seconds": 200,
                     "deploy_category": "payment",
+                    # Second annotated canary — fills the floor when the
+                    # preferred (shorter) canary lacks a pass streak.
+                    "deploy_canary": True,
                 },
                 {
                     "name": "stable-grep",
@@ -347,6 +357,159 @@ def test_predeploy_worktree_attempts_do_not_invalidate_canary_streak(
     assert "payment" in selection.categories_covered
 
 
+def test_suite_only_exclusion_preserves_canary_streak(tmp_path: Path) -> None:
+    """Excluded suite alone must drop the row even without the bool flag."""
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    catalog.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "harness-smoke",
+                    "tags": ["smoke"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "harness",
+                },
+                {
+                    "name": "stable-payment",
+                    "tags": ["payment"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "payment",
+                    "deploy_canary": True,
+                },
+            ]
+        )
+    )
+    _write_attempts(
+        attempts,
+        [
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("stable-payment", True),
+            ("stable-payment", True),
+            ("stable-payment", True),
+            ("stable-payment", False, {"suite": "predeploy"}),
+            (
+                "stable-payment",
+                False,
+                {"suite": "predeploy", "counts_for_deploy_eligibility": True},
+            ),
+        ],
+    )
+    selection = select_predeploy_benches(
+        catalog=catalog,
+        changed_files=[],
+        surface="local",
+        cap=20,
+        repo_root=ROOT,
+        attempts_file=attempts,
+    )
+    assert "stable-payment" in selection.selected
+    assert "payment" in selection.categories_covered
+
+
+def test_flag_only_exclusion_preserves_canary_streak(tmp_path: Path) -> None:
+    """`counts_for_deploy_eligibility=false` alone must drop the row."""
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    catalog.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "harness-smoke",
+                    "tags": ["smoke"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "harness",
+                },
+                {
+                    "name": "stable-payment",
+                    "tags": ["payment"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "payment",
+                    "deploy_canary": True,
+                },
+            ]
+        )
+    )
+    _write_attempts(
+        attempts,
+        [
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("stable-payment", True),
+            ("stable-payment", True),
+            ("stable-payment", True),
+            ("stable-payment", False, {"counts_for_deploy_eligibility": False}),
+        ],
+    )
+    selection = select_predeploy_benches(
+        catalog=catalog,
+        changed_files=[],
+        surface="local",
+        cap=20,
+        repo_root=ROOT,
+        attempts_file=attempts,
+    )
+    assert "stable-payment" in selection.selected
+    assert "payment" in selection.categories_covered
+
+
+def test_floor_does_not_silently_promote_non_canary(tmp_path: Path) -> None:
+    """Floor leaves a category uncovered when only non-canaries have a streak."""
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    catalog.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "harness-smoke",
+                    "tags": ["smoke"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "harness",
+                },
+                {
+                    "name": "payment-heavy",
+                    "tags": ["payment"],
+                    "timeout_seconds": 900,
+                    "deploy_category": "payment",
+                },
+                {
+                    "name": "payment-canary",
+                    "tags": ["payment"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "payment",
+                    "deploy_canary": True,
+                },
+            ]
+        )
+    )
+    _write_attempts(
+        attempts,
+        [
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("harness-smoke", True),
+            ("payment-heavy", True),
+            ("payment-heavy", True),
+            ("payment-heavy", True),
+            # Canary lacks a streak — floor must NOT promote payment-heavy.
+        ],
+    )
+    selection = select_predeploy_benches(
+        catalog=catalog,
+        changed_files=[],
+        surface="local",
+        cap=20,
+        repo_root=ROOT,
+        attempts_file=attempts,
+    )
+    assert "payment-heavy" not in selection.selected
+    assert "payment-canary" not in selection.selected
+    assert "payment" in selection.uncovered_categories
+
+
 def test_hard_cap_screams_when_history_qualified_extras_overflow(tmp_path: Path) -> None:
     catalog = tmp_path / "tasks.json"
     attempts = tmp_path / "attempts.jsonl"
@@ -469,6 +632,7 @@ def test_cloud_surface_skips_local_only_even_with_pass_streak(tmp_path: Path) ->
                     "tags": ["payment"],
                     "timeout_seconds": 90,
                     "deploy_category": "payment",
+                    "deploy_canary": True,
                 },
                 {
                     "name": "smoke-ok",

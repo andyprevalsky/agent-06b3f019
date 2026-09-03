@@ -114,6 +114,10 @@ def _resolve_counts_for_deploy_eligibility(
     `BENCHMARK_ATTEMPT_SUITE=predeploy`) so assigning a canary cannot be
     invalidated by the worktree run that just selected it.
     """
+    # Excluded suites always win — never let an explicit True / env=1 re-poison
+    # a canary streak from a predeploy / worktree attempt.
+    if suite and suite.strip().lower() in _ELIGIBILITY_EXCLUDED_SUITES:
+        return False
     if counts_for_deploy_eligibility is not None:
         return bool(counts_for_deploy_eligibility)
     env_flag = os.environ.get("BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY", "").strip().lower()
@@ -121,8 +125,6 @@ def _resolve_counts_for_deploy_eligibility(
         return False
     if env_flag in {"1", "true", "yes"}:
         return True
-    if suite and suite.strip().lower() in _ELIGIBILITY_EXCLUDED_SUITES:
-        return False
     return True
 
 
