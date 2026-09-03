@@ -49,6 +49,15 @@ def test_polar_bench_group_and_tags_never_daily():
     assert all(t.requires_browser_agent for t in polar)
     assert all(t.enforce_declared_evaluators for t in polar)
     assert all(t.approval_handling is None for t in polar)
+    # Polar slice uses the isolated Odysseys-faithful evaluator only.
+    assert all(
+        e.get("method") == "polar" for t in polar for e in (t.evaluators or [])
+    )
+    assert all(
+        isinstance((t.evaluators or [{}])[0].get("rubrics"), list)
+        and (t.evaluators or [{}])[0]["rubrics"]
+        for t in polar
+    )
 
     odysseys = [t for t in polar if "odysseys" in t.tags]
     bu = [t for t in polar if "bu-bench" in t.tags]

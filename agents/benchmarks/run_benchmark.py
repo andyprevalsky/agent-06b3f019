@@ -10132,7 +10132,7 @@ async def _run_declared_evaluators(
         await _hydrate_completion_sms_events(data)
 
     needs_tree_evidence = any(
-        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge"}
+        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge", "polar"}
         for evaluator in task.evaluators
     )
     if needs_tree_evidence and base_url:
@@ -10169,6 +10169,20 @@ async def _run_declared_evaluators(
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
                 passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            elif method == "polar":
+                # Isolated Odysseys-faithful path — see benchmarks/polar_evaluator.py.
+                # Does not share prompts/evidence builders with other judge methods.
+                from benchmarks.polar_evaluator import run_polar_evaluator
+
+                judged = await run_polar_evaluator(
+                    task_prompt=task.prompt,
+                    evaluator=evaluator,
+                    data=data,
+                )
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "polar judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
             else:
                 passed = False
                 score = 0.0
@@ -10188,6 +10202,13 @@ async def _run_declared_evaluators(
             result["evidence_mode"] = evidence_mode
         if usage is not None:
             result["usage"] = usage
+        if method == "polar":
+            # Surface per-rubric detail for hub / run JSON without affecting other methods.
+            polar_results = locals().get("judged")
+            if isinstance(polar_results, dict) and polar_results.get("rubric_results") is not None:
+                result["rubric_results"] = polar_results["rubric_results"]
+                result["perfect"] = polar_results.get("perfect")
+                result["num_screenshots_sent"] = polar_results.get("num_screenshots_sent")
         results.append(result)
         if not passed:
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results

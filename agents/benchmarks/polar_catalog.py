@@ -84,13 +84,14 @@ def _odyssey_entry(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(rubrics, list) or not rubrics:
         raise ValueError(f"odyssey {task_id}: rubrics must be a non-empty list")
 
-    criteria = [
-        f"{r['id']}: {r['requirement']} (verify: {r['verification']})"
-        for r in rubrics
-        if isinstance(r, dict) and r.get("id") and r.get("requirement") and r.get("verification")
-    ]
-    if not criteria:
+    # Keep full Odysseys rubric objects for method=polar; criteria[] is the
+    # display/API mirror required by the shared catalog contract.
+    from benchmarks.polar_evaluator import criteria_from_rubrics, parse_polar_rubrics
+
+    normalized_rubrics = parse_polar_rubrics({"rubrics": rubrics})
+    if not normalized_rubrics:
         raise ValueError(f"odyssey {task_id}: no usable rubric criteria")
+    criteria = criteria_from_rubrics(normalized_rubrics)
 
     website = str(raw.get("website") or "https://www.google.com")
     return {
@@ -98,7 +99,7 @@ def _odyssey_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "title": f"Polar Odysseys — {title}",
         "description": (
             f"Odysseys {level} live-web task from polar-evals "
-            f"({len(rubrics)} rubric checkpoints; perfect = all pass)."
+            f"({len(normalized_rubrics)} rubric checkpoints; perfect = all pass)."
         ),
         "prompt": str(raw["prompt"]),
         "timeout_seconds": _ODYSSEY_TIMEOUTS.get(level, _ODYSSEY_TIMEOUTS["hard"]),
@@ -123,8 +124,8 @@ def _odyssey_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "environment": _live_browser_environment(
             context_notes=(
                 "Polar Odysseys long-horizon live-Internet task. Start from the "
-                "task's website (usually Google). Grade against the official "
-                "per-rubric checkpoints (polar-evals / Odysseys). No production "
+                "task's website (usually Google). Grade with method=polar "
+                "(Odysseys per-rubric trajectory + screenshot judge). No production "
                 "auth fixture — public web only."
             ),
             live_targets=[website],
@@ -132,18 +133,10 @@ def _odyssey_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "evaluators": [
             {
                 "id": "odysseys-rubrics-perfect",
-                "method": "single_turn_llm_judge",
+                "method": "polar",
                 "pass_threshold": 1.0,
                 "criteria": criteria,
-                "judge_prompt": (
-                    "You are grading an Odysseys long-horizon web-agent trajectory. "
-                    "Score 1.0 only if EVERY rubric checkpoint is grounded in tool/"
-                    "browser evidence (tabs opened, pages fetched, structured final "
-                    "output). Score 0.0 if any rubric fails or is only claimed in "
-                    "assistant prose without evidence. Use each rubric's "
-                    "verification text as the check. Partial progress is a fail for "
-                    "this perfect-task metric."
-                ),
+                "rubrics": normalized_rubrics,
             }
         ],
         "source": list(raw.get("source") or [f"polar-evals:odysseys:{task_id}"]),
@@ -163,21 +156,16 @@ def _bu_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "Final output matches what the task asked for (format + substance)",
         "No fabricated facts that contradict the trajectory evidence",
     ]
-    judge_prompt = (
-        "You are grading a BU Bench V1 browser-automation task. Pass only when "
-        "the trajectory evidence shows the agent satisfied the user request. "
-        "Assistant claims without tool/browser grounding fail. Captcha/login "
-        "walls that block completion fail unless the task itself is to detect them."
-    )
     if isinstance(answer, str) and answer.strip():
         criteria.append(
             f"Ground truth is satisfied exactly when applicable: {answer.strip()}"
         )
-        judge_prompt += (
-            " GROUND TRUTH takes absolute precedence: if the provided ground-truth "
-            "answer/criteria is not satisfied by the agent's execution and final "
-            "response, score 0.0."
-        )
+
+    # BU Bench uses the same isolated polar judge (per-item trajectory +
+    # screenshots). Criteria are synthesized into rubrics by polar_evaluator.
+    from benchmarks.polar_evaluator import parse_polar_rubrics
+
+    rubrics = parse_polar_rubrics({"criteria": criteria})
 
     tags = [POLAR_TAG, "browser", "bu-bench", category.lower()]
     return {
@@ -200,25 +188,26 @@ def _bu_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "bench": "rose-bench",
         "group": POLAR_GROUP,
         "world_surface": "live",
-        "label_eval": "BU Bench V1 judge: task completed; ground truth when present.",
+        "label_eval": "BU Bench V1 polar judge: task completed; ground truth when present.",
         "enforce_declared_evaluators": True,
         "min_tool_counts": {"spawn_browser_agent": 1},
         "tool_count_scope": "root",
         "environment": _live_browser_environment(
             context_notes=(
                 f"Polar BU Bench V1 ({category}). Live public web; no production "
-                "auth fixture. Graded with a trajectory LLM judge aligned to the "
-                "BU Bench judge (ground truth when the source task ships one)."
+                "auth fixture. Graded with method=polar (Odysseys-faithful "
+                "per-rubric trajectory + screenshot judge; ground truth when "
+                "the source task ships one)."
             ),
             live_targets=[],
         ),
         "evaluators": [
             {
                 "id": "bu-bench-v1-judge",
-                "method": "single_turn_llm_judge",
+                "method": "polar",
                 "pass_threshold": 1.0,
                 "criteria": criteria,
-                "judge_prompt": judge_prompt,
+                "rubrics": rubrics,
             }
         ],
         "source": list(raw.get("source") or [f"polar-evals:bu-bench-v1:{task_id}"]),

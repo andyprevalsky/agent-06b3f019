@@ -91,7 +91,7 @@ class BenchmarkTask:
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
     context_gates: Optional[dict] = None  # Per-task user-context gates (helpers/get_user_context.py keys → bool), forwarded at agent creation
     model: Optional[str] = None  # Pin the ROOT agent to one Rose pool (e.g. 'rose-labs/rose-1-oss'). Only for tasks whose prompt a default-pool primary declines; forwarded at agent creation.
-    evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
+    evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge | polar)
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
     group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | polar-bench | incomplete). Absent → backend derives from status/tags/bench.
