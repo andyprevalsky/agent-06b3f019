@@ -118,6 +118,7 @@ Update/create `agents/benchmarks/<bench>/IMPLEMENTATION.md` with the ordered lis
 cd agents && source venv/bin/activate
 python -m pytest benchmarks/polar_evaluator_test.py benchmarks/polar_catalog_test.py -q
 python -c "from benchmarks.polar_catalog import build_polar_catalog_tasks; t=build_polar_catalog_tasks(); assert all(e['method']=='polar' for x in t for e in x['evaluators'])"
+# Prefer --local. Bare scripts/run-bench (no --local) spawns the paid Fly fleet.
 scripts/run-bench --local --suite polar-bench --max-concurrency 5 --keep-services
 ```
 
