@@ -24,6 +24,7 @@ import {
 import { canonicalInputFingerprint, purchaseReceipt, tryClaimFundingResume } from './fundingResume';
 import {
   PurchaseSpendStatus,
+  PurchaseWalletFundingStatus,
   type MintPurchaseInput,
   type MintPurchaseResult,
   type PurchaseLookupResult,
@@ -39,6 +40,35 @@ export {
 } from './reconcile';
 
 const log = createLogger('Purchases');
+
+/**
+ * Funding states that mean Rose already closed this card to reclaim org-wallet float (or finished
+ * doing so). A not-live / unreadable card in these states is expected reclaim noise — NOT merchant
+ * settlement — so fingerprint reuse must not flip the purchase to CLEARED and clobber abandon.
+ */
+const RECLAIM_IN_PROGRESS_FUNDING_STATUSES = new Set<PurchaseWalletFundingStatus>([
+  PurchaseWalletFundingStatus.RECLAIMING,
+  PurchaseWalletFundingStatus.RECLAIMED,
+  PurchaseWalletFundingStatus.RECLAIM_FAILED,
+]);
+
+/**
+ * Whether a closed/unreadable held card should be recorded as merchant-spent (CLEARED). Returns
+ * false while wallet funding is mid-reclaim so concurrent same-fingerprint lookup/mint cannot
+ * race an in-flight abandon (smoke: agent-payment-abandonment VOIDED vs CLEARED).
+ */
+async function closedCardIndicatesMerchantSpend(purchaseId: string): Promise<boolean> {
+  const funding = await repo.findWalletFundingByPurchaseId(purchaseId);
+  if (funding !== null && RECLAIM_IN_PROGRESS_FUNDING_STATUSES.has(funding.status)) {
+    log.info('Skipping CLEARED for closed card with reclaim in progress', {
+      purchase_id: purchaseId,
+      funding_status: funding.status,
+    });
+    return false;
+  }
+  return true;
+}
+
 function assertPositiveCents(value: number, field: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new PurchaseError(`${field} must be a positive integer`);
@@ -126,9 +156,11 @@ export async function lookupPurchase(
       cardProvider
     );
     if (!liveDetails) {
-      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
       reusable = false;
-      status = PurchaseSpendStatus.CLEARED;
+      if (await closedCardIndicatesMerchantSpend(purchase.id)) {
+        await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+        status = PurchaseSpendStatus.CLEARED;
+      }
     }
   }
 
@@ -215,8 +247,10 @@ async function tryReuseExistingPurchase(
         status: existing.status,
       };
     }
-    // Held card already settled/closed — record it consumed; fall through to a fresh purchase.
-    await repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.CLEARED);
+    // Held card already settled/closed — record consumed unless Rose closed it for reclaim.
+    if (await closedCardIndicatesMerchantSpend(existing.id)) {
+      await repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.CLEARED);
+    }
   }
 
   // CLEARED / consumed / FAILED / REFUNDED / VOIDED → caller opens a fresh (or retried) purchase.

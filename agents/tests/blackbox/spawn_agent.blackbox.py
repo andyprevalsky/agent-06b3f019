@@ -220,6 +220,53 @@ def test_validate_spawn_for_each_with_csv():
     )
 
 
+def test_validate_spawn_rejects_gpa_when_kill_switch_on():
+    """ROSE_DISABLE_GENERAL_PURPOSE_AGENT rejects general_purpose / for_each."""
+    import os
+
+    from domains.spawn_agent.config import ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV
+    from domains.spawn_agent.service import validate_spawn_params
+
+    previous = os.environ.get(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV)
+    os.environ[ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV] = "1"
+    try:
+        _assert_raises(
+            lambda: validate_spawn_params(
+                {
+                    "type": "general_purpose",
+                    "goal": "rank cuda repos",
+                    "output_schema": {"fields": []},
+                    "start_phase": "EXECUTE",
+                }
+            ),
+            "disabled",
+        )
+        _assert_raises(
+            lambda: validate_spawn_params(
+                {
+                    "type": "for_each",
+                    "goal": "rank cuda repos",
+                    "output_schema": {"fields": []},
+                    "items": ["a"],
+                    "start_phase": "EXECUTE",
+                }
+            ),
+            "disabled",
+        )
+        validate_spawn_params(
+            {
+                "type": "code",
+                "goal": "rank cuda repos with Claude Code",
+                "output_schema": {"fields": []},
+            }
+        )
+    finally:
+        if previous is None:
+            os.environ.pop(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV, None)
+        else:
+            os.environ[ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV] = previous
+
+
 def test_validate_spawn_explore_rejects_schema():
     """explore type rejects output_schema."""
     from domains.spawn_agent.service import validate_spawn_params
@@ -3940,6 +3987,7 @@ async def run_all_tests():
     r.record("validate_for_each_needs_items", test_validate_spawn_for_each_requires_items)
     r.record("validate_for_each_items", test_validate_spawn_for_each_with_items)
     r.record("validate_for_each_csv", test_validate_spawn_for_each_with_csv)
+    r.record("validate_gpa_kill_switch_rejects", test_validate_spawn_rejects_gpa_when_kill_switch_on)
     r.record("validate_explore_no_schema", test_validate_spawn_explore_rejects_schema)
     r.record("validate_explore_happy", test_validate_spawn_explore_happy)
     # resolve_start_phase

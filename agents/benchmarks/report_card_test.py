@@ -296,6 +296,35 @@ def test_implicit_queued_from_total_shortfall():
     assert card["tasks"]["queued"] == 3  # 5 total - 2 known cards
 
 
+
+def test_duplicate_task_names_keep_independent_statuses():
+    """Intentional k-repeats (bench A A A) must not collapse via by-name dict."""
+    state = _sample_state(
+        task_names=[
+            "cuda-kernel-github-top100-code-agent",
+            "cuda-kernel-github-top100-code-agent",
+            "cuda-kernel-github-top100-code-agent",
+        ],
+        per_task=[
+            TaskCard(
+                name="cuda-kernel-github-top100-code-agent",
+                status="failed",
+                duration_s=1751.0,
+                cost_usd=0.63,
+            ),
+            TaskCard(name="cuda-kernel-github-top100-code-agent", status="running"),
+            TaskCard(name="cuda-kernel-github-top100-code-agent", status="running"),
+        ],
+        total_tasks=3,
+    )
+    card = build_report_card(state)
+    assert card["tasks"] == {"total": 3, "running": 2, "completed": 1, "queued": 0}
+    assert card["results"]["failed"] == 1
+    assert card["results"]["passed"] == 0
+    statuses = [row["status"] for row in card["per_task"]]
+    assert statuses == ["failed", "running", "running"]
+
+
 def test_task_names_render_missing_rows_as_queued():
     state = _sample_state(
         task_names=["chat-mode", "spawn-sub-agents", "parallel-tool-calls", "user-data-prod-grep"],

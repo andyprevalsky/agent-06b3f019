@@ -947,6 +947,8 @@ def build_verifier_context_messages(
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     current_batch: List[str] = []
+    _tool_result_chars_used = 0
+    _tool_result_budget_hits = 0
 
     def _flush_batch() -> None:
         """Emit current_batch as a single user-role message and reset it."""
@@ -1008,14 +1010,30 @@ def build_verifier_context_messages(
             if structured_result is None:
                 structured_result = metadata.get("structuredResponse")
 
+            tool_name = metadata.get("toolName", "tool")
             tool_payload = {
-                "tool_name": metadata.get("toolName", "tool"),
+                "tool_name": tool_name,
                 "tool_call_id": metadata.get("toolCallId"),
                 "result": structured_result if structured_result is not None else text,
             }
             if metadata.get("title"):
                 tool_payload["title"] = metadata["title"]
-            tool_text = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
+            # Cap per-tool and total TOOL_RESULT size. File-evidence budget only
+            # covers resolved file pointers; spawn_agent / artifact_file tool
+            # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
+            # user batch → GPT RoseDeadline). Truncate before dump.
+            tool_text, truncated = _budget_verifier_tool_result_text(
+                "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str),
+                tool_name=str(tool_name or "tool"),
+                used_chars=_tool_result_chars_used,
+            )
+            if truncated:
+                _tool_result_budget_hits += 1
+            # Aggregate budget exhausted → empty text; skip append so later
+            # tools cannot keep growing the verifier prompt past the cap.
+            if not tool_text:
+                continue
+            _tool_result_chars_used += len(tool_text)
 
             screenshot_b64 = metadata.get("screenshot_b64")
             if screenshot_b64:
@@ -1059,7 +1077,63 @@ def build_verifier_context_messages(
     current_batch.append("Evaluate the agent's progress as JSON.")
     _flush_batch()
 
+    if _tool_result_budget_hits:
+        logger.info(
+            "Verifier tool-result budget applied",
+            truncated_tool_results=_tool_result_budget_hits,
+            used_chars=_tool_result_chars_used,
+            budget_chars=VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS,
+        )
+
     return messages
+
+
+# Per-tool / total caps for TOOL_RESULT bodies in verifier_execute. Distinct from
+# the file-evidence budget: spawn_agent and artifact_file tool rows often embed
+# full ranking JSON directly in `result`, bypassing file-pointer inlining.
+VERIFIER_MAX_TOOL_RESULT_CHARS = 12_000
+VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 40_000
+VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 64_000
+_VERIFIER_DELIVERABLE_TOOL_NAMES = frozenset(
+    {
+        "attempt_completion",
+        "artifact_file",
+        "write_file",
+        "create_file",
+    }
+)
+
+
+def _budget_verifier_tool_result_text(
+    tool_text: str,
+    *,
+    tool_name: str,
+    used_chars: int,
+) -> tuple[str, bool]:
+    """Truncate a verifier TOOL_RESULT line to per-tool and total budgets.
+
+    Returns (possibly_truncated_text, was_truncated).
+    """
+    per_tool_cap = (
+        VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS
+        if tool_name in _VERIFIER_DELIVERABLE_TOOL_NAMES
+        else VERIFIER_MAX_TOOL_RESULT_CHARS
+    )
+    remaining_total = max(0, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS - used_chars)
+    cap = min(per_tool_cap, remaining_total)
+    if cap <= 0:
+        # Do not emit a stub — callers must skip appending so the aggregate
+        # budget stays hard-capped at VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS.
+        return "", True
+    if len(tool_text) <= cap:
+        return tool_text, False
+    marker = f"...[verifier truncated {len(tool_text) - cap} chars from {tool_name}]..."
+    keep = max(0, cap - len(marker))
+    if keep < 64:
+        return tool_text[:cap], True
+    head = keep // 2
+    tail = keep - head
+    return tool_text[:head] + marker + tool_text[-tail:], True
 
 
 def _verifier_file_evidence_key(msg: Dict[str, Any]) -> str:
@@ -1107,6 +1181,102 @@ def _verifier_file_metadata(fp: FilePointer) -> Dict[str, Any]:
     }
 
 
+# Main-agent INLINE_THRESHOLD is 20MB — fine for the acting agent, catastrophic for
+# verifier_execute: intermediate ranking dumps (100KB–300KB+) get fully inlined,
+# Rose streams mid-JSON past the attempt deadline, soft-fails score=0.5, and the
+# finished agent is bounced back into execute (cuda-kernel top100). Cap verifier
+# inlining separately; prefer deliverable-looking filenames within the budget.
+VERIFIER_MAX_INLINE_FILE_CHARS = 40_000
+VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 48_000
+_VERIFIER_DELIVERABLE_FILENAME_RE = re.compile(
+    r"(top[_\-]?\d+|final|result|output|repos|deliverable|answer)",
+    re.IGNORECASE,
+)
+
+
+def _truncate_text_for_verifier_inline(text: str, *, max_chars: int, filename: str) -> str:
+    """Keep head+tail when a single file exceeds the verifier per-file cap."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    marker = f"\n\n...[verifier truncated {len(text) - max_chars} chars from {filename}]...\n\n"
+    keep = max_chars - len(marker)
+    if keep < 64:
+        return text[:max_chars]
+    head = keep // 2
+    tail = keep - head
+    return text[:head] + marker + text[-tail:]
+
+
+def _verifier_file_inline_priority(filename: str) -> int:
+    """Lower sorts first. Deliverable-looking names beat intermediate dumps."""
+    return 0 if _VERIFIER_DELIVERABLE_FILENAME_RE.search(filename or "") else 1
+
+
+def _verifier_omitted_file_metadata_text(artifact: Dict[str, Any]) -> str:
+    filename = artifact.get("original_filename") or "file"
+    size_bytes = artifact.get("size_bytes") or 0
+    mime_type = artifact.get("mime_type") or "application/octet-stream"
+    return (
+        "file_pointer:\n"
+        f"  original_filename: {filename}\n"
+        f"  mime_type: {mime_type}\n"
+        f"  size_bytes: {size_bytes}\n"
+        "  note: Omitted from verifier inline (file-evidence budget); "
+        "prefer newest deliverable artifacts already inlined above/below."
+    )
+
+
+def _apply_verifier_file_evidence_budget(
+    evidence_by_message: Dict[str, List[Dict[str, Any]]],
+    context: List[Dict[str, Any]],
+) -> None:
+    """Keep deliverables; demote older/intermediate inlines that blow the budget."""
+    indexed: List[Tuple[int, int, str, int, Dict[str, Any]]] = []
+    for msg_index, msg in enumerate(context):
+        if not isinstance(msg, dict):
+            continue
+        key = _verifier_file_evidence_key(msg)
+        payloads = evidence_by_message.get(key) or []
+        for payload_index, payload in enumerate(payloads):
+            if not payload.get("content_inlined"):
+                continue
+            artifact = payload.get("artifact") or {}
+            filename = str(artifact.get("original_filename") or "")
+            indexed.append(
+                (
+                    _verifier_file_inline_priority(filename),
+                    -msg_index,  # newer messages first among same priority
+                    key,
+                    payload_index,
+                    payload,
+                )
+            )
+
+    indexed.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    used = 0
+    kept = 0
+    demoted = 0
+    for _prio, _neg_idx, _key, _pidx, payload in indexed:
+        n = len(str(payload.get("result") or ""))
+        if used + n <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS:
+            used += n
+            kept += 1
+            continue
+        artifact = payload.get("artifact") or {}
+        payload["result"] = _verifier_omitted_file_metadata_text(artifact)
+        payload["content_inlined"] = False
+        demoted += 1
+
+    if demoted:
+        logger.info(
+            "Verifier file-evidence budget applied",
+            kept_inlined=kept,
+            demoted_to_metadata=demoted,
+            used_chars=used,
+            budget_chars=VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
+        )
+
+
 async def _resolve_verifier_file_evidence(
     context: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -1115,6 +1285,9 @@ async def _resolve_verifier_file_evidence(
     This mirrors the main-agent attachment loading policy: use the module cache
     first, download only from activity context, inline small text files, and
     fall back to metadata for large/binary/unavailable files.
+
+    Verifier inlining is further capped (per-file + total budget) so intermediate
+    artifact dumps cannot inflate verifier_execute past Rose attempt deadlines.
     """
     evidence_by_message: Dict[str, List[Dict[str, Any]]] = {}
     for msg in context:
@@ -1147,6 +1320,11 @@ async def _resolve_verifier_file_evidence(
                 if file_content is not None and fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
+                        text_content = _truncate_text_for_verifier_inline(
+                            text_content,
+                            max_chars=VERIFIER_MAX_INLINE_FILE_CHARS,
+                            filename=fp.original_filename,
+                        )
                         result_text = build_attachment_text_content(fp, text_content)
                         content_inlined = True
                     except UnicodeDecodeError:
@@ -1163,6 +1341,8 @@ async def _resolve_verifier_file_evidence(
 
         if payloads:
             evidence_by_message[_verifier_file_evidence_key(msg)] = payloads
+
+    _apply_verifier_file_evidence_budget(evidence_by_message, context)
     return evidence_by_message
 
 
@@ -5113,13 +5293,20 @@ def max_tokens_for_verifier_call_site(call_site: str) -> int:
         return DECLARED_EVALUATOR_MAX_TOKENS
     return VERIFIER_MAX_TOKENS
 # A verifier is advisory and must never outlive the agent benchmark/activity
-# that requested it. Keep each provider attempt short enough to fall through,
-# while also fencing the entire retry loop so six individually bounded attempts
-# cannot accumulate into a multi-minute zombie.
-VERIFIER_ATTEMPT_DEADLINE_S = 75.0
-VERIFIER_TTFT_TIMEOUT_S = 45.0
-VERIFIER_IDLE_TIMEOUT_S = 45.0
-VERIFIER_TOTAL_TIMEOUT_S = 180.0
+# that requested it. Bound each provider attempt, and fence the retry loop so
+# individually bounded attempts cannot accumulate into a multi-minute zombie.
+#
+# 2026-09-03 RCA (cuda-kernel-github-top100-code-agent k=3): attempt_completion
+# verifier_execute streamed 50–60 content chunks but RoseDeadlineError'd at the
+# old 75s attempt wall with unterminated JSON; the 180s total then soft-failed
+# at score=0.5 and bounced a finished ranking agent back into execute. Long
+# ranking transcripts need headroom for a cold verifier JSON completion (warm
+# cache retries historically finish in ~25s). Keep the fence well under the
+# 4200s task budget.
+VERIFIER_ATTEMPT_DEADLINE_S = 180.0
+VERIFIER_TTFT_TIMEOUT_S = 60.0
+VERIFIER_IDLE_TIMEOUT_S = 90.0
+VERIFIER_TOTAL_TIMEOUT_S = 420.0
 
 
 @activity.defn
@@ -6262,10 +6449,29 @@ async def fetch_compute_token_activity(
     fast_cache_affinity_key: Optional[str] = None,
     token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch one provider-typed compute token across Claude/GPT from the backend."""
+    """Fetch one provider-typed compute token across Claude/GPT from the backend.
+
+    When ``BENCHMARK_COMPUTE_TOKEN_TYPE`` is set (predeploy smoke), the pin is a
+    hard constraint: cross-provider rotation requests are refused so a Claude
+    auth failure cannot silently lease a GPT token mid-sequence and zero the
+    repeatable prompt-cache ratchet (browser-smoke floor is 40%).
+    """
     config = load_config()
     pinned_benchmark_type = benchmark_compute_token_type()
     _safe_heartbeat("Fetching compute token")
+
+    if (
+        pinned_benchmark_type
+        and token_type in ("claude", "gpt")
+        and token_type != pinned_benchmark_type
+    ):
+        logger.info(
+            "Skipping compute token fetch: rotation asked for %s but "
+            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s (keep waterfall affinity)",
+            token_type,
+            pinned_benchmark_type,
+        )
+        return None
 
     try:
         async with httpx.AsyncClient() as client:
@@ -6278,12 +6484,13 @@ async def fetch_compute_token_activity(
                 params["rootAgentId"] = root_agent_id
             if fast_cache_affinity_key:
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
-            if token_type in ("claude", "gpt"):
+            if pinned_benchmark_type:
+                # Pin wins over callers (including _rotate_compute_token).
+                params["tokenType"] = pinned_benchmark_type
+            elif token_type in ("claude", "gpt"):
                 params["tokenType"] = token_type
             elif anthropic_family_excluded():
                 params["tokenType"] = "gpt"
-            elif pinned_benchmark_type:
-                params["tokenType"] = pinned_benchmark_type
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={
@@ -6298,6 +6505,14 @@ async def fetch_compute_token_activity(
                 token = data.get("accessToken")
                 provider_type = data.get("type")
                 if token and provider_type in ("claude", "gpt"):
+                    if pinned_benchmark_type and provider_type != pinned_benchmark_type:
+                        logger.warning(
+                            "Rejecting compute token type=%s under "
+                            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
+                            provider_type,
+                            pinned_benchmark_type,
+                        )
+                        return None
                     logger.info(
                         "✅ Compute token fetched",
                         user_id=user_id,
@@ -6582,7 +6797,9 @@ async def call_planner_llm_activity(
     import time
 
     from utils.prompts import build_planner_system_prompt
-    from utils.tool_schemas import PlannerResponse
+    from utils.tool_schemas import get_planner_response_model
+
+    planner_response_model = get_planner_response_model()
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
@@ -6663,7 +6880,7 @@ async def call_planner_llm_activity(
             model=model,
             temperature=0.2,
             max_tokens=16384,
-            response_model=PlannerResponse,
+            response_model=planner_response_model,
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,

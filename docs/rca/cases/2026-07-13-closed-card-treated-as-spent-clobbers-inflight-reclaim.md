@@ -80,3 +80,20 @@ None recorded.
 When a cleanup path can run twice concurrently, derive "already handled" from
 the persisted state machine rather than from an ambiguous external resource
 state like "card is no longer live".
+
+## Recurrence (2026-09-03)
+
+Same symptom (`agent-payment-abandonment`: expected `VOIDED`, got `CLEARED`) via a
+**different entry point** than `purchaseCleanup.ts`.
+
+Smoke r17 agent `2795f430-1bf7-4f22-895a-6ba07de3a664`: abandon closed the card and
+started reclaim (`RECLAIMING`), then a concurrent same-fingerprint
+`GET /api/purchases/lookup` from the sibling idempotent-abandonment agent hit
+`tryGetLiveCardDetails` → `card_closed` and `lookupPurchase` / `tryReuseExistingPurchase`
+unconditionally wrote `CLEARED`. July's `purchaseCardWasSpent` guard never ran on
+this path.
+
+Fix: `closedCardIndicatesMerchantSpend()` in `domains/purchases/service.ts` skips
+`CLEARED` when wallet funding is `RECLAIMING` / `RECLAIMED` / `RECLAIM_FAILED`.
+Cemented by `lookupPurchase does not mark CLEARED a held card closed for reclaim`
+in `purchases-charge-flow` unit tests.

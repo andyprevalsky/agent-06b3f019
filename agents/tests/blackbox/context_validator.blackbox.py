@@ -395,6 +395,81 @@ def test_duplicate_system_messages_are_scoped_to_sub_agent():
     assert same_scope_duplicate_errors, "same browser task scope should still flag exact duplicate messages"
 
 
+def test_cc_session_cancelled_without_subagent_preserves_tool_pairing():
+    """CC Session Cancelled must stay model-visible when it closes the spawn toolCallId.
+
+    Repro from cuda-kernel k=3 r11 agent 9976214f (2026-09-03): DAG cancel left
+    Session Cancelled (task_complete + parent toolCallId) marked subAgentId.
+    drop_rows_never_sent_to_model stripped it → next spawn ASSISTANT sat adjacent
+    → role_alternation. Omitting subAgentId on task_complete keeps the terminal.
+    """
+    from context_validator import validate_context
+
+    spawn_a = "call_z1g8wJvBbH46TGXqEpsdUvcy"
+    spawn_b = "call_bXjvo57fITKUqZAUrgpYpdP9"
+    messages = [
+        _make_msg("USER", "Find top CUDA kernel repos", ts="2026-09-03T03:11:00.000Z"),
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("spawn_agent", spawn_a)],
+            ts="2026-09-03T03:11:58.000Z",
+        ),
+        {
+            "role": "TOOL",
+            "text": "Agent paused by user",
+            "timestamp": "2026-09-03T03:13:13.000Z",
+            "metadata": {
+                "toolCallId": spawn_a,
+                "toolName": "spawn_claude_code_agent",
+                "toolStatus": "FINISHED",
+                "title": "Session Cancelled",
+                "action_type": "task_complete",
+            },
+        },
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("spawn_agent", spawn_b)],
+            ts="2026-09-03T03:15:41.000Z",
+        ),
+        {
+            "role": "TOOL",
+            "text": "explore done",
+            "timestamp": "2026-09-03T03:19:00.000Z",
+            "metadata": {
+                "toolCallId": spawn_b,
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "title": "Explore complete",
+            },
+        },
+    ]
+
+    # Buggy shape: Session Cancelled marked subAgentId → dropped → role_alternation.
+    buggy = []
+    for msg in messages:
+        copied = {**msg, "metadata": dict(msg.get("metadata") or {})}
+        if copied["metadata"].get("title") == "Session Cancelled":
+            copied["metadata"]["subAgentId"] = "3491b1dd-c705-4735-984d-f0112555d470"
+        buggy.append(copied)
+    buggy_errors = [
+        v
+        for v in validate_context(buggy)
+        if v.rule == "role_alternation" and v.severity == "error"
+    ]
+    assert buggy_errors, (
+        "expected role_alternation when Session Cancelled is internal "
+        f"(subAgentId) and drops the only tool result, got: {buggy_errors}"
+    )
+
+    fixed_errors = [v for v in validate_context(messages) if v.severity == "error"]
+    assert not fixed_errors, (
+        "parent-visible Session Cancelled must pair the spawn tool_call and "
+        f"clear role_alternation, got: {fixed_errors}"
+    )
+
+
 def test_browser_teardown_exclude_from_model_preserves_spawn_tool_result():
     """FE chip-close teardown must not erase the real spawn tool result.
 
@@ -499,6 +574,10 @@ async def run_all_tests():
     r.record("direct_subagent_parent_result_wins_over_later_child_ui_row", test_direct_subagent_parent_result_wins_over_later_child_ui_row)
     r.record("final_orphan_tool_use_matches_llm_repair_path", test_final_orphan_tool_use_matches_llm_repair_path)
     r.record("duplicate_system_messages_are_scoped_to_sub_agent", test_duplicate_system_messages_are_scoped_to_sub_agent)
+    r.record(
+        "cc_session_cancelled_without_subagent_preserves_tool_pairing",
+        test_cc_session_cancelled_without_subagent_preserves_tool_pairing,
+    )
     r.record(
         "browser_teardown_exclude_from_model_preserves_spawn_tool_result",
         test_browser_teardown_exclude_from_model_preserves_spawn_tool_result,

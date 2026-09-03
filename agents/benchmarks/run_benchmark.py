@@ -42,6 +42,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -142,6 +143,28 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 # planner retry is still inside its workflow budget.
 AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
+
+
+def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
+    """Per-task early-fail silence budget for non-terminal leaves.
+
+    Claude Code sessions update a single in-place progress chip for up to
+    ``MAX_RUNTIME_S`` (30m) without incrementing ``message_count``. The default
+    stall budget (~510s) therefore false-fails healthy code-agent ranking
+    benches mid-session. Raise the limit to cover one full CC runtime plus a
+    small buffer when the task expects / requires Claude Code.
+    """
+    limit = int(AGENT_STALL_SECONDS)
+    expects_cc = "spawn_claude_code_agent" in (getattr(task, "expected_tools", None) or [])
+    requires_cc = bool(getattr(task, "requires_claude_code", False))
+    if expects_cc or requires_cc:
+        try:
+            from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
+        except Exception:  # pragma: no cover - import guard for non-agents layouts
+            MAX_RUNTIME_S = 1800
+        limit = max(limit, int(MAX_RUNTIME_S) + 120)
+    return limit
+
 
 _WORLD_MODEL_UPDATE_EVENTS: list[dict[str, Any]] = []
 _WORLD_MODEL_UPDATE_RESULT: Optional[dict[str, Any]] = None
@@ -2017,6 +2040,17 @@ def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
     return f"navi-agent-tasks-{workspace}"
 
 
+def _inject_benchmark_prompt_secrets(goal: str) -> str:
+    """Substitute secret placeholders in benchmark prompts from the environment."""
+    if "{GITHUB_DISPATCH_TOKEN}" in goal:
+        token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
+        if not token:
+            raise ValueError(
+                "GITHUB_DISPATCH_TOKEN is required for this benchmark prompt placeholder"
+            )
+        goal = goal.replace("{GITHUB_DISPATCH_TOKEN}", token)
+    return goal
+
 def _doordash_food_plan_fixture_env() -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -2196,6 +2230,7 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
+    goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
         goal += payment_boundary_operational_suffix()
     return goal
@@ -3740,6 +3775,7 @@ async def poll_agent(
     """
     start = time.time()
     last_activity_time = start  # tracks ANY activity across the entire tree
+    last_cost_change_time = start  # tree LLM cost growth (CC in-place progress)
     prev_tree_message_count = 0
     prev_tree_agent_count = 0
     prev_tree_cost = 0
@@ -3754,6 +3790,7 @@ async def poll_agent(
     # Per-agent stall tracking: agent_id → {count, last_change_time, status}.
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
+    stall_limit_seconds = agent_stall_limit_seconds(task)
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
     validated_payment_receipt_request_id: Optional[str] = None
@@ -4057,6 +4094,7 @@ async def poll_agent(
             if tree_cost > prev_tree_cost:
                 activity_detected = True
                 prev_tree_cost = tree_cost
+                last_cost_change_time = now
 
             if activity_detected:
                 last_activity_time = now
@@ -4127,13 +4165,15 @@ async def poll_agent(
                     leaves.append(aid)
 
             # Tree is stalled only when EVERY non-terminal leaf has been
-            # silent for ≥ AGENT_STALL_SECONDS. If the most-recently-active
-            # leaf still emitted within the threshold, the tree is making
-            # progress somewhere — not stalled.
+            # silent for ≥ stall_limit_seconds AND tree LLM cost has also
+            # stopped growing. Claude Code updates an in-place progress chip
+            # without bumping message_count, so cost is the durable signal
+            # that a long CC session is still alive.
             if leaves:
                 max_leaf_change = max(per_agent_state.get(aid, {}).get("last_change_time", 0.0) for aid in leaves)
                 tree_idle = now - max_leaf_change
-                if tree_idle > AGENT_STALL_SECONDS:
+                cost_idle = now - last_cost_change_time
+                if tree_idle > stall_limit_seconds and cost_idle > stall_limit_seconds:
                     # All leaves silent — pick the staffer leaf (most recent
                     # activity) to surface in the error message.
                     stuck_aid = max(
@@ -4144,7 +4184,8 @@ async def poll_agent(
                     role = "root" if stuck_aid == agent_id else "leaf"
                     reason = (
                         f"tree stalled — newest-active {role} {stuck_aid[:12]} "
-                        f"silent for {tree_idle:.0f}s (threshold={AGENT_STALL_SECONDS}s, "
+                        f"silent for {tree_idle:.0f}s (threshold={stall_limit_seconds}s, "
+                        f"cost_idle={cost_idle:.0f}s, "
                         f"status={stuck_st.get('status', '?')}, "
                         f"messages={stuck_st.get('count', '?')}, "
                         f"non_terminal_leaves={len(leaves)})"
@@ -9056,6 +9097,9 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
                 "agent_id": agent_id,
                 "status": node.get("status"),
                 "agent_type": node.get("agent_type"),
+                "goal": str(node.get("goal") or "")[:240],
+                "mentions_andy": bool(node.get("mentions_andy")),
+                "mentions_aman": bool(node.get("mentions_aman")),
                 "message_count": int(node.get("message_count") or 0),
                 "research_tool_count": int(node.get("research_tool_count") or 0),
                 "explore_spawn_count": int(node.get("explore_spawn_count") or 0),
@@ -9071,6 +9115,101 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
 
 def _first_level_gps_from_data(data: dict) -> list[dict]:
     return list(_compact_benchmark_state_for_judge(data).get("first_level_gps") or [])
+
+
+def _nested_general_purpose_violations(compact_tree: dict) -> list[dict]:
+    """GPs whose parent is itself GP / for_each / explore — typed evidence for T6."""
+    by_id = {str(agent_id): node for agent_id, node in compact_tree.items() if isinstance(node, dict)}
+    violations: list[dict] = []
+    for agent_id, node in by_id.items():
+        agent_type = str(node.get("agent_type") or "")
+        goal = str(node.get("goal") or "")
+        is_gp = agent_type == "general_purpose" or goal.startswith("You are analyzing ONE creator")
+        if not is_gp:
+            continue
+        parent_id = str(node.get("parent_agent_id") or "")
+        if not parent_id or parent_id not in by_id:
+            continue
+        parent = by_id[parent_id]
+        parent_type = str(parent.get("agent_type") or "")
+        parent_goal = str(parent.get("goal") or "")
+        parent_is_gp = parent_type in {"general_purpose", "for_each"} or parent_goal.startswith(
+            "You are analyzing ONE creator"
+        )
+        parent_is_explore = _is_explore_tree_node(parent)
+        if parent_is_gp or parent_is_explore:
+            violations.append(
+                {
+                    "agent_id": agent_id,
+                    "parent_agent_id": parent_id,
+                    "parent_agent_type": parent_type or ("explore" if parent_is_explore else "general_purpose"),
+                }
+            )
+    return violations
+
+
+def _text_mentions_andy(text: str) -> bool:
+    blob = str(text or "").lower()
+    return "andy prevalsky" in blob or "andy's" in blob or "for andy" in blob
+
+
+def _text_presents_aman_as_user(text: str) -> bool:
+    """True when Aman is framed as the principal user/owner (not schema key leftovers)."""
+    blob = str(text or "").lower()
+    if "aman gottumukkala" not in blob and "aman's" not in blob:
+        return False
+    # Historical July schema keys / phrase leftovers are not Aman-as-principal.
+    if "opportunities_for_aman" in blob or "opportunities for aman" in blob:
+        cleaned = (
+            blob.replace("opportunities_for_aman", " ")
+            .replace("opportunities for aman", " ")
+        )
+        if "aman gottumukkala" not in cleaned and "aman's" not in cleaned:
+            return False
+        blob = cleaned
+    andy_present = _text_mentions_andy(blob)
+    aman_owner_markers = (
+        "for aman gottumukkala",
+        "aman gottumukkala is",
+        "aman's personal brand",
+        "building a personal brand for aman",
+        "principal user",
+    )
+    if any(marker in blob for marker in aman_owner_markers):
+        return True
+    # Aman named without Andy in the same root/completion blob → treat as principal.
+    return not andy_present
+
+
+def _principal_user_andy_check(data: dict) -> tuple[bool, str]:
+    """T1: Andy is principal; Aman is not the user/owner on root goal or completion."""
+    compact = _compact_benchmark_state_for_judge(data)
+    tree = compact.get("tree") if isinstance(compact.get("tree"), dict) else {}
+    root_id = _tree_root_id(tree, data)
+    root = tree.get(str(root_id)) if root_id else None
+    root = root if isinstance(root, dict) else {}
+    root_goal = str(root.get("goal") or "")
+    completion_summary = str(root.get("completion_summary") or "")
+    if not completion_summary:
+        completion_summary = _root_deliverable_blob(data)[:240]
+    first_level = compact.get("first_level_gps") if isinstance(compact.get("first_level_gps"), list) else []
+    gps_mention_andy = any(
+        _text_mentions_andy(str(gp.get("goal") or ""))
+        or bool(gp.get("mentions_andy"))
+        for gp in first_level
+        if isinstance(gp, dict)
+    )
+    andy_ok = (
+        bool(root.get("mentions_andy"))
+        or _text_mentions_andy(root_goal)
+        or _text_mentions_andy(completion_summary)
+        or gps_mention_andy
+    )
+    if _text_presents_aman_as_user(root_goal) or _text_presents_aman_as_user(completion_summary):
+        return False, "T1: root goal or completion presents Aman as the principal user"
+    if not andy_ok:
+        return False, "T1: no Andy Prevalsky principal evidence on root/first-level GPs/completion"
+    return True, "All declared static checks passed"
 
 
 def _judge_source_tree(data: dict) -> dict:
@@ -9137,6 +9276,19 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
             if isinstance(agent, dict)
         ]
     compact["first_level_gps"] = _first_level_gps_from_compact_tree(compact_tree, data)
+    nested_violations = _nested_general_purpose_violations(compact_tree)
+    # Typed T6 evidence so the LLM judge cannot fail closed on "tree truncated"
+    # when parentage is fully available in compact form (mass-agent Fast Mode).
+    compact["nested_general_purpose_count"] = len(nested_violations)
+    compact["nested_general_purpose_violations"] = nested_violations[:20]
+    root_id = _tree_root_id(compact_tree, data)
+    root_node = compact_tree.get(str(root_id)) if root_id else None
+    root_node = root_node if isinstance(root_node, dict) else {}
+    compact["principal_user"] = {
+        "mentions_andy": bool(root_node.get("mentions_andy")),
+        "mentions_aman": bool(root_node.get("mentions_aman")),
+        "completion_summary": str(root_node.get("completion_summary") or "")[:240],
+    }
     compact["usage"] = {
         "cost_cents": data.get("cost_cents") or raw.get("cost_cents") or 0,
         "tokens_out": data.get("tokens_out") or raw.get("tree_tokens_out") or 0,
@@ -9837,6 +9989,100 @@ def _has_later_browser_recovery(messages: list, start_index: int) -> bool:
     return False
 
 
+def _has_later_web_fetch_recovery(messages: list, start_index: int) -> bool:
+    """True when a later web_fetch FINISHED proves the agent recovered from a fetch ERROR."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+        if tool_name != "web_fetch":
+            continue
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        if status == "FINISHED":
+            return True
+    return False
+
+
+_RECOVERABLE_EXPLORE_TOOLS = frozenset(
+    {"web_fetch", "web_search", "grep", "people_search"}
+)
+
+
+def _has_later_explore_tool_recovery(messages: list, start_index: int) -> bool:
+    """True when later research progress proves the agent recovered from an explore-tool ERROR."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        if status != "FINISHED":
+            continue
+        if tool_name in _RECOVERABLE_EXPLORE_TOOLS or tool_name in {
+            "attempt_completion",
+            "completion_summary",
+        }:
+            return True
+    return False
+
+
+def _is_recoverable_web_fetch_failure(
+    candidate: dict,
+    *,
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Transient web_fetch ERRORs recovered by a later successful fetch are not tool failures.
+
+    Explore / GP children often hit a one-off fetch ERROR (timeout, 403, soft page) and
+    continue with alternate URLs. Counting those recovered rows in `no_tool_failures`
+    fails closed Fast Mode mass-agent replays whose historical trajectories include a
+    single recovered fetch ERROR (local repro: test-mass-agent-run-0 agent
+    4f078c58… / child 84979949… web_fetch bf0a44fa… then 69 later FINISHED fetches).
+    Unrecovered terminal web_fetch ERRORs still count.
+    """
+    tool_name = str(candidate.get("toolName") or candidate.get("tool_name") or "")
+    if tool_name != "web_fetch":
+        return False
+    status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+    if status not in {"ERROR", "FAILED"}:
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_web_fetch_recovery(messages, message_index)
+
+
+def _is_recoverable_explore_tool_failure(
+    candidate: dict,
+    *,
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Explore-tool ERRORs recovered by later research/completion are not harness failures.
+
+    Fast Mode mass-agent cache trajectories include schema-invalid grep calls
+    (`Unsupported grep parameter: 'filters'`) and transient web_fetch ERRORs; children
+    pivot to web_search / alternate URLs and still COMPLETE. Local repro:
+    test-mass-agent-run-0 agent 65558d55… / child 5af074c9… had 3 unrecovered-by-same-tool
+    grep ERRORs then continued with dozens of FINISHED web_search calls. Unrecovered
+    terminal explore ERRORs (no later research/completion FINISHED) still count.
+    """
+    tool_name = str(candidate.get("toolName") or candidate.get("tool_name") or "")
+    if tool_name not in _RECOVERABLE_EXPLORE_TOOLS:
+        return False
+    status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+    if status not in {"ERROR", "FAILED"}:
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_explore_tool_recovery(messages, message_index)
+
+
 def _is_recoverable_browser_element_miss_failure(
     candidate: dict,
     *,
@@ -10196,50 +10442,80 @@ def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[
     return failures
 
 
+def _all_trajectory_messages(data: dict) -> list[tuple[list, str]]:
+    """Return (messages, agent_label) pairs for root + captured benchmark tree."""
+    sections: list[tuple[list, str]] = []
+    root_messages = data.get("messages", []) or []
+    if root_messages:
+        sections.append((root_messages, "root"))
+    tree = data.get("_benchmark", {}).get("tree") if isinstance(data.get("_benchmark"), dict) else None
+    if isinstance(tree, dict):
+        for agent_id, info in tree.items():
+            if not isinstance(info, dict):
+                continue
+            messages = info.get("messages") or []
+            if messages:
+                sections.append((messages, str(agent_id)[:8]))
+    return sections
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
-    """Return grounded failed tool lifecycle events from the root trajectory."""
+    """Return grounded failed tool lifecycle events from root + tree trajectories."""
     failures: list[str] = []
-    messages = data.get("messages", []) or []
-    for message_index, message in enumerate(messages):
-        metadata = message.get("metadata") if isinstance(message, dict) else None
-        if not isinstance(metadata, dict):
-            continue
-        message_text = _tool_message_body(message)
-        candidates = [metadata]
-        if isinstance(metadata.get("auxiliary"), dict):
-            candidates.append(metadata["auxiliary"])
-        for candidate in candidates:
-            tool_name = candidate.get("toolName") or candidate.get("tool_name")
-            if not tool_name:
+    for messages, agent_label in _all_trajectory_messages(data):
+        for message_index, message in enumerate(messages):
+            metadata = message.get("metadata") if isinstance(message, dict) else None
+            if not isinstance(metadata, dict):
                 continue
-            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
-                continue
-            if _is_recoverable_browser_element_miss_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_pinned_host_refusal_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_browser_evaluate_uncaught_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
-            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
-            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
-                call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
-                failures.append(f"{tool_name} {call_id} status={status or 'unsuccessful'}")
+            message_text = _tool_message_body(message)
+            candidates = [metadata]
+            if isinstance(metadata.get("auxiliary"), dict):
+                candidates.append(metadata["auxiliary"])
+            for candidate in candidates:
+                tool_name = candidate.get("toolName") or candidate.get("tool_name")
+                if not tool_name:
+                    continue
+                if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                    continue
+                if _is_recoverable_browser_element_miss_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_pinned_host_refusal_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_browser_evaluate_uncaught_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_web_fetch_failure(
+                    candidate,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_explore_tool_failure(
+                    candidate,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+                event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+                if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                    call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
+                    prefix = f"{agent_label}:" if agent_label != "root" else ""
+                    failures.append(f"{prefix}{tool_name} {call_id} status={status or 'unsuccessful'}")
     return failures
 
 
@@ -10294,6 +10570,17 @@ def _completion_cards_from_messages(messages: list) -> list[dict]:
         ):
             summaries.append(completion)
     return summaries
+
+
+
+def _task_declares_static_check(task: BenchmarkTask, check_type: str) -> bool:
+    """Return True when any declared static_check evaluator includes check_type."""
+    return any(
+        check.get("type") == check_type
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    )
 
 
 def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: bool) -> list[dict]:
@@ -10453,6 +10740,181 @@ _APPROVAL_AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
+
+
+def _claude_code_sessions_with_transcripts(
+    sessions: list[dict], *, min_chars: int = 1
+) -> list[dict]:
+    """Return sessions whose stored terminal output meets ``min_chars``."""
+    return [
+        session
+        for session in sessions
+        if isinstance(session, dict)
+        and isinstance(session.get("output"), str)
+        and len(session.get("output", "").strip()) >= min_chars
+    ]
+
+
+def _claude_code_started_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a claude_code_started (or equivalent) chip anchor."""
+    started: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        action_type = metadata.get("action_type")
+        if action_type in {"claude_code_started", "task_started"} or (
+            metadata.get("toolName") == "spawn_claude_code_agent"
+            and metadata.get("ws_url")
+        ):
+            started.add(task_id)
+    return started
+
+
+def _claude_code_terminal_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a chip-terminal task_complete/session_cancelled."""
+    terminal: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        if metadata.get("action_type") in {"task_complete", "session_cancelled"}:
+            terminal.add(task_id)
+    return terminal
+
+
+async def _await_claude_code_chip_terminality(
+    base_url: str,
+    agent_id: str,
+    data: dict,
+    *,
+    timeout_seconds: float = 45.0,
+) -> dict:
+    """After pause, wait until Claude Code chips have task_complete+task_id in-transcript.
+
+    Pause cancel is async (activity cleanup posts Session Cancelled). Collecting
+    logs immediately freezes the durable hub FE on "Spinning up..." because the
+    archive misses the terminal message (hub agent 094f1085 had 87 msgs without
+    cancel; local agent had 89 with Session Cancelled + task_id).
+    """
+    latest = data
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        messages = latest.get("messages") or []
+        started = _claude_code_started_task_ids(messages)
+        if not started:
+            return latest
+        terminal = _claude_code_terminal_task_ids(messages)
+        if started <= terminal:
+            print(
+                f"    ✓ Claude Code chip terminality settled "
+                f"({len(terminal)}/{len(started)} task_complete+task_id)"
+            )
+            return latest
+        if time.monotonic() >= deadline:
+            missing = sorted(started - terminal)
+            print(
+                f"    ⚠ Claude Code cancel messages incomplete before log collection; "
+                f"missing task_id(s): {missing[:5]}"
+            )
+            return latest
+        await asyncio.sleep(1.5)
+        try:
+            latest = await get_agent(base_url, agent_id)
+        except Exception as refresh_error:
+            print(f"    ⚠ post-pause agent refresh failed: {refresh_error}")
+
+
+async def _hydrate_claude_code_sessions(data: dict) -> None:
+    """Fetch Claude Code sessions (root + tree) for transcript static checks.
+
+    On timeout/early-fail the harness pauses the agent before evaluators run, but
+    ``spawn_claude_code_agent`` persists terminal output asynchronously on cancel.
+    Retry briefly when sessions exist yet still have empty ``output`` so the
+    static check does not race the cancel-persist path.
+    """
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_agent_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+    benchmark_state = data.setdefault("_benchmark", {})
+    base_url = str(benchmark_state.get("api_base_url") or "").rstrip("/")
+    if not root_agent_id:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "root agent id is missing"
+        return
+    if not base_url:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "api_base_url is missing"
+        return
+
+    agent_ids = {root_agent_id}
+    try:
+        tree_agents = await get_agent_tree(base_url, root_agent_id)
+        for node in tree_agents or []:
+            if not isinstance(node, dict):
+                continue
+            aid = str(node.get("agent_id") or node.get("id") or "").strip()
+            if aid:
+                agent_ids.add(aid)
+    except Exception as tree_exc:
+        benchmark_state["claude_code_session_tree_error"] = str(tree_exc)[:200]
+
+    # Pause → cancel → persist can lag the evaluator by a few seconds. Poll until
+    # at least one session has a non-empty transcript (or we exhaust the budget).
+    retry_deadline = time.monotonic() + 45.0
+    sessions_by_id: dict[str, dict] = {}
+    fetch_errors: list[str] = []
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                sessions_by_id = {}
+                fetch_errors = []
+                for aid in sorted(agent_ids):
+                    try:
+                        resp = await client.get(
+                            f"{base_url}/api/claude-code-session/agent/{aid}",
+                            headers=headers,
+                        )
+                        if resp.status_code != 200:
+                            fetch_errors.append(f"{aid[:8]}:HTTP {resp.status_code}")
+                            continue
+                        payload = resp.json() if resp.content else {}
+                        for session in payload.get("sessions") or []:
+                            if not isinstance(session, dict):
+                                continue
+                            session_id = str(session.get("id") or "").strip()
+                            if session_id:
+                                sessions_by_id[session_id] = session
+                    except Exception as fetch_exc:
+                        fetch_errors.append(f"{aid[:8]}:{fetch_exc}")
+
+                sessions = list(sessions_by_id.values())
+                if not sessions:
+                    break
+                if _claude_code_sessions_with_transcripts(sessions):
+                    break
+                if time.monotonic() >= retry_deadline:
+                    break
+                await asyncio.sleep(2.0)
+
+        benchmark_state["claude_code_sessions"] = list(sessions_by_id.values())
+        if fetch_errors and not sessions_by_id:
+            benchmark_state["claude_code_session_evidence_error"] = "; ".join(fetch_errors)[:300]
+    except Exception as exc:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = str(exc)[:300]
+
+
 
 
 def _approval_user_visible_text(request: dict) -> str:
@@ -10688,7 +11150,9 @@ def _run_declared_static_check(
                 )
             continue
         if check_type == "agent_status":
-            expected_status = str(check.get("value") or "COMPLETED").upper()
+            expected_status = str(
+                check.get("value") or check.get("expected_status") or "COMPLETED"
+            ).upper()
             observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
             if observed_status != expected_status:
                 return False, f"Agent status was {observed_status}; expected {expected_status}"
@@ -10775,6 +11239,97 @@ def _run_declared_static_check(
                     f"(of {len(gps)} first-level GPs); expected >= {minimum}",
                 )
             continue
+        if check_type == "first_level_gp_explore_research":
+            gps = _first_level_gps_from_data(data)
+            if not gps:
+                return False, "T3: first_level_gps was empty"
+            failures = []
+            for gp in gps:
+                explore = int(gp.get("explore_spawn_count") or 0)
+                research = int(gp.get("research_tool_count") or 0)
+                stub = bool(gp.get("has_traj_end_stub"))
+                if stub or (explore < 1 and research < 3):
+                    failures.append(gp)
+            if failures:
+                sample = failures[0]
+                return (
+                    False,
+                    "T3: first-level GP "
+                    f"{str(sample.get('agent_id') or '')[:8]} missing explore/research "
+                    f"(explore={int(sample.get('explore_spawn_count') or 0)}, "
+                    f"research={int(sample.get('research_tool_count') or 0)}, "
+                    f"stub={bool(sample.get('has_traj_end_stub'))}; "
+                    f"{len(failures)}/{len(gps)} failing)",
+                )
+            continue
+        if check_type == "first_level_gp_july_trajectories":
+            gps = _first_level_gps_from_data(data)
+            if not gps:
+                return False, "T4: first_level_gps was empty"
+            failures = []
+            for gp in gps:
+                messages = int(gp.get("message_count") or 0)
+                explore = int(gp.get("explore_spawn_count") or 0)
+                research = int(gp.get("research_tool_count") or 0)
+                stub = bool(gp.get("has_traj_end_stub"))
+                ok = (messages >= 12 or research >= 3 or explore >= 1) and not stub
+                if not ok:
+                    failures.append(gp)
+            if failures:
+                sample = failures[0]
+                return (
+                    False,
+                    "T4: first-level GP "
+                    f"{str(sample.get('agent_id') or '')[:8]} below July trajectory bar "
+                    f"(messages={int(sample.get('message_count') or 0)}, "
+                    f"research={int(sample.get('research_tool_count') or 0)}, "
+                    f"explore={int(sample.get('explore_spawn_count') or 0)}, "
+                    f"stub={bool(sample.get('has_traj_end_stub'))}; "
+                    f"{len(failures)}/{len(gps)} failing)",
+                )
+            continue
+        if check_type == "zero_live_spend":
+            compact = _compact_benchmark_state_for_judge(data)
+            usage = compact.get("usage") if isinstance(compact.get("usage"), dict) else {}
+            cost = int(usage.get("cost_cents") or 0)
+            cache_create = int(usage.get("cache_creation_input_tokens") or 0)
+            live_out = int(usage.get("live_output_tokens") or 0)
+            if cost != 0 or cache_create != 0 or live_out != 0:
+                return (
+                    False,
+                    "T5: live spend not zero "
+                    f"(cost_cents={cost}, cache_creation_input_tokens={cache_create}, "
+                    f"live_output_tokens={live_out})",
+                )
+            gps = list(compact.get("first_level_gps") or [])
+            stubs = [gp for gp in gps if isinstance(gp, dict) and gp.get("has_traj_end_stub")]
+            if stubs:
+                return (
+                    False,
+                    f"T5: {len(stubs)} first-level GP traj-end stubs while claiming $0 live spend",
+                )
+            continue
+        if check_type == "no_nested_general_purpose":
+            compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
+            violations = _nested_general_purpose_violations(compact_tree)
+            if violations:
+                sample = violations[0]
+                return (
+                    False,
+                    "T6: nested general-purpose "
+                    f"{str(sample.get('agent_id') or '')[:8]} under "
+                    f"{str(sample.get('parent_agent_type') or 'unknown')} "
+                    f"{str(sample.get('parent_agent_id') or '')[:8]} "
+                    f"({len(violations)} total)",
+                )
+            if not compact_tree:
+                return False, "T6: typed tree was empty"
+            continue
+        if check_type == "principal_user_andy":
+            ok, reason = _principal_user_andy_check(data)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "approval_request_details_for_seen_kind":
             observed_kind = benchmark_state.get("attention_request_kind_seen")
             details_by_kind = check.get("details_by_kind") or {}
@@ -10807,6 +11362,32 @@ def _run_declared_static_check(
             ):
                 return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type == "claude_code_session_output":
+            sessions = benchmark_state.get("claude_code_sessions") or []
+            min_sessions = int(check.get("min_sessions", 1))
+            min_chars = int(check.get("min_chars", 1))
+            if len(sessions) < min_sessions:
+                evidence_error = benchmark_state.get("claude_code_session_evidence_error")
+                suffix = f" ({evidence_error})" if evidence_error else ""
+                return (
+                    False,
+                    f"Claude Code session count was {len(sessions)}; "
+                    f"expected at least {min_sessions}{suffix}",
+                )
+            stored = [
+                session
+                for session in sessions
+                if isinstance(session, dict)
+                and isinstance(session.get("output"), str)
+                and len(session.get("output", "").strip()) >= min_chars
+            ]
+            if len(stored) < min_sessions:
+                return (
+                    False,
+                    f"Claude Code sessions with stored transcripts (≥{min_chars} chars): "
+                    f"{len(stored)}; expected at least {min_sessions}",
+                )
+            continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"
 
@@ -10814,7 +11395,9 @@ def _run_declared_static_check(
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
+    *,
     base_url: str | None = None,
+    static_only: bool = False,
 ) -> tuple[bool, Optional[str], list[dict]]:
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
     if not task.enforce_declared_evaluators:
@@ -10828,6 +11411,14 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    if any(
+        check.get("type") == "claude_code_session_output"
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    ):
+        await _hydrate_claude_code_sessions(data)
+
     needs_tree_evidence = any(
         evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge", "polar"}
         for evaluator in task.evaluators
@@ -10839,6 +11430,8 @@ async def _run_declared_evaluators(
     for evaluator in task.evaluators:
         evaluator_id = evaluator.get("id", "unnamed")
         method = evaluator.get("method")
+        if static_only and method != "static_check":
+            continue
         usage = None
         evidence_mode = method
         try:
@@ -11277,6 +11870,9 @@ async def run_single_task(
                     data = await _refresh_agent_after_pause_for_browser_terminal(
                         base_url, agent_id, data
                     )
+                    # Wait for Session Cancelled (task_complete+task_id) before
+                    # freezing the transcript into the durable hub archive.
+                    data = await _await_claude_code_chip_terminality(base_url, agent_id, data)
             except Exception as pause_error:
                 print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 
@@ -11535,7 +12131,10 @@ async def run_single_task(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
-        if task.enforce_declared_evaluators and passed:
+        run_declared = task.enforce_declared_evaluators and (
+            passed or _task_declares_static_check(task, "claude_code_session_output")
+        )
+        if run_declared and passed:
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
                 tree = canonicalize_agent_tree(
@@ -11563,11 +12162,13 @@ async def run_single_task(
                     "live_output_tokens": tokens_out,
                     "tree_tokens_out": tree_tokens_out,
                 }
-        if task.enforce_declared_evaluators and passed:
+        if run_declared:
+            data.setdefault("_benchmark", {})["api_base_url"] = base_url
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,
                 data,
                 base_url=base_url,
+                static_only=not passed,
             )
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),
@@ -11582,6 +12183,16 @@ async def run_single_task(
         logs = await collect_logs(agent_id, data, start_time)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
+        # Keep hydrated Claude Code transcripts in the run JSON so durable FE
+        # publish can dual-write them after the ephemeral bench DB is dropped.
+        claude_code_sessions = (data.get("_benchmark") or {}).get("claude_code_sessions")
+        if isinstance(claude_code_sessions, list) and claude_code_sessions:
+            logs["claude_code_sessions"] = claude_code_sessions
+        session_evidence_error = (data.get("_benchmark") or {}).get(
+            "claude_code_session_evidence_error"
+        )
+        if session_evidence_error:
+            logs["claude_code_session_evidence_error"] = session_evidence_error
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
@@ -12993,14 +13604,15 @@ async def main_async(args):
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
-    _live_task_agent_ids: dict[str, str] = {}
+    # name -> FIFO of live agent ids so k-repeats of the same task name each keep
+    # their own deep link instead of overwriting one shared slot.
+    _live_task_agent_ids: dict[str, list[str]] = {}
 
     def _remember_live_agent(task_name: str, agent_id: str) -> None:
         if task_name and agent_id:
-            _live_task_agent_ids[task_name] = agent_id
+            _live_task_agent_ids.setdefault(task_name, []).append(agent_id)
 
-    def _report_snapshot(running_names: set[str]) -> RunState:
-        finished = {r.name for r in run.task_results}
+    def _report_snapshot(running_name_counts: dict[str, int]) -> RunState:
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
@@ -13008,8 +13620,11 @@ async def main_async(args):
             peak_fly_machines = None
         task_world_model_modes = {t.name: t.world_model_mode for t in tasks if t.world_model_mode}
         per_task: list[TaskCard] = []
+        finished_agent_ids: set[str] = set()
         for r in run.task_results:
             status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
+            if r.agent_id:
+                finished_agent_ids.add(r.agent_id)
             per_task.append(
                 TaskCard(
                     name=r.name,
@@ -13026,9 +13641,17 @@ async def main_async(args):
                     infra_usd=_infra_usd_for_elapsed(r.duration_seconds) if r.duration_seconds is not None else None,
                 )
             )
-        for name in running_names:
-            if name not in finished:
-                live_agent_id = _live_task_agent_ids.get(name)
+        # Emit one running card per still-pending occurrence (Counter), not one
+        # per distinct name — otherwise `bench A A A` with one finished looks
+        # like all three completed.
+        for name, running_count in running_name_counts.items():
+            live_ids = [
+                agent_id
+                for agent_id in _live_task_agent_ids.get(name, [])
+                if agent_id not in finished_agent_ids
+            ]
+            for index in range(running_count):
+                live_agent_id = live_ids[index] if index < len(live_ids) else None
                 per_task.append(
                     TaskCard(
                         name=name,
@@ -13061,28 +13684,32 @@ async def main_async(args):
             infra=Infra(peak_machines=peak_fly_machines) if peak_fly_machines is not None else None,
         )
 
-    def _emit_report(running_names: set[str], *, force: bool = False) -> None:
+    def _emit_report(running_name_counts: dict[str, int] | None = None, *, force: bool = False) -> None:
         try:
-            _report_emitter.maybe_emit(_report_snapshot(running_names), force=force)
-        except Exception as exc:  # observability must never fail the run
+            _report_emitter.maybe_emit(
+                _report_snapshot(dict(running_name_counts or {})),
+                force=force,
+            )
+        except Exception as exc:  # [REDACTED] must never fail the run
             print(f"  ⚠ report card emit failed: {exc}")
 
     # Live report card: a background ticker emits on a timer so the dashboard updates
     # DURING the run. The drain loop only emits on task-completion events, so a single
     # blocking task (or any long task) would otherwise leave the report screen blank
-    # until the very end. `_report_running` is kept in sync by the branches below.
-    _report_running: set[str] = set()
+    # until the very end. `_report_running` is a Counter so k-repeats of the same
+    # task name each keep a distinct "running" slot.
+    _report_running: Counter[str] = Counter()
 
     async def _report_ticker() -> None:
         try:
             while True:
                 await asyncio.sleep(1)
-                _emit_report(set(_report_running))
+                _emit_report(dict(_report_running))
         except asyncio.CancelledError:
             pass
 
     _report_ticker_task = asyncio.create_task(_report_ticker())
-    _emit_report(set(), force=True)
+    _emit_report({}, force=True)
     try:
         if checkpoint_source_mode:
             if len(tasks) != 1:
@@ -13137,7 +13764,7 @@ async def main_async(args):
                 for task in exclusive_db_tasks:
                     print(f"\n  Running destructive DB fixture task serially: {task.name}")
                     _report_running.clear()
-                    _report_running.add(task.name)
+                    _report_running[task.name] += 1
                     result = await run_single_task(
                         base_url,
                         task,
@@ -13145,8 +13772,10 @@ async def main_async(args):
                         on_agent_created=_remember_live_agent,
                     )
                     run.task_results.append(result)
-                    _report_running.discard(task.name)
-                    _emit_report(set())
+                    _report_running[task.name] -= 1
+                    if _report_running[task.name] <= 0:
+                        del _report_running[task.name]
+                    _emit_report({})
 
                 task_runners = _parallel_task_runners(
                     parallel_batch,
@@ -13160,7 +13789,9 @@ async def main_async(args):
                 pending = set(pending_results)
                 while pending:
                     _report_running.clear()
-                    _report_running.update(pending_results[future].name for future in pending)
+                    _report_running.update(
+                        Counter(pending_results[future].name for future in pending)
+                    )
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     for task_future in done:
                         task = pending_results[task_future]
@@ -13182,7 +13813,7 @@ async def main_async(args):
                             )
                         else:
                             run.task_results.append(result)
-                    _emit_report({pending_results[future].name for future in pending})
+                    _emit_report(Counter(pending_results[future].name for future in pending))
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()
@@ -13209,7 +13840,7 @@ async def main_async(args):
         else:
             for task in tasks:
                 _report_running.clear()
-                _report_running.add(task.name)
+                _report_running[task.name] += 1
                 result = await run_single_task(
                     base_url,
                     task,
@@ -13217,11 +13848,13 @@ async def main_async(args):
                     on_agent_created=_remember_live_agent,
                 )
                 run.task_results.append(result)
-                _report_running.discard(task.name)
-                _emit_report(set())
+                _report_running[task.name] -= 1
+                if _report_running[task.name] <= 0:
+                    del _report_running[task.name]
+                _emit_report({})
     finally:
         _report_ticker_task.cancel()
-        _emit_report(set(), force=True)
+        _emit_report({}, force=True)
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
         if realtime_started:

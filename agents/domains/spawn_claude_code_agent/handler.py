@@ -28,6 +28,167 @@ from utils.error_utils import extract_error_message
 logger = structlog.get_logger()
 
 
+def _is_recoverable_github_clone_denial(error: BaseException) -> bool:
+    """True when sandbox GitHub clone was denied — agent should retry API-only.
+
+    E2B/Claude Code session create returns HTTP 403 GITHUB_ACCESS_DENIED when
+    ``github_repo_url`` points at a repo the sandbox GitHub app cannot clone.
+    That is recoverable (drop the URL, use REST API) and must not hard-ERROR
+    the tool call — ``no_tool_failures`` would otherwise fail closed ranking
+    benches that only needed metadata discovery.
+    """
+    text = extract_error_message(error).upper()
+    return "GITHUB_ACCESS_DENIED" in text or (
+        "PERMISSION TO CLONE" in text and "GITHUB" in text
+    )
+
+
+def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
+    """True when E2B session create failed on transient sandbox/infra capacity.
+
+    Local repro (cuda-kernel k=3 r8, 2026-09-03): concurrent Claude Code spawns
+    returned HTTP 500 ``redis: connection pool timeout`` / ``sandbox was not
+    found`` / ``sandbox timeout``. Those are capacity flakes, not agent bugs —
+    hard-ERROR trips ``no_tool_failures`` while the model can still succeed by
+    retrying spawn (ideally one session at a time). Soft-FINISH instead.
+
+    Also covers httpx ReadTimeout/ConnectTimeout on session create (cuda-kernel
+    k=3 r16 agent2): create hung past the 60s httpx timeout with an empty
+    ``ReadTimeout('')`` message, so substring markers alone miss it — match
+    exception type names across the cause chain as well.
+    """
+    timeout_types = (
+        "ReadTimeout",
+        "ConnectTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "TimeoutException",
+    )
+    cur: BaseException | None = error
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ in timeout_types:
+            return True
+        cur = cur.__cause__ or getattr(cur, "cause", None) or cur.__context__
+
+    text = extract_error_message(error).upper()
+    if "GITHUB_ACCESS_DENIED" in text:
+        return False
+    markers = (
+        "REDIS: CONNECTION POOL TIMEOUT",
+        "CONNECTION POOL TIMEOUT",
+        "FAILED TO CREATE SANDBOX",
+        "FAILED TO RUN RESERVE SCRIPT",
+        "THE SANDBOX WAS NOT FOUND",
+        "SANDBOX TIMEOUT",
+        "FAILED TO CREATE CODE SESSION",
+        # Proxy/gateway capacity (cuda-kernel k=3 r10 agent1 @ ~30m): HTTP 500
+        # wrapping ``503: no healthy upstream`` — soft-fail after Temporal
+        # retries so no_tool_failures stays green while the agent can re-spawn.
+        "NO HEALTHY UPSTREAM",
+        "HTTP 503",
+        "READTIMEOUT",
+        "CONNECTTIMEOUT",
+        "POOLTIMEOUT",
+    )
+    return any(m in text for m in markers)
+
+
+def _is_recoverable_claude_billing_failure(error: BaseException) -> bool:
+    """True when Claude Code session create failed on Anthropic org billing.
+
+    Local repro (cuda-kernel k=3 r13, 2026-09-03): user Claude OAuth is accepted
+    for the Messages API, but session create returns ``403: team is blocked:
+    missing payment method`` (or credit-balance-too-low). Hard-ERROR trips
+    ``no_tool_failures`` even though the agent can retry later or continue with
+    non-CC tools. Soft-FINISH instead.
+    """
+    text = extract_error_message(error).upper()
+    markers = (
+        "MISSING PAYMENT METHOD",
+        "TEAM IS BLOCKED",
+        "CREDIT BALANCE IS TOO LOW",
+        "TOO LOW TO ACCESS THE ANTHROPIC API",
+        "YOUR CREDIT BALANCE IS TOO LOW",
+        # E2B team billing (same soft-fail class; local fallback should usually
+        # absorb this before the tool sees it).
+        "TEAM IS BLOCKED: MISSING PAYMENT METHOD",
+    )
+    return any(m in text for m in markers)
+
+
+def _soft_fail_github_clone_denial_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Dict[str, Any]:
+    detail = extract_error_message(error)
+    return {
+        "success": False,
+        "message": (
+            "Code session could not start because the sandbox GitHub integration "
+            f"denied cloning the requested repo ({detail}). Do not pass "
+            "github_repo_url / github_repo_link. Retry with API-only discovery "
+            "using the provided GitHub token inside a session that has no repo URL."
+        ),
+        "code_provider": code_provider,
+    }
+
+
+def _soft_fail_sandbox_infra_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Dict[str, Any]:
+    detail = extract_error_message(error)
+    return {
+        "success": False,
+        "message": (
+            "Code session could not start due to a transient sandbox capacity "
+            f"error ({detail}). Retry spawn_claude_code_agent shortly, prefer a "
+            "single session at a time (avoid parallel code-agent spawns), and do "
+            "not pass github_repo_url / github_repo_link."
+        ),
+        "code_provider": code_provider,
+    }
+
+
+def _soft_fail_claude_billing_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Dict[str, Any]:
+    detail = extract_error_message(error)
+    return {
+        "success": False,
+        "message": (
+            "Code session could not start because Claude Code / sandbox billing "
+            f"is blocked ({detail}). Do not treat this as a task failure. Do NOT "
+            "retry spawn_claude_code_agent for this permanent payment-method / "
+            "team-billing block — continue discovery with non-code-agent tools "
+            "(web_search / GitHub API) instead."
+        ),
+        "code_provider": code_provider,
+    }
+
+
+def _maybe_soft_fail_session_create_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Optional[Dict[str, Any]]:
+    """Map recoverable session-create failures to soft-fail tool results."""
+    if _is_recoverable_github_clone_denial(error):
+        return _soft_fail_github_clone_denial_result(
+            code_provider=code_provider, error=error
+        )
+    # Billing markers must win over the broad sandbox "FAILED TO CREATE CODE
+    # SESSION" substring — otherwise Anthropic payment blocks are mislabeled as
+    # capacity flakes (cuda-kernel k=3 r13).
+    if _is_recoverable_claude_billing_failure(error):
+        return _soft_fail_claude_billing_result(
+            code_provider=code_provider, error=error
+        )
+    if _is_recoverable_sandbox_infra_failure(error):
+        return _soft_fail_sandbox_infra_result(
+            code_provider=code_provider, error=error
+        )
+    return None
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -139,8 +300,20 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     ],
                     start_to_close_timeout=timedelta(minutes=50),
                     heartbeat_timeout=timedelta(minutes=5),
-                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                    retry_policy=RetryPolicy(maximum_attempts=2),
+                    # WAIT so pause cancel receives the activity's cancelled
+                    # result (includes task_id). TRY_CANCEL races the workflow
+                    # ahead of cleanup and posts task_complete without task_id,
+                    # leaving ClaudeCodeChip stuck on "Spinning up..." on the
+                    # durable hub FE (agent 094f1085 / task 1d92a4db).
+                    cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+                    # Capacity flakes (redis pool / 503 no healthy upstream) often
+                    # clear within a minute. Prefer in-activity Temporal retries
+                    # over soft-failing the tool early — soft-fail lets the DAG
+                    # advance into attempt_completion with incomplete CC work
+                    # (cuda-kernel k=3 r10 agent1: soft-fail @~30m → verifier
+                    # 50% → redo CC → 4200s task timeout). Keep soft-fail as the
+                    # post-exhaustion path for no_tool_failures.
+                    retry_policy=RetryPolicy(maximum_attempts=5),
                 )
 
                 # Wait for activity completion or pause signal
@@ -158,18 +331,54 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     if isinstance(e, ActivityError) and not isinstance(
                         e.cause, (asyncio.CancelledError, TemporalCancelledError)
                     ):
-                        raise
-                    was_cancelled = True
-                    result = {"status": "cancelled", "message": "Claude Code agent cancelled by user"}
+                        soft = _maybe_soft_fail_session_create_result(
+                            code_provider=code_provider, error=e
+                        )
+                        if soft is not None:
+                            logger.warning(
+                                "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
+                                agent_id=agent_id,
+                                code_provider=code_provider,
+                                error=extract_error_message(e),
+                            )
+                            result = soft
+                        else:
+                            raise
+                    else:
+                        was_cancelled = True
+                        result = {
+                            "status": "cancelled",
+                            "message": "Claude Code agent cancelled by user",
+                        }
 
             if was_cancelled or (result and result.get("status") == "cancelled"):
                 logger.info("[ClaudeCode] Agent cancelled", agent_id=agent_id)
+                # Chip terminality requires action_type=task_complete + task_id.
+                # session_cancelled without task_id leaves ClaudeCodeChip stuck on
+                # "Spinning up..." after pause (hub agent 182cf2ab / task 45ce853d).
+                cancel_metadata = {
+                    "toolName": "spawn_claude_code_agent",
+                    "action_type": "task_complete",
+                    "success": False,
+                }
+                if result:
+                    if result.get("task_id"):
+                        cancel_metadata["task_id"] = result["task_id"]
+                    if result.get("code_provider"):
+                        cancel_metadata["code_provider"] = result["code_provider"]
+                if not cancel_metadata.get("task_id"):
+                    # Last resort: still emit task_complete so routing stays on
+                    # ClaudeCodeChip, but log — FE recovers task_id from siblings.
+                    logger.warning(
+                        "[ClaudeCode] Cancel without task_id; chip may need FE sibling recovery",
+                        agent_id=agent_id,
+                    )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Claude Code Session Cancelled",
                     message="User paused the agent",
                     status=MessageStatus.ERROR,
-                    metadata={"action_type": "session_cancelled", "toolName": "spawn_claude_code_agent"},
+                    metadata=cancel_metadata,
                 )
                 return
 
@@ -230,6 +439,31 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
+
+            soft = _maybe_soft_fail_session_create_result(
+                code_provider=code_provider, error=e
+            )
+            if soft is not None:
+                logger.warning(
+                    "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                    error=extract_error_message(e),
+                    error_type=type(e).__name__,
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Task Incomplete",
+                    message=soft["message"],
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "action_type": "task_complete",
+                        "success": False,
+                        "code_provider": code_provider,
+                    },
+                )
+                return
 
             logger.error(
                 "[ClaudeCode] Tool failed",

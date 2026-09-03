@@ -16,6 +16,13 @@ export function resolveBackendBaseUrl(
     const frontendPort = Number(locationLike.port);
     const isLocalHost =
       locationLike.hostname === 'localhost' || locationLike.hostname === '127.0.0.1';
+    const isNgrokHost =
+      locationLike.hostname.endsWith('.ngrok-free.dev') ||
+      locationLike.hostname.endsWith('.ngrok.app');
+    if (isNgrokHost) {
+      // Cloud preview tunnels: same-origin /api via vite proxy → local backend.
+      return '';
+    }
     const explicitIsDefaultLocal =
       explicit === 'http://localhost:3001' || explicit === 'http://127.0.0.1:3001';
     const explicitIsLocal =

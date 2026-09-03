@@ -175,6 +175,42 @@ def test_planner_assignable_tools():
     assert "reasoning" in PLANNER_ASSIGNABLE_TOOLS
 
 
+def test_gpa_kill_switch_swaps_spawn_schema_and_planner_enums(monkeypatch=None):
+    """ROSE_DISABLE_GENERAL_PURPOSE_AGENT removes GP/for_each from schemas."""
+    import os
+
+    from domains.spawn_agent.config import ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV
+
+    previous = os.environ.get(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV)
+    os.environ[ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV] = "1"
+    try:
+        from utils.tool_schemas import (
+            SpawnAgentToolNoGP,
+            get_planner_assignable_tools,
+            get_planner_response_model,
+            get_tool_models,
+        )
+
+        assert get_tool_models()["spawn_agent"] is SpawnAgentToolNoGP
+        type_schema = SpawnAgentToolNoGP.model_json_schema()["properties"]["type"]
+        type_blob = str(type_schema)
+        assert "general_purpose" not in type_blob or "disabled" in type_blob.lower()
+        # Literal enum values must not include GP routes.
+        assert "general_purpose" not in (type_schema.get("enum") or [])
+        assert "for_each" not in (type_schema.get("enum") or [])
+        assignable = get_planner_assignable_tools()
+        assert "spawn_general_purpose_agent" not in assignable
+        assert "spawn_general_purpose_agent_for_each" not in assignable
+        assert "spawn_code_agent" in assignable
+        planner_model = get_planner_response_model()
+        assert planner_model.__name__ == "PlannerResponseNoGP"
+    finally:
+        if previous is None:
+            os.environ.pop(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV, None)
+        else:
+            os.environ[ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV] = previous
+
+
 def test_planner_response_schema_is_compact():
     """Planner output schema omits old prose and mirrored dependency fields."""
     from utils.tool_schemas import PlannerResponse
@@ -979,6 +1015,10 @@ async def run_all_tests():
         "explore_agent_action_model_accepts_summary_grep", test_explore_agent_action_model_accepts_summary_grep
     )
     r.record("planner_assignable_tools", test_planner_assignable_tools)
+    r.record(
+        "gpa_kill_switch_swaps_spawn_schema_and_planner_enums",
+        test_gpa_kill_switch_swaps_spawn_schema_and_planner_enums,
+    )
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)
     # WaitForTool validation

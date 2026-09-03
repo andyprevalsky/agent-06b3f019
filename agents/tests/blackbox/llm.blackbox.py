@@ -1631,6 +1631,43 @@ async def test_fetch_compute_token_activity_pins_benchmark_provider():
     assert "tokenType=claude" in call["url"]
 
 
+async def test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation():
+    """Claude pin must refuse GPT rotation so browser-smoke cache stays measurable.
+
+    Repro: smoke r16 browser-smoke — Claude auth_error → _rotate_compute_token
+    requested token_type=gpt → mid-sequence OpenRouter→Codex switch → 0%
+    repeatable cache (floor 40%). Pin must short-circuit before any HTTP lease.
+    """
+    setup_mock(
+        {
+            "/api/integrations/compute-code/credentials/token": {
+                "status": 200,
+                "json": {
+                    "type": "gpt",
+                    "accessToken": "should-not-lease",
+                    "accountId": "acct-1",
+                    "source": "user",
+                },
+            },
+        }
+    )
+
+    from helpers.httpx_capture import clear_captures, get_captures
+
+    clear_captures()
+    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch(
+        "temporalio.activity.heartbeat"
+    ):
+        from helpers.llm import fetch_compute_token_activity
+
+        result = await fetch_compute_token_activity("user-1", token_type="gpt")
+
+    assert result is None
+    assert get_captures() == [], (
+        "pinned cross-provider rotation must not HTTP-lease a compute token"
+    )
+
+
 def test_benchmark_compute_token_type_rejects_conflicting_provider_policy():
     """A Claude pin cannot silently defeat an explicit Anthropic exclusion."""
     from providers.rose.policy import benchmark_compute_token_type
@@ -5056,6 +5093,137 @@ async def test_resolve_verifier_file_evidence_uses_cached_text_file_content():
     assert "2026-07-06,YouTube" in payload["result"]
 
 
+async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
+    """Verifier file evidence keeps deliverables; demotes huge intermediate dumps.
+
+    Regression for cuda-kernel top100: intermediate ranking JSONs (100KB–300KB)
+    were fully inlined into verifier_execute, Rose hit the attempt deadline
+    mid-JSON, soft-failed score=0.5, and the finished agent looped on CC spawns.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
+        _resolve_verifier_file_evidence,
+    )
+
+    intermediate = "x" * 80_000
+    # ~30k deliverable so truncated intermediate (40k) cannot also fit in 48k budget.
+    deliverable = '{"repos":[' + ",".join(
+        f'{{"name":"repo_{i:03d}","url":"https://github.com/org/repo_{i:03d}","stars":{10000-i},"desc":"cuda kernels for workload {i:03d}"}}'
+        for i in range(350)
+    ) + "]}"
+    assert 20_000 < len(deliverable) < VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
+
+    ctx = [
+        {
+            "role": "ASSISTANT",
+            "message_id": "msg-intermediate",
+            "text": "",
+            "file_pointer": {
+                "id": "file-intermediate",
+                "storage_path": "user/cuda_repo_candidates.json",
+                "original_filename": "cuda_repo_candidates.json",
+                "mime_type": "application/json",
+                "size_bytes": len(intermediate),
+                "created_at": "2026-09-03T07:00:00Z",
+            },
+            "metadata": {},
+        },
+        {
+            "role": "ASSISTANT",
+            "message_id": "msg-deliverable",
+            "text": "",
+            "file_pointer": {
+                "id": "file-deliverable",
+                "storage_path": "user/top_100_cuda_repos.json",
+                "original_filename": "top_100_cuda_repos.json",
+                "mime_type": "application/json",
+                "size_bytes": len(deliverable),
+                "created_at": "2026-09-03T07:01:00Z",
+            },
+            "metadata": {},
+        },
+    ]
+
+    def _fake_cached(file_id):
+        if file_id == "file-intermediate":
+            return (intermediate.encode(), {})
+        if file_id == "file-deliverable":
+            return (deliverable.encode(), {})
+        return None
+
+    with patch("helpers.llm.get_cached_file", side_effect=_fake_cached):
+        evidence = await _resolve_verifier_file_evidence(ctx)
+
+    inter = evidence["msg-intermediate"][0]
+    final = evidence["msg-deliverable"][0]
+    assert final["content_inlined"] is True
+    assert "repo_000" in final["result"]
+    assert inter["content_inlined"] is False, "huge intermediate dump must be demoted to metadata"
+    assert "Omitted from verifier inline" in inter["result"]
+    total_inlined = sum(
+        len(p["result"]) for payloads in evidence.values() for p in payloads if p.get("content_inlined")
+    )
+    assert total_inlined <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
+
+
+def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent():
+    """spawn_agent ranking dumps must not inflate verifier_execute past Rose deadlines.
+
+    Regression (cuda-kernel top100 r16 agent2): file-evidence budget only capped
+    resolved file pointers, but TOOL_RESULT bodies still embedded 25k–45k JSON
+    tables → 134k user batch on GPT → attempt deadline → score 0.5 loop.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_TOOL_RESULT_CHARS,
+        VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS,
+        build_verifier_context_messages,
+    )
+
+    huge_table = "| repo | stars |\n" + "\n".join(
+        f"| org/cuda-repo-{i} | {100000 - i} |" for i in range(2000)
+    )
+    assert len(huge_table) > VERIFIER_MAX_TOOL_RESULT_CHARS
+
+    ctx = [
+        {
+            "role": "USER",
+            "text": "Rank top 100 CUDA kernel repos",
+            "timestamp": "2026-09-03T08:00:00Z",
+        },
+        {
+            "role": "TOOL",
+            "text": huge_table,
+            "timestamp": "2026-09-03T08:01:00Z",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolCallId": "call_spawn_huge",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": '{"repos":[' + ",".join(f'{{"rank":{i},"url":"https://github.com/o/r{i}"}}' for i in range(100)) + "]}",
+            "timestamp": "2026-09-03T08:02:00Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolCallId": "call_done",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    user_blobs = [m["content"] for m in msgs if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    joined = "\n\n".join(user_blobs)
+    assert "verifier truncated" in joined or "[omitted: verifier tool-result budget exhausted]" in joined
+    # spawn_agent body must be capped; attempt_completion deliverable may use the larger cap
+    spawn_segments = [s for s in joined.split("TOOL_RESULT ") if '"tool_name": "spawn_agent"' in s or '"tool_name":"spawn_agent"' in s]
+    assert spawn_segments, joined[:500]
+    assert len(spawn_segments[0]) <= VERIFIER_MAX_TOOL_RESULT_CHARS + 64
+    tool_only = sum(len(s) for s in joined.split("\n\n") if s.startswith("TOOL_RESULT "))
+    assert tool_only <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 200
+
+
 async def test_build_verifier_context_messages_self_closes_trailing_refs():
     """Verifier context should not expand terminal message refs inside JSON/batches."""
     from helpers.context_pointers import resolve_pointers_in_messages
@@ -7396,6 +7564,10 @@ async def run_all_tests():
         "fetch_compute_token_activity_pins_benchmark_provider",
         test_fetch_compute_token_activity_pins_benchmark_provider,
     )
+    await r.record_async(
+        "fetch_compute_token_activity_pin_blocks_cross_provider_rotation",
+        test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation,
+    )
     r.record(
         "benchmark_compute_token_type_rejects_conflicting_provider_policy",
         test_benchmark_compute_token_type_rejects_conflicting_provider_policy,
@@ -7632,6 +7804,14 @@ async def run_all_tests():
     await r.record_async(
         "verifier_file_evidence_cached_text",
         test_resolve_verifier_file_evidence_uses_cached_text_file_content,
+    )
+    await r.record_async(
+        "verifier_file_evidence_budget_prefers_deliverable",
+        test_resolve_verifier_file_evidence_budget_prefers_deliverable,
+    )
+    r.record(
+        "verifier_ctx_tool_result_budget_truncates_spawn_agent",
+        test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent,
     )
     await r.record_async(
         "verifier_ctx_self_closes_trailing_refs",

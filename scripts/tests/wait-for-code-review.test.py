@@ -115,6 +115,20 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertFalse(status.successful)
         self.assertEqual(status.state, "REVIEW_SKIPPED")
 
+    def test_rate_limited_success_is_not_substantive(self) -> None:
+        status = MODULE.normalize_status(
+            {
+                "__typename": "StatusContext",
+                "context": "CodeRabbit",
+                "state": "SUCCESS",
+                "description": "Review rate limited",
+            }
+        )
+
+        self.assertTrue(status.terminal)
+        self.assertFalse(status.successful)
+        self.assertEqual(status.state, "REVIEW_RATE_LIMITED")
+
     def test_terminal_failure_is_not_successful(self) -> None:
         status = MODULE.normalize_status(
             {

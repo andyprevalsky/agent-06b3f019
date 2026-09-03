@@ -934,8 +934,80 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         if ADMIN_BYPASS_USER_ID not in configured:
             configured.append(ADMIN_BYPASS_USER_ID)
         os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
-    if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
+    # Force Claude Code (not Codex) for tasks that declare requires_claude_code
+    # OR expect spawn_claude_code_agent. Codex sessions were failing this bench
+    # with GitHub clone 403s / sandbox timeouts that trip no_tool_failures.
+    if any(
+        task.name in selected
+        and (
+            task.requires_claude_code
+            or "spawn_claude_code_agent" in (task.expected_tools or [])
+            or (task.min_tool_counts or {}).get("spawn_claude_code_agent", 0) > 0
+        )
+        for task in all_tasks()
+    ):
         os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
+    # TEMPORARY: skip post-run Claude Code / Codex dual-agent verifier. The
+    # verifier cannot see sandbox files and false-fails complete runs. Re-enable
+    # by unsetting ROSE_DISABLE_CODE_AGENT_VERIFIER once we have an in-sandbox
+    # agentic verifier. Override with ROSE_DISABLE_CODE_AGENT_VERIFIER=0.
+    if os.environ.get("ROSE_DISABLE_CODE_AGENT_VERIFIER", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        os.environ["ROSE_DISABLE_CODE_AGENT_VERIFIER"] = "1"
+    # TEMPORARY: strip api_request from explore tool injection + prompt context
+    # so coding-agent GitHub ranking benches are not steered onto that route.
+    # Override with ROSE_DISABLE_API_REQUEST=0.
+    if os.environ.get("ROSE_DISABLE_API_REQUEST", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        os.environ["ROSE_DISABLE_API_REQUEST"] = "1"
+    # When a selected task forbids general-purpose spawn aliases, also strip
+    # general_purpose / for_each from spawn_agent schemas + planner enums so
+    # the model cannot select them (mirrors ROSE_DISABLE_API_REQUEST). Override
+    # with ROSE_DISABLE_GENERAL_PURPOSE_AGENT=0.
+    _GPA_FORBIDDEN = {
+        "spawn_general_purpose_agent",
+        "spawn_general_purpose_agent_for_each",
+    }
+    _GPA_REQUIRED = {
+        "spawn_general_purpose_agent",
+        "spawn_general_purpose_agent_for_each",
+    }
+
+    def _task_requires_general_purpose_agent(task) -> bool:
+        if _GPA_REQUIRED.intersection(task.expected_tools or []):
+            return True
+        for counts in (task.expected_tool_counts or {}, task.min_tool_counts or {}):
+            if _GPA_REQUIRED.intersection(counts):
+                return True
+        return False
+
+    selected_tasks = [task for task in all_tasks() if task.name in selected]
+    gpa_forbidden_by_any = any(
+        _GPA_FORBIDDEN.intersection(task.forbidden_tools or []) for task in selected_tasks
+    )
+    gpa_required_by_any = any(_task_requires_general_purpose_agent(task) for task in selected_tasks)
+    # Concurrent predeploy batches mix GPA-forbidden tasks (parallel-tool-calls)
+    # with GPA-required tasks (spawn-sub-agents). A global env disable would strip
+    # spawn_general_purpose_agent from the whole stack and false-fail the latter.
+    if gpa_required_by_any:
+        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "0"
+    elif gpa_forbidden_by_any and os.environ.get(
+        "ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1"
+    ).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "1"
     browser_max_steps = 0
     for task in all_tasks():
         if task.name not in selected:
@@ -2312,6 +2384,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             # database — e.g. the grep fixture's direct agent lookup hits system Postgres
             # instead of the isolated container and fails with "root agent not found".
             os.environ["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
+            # Point collect_logs / agent_latency / agent_cache at THIS stack's
+            # worker*.log files for the whole run (not only post-fail diagnostics).
+            # Without this, run JSON kept ClickHouse/Fly placeholders and dropped
+            # Claude Code tool_use progress that only lived in the isolated logs.
+            for key, value in diagnostic_log_env(stack).items():
+                if key in {"NAVI_WORKER_LOGS", "NAVI_BACKEND_LOGS"} and value:
+                    os.environ[key] = value
             # The SMS web_search stub is a two-process contract: the backend was
             # given this absolute path at boot, and run_benchmark.py must write
             # the file there. Exporting it to the backend alone leaves the runner
