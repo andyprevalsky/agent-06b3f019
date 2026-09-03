@@ -286,6 +286,19 @@ if ! command -v ngrok >/dev/null 2>&1; then
         || log "WARN: ngrok install failed (local-bench public tunnel only)"
 fi
 
+# Isolated benchmark stacks (scripts/run.sh --benchmark, and therefore every
+# `run-bench --local` / `/deploy` smoke run) publish their public origin through
+# cloudflared, NOT ngrok — run.sh hard-fails with "cloudflared is required for
+# isolated benchmark public tunnels" when it is missing, which aborts the whole
+# smoke gate before a single task starts.
+if ! command -v cloudflared >/dev/null 2>&1; then
+    log "installing cloudflared…"
+    ( curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+        -o /tmp/cloudflared \
+        && $SUDO install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared ) >/dev/null 2>&1 \
+        || log "WARN: cloudflared install failed (isolated benchmark tunnels will fail)"
+fi
+
 # shlock — the cloud benchmark fleet's cross-workspace app-env lock requires it
 # (scripts/lib/cloudbench-app-env-lock.sh). The baked Fly bench image ships the
 # real INN shlock; a bare cloud VM does not, so install the repo fallback.
