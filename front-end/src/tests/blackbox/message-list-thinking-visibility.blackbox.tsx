@@ -28,11 +28,10 @@ function makeAgent(status: AgentDetail['status']): AgentDetail {
 function makeContext(status: AgentDetail['status']): AgentContextValue {
   return {
     agent: makeAgent(status),
-    setAgent: () => {},
+    applyAgentDetail: () => true,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
-    setMessages: () => {},
     streamingBubbles: new Map(),
     streamingPlan: null,
     streamingAttention: null,

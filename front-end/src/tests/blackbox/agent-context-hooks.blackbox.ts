@@ -249,15 +249,18 @@ describe('useAgentProvider', () => {
     expect(capturedRequests.some((request) => request.method === 'GET')).toBe(false);
 
     act(() => {
-      result.current.setMessages((previous) => [
-        ...previous,
-        {
-          message_id: 'realtime-assistant',
-          timestamp: '2026-01-01T00:00:00.500Z',
-          text: 'Already streaming',
-          role: 'ASSISTANT',
-        },
-      ]);
+      result.current.applyAgentDetail('pending-agent', {
+        agent: makeAgent({ agent_id: 'pending-agent', goal: 'instant goal' }),
+        messages: [
+          {
+            message_id: 'realtime-assistant',
+            timestamp: '2026-01-01T00:00:00.500Z',
+            text: 'Already streaming',
+            role: 'ASSISTANT',
+          },
+        ],
+        pagination: { has_more: false, oldest_timestamp: null },
+      });
     });
     await act(async () => {
       await result.current.reconcilePendingAgentCreation('pending-agent');
@@ -432,9 +435,9 @@ describe('useAgentProvider', () => {
 
   it('PAUSED agent status clears streaming state', async () => {
     server.use(
-      http.get(`${API_BASE}/agents/:agentId`, () =>
+      http.get(`${API_BASE}/agents/:agentId`, ({ params }) =>
         HttpResponse.json({
-          agent: makeAgent({ status: 'PAUSED' }),
+          agent: makeAgent({ agent_id: params.agentId as string, status: 'PAUSED' }),
           messages: [],
           pagination: { has_more: false, oldest_timestamp: null },
         }),
@@ -478,12 +481,11 @@ describe('useAgentContext', () => {
       streamingAttention: null,
       streamingTools: new Map(),
       streamedTextsRef: { current: new Set<string>() },
-      setAgent: vi.fn(),
+      applyAgentDetail: vi.fn(() => true),
       setSelectedAgentId: vi.fn(),
       stagePendingAgentCreation: vi.fn(),
       reconcilePendingAgentCreation: vi.fn(async () => {}),
       rollbackPendingAgentCreation: vi.fn(() => true),
-      setMessages: vi.fn(),
       registerMessageHandler: vi.fn(() => () => {}),
       sendMessage: vi.fn(async () => {}),
       isLoadingAgent: false,

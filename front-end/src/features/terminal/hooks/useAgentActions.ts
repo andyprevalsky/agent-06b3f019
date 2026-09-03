@@ -4,7 +4,7 @@
  * Handles create, resume, pause, select, feedback, and detail refresh.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 
@@ -16,14 +16,13 @@ import {
   findBlueprintByGoal,
   submitBlueprintFeedback,
 } from '../api';
+import type { AgentDetailResponse } from '@/lib/api';
 import type { BlueprintFeedback, TerminalView, CreateAgentPayload, AgentDetail } from '../types';
 
 interface UseAgentActionsArgs {
   selectedAgentId: string | null;
   agentDetail: AgentDetail | null;
-  setAgentDetail: (a: AgentDetail) => void;
-  setMessages: (m: unknown[]) => void;
-  setSelectedModel: (m: string) => void;
+  applyAgentDetail: (agentId: string, data: AgentDetailResponse) => boolean;
   setSelectedAgentIdContext: (id: string | null) => void;
   setCurrentView: (v: TerminalView) => void;
   clientSource: string;
@@ -33,9 +32,7 @@ interface UseAgentActionsArgs {
 export function useAgentActions({
   selectedAgentId,
   agentDetail,
-  setAgentDetail,
-  setMessages,
-  setSelectedModel,
+  applyAgentDetail,
   setSelectedAgentIdContext,
   setCurrentView,
   clientSource,
@@ -44,19 +41,20 @@ export function useAgentActions({
   const { toast } = useToast();
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
   const [isPausing, setIsPausing] = useState(false);
+  const selectedAgentIdRef = useRef(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
 
   const refreshAgentDetail = useCallback(
     async (agentId: string) => {
       try {
         const data = await fetchAgentDetail(agentId);
-        setAgentDetail(data.agent);
-        setMessages(data.messages);
-        setSelectedModel(data.agent.model);
+        if (selectedAgentIdRef.current !== agentId) return;
+        applyAgentDetail(agentId, data);
       } catch (err: unknown) {
         console.error('Failed to refresh agent details:', err);
       }
     },
-    [setAgentDetail, setMessages, setSelectedModel],
+    [applyAgentDetail],
   );
 
   const handleSelectAgent = useCallback(

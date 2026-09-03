@@ -108,7 +108,10 @@ export function AgentChatArea({
       {browserStatusProps && (
         <Suspense fallback={null}>
           <div className="px-2 md:px-0">
-            <BrowserStatusBarCarousel browsers={browserStatusProps.browsers} />
+            <BrowserStatusBarCarousel
+              key={a.selectedAgentId ?? 'no-agent'}
+              browsers={browserStatusProps.browsers}
+            />
           </div>
         </Suspense>
       )}

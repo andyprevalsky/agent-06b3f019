@@ -37,6 +37,18 @@ export function overlaySelectedAgentTitle(
   );
 }
 
+function useSelectedAgentModel(
+  model: string | undefined,
+  setSelectedModel: (model: string) => void,
+  isInitialLoadRef: React.MutableRefObject<boolean>,
+) {
+  useEffect(() => {
+    if (!model) return;
+    setSelectedModel(model);
+    isInitialLoadRef.current = true;
+  }, [isInitialLoadRef, model, setSelectedModel]);
+}
+
 export function useTerminalAgents(
   _currentView: TerminalView,
   setCurrentView: (view: TerminalView) => void,
@@ -71,12 +83,7 @@ export function useTerminalAgents(
   const isInitialLoadRef = useRef(false);
   const { setIsSendingMessage, setMessageInput, setSelectedModel } = messaging;
   const { agent, setSelectedAgentId } = ctx;
-  useEffect(() => {
-    if (agent?.model) {
-      setSelectedModel(agent.model);
-      isInitialLoadRef.current = true;
-    }
-  }, [agent?.model, setSelectedModel]);
+  useSelectedAgentModel(agent?.model, setSelectedModel, isInitialLoadRef);
 
   const cleanupAgentState = useCallback(() => {
     setSelectedAgentId(null);

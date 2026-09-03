@@ -3,7 +3,8 @@ import type React from 'react';
 import { type RealtimeChannel } from '@supabase/supabase-js';
 
 import { unsubscribe } from '@/lib/realtime';
-import type { AgentDetail, Message } from '@/lib/api';
+import type { AgentDetail, AgentDetailResponse, Message } from '@/lib/api';
+import { recordAgentScopeDiscard, recordAgentSelection } from '@/lib/agentScopeDiagnostics';
 
 import { fetchAgentDetail } from '../api';
 import type {
@@ -45,18 +46,46 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
     setMessages,
     setSelectedAgentIdState,
   } = state;
+  const applyAgentDetail = useCallback(
+    (agentId: string, data: AgentDetailResponse): boolean => {
+      if (data.agent.agent_id !== agentId) {
+        throw new Error(
+          `Agent detail identity mismatch: requested ${agentId}, received ${data.agent.agent_id}`,
+        );
+      }
+      if (selectedAgentIdRef.current !== agentId) {
+        recordAgentScopeDiscard('agent-detail', agentId, selectedAgentIdRef.current);
+        return false;
+      }
+
+      const isCurrentAgent = () => selectedAgentIdRef.current === agentId;
+      const projection =
+        pendingCreationRef.current?.agentId === agentId ? pendingCreationRef.current : null;
+      setAgent((previous) => (isCurrentAgent() ? data.agent : previous));
+      setInspectionContext((previous) =>
+        isCurrentAgent() ? (data.inspection_context ?? null) : previous,
+      );
+      setMessages((previous) =>
+        isCurrentAgent() ? mergeCanonicalMessages(previous, data.messages, projection) : previous,
+      );
+      setIsChatMode((previous) => (isCurrentAgent() ? !data.agent.temporal_workflow_id : previous));
+      return true;
+    },
+    [
+      pendingCreationRef,
+      selectedAgentIdRef,
+      setAgent,
+      setInspectionContext,
+      setIsChatMode,
+      setMessages,
+    ],
+  );
   const loadAgentDetail = useCallback(
     async (agentId: string, clearSelectionOnFailure: boolean): Promise<boolean> => {
       try {
         setIsLoadingAgent(true);
         const data = await fetchAgentDetail(agentId);
-        if (selectedAgentIdRef.current !== agentId) return false;
-        const projection =
-          pendingCreationRef.current?.agentId === agentId ? pendingCreationRef.current : null;
-        setAgent(data.agent);
-        setInspectionContext(data.inspection_context ?? null);
-        setMessages((previous) => mergeCanonicalMessages(previous, data.messages, projection));
-        setIsChatMode(!data.agent.temporal_workflow_id);
+        if (!applyAgentDetail(agentId, data)) return false;
         initialLoadDoneRef.current = agentId;
         return true;
       } catch (error) {
@@ -73,13 +102,9 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
     },
     [
       initialLoadDoneRef,
-      pendingCreationRef,
+      applyAgentDetail,
       selectedAgentIdRef,
-      setAgent,
-      setIsChatMode,
       setIsLoadingAgent,
-      setInspectionContext,
-      setMessages,
       setSelectedAgentIdState,
     ],
   );
@@ -98,6 +123,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
 
   const setSelectedAgentId = useCallback(
     (id: string | null) => {
+      recordAgentSelection(state.selectedAgentIdRef.current, id);
       state.selectedAgentIdRef.current = id;
       if (state.pendingCreationRef.current?.agentId !== id) state.pendingCreationRef.current = null;
       prepareSelection(state, id);
@@ -109,6 +135,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
   const stagePendingAgentCreation = useCallback(
     (input: PendingAgentCreationInput) => {
       const projection = buildPendingCreation(input);
+      recordAgentSelection(state.selectedAgentIdRef.current, input.agentId);
       state.selectedAgentIdRef.current = input.agentId;
       state.pendingCreationRef.current = projection;
       prepareSelection(state, input.agentId);
@@ -150,6 +177,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
   );
 
   return {
+    applyAgentDetail,
     setSelectedAgentId,
     stagePendingAgentCreation,
     reconcilePendingAgentCreation,

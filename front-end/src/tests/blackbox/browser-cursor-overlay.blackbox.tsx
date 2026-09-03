@@ -3,9 +3,11 @@
  */
 import React from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/lib/api';
+import { server } from './msw/server';
 
 const realtimeMocks = vi.hoisted(() => ({
   subscribeToChannel: vi.fn(),
@@ -22,6 +24,10 @@ vi.mock('@/lib/realtime', () => ({
 }));
 
 import BrowserCursorOverlay from '@/features/terminal-component-group/components/BrowserCursorOverlay';
+import { useRefreshedAuthAssistanceUrl } from '@/features/terminal-component-group/components/browser-status-bar/useRefreshedAuthAssistanceUrl';
+import type { PendingAuthAssistance } from '@/features/terminal-component-group/components/browser-status-bar/types';
+
+const API_BASE = 'http://localhost:3001/api';
 
 function makeMessageWithCoords(x: number, y: number): Message {
   return {
@@ -48,6 +54,10 @@ describe('BrowserCursorOverlay realtime stream', () => {
       configurable: true,
       get: () => 891,
     });
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({ access_token: 'test-token', user: { id: 'test-user' } }),
+    );
   });
 
   it('subscribes to BROWSER_CURSOR and moves the stitched cursor from live samples', async () => {
@@ -164,5 +174,88 @@ describe('BrowserCursorOverlay realtime stream', () => {
     const cursor = screen.getByTestId('browser-cursor');
     expect(cursor).toHaveStyle({ left: '104px', top: '141px' });
     expect(realtimeMocks.subscribeToChannel).not.toHaveBeenCalled();
+  });
+
+  it('cannot apply a queued cursor callback after switching agents', async () => {
+    const view = render(<BrowserCursorOverlay agentId="agent-a" taskId="task-1" messages={[]} />);
+    await waitFor(() => expect(realtimeMocks.subscribeToChannel).toHaveBeenCalledTimes(1));
+    const staleHandlers = realtimeMocks.subscribeToChannel.mock.calls[0][1] as Record<
+      string,
+      (payload: unknown) => void
+    >;
+
+    view.rerender(<BrowserCursorOverlay agentId="agent-b" taskId="task-1" messages={[]} />);
+    await waitFor(() => expect(realtimeMocks.subscribeToChannel).toHaveBeenCalledTimes(2));
+    act(() => {
+      staleHandlers.BROWSER_CURSOR({
+        payload: {
+          record: { agentId: 'agent-a', taskId: 'task-1', x: 10, y: 20, sequence: 2 },
+        },
+      });
+    });
+
+    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '644px', top: '491px' });
+  });
+
+  it('rejects a cursor payload whose agent identity differs from its channel', async () => {
+    render(<BrowserCursorOverlay agentId="agent-1" taskId="task-1" messages={[]} />);
+    await waitFor(() => expect(realtimeMocks.subscribeToChannel).toHaveBeenCalled());
+    const handlers = realtimeMocks.subscribeToChannel.mock.calls[0][1] as Record<
+      string,
+      (payload: unknown) => void
+    >;
+
+    act(() => {
+      handlers.BROWSER_CURSOR({
+        payload: {
+          record: { agentId: 'other-agent', taskId: 'task-1', x: 10, y: 20, sequence: 1 },
+        },
+      });
+    });
+
+    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '644px', top: '491px' });
+  });
+});
+
+describe('browser auth URL isolation', () => {
+  it('never renders the previous request URL during a browser-agent switch', async () => {
+    let finishAgentA!: () => void;
+    const agentACanFinish = new Promise<void>((resolve) => {
+      finishAgentA = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/auth-assistance/:requestId/refresh-session`, async ({ params }) => {
+        const requestId = String(params.requestId);
+        if (requestId === 'request-a') await agentACanFinish;
+        return HttpResponse.json({ liveViewUrl: `https://${requestId}.example/live` });
+      }),
+    );
+    const requestA: PendingAuthAssistance = {
+      requestId: 'request-a',
+      request: 'Authenticate A',
+      liveViewUrl: 'https://agent-a.example/live',
+    };
+    const requestB: PendingAuthAssistance = {
+      requestId: 'request-b',
+      request: 'Authenticate B',
+      liveViewUrl: 'https://agent-b.example/live',
+    };
+    const rendered: Array<{ requestId: string; url: string | null }> = [];
+    function UrlProbe({ request }: { request: PendingAuthAssistance }) {
+      const url = useRefreshedAuthAssistanceUrl(request);
+      rendered.push({ requestId: request.requestId, url });
+      return <output data-testid="auth-url">{url}</output>;
+    }
+
+    const view = render(<UrlProbe request={requestA} />);
+    view.rerender(<UrlProbe request={requestB} />);
+
+    expect(rendered.filter((entry) => entry.requestId === 'request-b')).not.toContainEqual({
+      requestId: 'request-b',
+      url: requestA.liveViewUrl,
+    });
+    expect(screen.getByTestId('auth-url')).toHaveTextContent('agent-b');
+    finishAgentA();
+    await waitFor(() => expect(screen.getByTestId('auth-url')).toHaveTextContent('request-b'));
   });
 });

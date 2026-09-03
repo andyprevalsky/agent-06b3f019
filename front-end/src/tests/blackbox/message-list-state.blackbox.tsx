@@ -4,11 +4,12 @@
  */
 import React from 'react';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AgentContext, type AgentContextValue } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
+import { useMessageAnimationBuffer } from '@/features/terminal-component-group/components/useMessageList';
 import type { AgentDetail, Message } from '@/lib/api';
 
 beforeAll(() => {
@@ -35,11 +36,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
   return {
     agent: null,
-    setAgent: () => {},
+    applyAgentDetail: () => true,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
-    setMessages: () => {},
     streamingBubbles: new Map(),
     streamingPlan: null,
     streamingAttention: null,
@@ -75,6 +75,35 @@ function msg(id: string, overrides: Partial<Message> = {}): Message {
 }
 
 describe('MessageList state transitions', () => {
+  it('clears an in-flight animation when the selected agent changes', async () => {
+    let dispatch!: (message: Message) => void;
+    const registerMessageHandler = (_subAgentId: string | null, handler: (m: Message) => void) => {
+      dispatch = handler;
+      return () => {};
+    };
+    const streamedTextsRef = { current: new Set<string>() };
+    const assistantInsertedRef = { current: false };
+    const { result, rerender } = renderHook(
+      ({ selectedAgentId }) =>
+        useMessageAnimationBuffer({
+          selectedAgentId,
+          subAgentId: undefined,
+          registerMessageHandler,
+          streamedTextsRef,
+          assistantInsertedRef,
+        }),
+      { initialProps: { selectedAgentId: 'agent-1' as string | null } },
+    );
+
+    act(() => dispatch(msg('agent-1-answer', { role: 'ASSISTANT', text: 'secret from A' })));
+    await waitFor(() => expect(result.current.currentAnimatingId).toBe('agent-1-answer'));
+    rerender({ selectedAgentId: 'agent-2' });
+
+    expect(result.current.currentAnimatingId).toBeNull();
+    expect(result.current.isAnimating).toBe(false);
+    expect(result.current.messageBufferLength).toBe(0);
+  });
+
   it('cleans up orphan IN_PROGRESS tools that came before the last ASSISTANT msg', () => {
     const now = Date.now();
     const ctx = makeAgentCtx({

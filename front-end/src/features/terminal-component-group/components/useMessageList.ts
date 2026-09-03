@@ -31,6 +31,7 @@ import { useThinkingVisibility } from './useThinkingVisibility';
 // ─── Animation buffer ────────────────────────────────────────────────────
 
 interface UseMessageAnimationBufferOptions {
+  selectedAgentId: string | null;
   subAgentId: string | undefined;
   registerMessageHandler: (
     subAgentId: string | null,
@@ -70,6 +71,7 @@ function shouldAnimateTool(next: Message): boolean {
 }
 
 export function useMessageAnimationBuffer({
+  selectedAgentId,
   subAgentId,
   registerMessageHandler,
   streamedTextsRef,
@@ -79,6 +81,14 @@ export function useMessageAnimationBuffer({
   const [isAnimating, setIsAnimating] = useState(false);
   const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
   const isInitialLoadRef = useRef(true);
+
+  useLayoutEffect(() => {
+    setMessageBuffer([]);
+    setIsAnimating(false);
+    setCurrentAnimatingId(null);
+    isInitialLoadRef.current = true;
+    assistantInsertedRef.current = false;
+  }, [assistantInsertedRef, selectedAgentId]);
 
   useEffect(() => {
     const unregister = registerMessageHandler(subAgentId ?? null, (message) => {
@@ -199,6 +209,7 @@ export function useMessageListState({
       [...streaming.tools.values()].some((tool) => streaming.bubbles.has(tool.stream_id)));
 
   const animation = useMessageAnimationBuffer({
+    selectedAgentId: ctx.selectedAgentId,
     subAgentId,
     registerMessageHandler: ctx.registerMessageHandler,
     streamedTextsRef: ctx.streamedTextsRef,

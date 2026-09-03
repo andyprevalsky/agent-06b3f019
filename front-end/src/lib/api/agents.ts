@@ -3,6 +3,18 @@ import { getAdminAccessToken } from '../impersonation';
 import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
 import { hydrateAgentDetail } from './hydrateAgentDetail';
 
+function assertAgentDetailIdentity(
+  agentId: string,
+  data: AgentDetailResponse,
+): AgentDetailResponse {
+  if (data.agent.agent_id !== agentId) {
+    throw new Error(
+      `Agent detail identity mismatch: requested ${agentId}, received ${data.agent.agent_id}`,
+    );
+  }
+  return data;
+}
+
 export function benchmarkAgentPreviewEnabled(): boolean {
   return import.meta.env.DEV === true || Boolean(import.meta.env.VITEST);
 }
@@ -55,7 +67,7 @@ export async function getAgent(agentId: string, before?: string): Promise<AgentD
     throw new Error('Failed to fetch agent');
   }
 
-  return hydrateAgentDetail(await response.json());
+  return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 
 export async function getBenchmarkAgentPreview(agentId: string): Promise<AgentDetailResponse> {
@@ -69,7 +81,7 @@ export async function getBenchmarkAgentPreview(agentId: string): Promise<AgentDe
     throw new Error('Failed to fetch benchmark agent preview');
   }
 
-  return hydrateAgentDetail(await response.json());
+  return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 
 // Create a new agent

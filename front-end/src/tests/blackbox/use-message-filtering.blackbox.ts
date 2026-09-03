@@ -1,5 +1,9 @@
+import { renderHook } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { mergeSubAgentTreeMessages } from '@/features/terminal-component-group/components/useMessageFiltering';
+import {
+  mergeSubAgentTreeMessages,
+  useSubAgentTreeMerge,
+} from '@/features/terminal-component-group/components/useMessageFiltering';
 import type { Message } from '@/lib/api';
 
 function msg(id: string, metadata: Record<string, unknown>, text = ''): Message {
@@ -13,6 +17,33 @@ function msg(id: string, metadata: Record<string, unknown>, text = ''): Message 
 }
 
 describe('useMessageFiltering mergeSubAgentTreeMessages', () => {
+  it('drops the full-message cache when its owning root agent changes', () => {
+    const messageA = msg('message-agent-a', {
+      toolCallId: 'shared-call',
+      toolName: 'spawn_sub_agent',
+      toolStatus: 'FINISHED',
+      busId: 'shared-bus',
+      spawnGroupId: 'shared-group',
+      subAgentIds: ['shared-child'],
+      agentMarker: 'agent-a',
+    });
+    const messageB = msg('message-agent-b', {
+      ...messageA.metadata,
+      agentMarker: 'agent-b',
+    });
+    const initialProps = { messages: [messageA], rootAgentId: 'agent-a' };
+    const { result, rerender } = renderHook(
+      (props: typeof initialProps) => useSubAgentTreeMerge(props.messages, props.rootAgentId),
+      { initialProps },
+    );
+    expect(result.current[0]?.message_id).toBe('message-agent-a');
+
+    rerender({ messages: [messageB], rootAgentId: 'agent-b' });
+
+    expect(result.current[0]?.message_id).toBe('message-agent-b');
+    expect(result.current[0]?.metadata?.agentMarker).toBe('agent-b');
+  });
+
   it('turns a terminal for_each response into one aggregate tree message', () => {
     const messages = [
       msg('for-each-start', {

@@ -17,6 +17,14 @@ export interface BrowserCursorPayload {
 const MIN_CURSOR_ANIMATION_MS = 35;
 const MAX_CURSOR_ANIMATION_MS = 120;
 const DEFAULT_CURSOR_ANIMATION_MS = 70;
+const DEFAULT_CURSOR_POSITION: CursorPosition = { x: 640, y: 400 };
+
+type CursorScopeId = string | null | undefined;
+
+interface ScopedCursorPosition {
+  scopeId: CursorScopeId;
+  position: CursorPosition;
+}
 
 /**
  * Cursor animation state machine:
@@ -30,11 +38,19 @@ const DEFAULT_CURSOR_ANIMATION_MS = 70;
  * rapid realtime updates remain continuous instead of jumping backward.
  */
 
-export function useCursorAnimation() {
-  const [cursorPos, setCursorPos] = useState<CursorPosition>({ x: 640, y: 400 });
+export function useCursorAnimation(scopeId: CursorScopeId) {
+  const scopeIdRef = useRef(scopeId);
+  scopeIdRef.current = scopeId;
+  const [cursorState, setCursorState] = useState<ScopedCursorPosition>({
+    scopeId,
+    position: DEFAULT_CURSOR_POSITION,
+  });
+  const cursorPos =
+    cursorState.scopeId === scopeId ? cursorState.position : DEFAULT_CURSOR_POSITION;
   const cursorPosRef = useRef(cursorPos);
   const animationFrameRef = useRef<number | null>(null);
   const animationStartRef = useRef<{
+    scopeId: CursorScopeId;
     from: CursorPosition;
     to: CursorPosition;
     startedAt: number;
@@ -42,9 +58,12 @@ export function useCursorAnimation() {
   } | null>(null);
   const lastRealtimeSampleRef = useRef<BrowserCursorPayload | null>(null);
 
-  const updateCursorPos = useCallback((next: CursorPosition) => {
+  const updateCursorPos = useCallback((next: CursorPosition, ownerScopeId: CursorScopeId) => {
+    if (scopeIdRef.current !== ownerScopeId) return;
     cursorPosRef.current = next;
-    setCursorPos(next);
+    setCursorState((previous) =>
+      scopeIdRef.current === ownerScopeId ? { scopeId: ownerScopeId, position: next } : previous,
+    );
   }, []);
   const stopAnimation = useCallback(() => {
     if (animationFrameRef.current !== null) window.cancelAnimationFrame(animationFrameRef.current);
@@ -55,11 +74,19 @@ export function useCursorAnimation() {
     (now: number) => {
       const animation = animationStartRef.current;
       if (!animation) return;
+      if (scopeIdRef.current !== animation.scopeId) {
+        animationFrameRef.current = null;
+        animationStartRef.current = null;
+        return;
+      }
       const progress = Math.min(1, Math.max(0, (now - animation.startedAt) / animation.durationMs));
-      updateCursorPos({
-        x: animation.from.x + (animation.to.x - animation.from.x) * progress,
-        y: animation.from.y + (animation.to.y - animation.from.y) * progress,
-      });
+      updateCursorPos(
+        {
+          x: animation.from.x + (animation.to.x - animation.from.x) * progress,
+          y: animation.from.y + (animation.to.y - animation.from.y) * progress,
+        },
+        animation.scopeId,
+      );
       if (progress < 1) {
         animationFrameRef.current = window.requestAnimationFrame(runAnimationFrame);
       } else {
@@ -70,13 +97,14 @@ export function useCursorAnimation() {
     [updateCursorPos],
   );
   const animateCursorTo = useCallback(
-    (record: BrowserCursorPayload) => {
+    (record: BrowserCursorPayload, ownerScopeId: CursorScopeId) => {
+      if (scopeIdRef.current !== ownerScopeId) return;
       const previous = lastRealtimeSampleRef.current;
       lastRealtimeSampleRef.current = record;
       const to = { x: record.x, y: record.y };
       if (!previous) {
         stopAnimation();
-        updateCursorPos(to);
+        updateCursorPos(to, ownerScopeId);
         return;
       }
       const sampleDeltaMs =
@@ -93,6 +121,7 @@ export function useCursorAnimation() {
       if (animationFrameRef.current !== null)
         window.cancelAnimationFrame(animationFrameRef.current);
       animationStartRef.current = {
+        scopeId: ownerScopeId,
         from: cursorPosRef.current,
         to,
         startedAt: performance.now(),
@@ -103,5 +132,21 @@ export function useCursorAnimation() {
     [runAnimationFrame, stopAnimation, updateCursorPos],
   );
 
-  return { cursorPos, lastRealtimeSampleRef, updateCursorPos, stopAnimation, animateCursorTo };
+  const resetCursor = useCallback(
+    (ownerScopeId: CursorScopeId) => {
+      stopAnimation();
+      lastRealtimeSampleRef.current = null;
+      updateCursorPos(DEFAULT_CURSOR_POSITION, ownerScopeId);
+    },
+    [stopAnimation, updateCursorPos],
+  );
+
+  return {
+    cursorPos,
+    lastRealtimeSampleRef,
+    updateCursorPos,
+    stopAnimation,
+    animateCursorTo,
+    resetCursor,
+  };
 }

@@ -18,6 +18,7 @@ export function useAgentProviderEffects(state: AgentProviderState, options: Effe
   const { agent, setStreamingBubbles, setStreamingPlan, setStreamingTools } = state;
   useRealtimeSubscription({
     selectedAgentId: state.selectedAgentId,
+    selectedAgentIdRef: state.selectedAgentIdRef,
     canSubscribe: options.canSubscribe,
     forceResubscribeCounter: state.forceResubscribeCounter,
     channelRef: state.channelRef,

@@ -28,12 +28,11 @@ const mocks = vi.hoisted(() => {
     streamingAttention: null,
     isLoadingAgent: false,
     isChatMode: false,
-    setAgent: vi.fn(),
+    applyAgentDetail: vi.fn(() => true),
     setSelectedAgentId: vi.fn(),
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => true),
-    setMessages: vi.fn(),
     forceResubscribe: vi.fn(),
   };
   return { authState, ctxState };
