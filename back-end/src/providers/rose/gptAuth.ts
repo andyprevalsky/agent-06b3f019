@@ -20,7 +20,6 @@ import { createHash } from 'node:crypto';
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import {
   RoseAuthError,
-  RoseError,
   RoseInvalidRequest,
   RoseRateLimitError,
   RoseServerError,

@@ -537,7 +537,6 @@ async function testGptAuth_happyPathUsesCodexResponses() {
   }
 }
 
-
 async function testGptAuth_codex404FallsThroughToWaterfall() {
   // Codex Cloudflare/edge 404 (empty body — same for garbage tokens) must NOT
   // fail the whole createStreamingCompletion() call. It must raise
@@ -576,6 +575,7 @@ async function testGptAuth_codex404FallsThroughToWaterfall() {
     const chunks = await collect(stream);
 
     assert(codexCalls >= 1, 'Codex route must be attempted');
+    assertEqual(openAiCalls, 0, 'openai api-key tier must not be required for this regression');
     assertEqual(openrouterCalls, 1, 'OpenRouter waterfall must serve after Codex 404');
     assert(chunks.length > 0, 'chunks emitted from waterfall after Codex 404');
     const first = chunks[0];
