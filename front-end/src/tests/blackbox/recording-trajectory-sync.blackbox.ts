@@ -7,6 +7,7 @@ import {
   findActiveStepIndex,
   playheadFromSegments,
   resolveRecordingStartMs,
+  seekTargetFromOffset,
 } from '@/features/terminal-component-group/components/browser-agent-chip/recordingTrajectorySync';
 
 describe('recordingTrajectorySync', () => {
@@ -59,5 +60,32 @@ describe('recordingTrajectorySync', () => {
     expect(playheadFromSegments([10, 20], 0, 3)).toBe(3);
     expect(playheadFromSegments([10, 20], 1, 4)).toBe(14);
     expect(playheadFromSegments([10, 20], 2, 5)).toBe(35);
+  });
+
+  it('keeps full step titles (no 80-char slice) so the live panel can wrap them', () => {
+    const long =
+      'Probing 5 cookie variant(s) in parallel on ephemeral browser sessions (not the live debug desktop; known challenge strips may commit, others are diagnostic).';
+    const steps = buildTrajectorySteps(
+      [
+        {
+          timestamp: '2026-08-31T16:51:30.000Z',
+          metadata: { action_type: 'recording' },
+        },
+        {
+          timestamp: '2026-08-31T16:51:35.000Z',
+          metadata: { action_type: 'browser_challenge_recovery', title: long },
+        },
+      ],
+      Date.parse('2026-08-31T16:51:30.000Z'),
+    );
+    expect(steps[0].title).toBe(long);
+    expect(steps[0].title.length).toBeGreaterThan(80);
+  });
+
+  it('maps a wall-clock offset back to the correct segment + local time for click-seek', () => {
+    expect(seekTargetFromOffset(3, [10, 20])).toEqual({ segmentIndex: 0, timeInSegment: 3 });
+    expect(seekTargetFromOffset(14, [10, 20])).toEqual({ segmentIndex: 1, timeInSegment: 4 });
+    expect(seekTargetFromOffset(35, [10, 20])).toEqual({ segmentIndex: 1, timeInSegment: 25 });
+    expect(seekTargetFromOffset(7, [])).toEqual({ segmentIndex: 0, timeInSegment: 7 });
   });
 });
