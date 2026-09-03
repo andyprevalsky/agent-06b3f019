@@ -6,19 +6,34 @@
  *       → SubAgentTree headed by user-facing sub-agent status
  *   (a) pre-spawn error (status ERROR, no subAgentIds, no subAgentId)
  *       → simple red "└─ ✗ title: error" line
- *   (b) summary with subAgentIds + busId
+ *   (b) parent fan-out while a child is selected
+ *       (busId !== selectedAgentId AND subAgentIds includes selectedAgentId)
+ *       → null (do not paint the root "new agent" tree on a child page)
+ *   (c) summary with subAgentIds + busId
  *       → SubAgentTree (tree view with live bus updates)
- *   (c) initial spawning message (IN_PROGRESS, no subAgentId)
+ *   (d) initial spawning message (IN_PROGRESS, no subAgentId)
  *       → "└─ ○ Spawning general-purpose agents..." placeholder
- *   (d) individual progress update (has subAgentId)
+ *   (e) individual progress update (has subAgentId)
  *       → SubAgentToolBubble
  *
  * Returns null when the message is not a general-purpose agent tool event.
  */
+import { useAgentContext } from '@/features/agent-context';
 import { userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../../hooks';
 import SubAgentTree from '../SubAgentTree';
 import SubAgentToolBubble from '../SubAgentToolBubble';
+
+/** Parent for_each / spawn tree that lists the currently viewed child. */
+export function isParentFanoutTree(args: {
+  selectedAgentId: string | null;
+  busId: string | undefined;
+  subAgentIds: string[] | undefined;
+}): boolean {
+  const { selectedAgentId, busId, subAgentIds } = args;
+  if (!selectedAgentId || !busId || !subAgentIds?.length) return false;
+  return busId !== selectedAgentId && subAgentIds.includes(selectedAgentId);
+}
 
 interface SubAgentBubbleProps {
   message: Message;
@@ -31,6 +46,7 @@ export function SubAgentBubble({
   onNavigateToAgent,
   hideSubAgentTreeHeader,
 }: SubAgentBubbleProps) {
+  const { selectedAgentId } = useAgentContext();
   if (!message.metadata) return null;
   const metadata = message.metadata;
   const rawToolStatus = (metadata.toolStatus as string | undefined) || 'FINISHED';
@@ -58,6 +74,9 @@ export function SubAgentBubble({
     'IN_PROGRESS' | 'FINISHED' | 'ERROR';
 
   if (subAgentIds && subAgentIds.length > 0 && busId) {
+    if (isParentFanoutTree({ selectedAgentId, busId, subAgentIds })) {
+      return null;
+    }
     return (
       <div className="flex gap-3 animate-in fade-in duration-300">
         <SubAgentTree

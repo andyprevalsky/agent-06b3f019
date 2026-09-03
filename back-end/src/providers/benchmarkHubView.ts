@@ -127,6 +127,47 @@ function agentSummaryFromTask(
 }
 
 /**
+ * When GET /tree?busId=<child> hits the hub, return that child plus its
+ * descendants — not the full run tree. Live findAgentsByBusId filters on the
+ * busId column; hub previously returned every node because getRunAgent always
+ * attaches the root tree.
+ */
+export function subtreeAgentsForBus<T extends { agent_id?: unknown; parent_agent_id?: unknown }>(
+  tree: T[],
+  busId: string
+): T[] {
+  if (!busId) return tree;
+  const target = tree.find((node) => node.agent_id === busId);
+  if (!target) return tree;
+  const parent = target.parent_agent_id;
+  const isRoot = parent == null || parent === '' || parent === busId;
+  if (isRoot) return tree;
+
+  const childrenByParent = new Map<string, T[]>();
+  for (const node of tree) {
+    const parentId = typeof node.parent_agent_id === 'string' ? node.parent_agent_id : '';
+    if (!parentId) continue;
+    const siblings = childrenByParent.get(parentId) ?? [];
+    siblings.push(node);
+    childrenByParent.set(parentId, siblings);
+  }
+
+  const keep = new Set<string>([busId]);
+  const stack = [busId];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined) break;
+    for (const child of childrenByParent.get(current) ?? []) {
+      const childId = typeof child.agent_id === 'string' ? child.agent_id : '';
+      if (!childId || keep.has(childId)) continue;
+      keep.add(childId);
+      stack.push(childId);
+    }
+  }
+  return tree.filter((node) => typeof node.agent_id === 'string' && keep.has(node.agent_id));
+}
+
+/**
  * Adapt a run bundle to the frontend agent-detail shape for one agent in the
  * run (root or any sub-agent captured by logs.tree), plus the fan-out tree.
  */
