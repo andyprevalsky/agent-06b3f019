@@ -315,6 +315,33 @@ def test_visible_result_completion_rewrites_post_submit_wait():
     assert "0.07" in forced["params"]["reasoning"]
 
 
+def test_visible_result_completion_rewrites_post_submit_scroll():
+    """b234cfa8 stated Risk Score 0.11 + bot verdict, then scrolled until 420s.
+
+    Idle scroll/screenshot after submit+stated result must also force completion;
+    wait-only rewriting leaves scroll loops uncapped.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stated = (
+        'The form was submitted and results are showing: Risk Score 0.11, and a '
+        '"Bot detected - form blocked" message. Let me scroll to see full details.'
+    )
+    prior_submit = ['click: {"text": "Submit (Protected by Invisible"}']
+    assert should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning=stated,
+        action_summaries=prior_submit,
+    )
+    assert should_force_visible_result_completion(
+        action_name="screenshot",
+        last_reasoning=stated,
+        action_summaries=prior_submit,
+    )
+
+
 def test_visible_result_completion_does_not_rewrite_before_submit():
     from domains.spawn_browser_agent_v3.visible_result_completion import (
         should_force_visible_result_completion,
@@ -333,6 +360,11 @@ def test_visible_result_completion_does_not_rewrite_before_submit():
     )
     assert not should_force_visible_result_completion(
         action_name="wait",
+        last_reasoning="Scrolling to bring the checkbox into view.",
+        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
+    )
+    assert not should_force_visible_result_completion(
+        action_name="scroll",
         last_reasoning="Scrolling to bring the checkbox into view.",
         action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
     )
@@ -19254,6 +19286,10 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_rewrites_post_submit_wait",
         test_visible_result_completion_rewrites_post_submit_wait,
+    )
+    r.record(
+        "visible_result_completion_rewrites_post_submit_scroll",
+        test_visible_result_completion_rewrites_post_submit_scroll,
     )
     r.record(
         "visible_result_completion_does_not_rewrite_before_submit",

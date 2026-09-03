@@ -5,8 +5,11 @@ score 0.07 and "Bot detected - form blocked" / pow_not_satisfied, then spent
 the remaining 420s cap on 5–10s waits and extra submits. The task asks to
 return that visible score and verdict, not to keep retrying proof-of-work.
 
-Rewrite a post-submit `wait` into `attempt_completion` so the parent can
-finish instead of burning the harness timeout.
+A later smoke failure (agent b234cfa8) stated Risk Score 0.11 + the same bot
+verdict, then burned the 420s cap on scroll/screenshot loops instead of wait.
+Rewrite post-submit idle actions (`wait`, `scroll`, …) into
+`attempt_completion` so the parent can finish instead of burning the harness
+timeout.
 """
 
 from __future__ import annotations
@@ -23,6 +26,24 @@ _VERDICT_MARKERS = (
     "pow_not_satisfied",
     "human detected",
     "verified!",
+)
+# Idle / exploratory actions that cannot change a result already on the page.
+# Do NOT include click/type/submit — those may still be required before the
+# first submit, and the submit-history gate already blocks pre-submit rewrites.
+_POST_RESULT_IDLE_ACTIONS = frozenset(
+    {
+        "wait",
+        "scroll",
+        "scroll_to",
+        "scroll_until",
+        "page_up",
+        "page_down",
+        "screenshot",
+        "noop",
+        "sleep",
+        "move",
+        "hover",
+    }
 )
 
 
@@ -66,8 +87,8 @@ def should_force_visible_result_completion(
     action_summaries: Iterable[Any] | None = None,
     action_entries: Iterable[Any] | None = None,
 ) -> bool:
-    """Rewrite only idle `wait` after a submit once the visible result is stated."""
-    if str(action_name or "").strip().lower() != "wait":
+    """Rewrite idle post-submit actions once the visible result is stated."""
+    if str(action_name or "").strip().lower() not in _POST_RESULT_IDLE_ACTIONS:
         return False
     if not history_has_submit_click(action_summaries, action_entries):
         return False
