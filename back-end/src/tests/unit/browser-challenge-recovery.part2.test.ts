@@ -12,6 +12,7 @@ import {
   compatiblePreferredBrowserConfig,
   orderConfigsForLane,
   sameSiteNavigationUrl,
+  shouldPreferSteelForChallengeTarget,
 } from '../../providers/browser/challengeRecovery';
 import { closeValidationBrowser } from '../../providers/browser/challengeRecoverySupport';
 import {
@@ -457,6 +458,27 @@ function testProbeAppliesFingerprintBeforeNavigationAndPassesToolParityInputs():
   assert.match(cookieSource, /getFingerprintInjectionData/);
 }
 
+function testSteelPreferredWhenCdnHardFilterActive(): void {
+  assert.ok(!shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x'));
+  assert.ok(
+    shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x', {
+      requirePaymentCdn: true,
+    })
+  );
+  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.example.com/shop'));
+  assert.ok(!shouldPreferSteelForChallengeTarget('not-a-url'));
+
+  const preferred = browserRecoveryCandidates(
+    { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
+    { preferSteel: true }
+  );
+  assert.deepStrictEqual(
+    preferred.map((candidate) => candidate.key),
+    ['steel_fixed', 'steel_managed']
+  );
+  assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
+}
+
 async function main(): Promise<void> {
   testPreferredConfigCompatibility();
   await testCloseValidationBrowserNeverBlocksRelease();
@@ -470,6 +492,7 @@ async function main(): Promise<void> {
   testChallengeLlmClassifierCostRouting();
   testConfigBlacklistExcludesUntilExhausted();
   testProbeAppliesFingerprintBeforeNavigationAndPassesToolParityInputs();
+  testSteelPreferredWhenCdnHardFilterActive();
   process.stdout.write('PASS staged browser challenge recovery part2\n');
 }
 

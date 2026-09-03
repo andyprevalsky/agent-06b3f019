@@ -10,7 +10,6 @@ import {
   recoveryConfigKeyForSession,
   runLaneConfigSearch,
   orderConfigsForLane,
-  shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
@@ -607,27 +606,6 @@ function testChallengeDetection(): void {
   );
 }
 
-function testSteelPreferredWhenCdnHardFilterActive(): void {
-  assert.ok(!shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x'));
-  assert.ok(
-    shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x', {
-      requirePaymentCdn: true,
-    })
-  );
-  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.example.com/shop'));
-  assert.ok(!shouldPreferSteelForChallengeTarget('not-a-url'));
-
-  const preferred = browserRecoveryCandidates(
-    { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
-    { preferSteel: true }
-  );
-  assert.deepStrictEqual(
-    preferred.map((candidate) => candidate.key),
-    ['steel_fixed', 'steel_managed']
-  );
-  assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
-}
-
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
@@ -639,14 +617,9 @@ async function main(): Promise<void> {
   await testLateCreateAfterAbortIsReleased();
   await testAbortedProbeDoesNotDoubleRelease();
   await testProbeCandidateBrowserSettlesOnAbort();
-  // Payment-CDN / Stripe.js ranking + hard gates live in
-  // browser-challenge-recovery-payment.test.ts (max-lines split).
-  // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
-  // Learned preferred-config seeding + schemas: .part2.test.ts.
   testOrderConfigsForLane();
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
-  testSteelPreferredWhenCdnHardFilterActive();
   process.stdout.write('PASS staged browser challenge recovery\n');
 }
 
