@@ -1499,6 +1499,56 @@ def test_agent_messages_have_browser_terminal_requires_explicit_close():
     assert bench._agent_messages_have_browser_terminal([])
 
 
+def test_agent_messages_ready_for_browser_hub_archive_waits_for_recording():
+    """session_paused alone must not archive before Kernel replay is attached.
+
+    DoorDash grocery timeout 3afbbda8 (2026-09-02): cleanup posted session_paused
+    without task_id, the refresh helper returned early, and the hub bundle missed
+    the FINISHED recording_view_url that landed ~1s later. FE Recording tab empty.
+    """
+    import benchmarks.run_benchmark as bench
+
+    task_id = "task-dd-1"
+    recording_started = {
+        "metadata": {
+            "toolName": "spawn_browser_agent",
+            "action_type": "recording",
+            "toolStatus": "IN_PROGRESS",
+            "task_id": task_id,
+        }
+    }
+    session_paused = {
+        "metadata": {
+            "toolName": "spawn_browser_agent",
+            "action_type": "session_paused",
+            "toolStatus": "ERROR",
+            "toolCallId": "tool-timeout-1",
+        }
+    }
+    recording_finished = {
+        "metadata": {
+            "toolName": "spawn_browser_agent",
+            "action_type": "recording",
+            "toolStatus": "FINISHED",
+            "task_id": task_id,
+            "recording_view_url": "https://kernel.example/replay.mp4",
+        }
+    }
+
+    paused_before_recording = [recording_started, session_paused]
+    assert bench._agent_messages_have_browser_terminal(paused_before_recording)
+    assert not bench._agent_messages_have_browser_recording_ready(
+        paused_before_recording
+    )
+    assert not bench._agent_messages_ready_for_browser_hub_archive(
+        paused_before_recording
+    )
+
+    paused_with_recording = [recording_started, recording_finished, session_paused]
+    assert bench._agent_messages_ready_for_browser_hub_archive(paused_with_recording)
+    assert bench._agent_messages_ready_for_browser_hub_archive([])
+
+
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
     """A displayed tax-rate qualifier is equivalent only when its amount is exact."""
     from benchmarks.benchmark_tasks import BenchmarkTask
@@ -3244,6 +3294,182 @@ def test_first_level_gp_count_static_uses_collected_transcripts():
     assert "T2:" in reason
 
 
+def test_no_nested_general_purpose_static_uses_typed_parentage():
+    """T6 is a named static row: nested GP under GP/explore fails; first-level GPs pass."""
+    from benchmarks.run_benchmark import (
+        _compact_benchmark_state_for_judge,
+        _run_declared_static_check,
+    )
+
+    evaluator = {"checks": [{"type": "no_nested_general_purpose"}]}
+    root = "root-mass"
+    gp0 = "gp-0"
+    explore0 = "explore-0"
+    nested = "gp-nested"
+    flat = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [],
+                },
+                gp0: {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+                explore0: {
+                    "parent_agent_id": gp0,
+                    "status": "COMPLETED",
+                    "agent_type": "explore",
+                    "goal": "Explore public posts for Huberman",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "ok",
+                            "metadata": {"toolName": "web_fetch", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, flat) == (True, "All declared static checks passed")
+    compact = _compact_benchmark_state_for_judge(flat)
+    assert compact["nested_general_purpose_count"] == 0
+    assert compact["nested_general_purpose_violations"] == []
+
+    nested_data = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                **flat["_benchmark"]["tree"],
+                nested: {
+                    "parent_agent_id": gp0,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Nested child.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, nested_data)
+    assert passed is False
+    assert "T6:" in reason
+    assert "nested general-purpose" in reason
+    nested_compact = _compact_benchmark_state_for_judge(nested_data)
+    assert nested_compact["nested_general_purpose_count"] == 1
+    assert nested_compact["nested_general_purpose_violations"][0]["agent_id"] == nested
+    assert nested_compact["nested_general_purpose_violations"][0]["parent_agent_id"] == gp0
+
+
+def test_principal_user_andy_static_ignores_schema_key_leftovers():
+    """T1 is a named static row: Andy principal wins; opportunities_for_aman does not fail."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "principal_user_andy"}]}
+    root = "root-mass"
+    good = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Task Complete",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "Andy’s differentiated positioning and 90-day calendar.",
+                        "outputs": [{"name": "opportunities_for_aman", "value": "gap"}],
+                    },
+                },
+            }
+        ],
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Task Complete",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Andy’s differentiated positioning and 90-day calendar.",
+                                    "outputs": [{"name": "opportunities_for_aman", "value": "gap"}],
+                                },
+                            },
+                        }
+                    ],
+                },
+                "gp-0": {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, good) == (True, "All declared static checks passed")
+
+    aman_principal = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Build a personal brand for Aman Gottumukkala across health creators",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Task Complete",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Aman’s personal brand calendar is ready.",
+                                    "outputs": [],
+                                },
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, aman_principal)
+    assert passed is False
+    assert "T1:" in reason
+
+
 def test_root_deliverable_markers_use_dag_assemble_not_stub_card():
     """T7 is a named static row: DAG assemble counts when Task Complete is a stub."""
     from benchmarks.run_benchmark import _run_declared_static_check
@@ -3646,6 +3872,156 @@ def test_instacart_catalog_uses_complete_weekly_grocery_basket():
         "earliest available delivery window",
     ):
         assert requirement in criteria
+
+
+
+def test_doordash_food_plan_grocery_cart_reauth_contract():
+    """Cookie-sync-off sibling: full manifest cart then auth_assistance via existing guest kill-switch."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.spawn_contract import (
+        should_disable_saved_browser_auth,
+        tasks_require_disabled_saved_browser_auth,
+    )
+
+    task = get_task_by_name("browser-doordash-food-plan-grocery-cart-reauth")
+    assert task.group == "daily"
+    assert task.harness == "rose"
+    assert "exactly one browser agent" in task.prompt.lower()
+    assert "partial cart" in task.prompt.lower()
+    assert "manifest line item" in task.prompt.lower()
+    assert "do not try to login" in task.prompt.lower()
+    assert "auth assistance" in task.prompt.lower() or "reauthentication" in task.prompt.lower()
+    assert task.pinned_facts["manifest_source"] == "doordash-food-plan-grocery-fixture.json"
+    assert task.environment.get("live_fixtures") in (None, [],)
+    assert not task.environment.get("required_injectable_cookie_domains")
+    assert task.environment.get("needs_auth") is not True
+    assert "needs_auth" not in task.tags
+    assert "cart-reauth" in task.tags
+    assert task.expected_attention_kind == "auth_assistance"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.timeout_seconds == 2700
+    assert should_disable_saved_browser_auth(task) is True
+    assert tasks_require_disabled_saved_browser_auth([task.name]) is True
+    # Sibling write_lock bench must keep cookies + needs_auth and must NOT trip the kill-switch.
+    sibling = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    assert sibling.environment.get("needs_auth") is True
+    assert sibling.expected_attention_kind == "write_lock"
+    assert should_disable_saved_browser_auth(sibling) is False
+    cart = task.evaluators[0]
+    assert cart["id"] == "doordash-food-plan-cart-reauth-completeness"
+    joined = " ".join(cart["criteria"]).lower()
+    assert "every required" in joined
+    assert "auth_assistance" in joined or "reauth" in joined
+    assert "write_lock" in joined  # explicitly forbidden terminal
+
+
+def test_doordash_food_plan_grocery_repro_contract():
+    """DoorDash food-plan grocery repro requires manifest-exact Safeway cart, not one SKU."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+    from benchmarks.run_benchmark import (
+        _doordash_food_plan_manifest_context_for_judge,
+        _doordash_food_plan_prompt_override,
+        _doordash_food_plan_supplemental_cart_evidence,
+    )
+
+    task = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    assert task.group == "daily"
+    assert task.harness == "rose"
+    assert "exactly one browser agent" in task.prompt.lower()
+    assert "partial cart" in task.prompt.lower()
+    assert "manifest line item" in task.prompt.lower()
+    assert "do not try to login" in task.prompt.lower()
+    assert task.pinned_facts["manifest_source"] == "doordash-food-plan-grocery-fixture.json"
+    assert task.pinned_facts["prod_user_id"] == "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+    assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
+    assert task.environment["required_injectable_cookie_domains"] == ["doordash.com"]
+    assert task.environment.get("needs_auth") is True
+    assert "needs_auth" in task.tags
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert task.max_steps == {"browser": 250}
+    # 30m timed out mid-progress (~162/250 steps); give checkout room to finish.
+    assert task.timeout_seconds == 2700
+    cart_evaluator = task.evaluators[0]
+    assert cart_evaluator["id"] == "doordash-food-plan-cart-completeness"
+    criteria = " ".join(cart_evaluator["criteria"]).lower()
+    assert "every required safeway manifest line" in criteria
+    assert "large item count" not in criteria
+    judge_prompt = cart_evaluator["judge_prompt"].lower()
+    assert "one item" in judge_prompt
+    assert "large item count" in judge_prompt or "high subtotal" in judge_prompt
+
+    # Seed a synthetic frozen fixture so this structural test does not depend on
+    # a prior live fixture apply / .context freeze. Also proves the harness does
+    # not append BENCHMARK EXECUTION CONTRACT / clear-cart injections.
+    prior_cache = dict(bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE)
+    try:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {
+            "benchmark_goal": (
+                "Checkout-ready one-week manifest for Safeway. "
+                "SAFEWAY MANIFEST: 93/7 lean ground beef about 2.5 lb; "
+                "Add every required ingredient. Complete checkout."
+            ),
+        }
+        override = _doordash_food_plan_prompt_override(task)
+        assert override is not None
+        assert "BENCHMARK EXECUTION CONTRACT" not in override
+        assert "FIRST open Safeway and remove every item" not in override
+        assert "93/7 lean ground beef" in override.lower()
+        assert "do not try to login" in override.lower()
+        manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
+        manifest_lower = manifest_context.lower()
+        assert "checkout-ready one-week manifest" in manifest_lower
+        assert "93/7 lean ground beef" in manifest_lower
+        # Live apply caches summary metadata (benchmark_goal / *_chars) without the
+        # checkout table body. The frozen JSON still holds the authoritative table —
+        # judge context must keep it (regression: apply-cache path used to force "").
+        frozen = bench._doordash_food_plan_frozen_fixture()
+        assert frozen is not None
+        if frozen.get("checkout_manifest"):
+            assert frozen["checkout_manifest"] in manifest_context
+            assert "authoritative checkout manifest table" in manifest_lower
+    finally:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.update(prior_cache)
+
+    supplemental = _doordash_food_plan_supplemental_cart_evidence(
+        {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": "Executed JS, result: [{'text': 'Ground Beef 93% Lean\\n3 ×'}]",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "action_type": "evaluate",
+                    },
+                },
+                {
+                    "role": "TOOL",
+                    "message": "**Approval Needed**\n47-item Safeway order\n1. Kodiak mix",
+                    "metadata": {"toolName": "request_user_approval"},
+                },
+            ],
+            "_benchmark": {
+                "attention_requests_seen": [
+                    {
+                        "kind": "write_lock",
+                        "question": (
+                            "47-item Safeway grocery delivery order at checkout "
+                            "with grounded itemization for manifest verification"
+                        ),
+                    }
+                ]
+            },
+        }
+    )
+    assert "Browser cart evaluate dump" in supplemental
+    assert "Approval tool message" in supplemental
+    assert "Attention request (write_lock)" in supplemental
 
 
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
@@ -4148,6 +4524,98 @@ def test_no_tool_failures_counts_unrecovered_evaluate_uncaught():
     assert _run_declared_static_check(evaluator, data)[0] is False
 
 
+def test_no_tool_failures_ignores_recoverable_web_fetch_error():
+    """Recovered web_fetch ERROR then later FINISHED fetch must not fail t10.
+
+    Local repro: test-mass-agent-run-0 Fast Mode replay (agent 4f078c58…,
+    child 84979949…) had one web_fetch ERROR on theunsubscribed.co/archive?sort=top
+    then 69 later FINISHED fetches; t10-no-tool-failures previously failed closed.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "bf0a44fa-d68d-4fdb-882d-f320c21e6b2e",
+                    "toolStatus": "ERROR",
+                },
+                "message": "Params: url=https://www.theunsubscribed.co/archive?sort=top",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "recover-1",
+                    "toolStatus": "FINISHED",
+                },
+                "message": "Params: url=https://www.theunsubscribed.co/archive",
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data)[0] is True
+
+
+def test_no_tool_failures_counts_unrecovered_web_fetch_error():
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "dead-fetch",
+                    "toolStatus": "ERROR",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "web_fetch dead-fetch status=ERROR",
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
+
+def test_no_tool_failures_ignores_recoverable_grep_error_after_web_search():
+    """Schema-invalid grep ERROR recovered via later web_search must not fail t10.
+
+    Local repro: test-mass-agent-run-0 Fast Mode replay (agent 65558d55…,
+    child 5af074c9…) had grep ERROR `Unsupported grep parameter: 'filters'`
+    then continued with FINISHED web_search calls and COMPLETED.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "grep",
+                    "toolCallId": "4b94286e-2a7b-42dc-a299-d46d283e9af4",
+                    "toolStatus": "ERROR",
+                },
+                "message": "Unsupported grep parameter: 'filters'.",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_search",
+                    "toolCallId": "recover-search",
+                    "toolStatus": "FINISHED",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data)[0] is True
+
 
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
@@ -4358,6 +4826,205 @@ def test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery():
     }
     assert _tool_runtime_failures(data) == []
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+
+def test_claude_code_session_output_static_check_is_fail_closed():
+    """Bench fails closed when Claude Code sessions lack stored transcripts."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
+        ],
+    }
+    good = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "_benchmark": {
+            "claude_code_sessions": [
+                {"id": "session-1", "output": "x" * 40},
+            ],
+        },
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    empty = deepcopy(good)
+    empty["_benchmark"]["claude_code_sessions"][0]["output"] = "   "
+    passed, reason = _run_declared_static_check(evaluator, empty)
+    assert passed is False
+    assert "stored transcripts" in reason.lower() or "chars" in reason.lower()
+
+    missing = deepcopy(good)
+    missing["_benchmark"]["claude_code_sessions"] = []
+    missing["_benchmark"]["claude_code_session_evidence_error"] = "api_base_url is missing"
+    passed, reason = _run_declared_static_check(evaluator, missing)
+    assert passed is False
+    assert "session count" in reason.lower()
+    assert "api_base_url is missing" in reason
+
+
+def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
+    """CUDA ranking bench requires coding-agent route with zero tool failures."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
+
+    assert "no_tool_failures" in RUNTIME_STATIC_CHECK_TYPES
+    task = get_task_by_name("cuda-kernel-github-top100-code-agent")
+    assert "spawn_claude_code_agent" in task.expected_tools
+    assert "api_request" not in task.expected_tools
+    # Force Claude Code (not Codex) so GitHub REST work stays on the CC path.
+    assert task.requires_claude_code is True
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    checks = {c["type"]: c for c in static["checks"]}
+    assert "no_tool_failures" in checks
+    assert checks["agent_status"]["value"] == "COMPLETED"
+    assert "Github API token:" in task.prompt
+    assert "{GITHUB_DISPATCH_TOKEN}" in task.prompt
+    assert "at most one Claude Code session at a time" in task.prompt
+
+
+def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
+    """CC in-place progress chips must not trip the default ~510s tree-stall early-fail.
+
+    Local repro (k=3 r7, 2026-09-02): agent 193b753e failed at ~872s with
+    ``tree stalled … silent for 518s (threshold=510s)`` while Claude Code was
+    still mid-session updating a progress chip (message_count frozen). Stall
+    budget for CC tasks must cover MAX_RUNTIME_S + buffer; cost idle is also
+    required so a truly dead tree still fails fast.
+    """
+    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds
+
+    cuda = get_task_by_name("cuda-kernel-github-top100-code-agent")
+    chat = get_task_by_name("chat-mode")
+    cuda_limit = agent_stall_limit_seconds(cuda)
+    chat_limit = agent_stall_limit_seconds(chat)
+
+    assert cuda.requires_claude_code is True
+    assert "spawn_claude_code_agent" in cuda.expected_tools
+    assert cuda_limit == max(AGENT_STALL_SECONDS, int(MAX_RUNTIME_S) + 120)
+    assert cuda_limit >= 1920
+    assert chat_limit == AGENT_STALL_SECONDS
+    assert chat_limit < cuda_limit
+
+
+async def test_declared_evaluator_hydrates_claude_code_sessions():
+    """Transcript static checks hydrate Claude Code sessions before grading."""
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    static_evaluator = {
+        "id": "claude-code-transcript",
+        "method": "static_check",
+        "checks": [
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
+        ],
+    }
+    task = replace(
+        get_task_by_name("cuda-kernel-github-top100-code-agent"),
+        evaluators=[static_evaluator],
+    )
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "messages": [],
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+
+    fake_response = AsyncMock()
+    fake_response.status_code = 200
+    fake_response.content = b"{}"
+    fake_response.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "durable transcript " + ("y" * 40)}]
+    }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return fake_response
+
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+    ):
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+
+    assert passed is True
+    assert reason is None
+    assert results[0]["passed"] is True
+    assert data["_benchmark"]["claude_code_sessions"][0]["id"] == "session-1"
+
+
+async def test_hydrate_claude_code_sessions_retries_until_transcript_persists():
+    """Cancel-persist can lag pause; hydrate retries while output is still empty."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    empty = AsyncMock()
+    empty.status_code = 200
+    empty.content = b"{}"
+    empty.json = lambda: {"sessions": [{"id": "session-1", "output": ""}]}
+
+    filled = AsyncMock()
+    filled.status_code = 200
+    filled.content = b"{}"
+    filled.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "[Claude] Session started\n" + ("z" * 40)}]
+    }
+
+    responses = [empty, filled]
+    sleeps: list[float] = []
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return responses.pop(0)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "ACTIVE"},
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+        patch.object(bench.asyncio, "sleep", _fake_sleep),
+    ):
+        await bench._hydrate_claude_code_sessions(data)
+
+    sessions = data["_benchmark"]["claude_code_sessions"]
+    assert len(sessions) == 1
+    assert len(sessions[0]["output"].strip()) >= 32
+    assert sleeps == [2.0]
+    assert responses == []
 
 
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
@@ -14267,7 +14934,12 @@ def test_unified_catalog_delineates_bench_axes():
             "explore_completion_summary",
         ],
         "t7-completion-summary-length": ["completion_summary_length"],
+        "t1-andy-only": ["principal_user_andy"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
+        "t3-full-explore-trajectories": ["first_level_gp_explore_research"],
+        "t4-full-july-gp-trajectories": ["first_level_gp_july_trajectories"],
+        "t5-zero-live-spend": ["zero_live_spend"],
+        "t6-no-nested-gps": ["no_nested_general_purpose"],
         "t7-real-deliverable": ["root_deliverable_markers"],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
@@ -14302,11 +14974,6 @@ def test_unified_catalog_delineates_bench_axes():
         if evaluator["method"] == "single_turn_llm_judge"
     ]
     assert judge_ids == [
-        "t1-andy-only",
-        "t3-full-explore-trajectories",
-        "t4-full-july-gp-trajectories",
-        "t5-zero-live-spend",
-        "t6-no-nested-gps",
         "t7-schema-task-complete",
     ]
     criteria = [criterion for evaluator in mass["evaluators"] for criterion in evaluator["criteria"]]
@@ -14332,7 +14999,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
-def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
+def test_daily_ecommerce_v1_catalog_has_distinct_transaction_flows():
     """The daily ecommerce slice stays focused, complete, and stable."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.fixtures import DEFAULT_BASE_IMAGE
@@ -14343,6 +15010,8 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
         "browser-toast-nopa-write-lock",
         "browser-instacart-grocery-order",
         "browser-doordash-usb-c-cable",
+        "browser-doordash-food-plan-grocery-order",
+        "browser-doordash-food-plan-grocery-cart-reauth",
         "minted-agent-accounts-uber",
         "browser-agent-amazon-cookie-payment",
         "browser-alchemy-springs-sauna",
@@ -14357,7 +15026,7 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 13
+    assert len(ecommerce) == len(expected_names)
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -14366,7 +15035,12 @@ def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
     for name in expected_names:
         loaded = get_task_by_name(name)
         assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
-        if name == "browser-blue-bottle-challenge-recovery":
+        if name == "browser-doordash-food-plan-grocery-order":
+            assert loaded.environment["live_fixtures"] == ["live-aman-food-plan-identity"]
+        elif name in {
+            "browser-blue-bottle-challenge-recovery",
+            "browser-doordash-food-plan-grocery-cart-reauth",
+        }:
             assert loaded.environment.get("live_fixtures", []) == []
         else:
             assert loaded.environment["live_fixtures"] == ["live"]
@@ -15106,7 +15780,7 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity"}
+    assert LIVE_FIXTURE_NAMES == {"live", "live-tamy-identity", "live-aman-food-plan-identity"}
 
 
 def test_amazon_passkey_scenario_is_exclusive_and_restorable():
@@ -15183,7 +15857,7 @@ def test_live_fixture_is_single_and_explicit():
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
-        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity"}, (
+        assert set(env["live_fixtures"]) <= {"live", "live-tamy-identity", "live-aman-food-plan-identity"}, (
             f"{t.name}: noncanonical live fixture"
         )
         if env.get("mode") == "synthetic":
@@ -15252,6 +15926,55 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
     except ValueError as e:
         raised = "required_injectable_cookie_domains" in str(e) and "subset" in str(e)
     assert raised, "required auth domains outside the synchronized scope must fail validation"
+
+    # needs_auth requires injectable cookie domains (live session scopes).
+    needs_auth_without_domains = {**base_env, "needs_auth": True}
+    raised = False
+    try:
+        _validate_environment(needs_auth_without_domains, "t-needs-auth-empty")
+    except ValueError as e:
+        raised = "needs_auth" in str(e) and "required_injectable_cookie_domains" in str(e)
+    assert raised, "needs_auth without injectable cookie domains must fail validation"
+
+    needs_auth_ok = {
+        **base_env,
+        "live_fixtures": ["live"],
+        "live_cookie_domains": ["doordash.com"],
+        "required_injectable_cookie_domains": ["doordash.com"],
+        "needs_auth": True,
+    }
+    assert _validate_environment(needs_auth_ok, "t-needs-auth-ok")["needs_auth"] is True
+
+    raised = False
+    try:
+        _validate_environment({**base_env, "needs_auth": "yes"}, "t-needs-auth-type")
+    except ValueError as e:
+        raised = "needs_auth must be a boolean" in str(e)
+    assert raised, "non-boolean needs_auth must fail validation"
+
+
+def test_needs_auth_failure_reports_valid_auth_token_requirement():
+    """needs_auth benches rewrite auth_assistance mismatches into INFRA auth-token reports."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _annotate_needs_auth_failure
+
+    task = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    assert task.environment.get("needs_auth") is True
+
+    raw = "Expected attention kind write_lock, observed auth_assistance"
+    data = {"_benchmark": {"unexpected_attention_kind": "auth_assistance"}}
+    annotated = _annotate_needs_auth_failure(task, raw, data)
+    assert annotated is not None
+    assert "needs a valid auth token" in annotated
+    assert "INFRA/fixture" in annotated
+    assert "doordash.com" in annotated
+    assert raw in annotated
+    assert data["_benchmark"]["needs_auth"] is True
+    assert data["_benchmark"]["auth_fixture_failure"] is True
+
+    # Non-auth failures stay untouched.
+    other = "Expected attention kind write_lock, observed payment_approval"
+    assert _annotate_needs_auth_failure(task, other, {}) == other
 
 
 def test_tag_slices_still_resolve():
@@ -15494,6 +16217,100 @@ def test_retired_tasks_hidden_from_suite_and_listing():
     with redirect_stdout(buf):
         _print_holding_set(tasks)
     assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
+
+
+def test_fetch_local_worker_logs_reads_benchmark_context_worker_files():
+    """Isolated stacks write worker*.log under BENCHMARK_CONTEXT_DIR — must be scraped."""
+    import tempfile
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = os.path.join(tmp, "logs")
+        os.makedirs(log_dir)
+        line = json.dumps(
+            {
+                "timestamp": "2026-08-31T03:00:00.000000+00:00",
+                "event": "[ClaudeCode] Code-agent event",
+                "agent_id": agent_id,
+                "event_type": "tool_use",
+                "tool_name": "Bash",
+            }
+        )
+        with open(os.path.join(log_dir, "worker.log"), "w") as handle:
+            handle.write(line + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-08-31T02:00:00.000000+00:00",
+                        "event": "too-old",
+                        "agent_id": agent_id,
+                    }
+                )
+                + "\n"
+            )
+            handle.write('{"event":"other-agent","agent_id":"ffffffff-0000-0000-0000-000000000000"}\n')
+
+        with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": tmp}, clear=False):
+            matched = logs.fetch_local_worker_logs(
+                agent_id,
+                datetime(2026, 8, 31, 2, 30, tzinfo=timezone.utc),
+            )
+
+    assert len(matched) == 1
+    assert "tool_use" in matched[0]
+    assert agent_id in matched[0]
+
+
+async def test_collect_logs_prefers_local_worker_logs_over_remote_placeholders():
+    """Run JSON must keep local Claude Code progress, not ClickHouse/Fly DNS stubs."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    local_line = json.dumps(
+        {
+            "timestamp": "2026-08-31T03:10:00+00:00",
+            "event": "[ClaudeCode] Code-agent event",
+            "agent_id": agent_id,
+            "event_type": "tool_use",
+        }
+    )
+
+    with (
+        patch.object(logs, "fetch_local_worker_logs", return_value=[local_line]),
+        patch.object(logs, "get_flyio_logs_for_agent", return_value=[]),
+        patch.object(
+            logs,
+            "fetch_flyio_logs_snapshot",
+            new_callable=AsyncMock,
+            return_value=["[fly.io] 0 logs for agent 11111111-2222"],
+        ),
+        patch.object(
+            logs,
+            "fetch_clickhouse_worker_logs",
+            new_callable=AsyncMock,
+            return_value=["[clickhouse] Error: [Errno -2] Name or service not known"],
+        ),
+        patch.object(logs, "fetch_render_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "fetch_supabase_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "get_supabase_realtime_logs_for_agent", return_value=[]),
+        patch.object(logs, "extract_message_transcript", return_value=[]),
+    ):
+        result = await logs.collect_logs(
+            agent_id,
+            {},
+            datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc),
+        )
+
+    assert result["worker_logs"] == [local_line]
+    assert not any(line.startswith("[fly.io]") for line in result["worker_logs"])
+    assert not any(line.startswith("[clickhouse]") for line in result["worker_logs"])
 
 
 def test_agent_latency_reads_isolated_benchmark_stack_logs():
@@ -17041,6 +17858,14 @@ async def run_all_tests():
         test_first_level_gp_count_static_uses_collected_transcripts,
     )
     r.record(
+        "no_nested_general_purpose_static_uses_typed_parentage",
+        test_no_nested_general_purpose_static_uses_typed_parentage,
+    )
+    r.record(
+        "principal_user_andy_static_ignores_schema_key_leftovers",
+        test_principal_user_andy_static_ignores_schema_key_leftovers,
+    )
+    r.record(
         "root_deliverable_markers_use_dag_assemble_not_stub_card",
         test_root_deliverable_markers_use_dag_assemble_not_stub_card,
     )
@@ -17067,6 +17892,14 @@ async def run_all_tests():
     r.record(
         "instacart_weekly_grocery_catalog",
         test_instacart_catalog_uses_complete_weekly_grocery_basket,
+    )
+    r.record(
+        "doordash_food_plan_grocery_cart_reauth_contract",
+        test_doordash_food_plan_grocery_cart_reauth_contract,
+    )
+    r.record(
+        "doordash_food_plan_grocery_repro_contract",
+        test_doordash_food_plan_grocery_repro_contract,
     )
     r.record(
         "live_cookie_scope_separate_from_injectable_cookie_requirement",
@@ -17109,6 +17942,18 @@ async def run_all_tests():
         test_no_tool_failures_counts_unrecovered_evaluate_uncaught,
     )
     r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_web_fetch",
+        test_no_tool_failures_ignores_recoverable_web_fetch_error,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_web_fetch",
+        test_no_tool_failures_counts_unrecovered_web_fetch_error,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_grep_after_search",
+        test_no_tool_failures_ignores_recoverable_grep_error_after_web_search,
+    )
+    r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",
         test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field,
     )
@@ -17133,6 +17978,10 @@ async def run_all_tests():
         test_completion_summary_and_sms_static_checks_are_fail_closed,
     )
     r.record(
+        "claude_code_session_output_static_check_fail_closed",
+        test_claude_code_session_output_static_check_is_fail_closed,
+    )
+    r.record(
         "declared_static_completion_summary_rejects_fast_mode_ablation",
         test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs,
     )
@@ -17147,6 +17996,14 @@ async def run_all_tests():
     r.record(
         "blue_bottle_payment_card_request_contract",
         test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
+    )
+    r.record(
+        "cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures",
+        test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures,
+    )
+    r.record(
+        "cuda_kernel_stall_limit_covers_full_claude_code_runtime",
+        test_cuda_kernel_stall_limit_covers_full_claude_code_runtime,
     )
     await r.record_async(
         "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
@@ -17179,6 +18036,14 @@ async def run_all_tests():
     r.record(
         "blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract",
         test_blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration",
+        test_declared_evaluator_hydrates_claude_code_sessions,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration_retries_empty",
+        test_hydrate_claude_code_sessions_retries_until_transcript_persists,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
@@ -17373,7 +18238,7 @@ async def run_all_tests():
     )
     r.record(
         "daily_ecommerce_v1_catalog",
-        test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows,
+        test_daily_ecommerce_v1_catalog_has_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",
@@ -17455,6 +18320,10 @@ async def run_all_tests():
     )
     r.record("live_fixture_is_single_and_explicit", test_live_fixture_is_single_and_explicit)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
+    r.record(
+        "needs_auth_failure_reports_valid_auth_token",
+        test_needs_auth_failure_reports_valid_auth_token_requirement,
+    )
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("eventim_1015_request_card_contract", test_eventim_1015_request_card_benchmark_contract)
@@ -17474,6 +18343,14 @@ async def run_all_tests():
     )
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
+    r.record(
+        "fetch_local_worker_logs_reads_benchmark_context",
+        test_fetch_local_worker_logs_reads_benchmark_context_worker_files,
+    )
+    await r.record_async(
+        "collect_logs_prefers_local_worker_logs",
+        test_collect_logs_prefers_local_worker_logs_over_remote_placeholders,
+    )
     r.record(
         "agent_latency_explicit_context_excludes_neighbor_stacks",
         test_agent_latency_explicit_context_excludes_neighbor_stacks,

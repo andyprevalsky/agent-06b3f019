@@ -41,6 +41,7 @@ LIST=false
 VERBOSE=false
 PROMPT_HUMAN_APPROVAL_RETRIEVED=false
 AGENT_BEHAVIOR_APPROVAL_RETRIEVED=false
+LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED=false
 DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW=false
 AUTO_RCA_BASE_SHA=""
 FULL_MAX_CONCURRENCY="${BENCHMARK_PROD_MAX_CONCURRENCY:-5}"
@@ -64,6 +65,12 @@ for arg in "$@"; do
     agent-behavior-approval-retrieved=false|--agent-behavior-approval-retrieved=false)
       AGENT_BEHAVIOR_APPROVAL_RETRIEVED=false
       ;;
+    llm-trajectory-injection-approval-retrieved=true|--llm-trajectory-injection-approval-retrieved=true)
+      LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED=true
+      ;;
+    llm-trajectory-injection-approval-retrieved=false|--llm-trajectory-injection-approval-retrieved=false)
+      LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED=false
+      ;;
     defer-human-approval-to-exact-head-pr-review=true|--defer-human-approval-to-exact-head-pr-review=true)
       DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW=true
       ;;
@@ -72,7 +79,7 @@ for arg in "$@"; do
       ;;
     -*)
       echo "Unknown flag: $arg"
-      echo "Usage: bash scripts/test.sh [repo] [domain] [--full] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true] [--agent-behavior-approval-retrieved=true]"
+      echo "Usage: bash scripts/test.sh [repo] [domain] [--full] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true] [--agent-behavior-approval-retrieved=true] [--llm-trajectory-injection-approval-retrieved=true]"
       exit 1
       ;;
     *)
@@ -277,7 +284,7 @@ auto_rca_changed() {
 }
 
 if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
-  if $PROMPT_HUMAN_APPROVAL_RETRIEVED || $AGENT_BEHAVIOR_APPROVAL_RETRIEVED; then
+  if $PROMPT_HUMAN_APPROVAL_RETRIEVED || $AGENT_BEHAVIOR_APPROVAL_RETRIEVED || $LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED; then
     echo "ERROR: human approval cannot be both retrieved and deferred."
     exit 1
   fi
@@ -285,19 +292,29 @@ if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
     --defer-human-approval-to-exact-head-pr-review=true
   run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh \
     --defer-human-approval-to-exact-head-pr-review=true
+  run_suite "LLM Trajectory Injection Approval Guard" bash scripts/check-llm-trajectory-injection-approval.sh \
+    --defer-human-approval-to-exact-head-pr-review=true
 elif $PROMPT_HUMAN_APPROVAL_RETRIEVED; then
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
 else
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
 fi
 if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
-  : # Both approval guards ran together above.
+  : # All three approval guards ran together above.
 elif $AGENT_BEHAVIOR_APPROVAL_RETRIEVED; then
   run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh mandatory-human-approval-retrieved=true
 else
   run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh
 fi
+if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
+  :
+elif $LLM_TRAJECTORY_INJECTION_APPROVAL_RETRIEVED; then
+  run_suite "LLM Trajectory Injection Approval Guard" bash scripts/check-llm-trajectory-injection-approval.sh mandatory-human-approval-retrieved=true
+else
+  run_suite "LLM Trajectory Injection Approval Guard" bash scripts/check-llm-trajectory-injection-approval.sh
+fi
 run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behavior-approval.test.sh
+run_suite "LLM Trajectory Injection Guard Unit Tests" bash scripts/tests/check-llm-trajectory-injection-approval.test.sh
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
 run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelligence-category.test.sh

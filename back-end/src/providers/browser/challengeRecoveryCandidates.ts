@@ -95,15 +95,22 @@ export function recoverySearchPlan(options: {
   return phases;
 }
 
-/** The six independent browser/IP configurations searched after cookie isolation. */
+/** Independent browser/IP configs searched after cookie isolation.
+ *
+ * Probe order (sequential within each cookie lane):
+ *   steel_fixed → kernel_mobile → kernel residential → steel_managed → kernel_isp
+ *
+ * Residential is one geo tier: city and state when available, else country.
+ * Prefer-Steel (payment CDN) keeps this relative order among Steel entries only.
+ */
 export function browserRecoveryCandidates(
   location: ProxyGeoLocation,
   options?: { preferSteel?: boolean }
 ): BrowserRecoveryConfig[] {
   const fallbackSpecificity = bestSpecificity(location);
-  const candidates: BrowserRecoveryConfig[] = [];
+  const residential: BrowserRecoveryConfig[] = [];
   if (location.city) {
-    candidates.push({
+    residential.push({
       key: 'kernel_residential_city',
       provider: 'kernel',
       proxyMode: 'residential_city',
@@ -112,7 +119,7 @@ export function browserRecoveryCandidates(
     });
   }
   if (location.state) {
-    candidates.push({
+    residential.push({
       key: 'kernel_residential_state',
       provider: 'kernel',
       proxyMode: 'residential_state',
@@ -121,7 +128,7 @@ export function browserRecoveryCandidates(
     });
   }
   if (!location.city && !location.state) {
-    candidates.push({
+    residential.push({
       key: 'kernel_residential_country',
       provider: 'kernel',
       proxyMode: 'residential_country',
@@ -129,13 +136,26 @@ export function browserRecoveryCandidates(
       kernelSpecificity: 'country',
     });
   }
-  candidates.push(
+  const candidates: BrowserRecoveryConfig[] = [
+    {
+      key: 'steel_fixed',
+      provider: 'steel',
+      proxyMode: 'fixed',
+      steelProxyMode: 'fixed',
+    },
     {
       key: 'kernel_mobile',
       provider: 'kernel',
       proxyMode: `mobile_${fallbackSpecificity}`,
       kernelProxyType: 'mobile',
       kernelSpecificity: fallbackSpecificity,
+    },
+    ...residential,
+    {
+      key: 'steel_managed',
+      provider: 'steel',
+      proxyMode: 'managed',
+      steelProxyMode: 'managed',
     },
     {
       key: 'kernel_isp',
@@ -144,25 +164,13 @@ export function browserRecoveryCandidates(
       kernelProxyType: 'isp',
       kernelSpecificity: fallbackSpecificity,
     },
-    {
-      key: 'steel_managed',
-      provider: 'steel',
-      proxyMode: 'managed',
-      steelProxyMode: 'managed',
-    },
-    {
-      key: 'steel_fixed',
-      provider: 'steel',
-      proxyMode: 'fixed',
-      steelProxyMode: 'fixed',
-    }
-  );
+  ];
   if (!options?.preferSteel) return candidates;
   // Kernel hard-blacklists Stripe Checkout on managed proxies AND on
   // omitManagedProxy/stealth exits (prod: text:provider_blacklisted ~93s per
   // probe). Parallel Promise.allSettled waits for every candidate, so including
   // kernel_direct delayed promoting a clean steel_managed winner by ~85s each
   // recovery cycle and burned agent-payment-production-purchase's 900s budget.
-  // Steel-only for these hosts.
+  // Steel-only for these hosts (order preserved: fixed then managed).
   return candidates.filter((candidate) => candidate.provider === 'steel');
 }

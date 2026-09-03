@@ -596,6 +596,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             toolChoice: opts.options.tool_choice,
             maxTokens: opts.options.max_tokens,
             temperature: opts.options.temperature,
+            effort: opts.options.effort,
             auth: { mode: 'apiKey', key: anthropicApiKey },
             requestId: opts.requestId,
             callSite: opts.callSite,

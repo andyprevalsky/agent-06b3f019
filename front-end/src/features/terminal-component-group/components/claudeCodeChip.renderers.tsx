@@ -20,7 +20,6 @@ import {
   ProviderIcon,
   StatusDisplay,
   TerminalSurface,
-  TurnCounter,
 } from './claudeCodeChip.shared';
 import { CompletedTranscriptSurface } from './claudeCodeChip.transcript';
 
@@ -29,7 +28,6 @@ interface FullscreenViewProps {
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
   githubRepoUrl: string | undefined;
   codeProvider: CodeProvider;
-  turnCount: number;
   terminalTranscript: string;
   terminalContainerRef: RefObject<HTMLDivElement | null>;
   onClose: () => void;
@@ -40,7 +38,6 @@ export function FullscreenView({
   outputSchema,
   githubRepoUrl,
   codeProvider,
-  turnCount,
   terminalTranscript,
   terminalContainerRef,
   onClose,
@@ -53,7 +50,6 @@ export function FullscreenView({
         <div className="flex min-w-0 items-center gap-3">
           <ProviderIcon codeProvider={codeProvider} className="h-5 w-5 flex-shrink-0" />
           <StatusDisplay state={state} codeProvider={codeProvider} />
-          <TurnCounter state={state} turnCount={turnCount} />
           <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
           <GithubRepoLink url={githubRepoUrl} />
         </div>
@@ -91,7 +87,6 @@ interface CollapsedChipProps {
   failureMessage: string | null;
   githubRepoUrl: string | undefined;
   codeProvider: CodeProvider;
-  turnCount: number;
   terminalTranscript: string;
   terminalContainerRef: RefObject<HTMLDivElement | null>;
   onToggleExpand: () => void;
@@ -107,7 +102,6 @@ function CollapsedHeader(props: CollapsedChipProps) {
       <ProviderIcon codeProvider={props.codeProvider} className="h-5 w-5" />
       <div className="flex min-w-0 flex-1 items-center gap-2">
         <StatusDisplay state={props.state} codeProvider={props.codeProvider} />
-        <TurnCounter state={props.state} turnCount={props.turnCount} />
       </div>
       <div className="flex items-center gap-1">
         <GithubRepoLink url={props.githubRepoUrl} />
@@ -177,7 +171,6 @@ interface SpinningUpChipProps {
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
   githubRepoUrl: string | undefined;
   codeProvider: CodeProvider;
-  turnCount: number;
   terminalContainerRef: RefObject<HTMLDivElement | null>;
   onMaximize: () => void;
 }
@@ -216,7 +209,6 @@ interface LiveChipProps {
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
   githubRepoUrl: string | undefined;
   codeProvider: CodeProvider;
-  turnCount: number;
   terminalContainerRef: RefObject<HTMLDivElement | null>;
   onMaximize: () => void;
 }

@@ -87,6 +87,7 @@ MAX_APPROVAL_RESUME_SECONDS = 24 * 60 * 60
 APPROVAL_GATES = {
     "prompt-approval",
     "agent-behavior-approval",
+    "llm-trajectory-injection-approval",
 }
 AUTO_FIX_GATES = {
     "prettier",
@@ -851,6 +852,8 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         gates.add("prompt-approval")
     if "check-agent-behavior-approval.sh" in command and ".test.sh" not in command:
         gates.add("agent-behavior-approval")
+    if "check-llm-trajectory-injection-approval.sh" in command and ".test.sh" not in command:
+        gates.add("llm-trajectory-injection-approval")
     if re.search(
         r"\bnpx\s+prettier\s+--(?:write|check)\b|\bnpm\s+run\s+format(?::check)?\b",
         command,
@@ -869,7 +872,7 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         gates.add("typescript")
     if re.search(
         r"\bnpx\s+tsx\s+[^\s]*tests/structural/|\bpytest\b[^\n;]*(?:structural|cloudbench_dependency_sync_test)|"
-        r"bash\s+scripts/tests/(?:workspace-env|semantic-deploy-gate|check-agent-behavior-approval)\.test\.sh",
+        r"bash\s+scripts/tests/(?:workspace-env|semantic-deploy-gate|check-agent-behavior-approval|check-llm-trajectory-injection-approval)\.test\.sh",
         command,
     ):
         gates.add("structural")
@@ -2835,6 +2838,17 @@ def self_test() -> None:
     assert grouped_timing(failure_separated_groups(fast_retry)).runs == 2
     gate = Invocation("4", "Bash", "npm run test:coverage", "", 0.0, 60.0, False)
     assert classify_deploy_gates(gate) == {"unresolved-coverage"}
+    traj_gate = Invocation(
+        "traj",
+        "Bash",
+        "bash scripts/check-llm-trajectory-injection-approval.sh",
+        "",
+        0.0,
+        1.0,
+        True,
+    )
+    assert "llm-trajectory-injection-approval" in classify_deploy_gates(traj_gate)
+    assert "llm-trajectory-injection-approval" in APPROVAL_GATES
     first_turn = Turn(
         "deploy",
         "first",

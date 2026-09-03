@@ -32,12 +32,24 @@ function chatIdleTimeoutMs(): number {
     : DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS;
 }
 
+const DEFAULT_OPENROUTER_FAST_CHAT_EFFORT = 'xhigh';
+
+function normalizeOpenRouterFastChatEffort(effort?: string): string {
+  if (effort === 'minimal') return 'low';
+  if (effort === 'max') return 'xhigh';
+  return effort ?? DEFAULT_OPENROUTER_FAST_CHAT_EFFORT;
+}
+
 export function buildOpenRouterFastChatBody(options: CompletionOptions): Record<string, unknown> {
   return {
     model: OPENROUTER_FAST_CHAT_MODEL,
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
+    // Always stamp reasoning.effort so every Rose body builder is well-formed.
+    // Callers (chat router/generator) may pass effort:'minimal' for latency;
+    // omit → xhigh to match the rest of the Rose surface.
+    reasoning: { effort: normalizeOpenRouterFastChatEffort(options.effort) },
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),

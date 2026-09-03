@@ -1,4 +1,3 @@
-import type { Prisma } from '@prisma/client';
 import type { Browser, Cookie } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
@@ -6,17 +5,18 @@ import { createLogger } from '../logger';
 import { releaseSteelRemoteSession } from '../steel/session';
 import { createSteelRecoverySession } from '../steel/sessionRecovery';
 import { waitForProviderSolver } from './challengePageDetect';
-import type {
-  ChallengeClassifierBilling,
-  ChallengeClassifierLlmUsage,
+import { applyFingerprintInjection, type FingerprintInjectionData } from './fingerprintInjection';
+import {
+  type ChallengeClassifierBilling,
+  type ChallengeClassifierLlmUsage,
 } from './challengeLlmClassifier';
+import {
+  selectNetworkEntriesForClassifier,
+  type NetworkSummaryEntry,
+} from './challengeClassifierNetwork';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
-import {
-  raceProbeAbort,
-  recoveryConfigKeyForSession,
-  sameSiteNavigationUrl,
-} from './challengeRecoveryShared';
+import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
 import type { BrowserProviderName } from './types';
 
 export { recoveryConfigKeyForSession, sameSiteNavigationUrl } from './challengeRecoveryShared';
@@ -54,13 +54,14 @@ export {
   targetLooksLikePaymentDocument,
 } from './paymentCdnProbe';
 import {
+  applyConfigBlacklist,
   orderConfigsForLane,
   runLaneConfigSearch,
   runParallelBrowserConfigSearch,
   type ConfigSearchDependencies,
   type LaneConfigSearchOptions,
 } from './challengeRecoveryLaneSearch';
-import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
+import { closeValidationBrowser } from './challengeRecoverySupport';
 
 export {
   buildPreferredBrowserConfig,
@@ -69,6 +70,7 @@ export {
 } from './challengeRecoverySupport';
 
 export {
+  applyConfigBlacklist,
   orderConfigsForLane,
   runLaneConfigSearch,
   runParallelBrowserConfigSearch,
@@ -106,6 +108,16 @@ export interface CandidateProbeResult {
    * agent ToolUsage ledger via recover-challenge → usage_by_model).
    */
   classifierLlmUsage?: ChallengeClassifierLlmUsage[];
+  /** LLM classifier challenged=true on the final settle pass. */
+  classifierChallenged?: boolean;
+  /** One-sentence LLM classifier reason for the final settle pass. */
+  classifierReason?: string;
+  /** Raw network rows captured during navigation (before cap/pinning). */
+  networkEntriesCaptured?: number;
+  /** Rows passed into the classifier after cited-URL pinning + cap. */
+  classifierNetworkEntriesSelected?: number;
+  /** Whether js.stripe.com (or cited blocked host) appears in classifier network input. */
+  stripeInClassifierNetwork?: boolean;
   /** Final same-site URL after the last clean probe settle (soft-redirect resume). */
   settledUrl?: string;
 }
@@ -146,6 +158,8 @@ export async function probeCandidateBrowser(
     requirePaymentCdn?: boolean;
     /** Test-only solver override (avoids live LLM in unit probes). */
     waitForSolver?: typeof waitForProviderSolver;
+    /** Agent fingerprint applied before navigation so classify matches live identity. */
+    fingerprintInjection?: FingerprintInjectionData | null;
   } = {},
   billing: ChallengeClassifierBilling = {},
   signal?: AbortSignal
@@ -156,18 +170,17 @@ export async function probeCandidateBrowser(
   // One nav + one classify. Soft-redirect re-nav / dual stablePasses were scar
   // tissue; resume at whatever URL the single settle lands on.
   const attempts = 1;
-  const blockedResourceUrl = (logContext.blockedResourceUrl || '').trim();
-  const recoveryReasonParts = [
-    (logContext.recoveryReason || '').trim(),
-    blockedResourceUrl
-      ? `Blocked third-party resource that must become reachable/usable: ${blockedResourceUrl}`
-      : '',
-  ].filter(Boolean);
-  const recoveryReason = recoveryReasonParts.join('\n') || null;
-  // requirePaymentCdn ignored — kept on the type for older callers.
+  const recoveryReason = (logContext.recoveryReason || '').trim() || null;
+  // requirePaymentCdn / blockedResourceUrl ignored — LLM reason is sole classifier constraint.
   void logContext.requirePaymentCdn;
+  void logContext.blockedResourceUrl;
   const solve = logContext.waitForSolver ?? waitForProviderSolver;
   let settledUrl: string | undefined;
+  let classifierChallenged: boolean | undefined;
+  let classifierReason: string | undefined;
+  let networkEntriesCaptured = 0;
+  let classifierNetworkEntriesSelected = 0;
+  let stripeInClassifierNetwork = false;
   try {
     if (signal?.aborted) {
       throw new Error('lane_aborted');
@@ -189,6 +202,55 @@ export async function probeCandidateBrowser(
     if (signal?.aborted) {
       throw new Error('lane_aborted');
     }
+    // Identity BEFORE navigation — classify must see the same fingerprint the
+    // agent re-attaches on CDP reconnect after promote.
+    await raceProbeAbort(applyFingerprintInjection(page, logContext.fingerprintInjection), signal);
+    // Tool-parity classifier inputs: accumulate network like BrowserNetworkRecorder
+    // / read_network_requests (status + truncated bodies), not perf timings alone.
+    const networkEntries: NetworkSummaryEntry[] = [];
+    const pendingResponses = new Set<Promise<void>>();
+    const onResponse = async (res: import('playwright').Response) => {
+      const task = (async () => {
+        try {
+          const req = res.request();
+          const url = req.url();
+          if (!url.startsWith('http')) return;
+          let body: string | undefined;
+          let truncated = false;
+          try {
+            const resourceType = req.resourceType();
+            if (['xhr', 'fetch', 'document', 'script'].includes(resourceType)) {
+              const raw = await res.text();
+              if (raw) {
+                body = raw.slice(0, 200);
+                truncated = raw.length > 200;
+              }
+            }
+          } catch {
+            /* opaque / binary */
+          }
+          networkEntries.push({
+            url: url.slice(0, 180),
+            status: res.status(),
+            statusText: res.statusText(),
+            ...(body !== undefined
+              ? { response_body: body, response_body_truncated: truncated }
+              : {}),
+          });
+        } catch {
+          /* ignore listener errors */
+        }
+      })();
+      pendingResponses.add(task);
+      try {
+        await task;
+      } finally {
+        pendingResponses.delete(task);
+      }
+    };
+    if (typeof (page as { on?: unknown }).on === 'function') {
+      page.on('response', onResponse);
+    }
     const response = await raceProbeAbort(
       page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => null),
       signal
@@ -204,11 +266,61 @@ export async function probeCandidateBrowser(
         signal
       );
     }
+    // Prefer the same stripped visible text the agent DOM tool feeds the
+    // classifier (iframe titles/names kept; scripts stripped).
+    let agentDomTree: string | null = null;
+    try {
+      // String form avoids DOM lib types in the Node tsc project (same pattern as
+      // challengeLlmClassifier.captureCleanedDom).
+      const cleaned = await page.evaluate(
+        `(() => {
+          const body = document.body;
+          if (!body) return '';
+          const clone = body.cloneNode(true);
+          clone.querySelectorAll('script, style, noscript, svg').forEach((n) => n.remove());
+          clone.querySelectorAll('iframe').forEach((frame) => {
+            const marker = document.createElement('div');
+            marker.textContent = '[iframe title=' + JSON.stringify(frame.title || '') +
+              ' src=' + JSON.stringify(frame.src || '') + ']';
+            frame.replaceWith(marker);
+          });
+          return (clone.innerText || clone.textContent || '')
+            .replace(/\\s+/g, ' ')
+            .trim()
+            .slice(0, 12000);
+        })()`
+      );
+      agentDomTree = typeof cleaned === 'string' ? cleaned : null;
+    } catch {
+      agentDomTree = null;
+    }
+    if (pendingResponses.size > 0) {
+      await raceProbeAbort(Promise.allSettled([...pendingResponses]), signal);
+    }
+    const classifierNetworkEntries = selectNetworkEntriesForClassifier(networkEntries, {
+      recoveryReason,
+    });
+    networkEntriesCaptured = networkEntries.length;
+    classifierNetworkEntriesSelected = classifierNetworkEntries.length;
+    stripeInClassifierNetwork = classifierNetworkEntries.some((entry) =>
+      String(entry.url || entry.name || '')
+        .toLowerCase()
+        .includes('js.stripe.com')
+    );
     const attempt = await raceProbeAbort(
-      solve(page, response, billing, { recoveryReason }),
+      solve(page, response, billing, {
+        recoveryReason,
+        agentDomTree,
+        networkEntries: classifierNetworkEntries,
+      }),
       signal
     );
+    if (typeof (page as { off?: unknown }).off === 'function') {
+      page.off('response', onResponse);
+    }
     if (attempt.usage) classifierLlmUsage.push(attempt.usage);
+    classifierChallenged = !attempt.clean;
+    classifierReason = attempt.reason ?? undefined;
     if (!attempt.clean) {
       log.info('Challenge recovery candidate probe attempt still challenged', {
         ...logContext,
@@ -251,11 +363,16 @@ export async function probeCandidateBrowser(
     paymentCdnOk: true,
     paymentCdnHosts: {},
     classifierLlmUsage,
+    classifierChallenged,
+    classifierReason,
+    networkEntriesCaptured,
+    classifierNetworkEntriesSelected,
+    stripeInClassifierNetwork,
     ...(settledUrl ? { settledUrl } : {}),
   };
 }
 
-const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependencies = {
+export const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependencies = {
   createKernel: createKernelRecoverySession,
   createSteel: createSteelRecoverySession,
   releaseKernel: releaseKernelRemoteSession,
@@ -269,6 +386,16 @@ const browserConfigSearchRuntimeDependencies: BrowserConfigSearchRuntimeDependen
  * Used by the agent cookie-probe wave so isolation experiments never open
  * ``new_context`` windows on the live debug desktop.
  */
+export class ChallengeConfigSearchExhaustedError extends Error {
+  readonly failedConfigKeys: string[];
+
+  constructor(message: string, failedConfigKeys: string[]) {
+    super(message);
+    this.name = 'ChallengeConfigSearchExhaustedError';
+    this.failedConfigKeys = [...failedConfigKeys];
+  }
+}
+
 export async function probeCookieVariant(
   input: {
     taskId: string;
@@ -278,6 +405,10 @@ export async function probeCookieVariant(
     userAgent?: string;
     blockedResourceUrl?: string;
     recoveryReason?: string | null;
+    /** Skip configs that already failed for this agent until catalog exhaust. */
+    blockedConfigKeys?: string[];
+    /** Optional override; defaults to the task owner's stored fingerprint (config-search parity). */
+    fingerprintInjection?: FingerprintInjectionData | null;
   },
   dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
 ): Promise<{ clean: boolean; configKey: string; latencyMs: number }> {
@@ -307,8 +438,17 @@ export async function probeCookieVariant(
   const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
     requirePaymentCdn: false,
   });
+  const fingerprintInjection =
+    input.fingerprintInjection !== undefined
+      ? input.fingerprintInjection
+      : billing.userId
+        ? await import('../steel/files').then((mod) =>
+            mod.getFingerprintInjectionData(billing.userId!)
+          )
+        : null;
   const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
-  const config = configs[0];
+  const cookieBlacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
+  const config = cookieBlacklist.configs[0];
   if (!config) {
     throw new Error('No ephemeral browser config available for cookie-variant probe');
   }
@@ -344,6 +484,7 @@ export async function probeCookieVariant(
         laneKey: 'cookie_probe',
         blockedResourceUrl: input.blockedResourceUrl,
         recoveryReason: input.recoveryReason,
+        fingerprintInjection,
       },
       billing
     );
@@ -355,7 +496,7 @@ export async function probeCookieVariant(
       stablePasses: probe.stablePasses,
       attempts: probe.attempts,
       latencyMs: probe.latencyMs,
-      agent_id: billing.agentId,
+      agentId: billing.agentId,
     });
     return { clean, configKey: config.key, latencyMs: probe.latencyMs };
   } finally {
@@ -369,206 +510,4 @@ export async function probeCookieVariant(
   }
 }
 
-export async function searchAndPromoteBrowserConfig(
-  input: {
-    taskId: string;
-    userId?: string;
-    targetUrl: string;
-    storageState: Record<string, unknown>;
-    /** Parallel cookie-signature lanes; defaults to a single lane from storageState. */
-    storageLanes?: RecoveryStorageLane[];
-    userAgent?: string;
-    /** Failure-driven: blocked third-party URL that triggered this recovery. */
-    blockedResourceUrl?: string;
-    /** Agent recover_from_challenge reason for the LLM gate. */
-    recoveryReason?: string | null;
-    /** @deprecated Ignored — single LLM gate only. */
-    requirePaymentCdn?: boolean;
-    preserveAuth?: boolean;
-  },
-  dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
-) {
-  const current = await prisma.browserSession.findFirst({
-    where: {
-      id: input.taskId,
-      ...(input.userId === undefined ? {} : { context: { userId: input.userId } }),
-    },
-    include: { context: true },
-  });
-  if (current === null) throw new Error(`Browser task not found: ${input.taskId}`);
-  const billing: ChallengeClassifierBilling = {
-    agentId: current.agentId,
-    userId: input.userId ?? current.context.userId,
-  };
-  const agent = await prisma.agent.findUnique({
-    where: { id: current.agentId },
-    select: { proxyCountry: true, proxyState: true, proxyCity: true },
-  });
-  const proxyLocation: ProxyGeoLocation = agent?.proxyCountry
-    ? {
-        country: agent.proxyCountry,
-        ...(agent.proxyState ? { state: agent.proxyState } : {}),
-        ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
-      }
-    : DEFAULT_GEOLOCATION;
-  const sessionAvoidConfigKey = recoveryConfigKeyForSession(current.provider, current.proxyTier);
-  // Payment-CDN hard filter removed. blockedResourceUrl is evidence for the LLM gate.
-  void input.requirePaymentCdn;
-  const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
-    requirePaymentCdn: false,
-  });
-  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
-  const lanes: RecoveryStorageLane[] =
-    input.storageLanes && input.storageLanes.length > 0
-      ? input.storageLanes
-      : [{ key: 'default', storageState: input.storageState }];
-
-  if (sessionAvoidConfigKey) {
-    log.info('Challenge recovery will deprioritize current failing exit', {
-      taskId: input.taskId,
-      avoidConfigKey: sessionAvoidConfigKey,
-      provider: current.provider,
-      proxyTier: current.proxyTier,
-    });
-  }
-  log.info('Challenge recovery lane search', {
-    taskId: input.taskId,
-    laneKeys: lanes.map((lane) => lane.key),
-    configKeys: configs.map((config) => config.key),
-    avoidConfigKey: sessionAvoidConfigKey ?? null,
-    preserveAuth: input.preserveAuth ?? null,
-    blockedResourceUrl: input.blockedResourceUrl ?? null,
-    agent_id: billing.agentId,
-  });
-
-  const searchDependencies: ConfigSearchDependencies = {
-    create: async (config, signal) => {
-      if (signal.aborted) {
-        throw new Error('lane_aborted');
-      }
-      if (config.provider === 'kernel') {
-        const session = config.omitManagedProxy
-          ? await dependencies.createKernel(current.agentId, proxyLocation, {
-              omitManagedProxy: true,
-            })
-          : await dependencies.createKernel(current.agentId, proxyLocation, {
-              type: config.kernelProxyType ?? 'residential',
-              specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
-            });
-        if (signal.aborted) {
-          await closeValidationBrowser(session);
-          await dependencies.releaseKernel(session.sessionId).catch(() => {});
-          throw new Error('lane_aborted');
-        }
-        return { provider: 'kernel', ...session };
-      }
-      const session = await dependencies.createSteel({
-        proxyLocation,
-        proxyMode: config.steelProxyMode ?? 'managed',
-        userAgent: input.userAgent,
-      });
-      if (signal.aborted) {
-        await closeValidationBrowser(session);
-        await dependencies.releaseSteel(session.sessionId).catch(() => {});
-        throw new Error('lane_aborted');
-      }
-      return { provider: 'steel', ...session };
-    },
-    probe: async (config, session, lane, signal) => {
-      if (signal.aborted) {
-        throw new Error('lane_aborted');
-      }
-      return dependencies.probe(
-        session,
-        input.targetUrl,
-        lane.storageState,
-        {
-          configKey: config.key,
-          provider: config.provider,
-          proxyMode: config.proxyMode,
-          laneKey: lane.key,
-          blockedResourceUrl: input.blockedResourceUrl,
-          recoveryReason: input.recoveryReason,
-        },
-        billing,
-        signal
-      );
-    },
-    promote: async ({ config, session }) => {
-      const updated = await prisma.$transaction(async (tx) => {
-        const replaced = await tx.browserSession.updateMany({
-          where: { id: current.id, sessionId: current.sessionId },
-          data: {
-            sessionId: session.sessionId,
-            debugUrl: session.debugUrl,
-            wsUrl: session.wsUrl,
-            currentUrl: input.targetUrl,
-            status: 'ACTIVE',
-            closedAt: null,
-            provider: config.provider,
-            providerProfileId: session.profileId,
-            providerProfileSource: session.profileSource,
-            providerProfilePersist: false,
-            proxyTier: config.proxyMode,
-          },
-        });
-        if (replaced.count !== 1) return false;
-        await tx.browserContext.update({
-          where: { id: current.contextId },
-          data: {
-            preferredBrowserConfig: buildPreferredBrowserConfig(
-              config,
-              proxyLocation
-            ) as unknown as Prisma.InputJsonValue,
-          },
-        });
-        return true;
-      });
-      if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
-      if (current.provider === 'kernel') {
-        await dependencies.releaseKernel(current.sessionId).catch(() => {});
-      } else {
-        await dependencies.releaseSteel(current.sessionId).catch(() => {});
-      }
-    },
-    release: async (_config, session) => {
-      await closeValidationBrowser(session).catch(() => {});
-      if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
-      else await dependencies.releaseSteel(session.sessionId);
-    },
-  };
-
-  const winner = await runLaneConfigSearch(configs, lanes, searchDependencies, {
-    avoidConfigKey: sessionAvoidConfigKey,
-  });
-  const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [
-    ...(winner.probe.classifierLlmUsage ?? []),
-  ];
-
-  const resumeUrl =
-    sameSiteNavigationUrl(input.targetUrl, winner.probe.settledUrl) ?? input.targetUrl;
-  return {
-    task_id: current.id,
-    session_id: winner.session.sessionId,
-    debug_url: winner.session.debugUrl,
-    ws_url: winner.session.wsUrl,
-    saved_url: resumeUrl,
-    provider: winner.config.provider,
-    proxy_tier: winner.config.proxyMode,
-    config_key: winner.config.key,
-    storage_state_preloaded: true,
-    recovery_action:
-      winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
-    recovery_message: `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
-    classifier_llm_usage: classifierLlmUsage,
-    browser_session_metadata: {
-      provider: winner.config.provider,
-      proxy_source: winner.session.proxySource,
-      proxy_location: winner.session.proxyLocation,
-      proxy_tier: winner.config.proxyMode,
-      config_key: winner.config.key,
-      profile_id: null,
-      profile_source: winner.session.profileSource,
-    },
-  };
-}
+export { searchAndPromoteBrowserConfig } from './challengeRecoveryPromote';

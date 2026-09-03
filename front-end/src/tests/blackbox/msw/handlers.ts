@@ -79,6 +79,17 @@ export const handlers = [
     return HttpResponse.json({ prompts: [] });
   }),
 
+  // Claude/Codex code-agent session fetch (chip closed-session fallback polls these)
+  http.get(`${API_BASE}/claude-code-session/:taskId`, () => {
+    return HttpResponse.json({ status: 'RUNNING', output: '' });
+  }),
+  http.get(`${API_BASE}/codex-session/:taskId`, () => {
+    return HttpResponse.json({ status: 'RUNNING', output: '' });
+  }),
+  http.get(`${API_BASE}/benchmarks/claude-code-session-preview/:taskId`, () => {
+    return HttpResponse.json({ status: 'RUNNING', output: '' });
+  }),
+
   // Agents endpoints
   http.get(`${API_BASE}/agents`, () => {
     return HttpResponse.json({

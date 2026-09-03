@@ -42,6 +42,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,9 +64,15 @@ from benchmarks.benchmark_tasks import (
     get_timeout_floor,
     list_all_tasks,
 )
-from benchmarks.polar_catalog import is_polar_bench_task
+from benchmarks.polar_catalog import (
+    is_polar_bench_task,
+    polar_browser_step_budget,
+    polar_wall_clock_disabled,
+)
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
+    AMAN_FOOD_PLAN_COOKIE_DOMAINS,
+    AMAN_FOOD_PLAN_USER_ID,
     LIVE_FIXTURE_NAMES,
     TAMY_IDENTITY_COOKIE_DOMAINS,
     TAMY_IDENTITY_USER_ID,
@@ -137,6 +144,28 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 
+
+def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
+    """Per-task early-fail silence budget for non-terminal leaves.
+
+    Claude Code sessions update a single in-place progress chip for up to
+    ``MAX_RUNTIME_S`` (30m) without incrementing ``message_count``. The default
+    stall budget (~510s) therefore false-fails healthy code-agent ranking
+    benches mid-session. Raise the limit to cover one full CC runtime plus a
+    small buffer when the task expects / requires Claude Code.
+    """
+    limit = int(AGENT_STALL_SECONDS)
+    expects_cc = "spawn_claude_code_agent" in (getattr(task, "expected_tools", None) or [])
+    requires_cc = bool(getattr(task, "requires_claude_code", False))
+    if expects_cc or requires_cc:
+        try:
+            from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
+        except Exception:  # pragma: no cover - import guard for non-agents layouts
+            MAX_RUNTIME_S = 1800
+        limit = max(limit, int(MAX_RUNTIME_S) + 120)
+    return limit
+
+
 _WORLD_MODEL_UPDATE_EVENTS: list[dict[str, Any]] = []
 _WORLD_MODEL_UPDATE_RESULT: Optional[dict[str, Any]] = None
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
@@ -150,6 +179,8 @@ MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
+DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
+_DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 # Tasks whose fixtures destructively mutate shared benchmark DB state. The
 # parallel scheduler runs these serially before starting any ordinary task so a
 # retained failed agent tree cannot mutate their fixtures. Each fixture must
@@ -158,6 +189,7 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
     AMAZON_MX_TAMY_TASK_NAME,
+    DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
@@ -760,6 +792,41 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
     return DURABLE_BENCHMARK_FRONTEND_URL
+
+
+def _rose_api_url_for_codex_harness(base_url: str) -> str:
+    """Public Rose API origin reachable from E2B (frontend dev server proxies /api)."""
+    for key in ("BENCHMARK_PUBLIC_API_URL", "BACKEND_API_URL", "PUBLIC_API_URL"):
+        explicit = os.environ.get(key, "").strip()
+        if explicit:
+            return explicit.rstrip("/")
+    services_path = _benchmark_context_path() / "services.json"
+    if services_path.exists():
+        try:
+            urls = (json.loads(services_path.read_text()) or {}).get("urls") or {}
+            for field in ("backend_api", "public", "backend"):
+                candidate = str(urls.get(field) or "").strip()
+                if candidate:
+                    return candidate.rstrip("/")
+        except Exception:
+            pass
+    parsed = urlparse(base_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return base_url.rstrip("/")
+    public_frontend = os.environ.get("PUBLIC_BASE_URL", "").strip()
+    if public_frontend:
+        return public_frontend.rstrip("/")
+    if parsed.port:
+        return f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    return base_url.rstrip("/")
+
+
+def _effective_harness(task: BenchmarkTask) -> str:
+    override = os.environ.get("BENCHMARK_HARNESS", "").strip().lower()
+    if override in {"rose", "codex"}:
+        return override
+    harness = getattr(task, "harness", "rose") or "rose"
+    return harness if harness in {"rose", "codex"} else "rose"
 
 
 def _report_frontend_url_for_benchmark(base_url: str) -> str:
@@ -1406,6 +1473,23 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
 CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
     "Claude Code credentials unavailable: no synced Claude token and no available pool token"
 )
+CODEX_HARNESS_CREDENTIAL_SKIP_REASON = (
+    "Codex harness credentials unavailable: no synced GPT compute token and no funded OpenAI API key"
+)
+
+
+def _codex_harness_credential_skip_result(task: BenchmarkTask) -> TaskResult:
+    return TaskResult(
+        name=task.name,
+        passed=False,
+        agent_id="",
+        status="SKIPPED",
+        progress_score=0,
+        duration_seconds=0,
+        cost_cents=0,
+        message_count=0,
+        failure_reason=CODEX_HARNESS_CREDENTIAL_SKIP_REASON,
+    )
 
 
 def _claude_code_credential_skip_result(task: BenchmarkTask) -> TaskResult:
@@ -1956,13 +2040,197 @@ def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
     return f"navi-agent-tasks-{workspace}"
 
 
+def _inject_benchmark_prompt_secrets(goal: str) -> str:
+    """Substitute secret placeholders in benchmark prompts from the environment."""
+    if "{GITHUB_DISPATCH_TOKEN}" in goal:
+        token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
+        if not token:
+            raise ValueError(
+                "GITHUB_DISPATCH_TOKEN is required for this benchmark prompt placeholder"
+            )
+        goal = goal.replace("{GITHUB_DISPATCH_TOKEN}", token)
+    return goal
+
+def _doordash_food_plan_fixture_env() -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for DoorDash food-plan fixture")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["BENCHMARK_USER_ID"] = AMAN_FOOD_PLAN_USER_ID
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
+    if source_database_url:
+        env["BENCHMARK_DOORDASH_SOURCE_DATABASE_URL"] = source_database_url
+    return env
+
+
+def _run_doordash_food_plan_fixture(action: str) -> dict:
+    if action == "apply" and action in _DOORDASH_FOOD_PLAN_FIXTURE_CACHE:
+        return dict(_DOORDASH_FOOD_PLAN_FIXTURE_CACHE[action])
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/doordash-food-plan-benchmark-fixture.ts", action],
+        cwd=REPO_ROOT / "back-end",
+        env=_doordash_food_plan_fixture_env(),
+        capture_output=True,
+        text=True,
+        timeout=240 if action in ("apply", "freeze") else 60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"DoorDash food-plan benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
+        )
+    manifest = _parse_last_json_line(result.stdout)
+    if action == "apply":
+        _DOORDASH_FOOD_PLAN_FIXTURE_CACHE[action] = dict(manifest)
+    elif action == "cleanup":
+        _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+    return manifest
+
+
+def _doordash_food_plan_frozen_fixture() -> dict | None:
+    """Resolve execute_prompt + checkout_manifest for agent override / judge context.
+
+    Live ``apply`` caches a summary row (``benchmark_goal``, ``*_chars``) rather than the
+    full checkout table. Prefer that goal for the agent prompt when present, but still load
+    ``checkout_manifest`` from the frozen JSON so the judge keeps the authoritative table.
+    """
+    frozen_path = REPO_ROOT / ".context" / "benchmarks" / "doordash-food-plan-grocery-fixture.json"
+    file_execute = ""
+    file_checkout = ""
+    if frozen_path.is_file():
+        data = json.loads(frozen_path.read_text())
+        raw_execute = data.get("execute_prompt")
+        if isinstance(raw_execute, str) and raw_execute.strip():
+            file_execute = raw_execute.strip()
+        raw_checkout = data.get("checkout_manifest")
+        if isinstance(raw_checkout, str) and raw_checkout.strip():
+            file_checkout = raw_checkout.strip()
+
+    manifest = _DOORDASH_FOOD_PLAN_FIXTURE_CACHE.get("apply")
+    if manifest and manifest.get("benchmark_goal"):
+        cached_checkout = manifest.get("checkout_manifest")
+        checkout = (
+            cached_checkout.strip()
+            if isinstance(cached_checkout, str) and cached_checkout.strip()
+            else file_checkout
+        )
+        return {
+            "execute_prompt": str(manifest["benchmark_goal"]),
+            "checkout_manifest": checkout,
+        }
+    if not file_execute:
+        return None
+    return {
+        "execute_prompt": file_execute,
+        "checkout_manifest": file_checkout,
+    }
+
+
+# Fixture execute_prompt is prod-derived and already assumes an authenticated
+# session; still append this classifier so the agent does not fall into login/OTP.
+DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
+
+
+def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        return None
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return None
+    prompt = frozen["execute_prompt"]
+    if DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER.lower() not in prompt.lower():
+        prompt = f"{prompt.rstrip()}\n\n{DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER}"
+    return prompt
+
+
+def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
+    override = _doordash_food_plan_prompt_override(task)
+    return override if override else task.prompt
+
+
+def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        return ""
+    frozen = _doordash_food_plan_frozen_fixture()
+    if not frozen:
+        return ""
+    sections: list[str] = []
+    if frozen.get("checkout_manifest"):
+        sections.append(
+            "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "
+            "99 Ranch line must be satisfied or manifest-allowed omitted/substituted):\n"
+            + frozen["checkout_manifest"]
+        )
+    sections.append(
+        "Authoritative execute manifest text (same source the agent received):\n"
+        + frozen["execute_prompt"]
+    )
+    return "\n\n".join(sections)
+
+
+def _doordash_food_plan_supplemental_cart_evidence(data: dict) -> str:
+    """Collect full cart itemization from write-lock and browser evaluate dumps.
+
+    DoorDash write-lock approvals often summarize only the first handful of SKUs while
+    reporting a larger cart count. For manifest-exact judging, surface every grounded
+    cart dump the trajectory captured.
+    """
+    snippets: list[str] = []
+    benchmark_state = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    for req in benchmark_state.get("attention_requests_seen") or []:
+        if not isinstance(req, dict):
+            continue
+        question = str(req.get("question") or req.get("message") or "").strip()
+        if len(question) < 80:
+            continue
+        kind = req.get("kind") or "attention"
+        snippets.append(f"Attention request ({kind}):\n{question[:20000]}")
+
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        text = str(message.get("message") or message.get("text") or "").strip()
+        if not text:
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_name = metadata.get("toolName")
+        action_type = metadata.get("action_type")
+        if tool_name == "request_user_approval":
+            snippets.append(f"Approval tool message:\n{text[:20000]}")
+            continue
+        if action_type != "evaluate":
+            continue
+        lowered = text.lower()
+        if "result:" not in text:
+            continue
+        if (
+            "×" in text
+            or "in cart" in lowered
+            or "ground beef" in lowered
+            or "safeway" in lowered
+        ):
+            snippets.append(f"Browser cart evaluate dump:\n{text[:20000]}")
+
+    if not snippets:
+        return ""
+    return "\n\n---\n\n".join(snippets)
+
+
+
+
 def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
     """Resolve the root-agent goal sent to POST /api/agents for a benchmark task."""
     from utils.payment_boundary_goal import payment_boundary_operational_suffix
 
-    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
+    goal = (
+        os.environ.get("BENCHMARK_GOAL_OVERRIDE")
+        or _doordash_food_plan_prompt_override(task)
+        or _prod_user_data_prompt_override(task)
+        or task.prompt
+    )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
+    goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
         goal += payment_boundary_operational_suffix()
     return goal
@@ -3507,6 +3775,7 @@ async def poll_agent(
     """
     start = time.time()
     last_activity_time = start  # tracks ANY activity across the entire tree
+    last_cost_change_time = start  # tree LLM cost growth (CC in-place progress)
     prev_tree_message_count = 0
     prev_tree_agent_count = 0
     prev_tree_cost = 0
@@ -3521,6 +3790,7 @@ async def poll_agent(
     # Per-agent stall tracking: agent_id → {count, last_change_time, status}.
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
+    stall_limit_seconds = agent_stall_limit_seconds(task)
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
     validated_payment_receipt_request_id: Optional[str] = None
@@ -3535,10 +3805,12 @@ async def poll_agent(
     task._mid_run_feedback_initial_schema = None
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
+    step_budget = polar_browser_step_budget(task)
 
     while True:
         elapsed = time.time() - start
-        if elapsed > resolved_timeout:
+        if not wall_clock_disabled and resolved_timeout and elapsed > resolved_timeout:
             reason = (
                 f"Timeout after {elapsed:.0f}s (dynamic cap={resolved_timeout}s)"
                 f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}"
@@ -3616,6 +3888,34 @@ async def poll_agent(
         if write_lock_prerequisite_request_id:
             data["_benchmark"]["write_lock_prerequisite_auto_approved"] = True
             data["_benchmark"]["write_lock_prerequisite_request_id"] = write_lock_prerequisite_request_id
+
+        if step_budget and status not in TERMINAL_STATUSES:
+            browser_steps = _agent_class_step_counts(data).get("browser", {})
+            used_steps = max(browser_steps.values()) if browser_steps else 0
+            if used_steps >= step_budget:
+                data["_benchmark"]["step_budget_reached"] = True
+                data["_benchmark"]["browser_steps"] = used_steps
+                data["_benchmark"]["browser_step_budget"] = step_budget
+                print(
+                    f"    🧭 Browser step budget reached: {used_steps}/{step_budget} "
+                    f"— pausing for polar judge"
+                )
+                try:
+                    await pause_agent(base_url, agent_id)
+                    data = await get_agent(base_url, agent_id)
+                    data["_benchmark"] = {
+                        **data.get("_benchmark", {}),
+                        "step_budget_reached": True,
+                        "browser_steps": used_steps,
+                        "browser_step_budget": step_budget,
+                        "approvals_triggered": approvals_triggered,
+                        "approvals_resolved": approvals_resolved,
+                        "attention_requests_seen": list(attention_requests_seen),
+                    }
+                except Exception as pause_error:
+                    print(f"    ⚠ Failed to pause after step budget: {pause_error}")
+                # Not an early-fail: Odysseys grades whatever trajectory fit the budget.
+                return data, approvals_triggered, approvals_resolved, None
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -3794,6 +4094,7 @@ async def poll_agent(
             if tree_cost > prev_tree_cost:
                 activity_detected = True
                 prev_tree_cost = tree_cost
+                last_cost_change_time = now
 
             if activity_detected:
                 last_activity_time = now
@@ -3864,13 +4165,15 @@ async def poll_agent(
                     leaves.append(aid)
 
             # Tree is stalled only when EVERY non-terminal leaf has been
-            # silent for ≥ AGENT_STALL_SECONDS. If the most-recently-active
-            # leaf still emitted within the threshold, the tree is making
-            # progress somewhere — not stalled.
+            # silent for ≥ stall_limit_seconds AND tree LLM cost has also
+            # stopped growing. Claude Code updates an in-place progress chip
+            # without bumping message_count, so cost is the durable signal
+            # that a long CC session is still alive.
             if leaves:
                 max_leaf_change = max(per_agent_state.get(aid, {}).get("last_change_time", 0.0) for aid in leaves)
                 tree_idle = now - max_leaf_change
-                if tree_idle > AGENT_STALL_SECONDS:
+                cost_idle = now - last_cost_change_time
+                if tree_idle > stall_limit_seconds and cost_idle > stall_limit_seconds:
                     # All leaves silent — pick the staffer leaf (most recent
                     # activity) to surface in the error message.
                     stuck_aid = max(
@@ -3881,7 +4184,8 @@ async def poll_agent(
                     role = "root" if stuck_aid == agent_id else "leaf"
                     reason = (
                         f"tree stalled — newest-active {role} {stuck_aid[:12]} "
-                        f"silent for {tree_idle:.0f}s (threshold={AGENT_STALL_SECONDS}s, "
+                        f"silent for {tree_idle:.0f}s (threshold={stall_limit_seconds}s, "
+                        f"cost_idle={cost_idle:.0f}s, "
                         f"status={stuck_st.get('status', '?')}, "
                         f"messages={stuck_st.get('count', '?')}, "
                         f"non_terminal_leaves={len(leaves)})"
@@ -4582,9 +4886,19 @@ def evaluate_task(
         if benchmark_state.get("subscription_webhook_simulated") is not True:
             return False, "Expected simulated subscription webhook after gate"
 
-    # Agent mode: must complete
+    # Agent mode: must complete. Polar step-budget stops pause the agent on
+    # purpose so the Odysseys/BU judge can grade the trajectory (upstream also
+    # stops on max steps, then rubrics — not a wall-clock fail).
     if status != "COMPLETED":
-        return False, f"Agent status: {status} (expected COMPLETED)"
+        benchmark_state = data.get("_benchmark", {}) if isinstance(data, dict) else {}
+        if (
+            status == "PAUSED"
+            and benchmark_state.get("step_budget_reached") is True
+            and is_polar_bench_task(task)
+        ):
+            pass
+        else:
+            return False, f"Agent status: {status} (expected COMPLETED)"
 
     if task.agentcard_setup_action == "complete":
         benchmark_state = data.get("_benchmark", {})
@@ -4858,6 +5172,66 @@ def _agent_messages_have_browser_terminal(messages: Optional[List[dict]]) -> boo
     return open_task_ids.issubset(terminal_task_ids)
 
 
+def _recording_attachment_ready(metadata: dict) -> bool:
+    """True when a FINISHED recording row carries a playable FE attachment."""
+    if metadata.get("action_type") != "recording":
+        return False
+    if metadata.get("toolStatus") != "FINISHED":
+        return False
+    view_url = metadata.get("recording_view_url")
+    if isinstance(view_url, str) and view_url.strip():
+        return True
+    view_urls = metadata.get("recording_view_urls")
+    if isinstance(view_urls, list) and any(
+        isinstance(url, str) and url.strip() for url in view_urls
+    ):
+        return True
+    file_pointer = metadata.get("recording_file_pointer")
+    return isinstance(file_pointer, dict) and bool(
+        file_pointer.get("storage_path") or file_pointer.get("id")
+    )
+
+
+def _agent_messages_have_browser_recording_ready(
+    messages: Optional[List[dict]],
+) -> bool:
+    """True when every browser task that started a recording has a playable one.
+
+    Timeout cleanup posts ``session_paused`` / ``task_complete`` and finalizes
+    Kernel replay asynchronously. Hub archives that snapshot as soon as the
+    terminal lands (before the FINISHED recording row) leave the FE Recording
+    tab empty even though Kernel already has the MP4.
+    """
+    started_task_ids: set[str] = set()
+    ready_task_ids: set[str] = set()
+    for message in messages or []:
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent":
+            continue
+        if metadata.get("action_type") != "recording":
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        started_task_ids.add(task_id)
+        if _recording_attachment_ready(metadata):
+            ready_task_ids.add(task_id)
+    if not started_task_ids:
+        return True
+    return started_task_ids.issubset(ready_task_ids)
+
+
+def _agent_messages_ready_for_browser_hub_archive(
+    messages: Optional[List[dict]],
+) -> bool:
+    """Terminal chip close + playable recording — both required for hub FE links."""
+    return _agent_messages_have_browser_terminal(
+        messages
+    ) and _agent_messages_have_browser_recording_ready(messages)
+
+
 async def _refresh_agent_after_pause_for_browser_terminal(
     base_url: str,
     agent_id: str,
@@ -4871,9 +5245,10 @@ async def _refresh_agent_after_pause_for_browser_terminal(
     Timeout/stall paths pause the agent *after* the poll snapshot. Cancel +
     recording cleanup then post ``task_complete`` / ``session_paused`` and finalize
     the recording asynchronously. Archiving the pre-pause snapshot leaves FE links
-    with an IN_PROGRESS browser chip forever.
+    with an IN_PROGRESS browser chip forever. Archiving as soon as ``session_paused``
+    lands (before Kernel replay finalize) leaves the Recording tab empty.
     """
-    if _agent_messages_have_browser_terminal(data.get("messages")):
+    if _agent_messages_ready_for_browser_hub_archive(data.get("messages")):
         return data
     deadline = time.time() + timeout_seconds
     latest = data
@@ -4884,7 +5259,7 @@ async def _refresh_agent_after_pause_for_browser_terminal(
         except Exception as refresh_error:
             print(f"    ⚠ Browser-terminal refresh failed: {refresh_error}")
             continue
-        if _agent_messages_have_browser_terminal(latest.get("messages")):
+        if _agent_messages_ready_for_browser_hub_archive(latest.get("messages")):
             print(
                 f"    ✓ Browser terminal messages landed after pause "
                 f"({len(latest.get('messages') or [])} messages)"
@@ -6093,6 +6468,100 @@ def _describe_unusable_cookie_domain(summary: dict) -> str:
     )
 
 
+def _task_needs_auth(task: "BenchmarkTask") -> bool:
+    """True when the catalog declares environment.needs_auth (live session required)."""
+    return bool((task.environment or {}).get("needs_auth"))
+
+
+def _needs_auth_domains(task: "BenchmarkTask") -> tuple[str, ...]:
+    env = task.environment or {}
+    raw = env.get("required_injectable_cookie_domains") or env.get("live_cookie_domains") or []
+    return tuple(str(d).strip() for d in raw if str(d).strip())
+
+
+def _looks_like_auth_session_failure(
+    failure_reason: Optional[str],
+    data: Optional[dict] = None,
+) -> bool:
+    """Detect auth-assistance / dead-session outcomes that needs_auth benches care about."""
+    text = (failure_reason or "").lower()
+    if any(
+        marker in text
+        for marker in (
+            "auth_assistance",
+            "awaiting_auth_assistance",
+            "auth_failed",
+            "valid auth token",
+        )
+    ):
+        return True
+    if not data:
+        return False
+    benchmark = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    if benchmark.get("unexpected_attention_kind") == "auth_assistance":
+        return True
+    if benchmark.get("attention_request_kind_seen") == "auth_assistance":
+        return True
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    status = str(agent.get("status") or "").lower()
+    return status in {"awaiting_auth_assistance", "auth_failed"}
+
+
+def _annotate_needs_auth_failure(
+    task: "BenchmarkTask",
+    failure_reason: Optional[str],
+    data: Optional[dict] = None,
+) -> Optional[str]:
+    """Rewrite auth-session failures on needs_auth benches into an INFRA/fixture report.
+
+    Diagram::
+
+        catalog needs_auth=true
+                │
+                ▼
+        injectable cookies present? ──no──► preflight INFRA (existing)
+                │ yes
+                ▼
+        live session valid? ──no──► auth_assistance / auth_failed
+                │                      │
+                │                      ▼
+                │            annotate: "bench needs a valid auth token"
+                ▼
+              write_lock / task success
+
+    Injectable CookieBundles prove selection, not liveness. When a needs_auth
+    bench still lands on auth_assistance, report that the fixture needs a valid
+    auth token rather than leaving a bare attention-kind mismatch.
+    """
+    if not failure_reason or not _task_needs_auth(task):
+        return failure_reason
+    if not _looks_like_auth_session_failure(failure_reason, data):
+        return failure_reason
+    if "needs a valid auth token" in failure_reason.lower():
+        if data is not None:
+            data["_benchmark"] = {
+                **(data.get("_benchmark") or {}),
+                "needs_auth": True,
+                "auth_fixture_failure": True,
+            }
+        return failure_reason
+    domains = _needs_auth_domains(task)
+    domain_hint = f" for {', '.join(domains)}" if domains else ""
+    annotated = (
+        f"INFRA/fixture: this bench declares needs_auth and needs a valid auth token"
+        f"{domain_hint} (injectable CookieBundles alone are insufficient — refresh a "
+        f"live signed-in session for the fixture identity, re-sync, then re-run). "
+        f"{failure_reason}"
+    )
+    if data is not None:
+        data["_benchmark"] = {
+            **(data.get("_benchmark") or {}),
+            "needs_auth": True,
+            "auth_fixture_failure": True,
+        }
+    return annotated
+
+
 def _assert_live_cookie_domains_usable(user_id: str, cookie_domains: tuple[str, ...]) -> None:
     """Fail the fixture — loudly, as infra — when the scoped sync produced nothing usable.
 
@@ -6580,8 +7049,11 @@ async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
 
 def _live_fixture_run_user_id(task: "BenchmarkTask") -> Optional[str]:
     """The production identity a task's declared live fixtures make it run as."""
-    if "live-tamy-identity" in resolve_live_fixtures(task.environment):
+    fixtures = resolve_live_fixtures(task.environment)
+    if "live-tamy-identity" in fixtures:
         return TAMY_IDENTITY_USER_ID
+    if "live-aman-food-plan-identity" in fixtures:
+        return AMAN_FOOD_PLAN_USER_ID
     return None
 
 
@@ -6620,9 +7092,30 @@ def _apply_live_tamy_identity_fixture(ctx: LiveFixtureContext) -> dict:
     }
 
 
+def _apply_live_aman_food_plan_identity_fixture(ctx: LiveFixtureContext) -> dict:
+    """Apply the complete live overlay for Aman's DoorDash food-plan repro identity."""
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — skipping the Aman food-plan identity overlay")
+        return {"fixture": "live-aman-food-plan-identity", "skipped": True, "reason": "simulate"}
+    manifest = _apply_live_fixture(
+        replace(
+            ctx,
+            user_id=AMAN_FOOD_PLAN_USER_ID,
+            cookie_domains=AMAN_FOOD_PLAN_COOKIE_DOMAINS,
+        )
+    )
+    print(f"    🛒 Seeded Aman's production identity {AMAN_FOOD_PLAN_USER_ID} into the isolated DB")
+    return {
+        **manifest,
+        "fixture": "live-aman-food-plan-identity",
+        "user_id": AMAN_FOOD_PLAN_USER_ID,
+    }
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
     "live-tamy-identity": _apply_live_tamy_identity_fixture,
+    "live-aman-food-plan-identity": _apply_live_aman_food_plan_identity_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
@@ -6667,6 +7160,13 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
         required_injectable_cookie_domains=required_cookie_domains,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     )
+    if _task_needs_auth(task):
+        domains = _needs_auth_domains(task)
+        domain_hint = f" ({', '.join(domains)})" if domains else ""
+        print(
+            f"    🔐 needs_auth: this bench requires a valid live auth token/session"
+            f"{domain_hint} — injectable CookieBundles alone are not sufficient"
+        )
     manifests: list[dict] = []
     for name in fixtures:
         applier = LIVE_FIXTURE_APPLIERS.get(name)
@@ -8597,6 +9097,9 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
                 "agent_id": agent_id,
                 "status": node.get("status"),
                 "agent_type": node.get("agent_type"),
+                "goal": str(node.get("goal") or "")[:240],
+                "mentions_andy": bool(node.get("mentions_andy")),
+                "mentions_aman": bool(node.get("mentions_aman")),
                 "message_count": int(node.get("message_count") or 0),
                 "research_tool_count": int(node.get("research_tool_count") or 0),
                 "explore_spawn_count": int(node.get("explore_spawn_count") or 0),
@@ -8612,6 +9115,101 @@ def _first_level_gps_from_compact_tree(compact_tree: dict, data: dict) -> list[d
 
 def _first_level_gps_from_data(data: dict) -> list[dict]:
     return list(_compact_benchmark_state_for_judge(data).get("first_level_gps") or [])
+
+
+def _nested_general_purpose_violations(compact_tree: dict) -> list[dict]:
+    """GPs whose parent is itself GP / for_each / explore — typed evidence for T6."""
+    by_id = {str(agent_id): node for agent_id, node in compact_tree.items() if isinstance(node, dict)}
+    violations: list[dict] = []
+    for agent_id, node in by_id.items():
+        agent_type = str(node.get("agent_type") or "")
+        goal = str(node.get("goal") or "")
+        is_gp = agent_type == "general_purpose" or goal.startswith("You are analyzing ONE creator")
+        if not is_gp:
+            continue
+        parent_id = str(node.get("parent_agent_id") or "")
+        if not parent_id or parent_id not in by_id:
+            continue
+        parent = by_id[parent_id]
+        parent_type = str(parent.get("agent_type") or "")
+        parent_goal = str(parent.get("goal") or "")
+        parent_is_gp = parent_type in {"general_purpose", "for_each"} or parent_goal.startswith(
+            "You are analyzing ONE creator"
+        )
+        parent_is_explore = _is_explore_tree_node(parent)
+        if parent_is_gp or parent_is_explore:
+            violations.append(
+                {
+                    "agent_id": agent_id,
+                    "parent_agent_id": parent_id,
+                    "parent_agent_type": parent_type or ("explore" if parent_is_explore else "general_purpose"),
+                }
+            )
+    return violations
+
+
+def _text_mentions_andy(text: str) -> bool:
+    blob = str(text or "").lower()
+    return "andy prevalsky" in blob or "andy's" in blob or "for andy" in blob
+
+
+def _text_presents_aman_as_user(text: str) -> bool:
+    """True when Aman is framed as the principal user/owner (not schema key leftovers)."""
+    blob = str(text or "").lower()
+    if "aman gottumukkala" not in blob and "aman's" not in blob:
+        return False
+    # Historical July schema keys / phrase leftovers are not Aman-as-principal.
+    if "opportunities_for_aman" in blob or "opportunities for aman" in blob:
+        cleaned = (
+            blob.replace("opportunities_for_aman", " ")
+            .replace("opportunities for aman", " ")
+        )
+        if "aman gottumukkala" not in cleaned and "aman's" not in cleaned:
+            return False
+        blob = cleaned
+    andy_present = _text_mentions_andy(blob)
+    aman_owner_markers = (
+        "for aman gottumukkala",
+        "aman gottumukkala is",
+        "aman's personal brand",
+        "building a personal brand for aman",
+        "principal user",
+    )
+    if any(marker in blob for marker in aman_owner_markers):
+        return True
+    # Aman named without Andy in the same root/completion blob → treat as principal.
+    return not andy_present
+
+
+def _principal_user_andy_check(data: dict) -> tuple[bool, str]:
+    """T1: Andy is principal; Aman is not the user/owner on root goal or completion."""
+    compact = _compact_benchmark_state_for_judge(data)
+    tree = compact.get("tree") if isinstance(compact.get("tree"), dict) else {}
+    root_id = _tree_root_id(tree, data)
+    root = tree.get(str(root_id)) if root_id else None
+    root = root if isinstance(root, dict) else {}
+    root_goal = str(root.get("goal") or "")
+    completion_summary = str(root.get("completion_summary") or "")
+    if not completion_summary:
+        completion_summary = _root_deliverable_blob(data)[:240]
+    first_level = compact.get("first_level_gps") if isinstance(compact.get("first_level_gps"), list) else []
+    gps_mention_andy = any(
+        _text_mentions_andy(str(gp.get("goal") or ""))
+        or bool(gp.get("mentions_andy"))
+        for gp in first_level
+        if isinstance(gp, dict)
+    )
+    andy_ok = (
+        bool(root.get("mentions_andy"))
+        or _text_mentions_andy(root_goal)
+        or _text_mentions_andy(completion_summary)
+        or gps_mention_andy
+    )
+    if _text_presents_aman_as_user(root_goal) or _text_presents_aman_as_user(completion_summary):
+        return False, "T1: root goal or completion presents Aman as the principal user"
+    if not andy_ok:
+        return False, "T1: no Andy Prevalsky principal evidence on root/first-level GPs/completion"
+    return True, "All declared static checks passed"
 
 
 def _judge_source_tree(data: dict) -> dict:
@@ -8678,6 +9276,19 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
             if isinstance(agent, dict)
         ]
     compact["first_level_gps"] = _first_level_gps_from_compact_tree(compact_tree, data)
+    nested_violations = _nested_general_purpose_violations(compact_tree)
+    # Typed T6 evidence so the LLM judge cannot fail closed on "tree truncated"
+    # when parentage is fully available in compact form (mass-agent Fast Mode).
+    compact["nested_general_purpose_count"] = len(nested_violations)
+    compact["nested_general_purpose_violations"] = nested_violations[:20]
+    root_id = _tree_root_id(compact_tree, data)
+    root_node = compact_tree.get(str(root_id)) if root_id else None
+    root_node = root_node if isinstance(root_node, dict) else {}
+    compact["principal_user"] = {
+        "mentions_andy": bool(root_node.get("mentions_andy")),
+        "mentions_aman": bool(root_node.get("mentions_aman")),
+        "completion_summary": str(root_node.get("completion_summary") or "")[:240],
+    }
     compact["usage"] = {
         "cost_cents": data.get("cost_cents") or raw.get("cost_cents") or 0,
         "tokens_out": data.get("tokens_out") or raw.get("tree_tokens_out") or 0,
@@ -8976,6 +9587,17 @@ async def _call_declared_llm_judge(
     from helpers.llm import check_progress
 
     criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    task_requirement = (
+        _doordash_food_plan_task_requirement_for_judge(task)
+        if task.name == DOORDASH_FOOD_PLAN_TASK_NAME
+        else task.prompt
+    )
+    manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
+    manifest_block = (
+        f"\n\nCanonical manifest checklist (ground truth for item matching):\n{manifest_context}"
+        if manifest_context
+        else ""
+    )
     verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
 
 The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
@@ -8985,13 +9607,23 @@ terminal gate; it does not prove item, price, date, address, quantity, or select
 assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
 eligible orders fail unless a criterion explicitly defines that state as success.
 
-Task requirement: {task.prompt}
+Task requirement: {task_requirement}{manifest_block}
 Criteria:
 {criteria}
 Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
+    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+        cart_evidence = _doordash_food_plan_supplemental_cart_evidence(data)
+        if cart_evidence:
+            evidence.append(
+                {
+                    "role": "TOOL",
+                    "text": cart_evidence,
+                    "metadata": {"evidence_type": "doordash_food_plan_cart_itemization"},
+                }
+            )
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
     judge_user_id = (
         agent.get("userId")
@@ -9357,6 +9989,100 @@ def _has_later_browser_recovery(messages: list, start_index: int) -> bool:
     return False
 
 
+def _has_later_web_fetch_recovery(messages: list, start_index: int) -> bool:
+    """True when a later web_fetch FINISHED proves the agent recovered from a fetch ERROR."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+        if tool_name != "web_fetch":
+            continue
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        if status == "FINISHED":
+            return True
+    return False
+
+
+_RECOVERABLE_EXPLORE_TOOLS = frozenset(
+    {"web_fetch", "web_search", "grep", "people_search"}
+)
+
+
+def _has_later_explore_tool_recovery(messages: list, start_index: int) -> bool:
+    """True when later research progress proves the agent recovered from an explore-tool ERROR."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        if status != "FINISHED":
+            continue
+        if tool_name in _RECOVERABLE_EXPLORE_TOOLS or tool_name in {
+            "attempt_completion",
+            "completion_summary",
+        }:
+            return True
+    return False
+
+
+def _is_recoverable_web_fetch_failure(
+    candidate: dict,
+    *,
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Transient web_fetch ERRORs recovered by a later successful fetch are not tool failures.
+
+    Explore / GP children often hit a one-off fetch ERROR (timeout, 403, soft page) and
+    continue with alternate URLs. Counting those recovered rows in `no_tool_failures`
+    fails closed Fast Mode mass-agent replays whose historical trajectories include a
+    single recovered fetch ERROR (local repro: test-mass-agent-run-0 agent
+    4f078c58… / child 84979949… web_fetch bf0a44fa… then 69 later FINISHED fetches).
+    Unrecovered terminal web_fetch ERRORs still count.
+    """
+    tool_name = str(candidate.get("toolName") or candidate.get("tool_name") or "")
+    if tool_name != "web_fetch":
+        return False
+    status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+    if status not in {"ERROR", "FAILED"}:
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_web_fetch_recovery(messages, message_index)
+
+
+def _is_recoverable_explore_tool_failure(
+    candidate: dict,
+    *,
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Explore-tool ERRORs recovered by later research/completion are not harness failures.
+
+    Fast Mode mass-agent cache trajectories include schema-invalid grep calls
+    (`Unsupported grep parameter: 'filters'`) and transient web_fetch ERRORs; children
+    pivot to web_search / alternate URLs and still COMPLETE. Local repro:
+    test-mass-agent-run-0 agent 65558d55… / child 5af074c9… had 3 unrecovered-by-same-tool
+    grep ERRORs then continued with dozens of FINISHED web_search calls. Unrecovered
+    terminal explore ERRORs (no later research/completion FINISHED) still count.
+    """
+    tool_name = str(candidate.get("toolName") or candidate.get("tool_name") or "")
+    if tool_name not in _RECOVERABLE_EXPLORE_TOOLS:
+        return False
+    status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+    if status not in {"ERROR", "FAILED"}:
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_explore_tool_recovery(messages, message_index)
+
+
 def _is_recoverable_browser_element_miss_failure(
     candidate: dict,
     *,
@@ -9716,50 +10442,80 @@ def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[
     return failures
 
 
+def _all_trajectory_messages(data: dict) -> list[tuple[list, str]]:
+    """Return (messages, agent_label) pairs for root + captured benchmark tree."""
+    sections: list[tuple[list, str]] = []
+    root_messages = data.get("messages", []) or []
+    if root_messages:
+        sections.append((root_messages, "root"))
+    tree = data.get("_benchmark", {}).get("tree") if isinstance(data.get("_benchmark"), dict) else None
+    if isinstance(tree, dict):
+        for agent_id, info in tree.items():
+            if not isinstance(info, dict):
+                continue
+            messages = info.get("messages") or []
+            if messages:
+                sections.append((messages, str(agent_id)[:8]))
+    return sections
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
-    """Return grounded failed tool lifecycle events from the root trajectory."""
+    """Return grounded failed tool lifecycle events from root + tree trajectories."""
     failures: list[str] = []
-    messages = data.get("messages", []) or []
-    for message_index, message in enumerate(messages):
-        metadata = message.get("metadata") if isinstance(message, dict) else None
-        if not isinstance(metadata, dict):
-            continue
-        message_text = _tool_message_body(message)
-        candidates = [metadata]
-        if isinstance(metadata.get("auxiliary"), dict):
-            candidates.append(metadata["auxiliary"])
-        for candidate in candidates:
-            tool_name = candidate.get("toolName") or candidate.get("tool_name")
-            if not tool_name:
+    for messages, agent_label in _all_trajectory_messages(data):
+        for message_index, message in enumerate(messages):
+            metadata = message.get("metadata") if isinstance(message, dict) else None
+            if not isinstance(metadata, dict):
                 continue
-            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
-                continue
-            if _is_recoverable_browser_element_miss_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_pinned_host_refusal_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            if _is_recoverable_browser_evaluate_uncaught_failure(
-                candidate,
-                message_text=message_text,
-                messages=messages,
-                message_index=message_index,
-            ):
-                continue
-            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
-            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
-            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
-                call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
-                failures.append(f"{tool_name} {call_id} status={status or 'unsuccessful'}")
+            message_text = _tool_message_body(message)
+            candidates = [metadata]
+            if isinstance(metadata.get("auxiliary"), dict):
+                candidates.append(metadata["auxiliary"])
+            for candidate in candidates:
+                tool_name = candidate.get("toolName") or candidate.get("tool_name")
+                if not tool_name:
+                    continue
+                if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                    continue
+                if _is_recoverable_browser_element_miss_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_pinned_host_refusal_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_browser_evaluate_uncaught_failure(
+                    candidate,
+                    message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_web_fetch_failure(
+                    candidate,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_explore_tool_failure(
+                    candidate,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+                event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+                if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                    call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
+                    prefix = f"{agent_label}:" if agent_label != "root" else ""
+                    failures.append(f"{prefix}{tool_name} {call_id} status={status or 'unsuccessful'}")
     return failures
 
 
@@ -9814,6 +10570,17 @@ def _completion_cards_from_messages(messages: list) -> list[dict]:
         ):
             summaries.append(completion)
     return summaries
+
+
+
+def _task_declares_static_check(task: BenchmarkTask, check_type: str) -> bool:
+    """Return True when any declared static_check evaluator includes check_type."""
+    return any(
+        check.get("type") == check_type
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    )
 
 
 def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: bool) -> list[dict]:
@@ -9973,6 +10740,181 @@ _APPROVAL_AMOUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
+
+
+def _claude_code_sessions_with_transcripts(
+    sessions: list[dict], *, min_chars: int = 1
+) -> list[dict]:
+    """Return sessions whose stored terminal output meets ``min_chars``."""
+    return [
+        session
+        for session in sessions
+        if isinstance(session, dict)
+        and isinstance(session.get("output"), str)
+        and len(session.get("output", "").strip()) >= min_chars
+    ]
+
+
+def _claude_code_started_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a claude_code_started (or equivalent) chip anchor."""
+    started: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        action_type = metadata.get("action_type")
+        if action_type in {"claude_code_started", "task_started"} or (
+            metadata.get("toolName") == "spawn_claude_code_agent"
+            and metadata.get("ws_url")
+        ):
+            started.add(task_id)
+    return started
+
+
+def _claude_code_terminal_task_ids(messages: list) -> set[str]:
+    """Return task_ids that have a chip-terminal task_complete/session_cancelled."""
+    terminal: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        if metadata.get("action_type") in {"task_complete", "session_cancelled"}:
+            terminal.add(task_id)
+    return terminal
+
+
+async def _await_claude_code_chip_terminality(
+    base_url: str,
+    agent_id: str,
+    data: dict,
+    *,
+    timeout_seconds: float = 45.0,
+) -> dict:
+    """After pause, wait until Claude Code chips have task_complete+task_id in-transcript.
+
+    Pause cancel is async (activity cleanup posts Session Cancelled). Collecting
+    logs immediately freezes the durable hub FE on "Spinning up..." because the
+    archive misses the terminal message (hub agent 094f1085 had 87 msgs without
+    cancel; local agent had 89 with Session Cancelled + task_id).
+    """
+    latest = data
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        messages = latest.get("messages") or []
+        started = _claude_code_started_task_ids(messages)
+        if not started:
+            return latest
+        terminal = _claude_code_terminal_task_ids(messages)
+        if started <= terminal:
+            print(
+                f"    ✓ Claude Code chip terminality settled "
+                f"({len(terminal)}/{len(started)} task_complete+task_id)"
+            )
+            return latest
+        if time.monotonic() >= deadline:
+            missing = sorted(started - terminal)
+            print(
+                f"    ⚠ Claude Code cancel messages incomplete before log collection; "
+                f"missing task_id(s): {missing[:5]}"
+            )
+            return latest
+        await asyncio.sleep(1.5)
+        try:
+            latest = await get_agent(base_url, agent_id)
+        except Exception as refresh_error:
+            print(f"    ⚠ post-pause agent refresh failed: {refresh_error}")
+
+
+async def _hydrate_claude_code_sessions(data: dict) -> None:
+    """Fetch Claude Code sessions (root + tree) for transcript static checks.
+
+    On timeout/early-fail the harness pauses the agent before evaluators run, but
+    ``spawn_claude_code_agent`` persists terminal output asynchronously on cancel.
+    Retry briefly when sessions exist yet still have empty ``output`` so the
+    static check does not race the cancel-persist path.
+    """
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_agent_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+    benchmark_state = data.setdefault("_benchmark", {})
+    base_url = str(benchmark_state.get("api_base_url") or "").rstrip("/")
+    if not root_agent_id:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "root agent id is missing"
+        return
+    if not base_url:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = "api_base_url is missing"
+        return
+
+    agent_ids = {root_agent_id}
+    try:
+        tree_agents = await get_agent_tree(base_url, root_agent_id)
+        for node in tree_agents or []:
+            if not isinstance(node, dict):
+                continue
+            aid = str(node.get("agent_id") or node.get("id") or "").strip()
+            if aid:
+                agent_ids.add(aid)
+    except Exception as tree_exc:
+        benchmark_state["claude_code_session_tree_error"] = str(tree_exc)[:200]
+
+    # Pause → cancel → persist can lag the evaluator by a few seconds. Poll until
+    # at least one session has a non-empty transcript (or we exhaust the budget).
+    retry_deadline = time.monotonic() + 45.0
+    sessions_by_id: dict[str, dict] = {}
+    fetch_errors: list[str] = []
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                sessions_by_id = {}
+                fetch_errors = []
+                for aid in sorted(agent_ids):
+                    try:
+                        resp = await client.get(
+                            f"{base_url}/api/claude-code-session/agent/{aid}",
+                            headers=headers,
+                        )
+                        if resp.status_code != 200:
+                            fetch_errors.append(f"{aid[:8]}:HTTP {resp.status_code}")
+                            continue
+                        payload = resp.json() if resp.content else {}
+                        for session in payload.get("sessions") or []:
+                            if not isinstance(session, dict):
+                                continue
+                            session_id = str(session.get("id") or "").strip()
+                            if session_id:
+                                sessions_by_id[session_id] = session
+                    except Exception as fetch_exc:
+                        fetch_errors.append(f"{aid[:8]}:{fetch_exc}")
+
+                sessions = list(sessions_by_id.values())
+                if not sessions:
+                    break
+                if _claude_code_sessions_with_transcripts(sessions):
+                    break
+                if time.monotonic() >= retry_deadline:
+                    break
+                await asyncio.sleep(2.0)
+
+        benchmark_state["claude_code_sessions"] = list(sessions_by_id.values())
+        if fetch_errors and not sessions_by_id:
+            benchmark_state["claude_code_session_evidence_error"] = "; ".join(fetch_errors)[:300]
+    except Exception as exc:
+        benchmark_state["claude_code_sessions"] = []
+        benchmark_state["claude_code_session_evidence_error"] = str(exc)[:300]
+
+
 
 
 def _approval_user_visible_text(request: dict) -> str:
@@ -10208,7 +11150,9 @@ def _run_declared_static_check(
                 )
             continue
         if check_type == "agent_status":
-            expected_status = str(check.get("value") or "COMPLETED").upper()
+            expected_status = str(
+                check.get("value") or check.get("expected_status") or "COMPLETED"
+            ).upper()
             observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
             if observed_status != expected_status:
                 return False, f"Agent status was {observed_status}; expected {expected_status}"
@@ -10295,6 +11239,97 @@ def _run_declared_static_check(
                     f"(of {len(gps)} first-level GPs); expected >= {minimum}",
                 )
             continue
+        if check_type == "first_level_gp_explore_research":
+            gps = _first_level_gps_from_data(data)
+            if not gps:
+                return False, "T3: first_level_gps was empty"
+            failures = []
+            for gp in gps:
+                explore = int(gp.get("explore_spawn_count") or 0)
+                research = int(gp.get("research_tool_count") or 0)
+                stub = bool(gp.get("has_traj_end_stub"))
+                if stub or (explore < 1 and research < 3):
+                    failures.append(gp)
+            if failures:
+                sample = failures[0]
+                return (
+                    False,
+                    "T3: first-level GP "
+                    f"{str(sample.get('agent_id') or '')[:8]} missing explore/research "
+                    f"(explore={int(sample.get('explore_spawn_count') or 0)}, "
+                    f"research={int(sample.get('research_tool_count') or 0)}, "
+                    f"stub={bool(sample.get('has_traj_end_stub'))}; "
+                    f"{len(failures)}/{len(gps)} failing)",
+                )
+            continue
+        if check_type == "first_level_gp_july_trajectories":
+            gps = _first_level_gps_from_data(data)
+            if not gps:
+                return False, "T4: first_level_gps was empty"
+            failures = []
+            for gp in gps:
+                messages = int(gp.get("message_count") or 0)
+                explore = int(gp.get("explore_spawn_count") or 0)
+                research = int(gp.get("research_tool_count") or 0)
+                stub = bool(gp.get("has_traj_end_stub"))
+                ok = (messages >= 12 or research >= 3 or explore >= 1) and not stub
+                if not ok:
+                    failures.append(gp)
+            if failures:
+                sample = failures[0]
+                return (
+                    False,
+                    "T4: first-level GP "
+                    f"{str(sample.get('agent_id') or '')[:8]} below July trajectory bar "
+                    f"(messages={int(sample.get('message_count') or 0)}, "
+                    f"research={int(sample.get('research_tool_count') or 0)}, "
+                    f"explore={int(sample.get('explore_spawn_count') or 0)}, "
+                    f"stub={bool(sample.get('has_traj_end_stub'))}; "
+                    f"{len(failures)}/{len(gps)} failing)",
+                )
+            continue
+        if check_type == "zero_live_spend":
+            compact = _compact_benchmark_state_for_judge(data)
+            usage = compact.get("usage") if isinstance(compact.get("usage"), dict) else {}
+            cost = int(usage.get("cost_cents") or 0)
+            cache_create = int(usage.get("cache_creation_input_tokens") or 0)
+            live_out = int(usage.get("live_output_tokens") or 0)
+            if cost != 0 or cache_create != 0 or live_out != 0:
+                return (
+                    False,
+                    "T5: live spend not zero "
+                    f"(cost_cents={cost}, cache_creation_input_tokens={cache_create}, "
+                    f"live_output_tokens={live_out})",
+                )
+            gps = list(compact.get("first_level_gps") or [])
+            stubs = [gp for gp in gps if isinstance(gp, dict) and gp.get("has_traj_end_stub")]
+            if stubs:
+                return (
+                    False,
+                    f"T5: {len(stubs)} first-level GP traj-end stubs while claiming $0 live spend",
+                )
+            continue
+        if check_type == "no_nested_general_purpose":
+            compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
+            violations = _nested_general_purpose_violations(compact_tree)
+            if violations:
+                sample = violations[0]
+                return (
+                    False,
+                    "T6: nested general-purpose "
+                    f"{str(sample.get('agent_id') or '')[:8]} under "
+                    f"{str(sample.get('parent_agent_type') or 'unknown')} "
+                    f"{str(sample.get('parent_agent_id') or '')[:8]} "
+                    f"({len(violations)} total)",
+                )
+            if not compact_tree:
+                return False, "T6: typed tree was empty"
+            continue
+        if check_type == "principal_user_andy":
+            ok, reason = _principal_user_andy_check(data)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "approval_request_details_for_seen_kind":
             observed_kind = benchmark_state.get("attention_request_kind_seen")
             details_by_kind = check.get("details_by_kind") or {}
@@ -10327,6 +11362,32 @@ def _run_declared_static_check(
             ):
                 return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type == "claude_code_session_output":
+            sessions = benchmark_state.get("claude_code_sessions") or []
+            min_sessions = int(check.get("min_sessions", 1))
+            min_chars = int(check.get("min_chars", 1))
+            if len(sessions) < min_sessions:
+                evidence_error = benchmark_state.get("claude_code_session_evidence_error")
+                suffix = f" ({evidence_error})" if evidence_error else ""
+                return (
+                    False,
+                    f"Claude Code session count was {len(sessions)}; "
+                    f"expected at least {min_sessions}{suffix}",
+                )
+            stored = [
+                session
+                for session in sessions
+                if isinstance(session, dict)
+                and isinstance(session.get("output"), str)
+                and len(session.get("output", "").strip()) >= min_chars
+            ]
+            if len(stored) < min_sessions:
+                return (
+                    False,
+                    f"Claude Code sessions with stored transcripts (≥{min_chars} chars): "
+                    f"{len(stored)}; expected at least {min_sessions}",
+                )
+            continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"
 
@@ -10334,7 +11395,9 @@ def _run_declared_static_check(
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
+    *,
     base_url: str | None = None,
+    static_only: bool = False,
 ) -> tuple[bool, Optional[str], list[dict]]:
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
     if not task.enforce_declared_evaluators:
@@ -10348,6 +11411,14 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    if any(
+        check.get("type") == "claude_code_session_output"
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    ):
+        await _hydrate_claude_code_sessions(data)
+
     needs_tree_evidence = any(
         evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge", "polar"}
         for evaluator in task.evaluators
@@ -10359,6 +11430,8 @@ async def _run_declared_evaluators(
     for evaluator in task.evaluators:
         evaluator_id = evaluator.get("id", "unnamed")
         method = evaluator.get("method")
+        if static_only and method != "static_check":
+            continue
         usage = None
         evidence_mode = method
         try:
@@ -10451,6 +11524,10 @@ async def run_single_task(
         from benchmarks.sms_runner import build_deps_from_module, run_sms_task
 
         return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__]))
+    if _effective_harness(task) == "codex":
+        if not await _check_codex_harness_credentials(base_url):
+            print(f"  ⚠ Codex harness credentials unavailable at task dispatch — skipping: {task.name}")
+            return _codex_harness_credential_skip_result(task)
     # Parallel suites can queue a long-running Claude task for several minutes.
     # A credential that was available during the suite-level preflight may be
     # invalidated or enter cooldown before this task obtains its execution slot.
@@ -10552,6 +11629,12 @@ async def run_single_task(
         doc_count = user_data_manifest.get("document_count", "?")
         provider_count = user_data_manifest.get("provider_count", "?")
         print(f"    📄 Seeded frozen user-data fixture: {doc_count} documents across {provider_count} providers")
+    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+        if not _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+        doordash_manifest = _run_doordash_food_plan_fixture("apply")
+        prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
+        print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -10564,9 +11647,14 @@ async def run_single_task(
         )
 
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    step_budget = polar_browser_step_budget(task)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
-    print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
+    if polar_wall_clock_disabled(task) or resolved_timeout in (None, 0):
+        budget_note = f", browser_steps≤{step_budget}" if step_budget else ""
+        print(f"     timeout=disabled (step budget){budget_note}, price_limit={task.effective_price_limit_cents()}c")
+    else:
+        print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
     all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
     if all_attachments:
         print(f"     attachments={all_attachments}")
@@ -10677,6 +11765,19 @@ async def run_single_task(
                 )
             )
 
+        if _effective_harness(task) == "codex":
+            from benchmarks.codex_runner import build_deps_from_module, run_codex_task
+
+            fast_mode_cache = _resolved_fast_mode_cache(task)
+            benchmark_goal = _benchmark_goal_for_task(task, base_url)
+            return await run_codex_task(
+                base_url,
+                task,
+                build_deps_from_module(sys.modules[__name__]),
+                benchmark_goal,
+                fast_mode_cache_enabled=fast_mode_cache,
+            )
+
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
@@ -10758,6 +11859,7 @@ async def run_single_task(
         data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
             base_url, agent_id, task, realtime_monitor
         )
+        early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
@@ -10768,6 +11870,9 @@ async def run_single_task(
                     data = await _refresh_agent_after_pause_for_browser_terminal(
                         base_url, agent_id, data
                     )
+                    # Wait for Session Cancelled (task_complete+task_id) before
+                    # freezing the transcript into the durable hub archive.
+                    data = await _await_claude_code_chip_terminality(base_url, agent_id, data)
             except Exception as pause_error:
                 print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 
@@ -11026,7 +12131,10 @@ async def run_single_task(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
-        if task.enforce_declared_evaluators and passed:
+        run_declared = task.enforce_declared_evaluators and (
+            passed or _task_declares_static_check(task, "claude_code_session_output")
+        )
+        if run_declared and passed:
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
                 tree = canonicalize_agent_tree(
@@ -11054,11 +12162,13 @@ async def run_single_task(
                     "live_output_tokens": tokens_out,
                     "tree_tokens_out": tree_tokens_out,
                 }
-        if task.enforce_declared_evaluators and passed:
+        if run_declared:
+            data.setdefault("_benchmark", {})["api_base_url"] = base_url
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
                 task,
                 data,
                 base_url=base_url,
+                static_only=not passed,
             )
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),
@@ -11073,6 +12183,16 @@ async def run_single_task(
         logs = await collect_logs(agent_id, data, start_time)
         if declared_evaluator_results:
             logs["declared_evaluators"] = declared_evaluator_results
+        # Keep hydrated Claude Code transcripts in the run JSON so durable FE
+        # publish can dual-write them after the ephemeral bench DB is dropped.
+        claude_code_sessions = (data.get("_benchmark") or {}).get("claude_code_sessions")
+        if isinstance(claude_code_sessions, list) and claude_code_sessions:
+            logs["claude_code_sessions"] = claude_code_sessions
+        session_evidence_error = (data.get("_benchmark") or {}).get(
+            "claude_code_session_evidence_error"
+        )
+        if session_evidence_error:
+            logs["claude_code_session_evidence_error"] = session_evidence_error
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
@@ -11109,6 +12229,7 @@ async def run_single_task(
             log_summary.append(f"{label}={len(entries)}")
         log_summary.append(f"messages={len(logs.get('messages', []))}")
         print(f"    Logs collected: {', '.join(log_summary)}")
+        failure_reason = _annotate_needs_auth_failure(task, failure_reason, data)
         archive_manifest_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
             base_url,
             agent_id,
@@ -12016,6 +13137,25 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
         return False
 
 
+async def _check_codex_harness_credentials(base_url: str) -> bool:
+    """Codex harness requires a usable GPT compute token or funded OpenAI API key."""
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{base_url}/api/integrations/gpt-code/credentials/token",
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if bool(data.get("accessToken")):
+                    return True
+        return bool(os.environ.get("GPT_API_KEY", "").strip())
+    except Exception:
+        return False
+
+
 async def _check_claude_code_credentials(base_url: str) -> bool:
     """Check whether Claude Code can actually create a code session.
 
@@ -12355,6 +13495,14 @@ async def main_async(args):
     # In non-bootstrap mode, incomplete history falls back to the configured task
     # timeout so new or low-sample tasks can still run and accumulate pass data.
     for t in tasks:
+        if polar_wall_clock_disabled(t):
+            budget = polar_browser_step_budget(t)
+            t._resolved_timeout_seconds = 0
+            print(
+                f"  🧭 {t.name} → wall-clock disabled; "
+                f"browser step budget={budget if budget is not None else '—'}"
+            )
+            continue
         if args.bootstrap:
             t._resolved_timeout_seconds = t.timeout_seconds
             s = _history_summary(t.name, max_seconds=get_smoke_cap(t.name))
@@ -12456,14 +13604,15 @@ async def main_async(args):
 
     _report_emitter = ReportCardEmitter(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
     _report_start = time.monotonic()
-    _live_task_agent_ids: dict[str, str] = {}
+    # name -> FIFO of live agent ids so k-repeats of the same task name each keep
+    # their own deep link instead of overwriting one shared slot.
+    _live_task_agent_ids: dict[str, list[str]] = {}
 
     def _remember_live_agent(task_name: str, agent_id: str) -> None:
         if task_name and agent_id:
-            _live_task_agent_ids[task_name] = agent_id
+            _live_task_agent_ids.setdefault(task_name, []).append(agent_id)
 
-    def _report_snapshot(running_names: set[str]) -> RunState:
-        finished = {r.name for r in run.task_results}
+    def _report_snapshot(running_name_counts: dict[str, int]) -> RunState:
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
@@ -12471,8 +13620,11 @@ async def main_async(args):
             peak_fly_machines = None
         task_world_model_modes = {t.name: t.world_model_mode for t in tasks if t.world_model_mode}
         per_task: list[TaskCard] = []
+        finished_agent_ids: set[str] = set()
         for r in run.task_results:
             status = "skipped" if r.status == "SKIPPED" else ("passed" if r.passed else "failed")
+            if r.agent_id:
+                finished_agent_ids.add(r.agent_id)
             per_task.append(
                 TaskCard(
                     name=r.name,
@@ -12489,9 +13641,17 @@ async def main_async(args):
                     infra_usd=_infra_usd_for_elapsed(r.duration_seconds) if r.duration_seconds is not None else None,
                 )
             )
-        for name in running_names:
-            if name not in finished:
-                live_agent_id = _live_task_agent_ids.get(name)
+        # Emit one running card per still-pending occurrence (Counter), not one
+        # per distinct name — otherwise `bench A A A` with one finished looks
+        # like all three completed.
+        for name, running_count in running_name_counts.items():
+            live_ids = [
+                agent_id
+                for agent_id in _live_task_agent_ids.get(name, [])
+                if agent_id not in finished_agent_ids
+            ]
+            for index in range(running_count):
+                live_agent_id = live_ids[index] if index < len(live_ids) else None
                 per_task.append(
                     TaskCard(
                         name=name,
@@ -12524,28 +13684,32 @@ async def main_async(args):
             infra=Infra(peak_machines=peak_fly_machines) if peak_fly_machines is not None else None,
         )
 
-    def _emit_report(running_names: set[str], *, force: bool = False) -> None:
+    def _emit_report(running_name_counts: dict[str, int] | None = None, *, force: bool = False) -> None:
         try:
-            _report_emitter.maybe_emit(_report_snapshot(running_names), force=force)
-        except Exception as exc:  # observability must never fail the run
+            _report_emitter.maybe_emit(
+                _report_snapshot(dict(running_name_counts or {})),
+                force=force,
+            )
+        except Exception as exc:  # [REDACTED] must never fail the run
             print(f"  ⚠ report card emit failed: {exc}")
 
     # Live report card: a background ticker emits on a timer so the dashboard updates
     # DURING the run. The drain loop only emits on task-completion events, so a single
     # blocking task (or any long task) would otherwise leave the report screen blank
-    # until the very end. `_report_running` is kept in sync by the branches below.
-    _report_running: set[str] = set()
+    # until the very end. `_report_running` is a Counter so k-repeats of the same
+    # task name each keep a distinct "running" slot.
+    _report_running: Counter[str] = Counter()
 
     async def _report_ticker() -> None:
         try:
             while True:
                 await asyncio.sleep(1)
-                _emit_report(set(_report_running))
+                _emit_report(dict(_report_running))
         except asyncio.CancelledError:
             pass
 
     _report_ticker_task = asyncio.create_task(_report_ticker())
-    _emit_report(set(), force=True)
+    _emit_report({}, force=True)
     try:
         if checkpoint_source_mode:
             if len(tasks) != 1:
@@ -12600,7 +13764,7 @@ async def main_async(args):
                 for task in exclusive_db_tasks:
                     print(f"\n  Running destructive DB fixture task serially: {task.name}")
                     _report_running.clear()
-                    _report_running.add(task.name)
+                    _report_running[task.name] += 1
                     result = await run_single_task(
                         base_url,
                         task,
@@ -12608,8 +13772,10 @@ async def main_async(args):
                         on_agent_created=_remember_live_agent,
                     )
                     run.task_results.append(result)
-                    _report_running.discard(task.name)
-                    _emit_report(set())
+                    _report_running[task.name] -= 1
+                    if _report_running[task.name] <= 0:
+                        del _report_running[task.name]
+                    _emit_report({})
 
                 task_runners = _parallel_task_runners(
                     parallel_batch,
@@ -12623,7 +13789,9 @@ async def main_async(args):
                 pending = set(pending_results)
                 while pending:
                     _report_running.clear()
-                    _report_running.update(pending_results[future].name for future in pending)
+                    _report_running.update(
+                        Counter(pending_results[future].name for future in pending)
+                    )
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     for task_future in done:
                         task = pending_results[task_future]
@@ -12645,7 +13813,7 @@ async def main_async(args):
                             )
                         else:
                             run.task_results.append(result)
-                    _emit_report({pending_results[future].name for future in pending})
+                    _emit_report(Counter(pending_results[future].name for future in pending))
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()
@@ -12672,7 +13840,7 @@ async def main_async(args):
         else:
             for task in tasks:
                 _report_running.clear()
-                _report_running.add(task.name)
+                _report_running[task.name] += 1
                 result = await run_single_task(
                     base_url,
                     task,
@@ -12680,11 +13848,13 @@ async def main_async(args):
                     on_agent_created=_remember_live_agent,
                 )
                 run.task_results.append(result)
-                _report_running.discard(task.name)
-                _emit_report(set())
+                _report_running[task.name] -= 1
+                if _report_running[task.name] <= 0:
+                    del _report_running[task.name]
+                _emit_report({})
     finally:
         _report_ticker_task.cancel()
-        _emit_report(set(), force=True)
+        _emit_report({}, force=True)
         fly_total = await stop_fly_log_collector()
         print(f"\n  📡 Fly.io log stream stopped ({fly_total} lines captured)")
         if realtime_started:
@@ -12940,6 +14110,13 @@ def main():
         default=None,
         help="Optional tree JSON output path for --checkpoint-source-index.",
     )
+    parser.add_argument(
+        "--harness",
+        choices=["rose", "codex"],
+        default=None,
+        help="Override benchmark harness (rose=Temporal agent workflow, codex=Codex E2B orchestrator). "
+        "Also set via BENCHMARK_HARNESS env.",
+    )
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
         "--prod",
@@ -12985,6 +14162,8 @@ def main():
 
     if args.anon:
         _apply_anon_benchmark_mode(force_show_passwords=args.force_show_passwords)
+    if args.harness:
+        os.environ["BENCHMARK_HARNESS"] = args.harness
     _apply_world_model_cli_env(args, parser)
 
     asyncio.run(main_async(args))

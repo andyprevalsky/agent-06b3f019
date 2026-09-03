@@ -81,12 +81,33 @@ def _env_log_files() -> List[Path]:
     return found
 
 
+def _context_dir_log_files() -> List[Path]:
+    """Discover worker/backend logs under BENCHMARK_CONTEXT_DIR when NAVI_* is unset."""
+    raw = (os.environ.get("BENCHMARK_CONTEXT_DIR") or "").strip()
+    if not raw:
+        return []
+    log_dir = Path(raw) / "logs"
+    if not log_dir.is_dir():
+        return []
+    found: List[Path] = []
+    for path in sorted(log_dir.glob("worker*.log")):
+        if path.is_file() and path not in found:
+            found.append(path)
+    backend = log_dir / "backend.log"
+    if backend.is_file():
+        found.append(backend)
+    return found
+
+
 def _find_log_files(explicit: Optional[str]) -> List[Path]:
     if explicit:
         return [Path(explicit)]
     from_env = _env_log_files()
     if from_env:
         return from_env
+    from_context = _context_dir_log_files()
+    if from_context:
+        return from_context
     repo_root = Path(__file__).parent.parent.parent
     worker_candidates = [
         Path("agents/navi-worker-log.txt"),

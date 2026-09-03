@@ -56,6 +56,30 @@ async function main(): Promise<void> {
     assert.equal(calledWithToken, 'fresh-org-token');
     assert.equal(tokenRequests, 1, 'client-credential tokens should be cached until near expiry');
 
+    // Transient AgentCard token-grant 5xx must retry rather than fail the payment rails.
+    let flakyTokenRequests = 0;
+    const flakyTokenRuntime = new AgentCardOrgRuntime(
+      async (accessToken) => {
+        assert.equal(accessToken, 'recovered-org-token');
+        return { structuredContent: { wallet: { availableCents: 1 } } };
+      },
+      async () => {
+        flakyTokenRequests += 1;
+        if (flakyTokenRequests < 3) {
+          return new Response(
+            JSON.stringify({ error: 'server_error', error_description: 'Token grant failed' }),
+            { status: 500, headers: { 'content-type': 'application/json' } }
+          );
+        }
+        return new Response(
+          JSON.stringify({ access_token: 'recovered-org-token', expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    );
+    await flakyTokenRuntime.callTool('get_company_wallet', {});
+    assert.equal(flakyTokenRequests, 3, 'token grant must retry transient 5xx until success');
+
     let concurrentTokenRequests = 0;
     let releaseTokenRequest: (() => void) | undefined;
     const tokenRequestReleased = new Promise<void>((resolve) => {
@@ -134,6 +158,7 @@ async function main(): Promise<void> {
       await proactiveRuntime.callTool('list_transfers', { limit: 100 });
       nowMs += 61_000;
       await proactiveRuntime.callTool('list_transfers', { limit: 100 });
+      // Initial grant + one best-effort proactive refresh (no 5xx retry when cache can cover).
       assert.equal(proactiveTokenRequests, 2, 'the refresh window should trigger a token exchange');
       assert.deepEqual(
         proactiveToolTokens,
@@ -437,6 +462,94 @@ async function main(): Promise<void> {
     releaseMutation?.();
     await mutations;
     assert.equal(mutationCalls, 2, 'identical mutations must not be coalesced');
+
+    for (const name of ENV_NAMES) delete process.env[name];
+    process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'wizard-client';
+    process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'wizard-secret';
+
+    // Non-JSON token bodies and missing expires_in must still parse into a usable grant.
+    let oddBodyRequests = 0;
+    const oddBodyRuntime = new AgentCardOrgRuntime(
+      async (accessToken) => {
+        assert.equal(accessToken, 'odd-body-token');
+        return { structuredContent: { ok: true } };
+      },
+      async () => {
+        oddBodyRequests += 1;
+        if (oddBodyRequests === 1) {
+          return new Response('not-json-but-we-retry', {
+            status: 500,
+            headers: { 'content-type': 'text/plain' },
+          });
+        }
+        return new Response(JSON.stringify({ access_token: 'odd-body-token' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+    );
+    await oddBodyRuntime.callTool('get_company_wallet', {});
+    assert.equal(oddBodyRequests, 2, 'non-JSON 5xx body must still retry then succeed');
+
+    // Live AGENTCARD_MCP_URL (with trailing slash) must win over the module-init default.
+    const originalMcpUrl = process.env.AGENTCARD_MCP_URL;
+    process.env.AGENTCARD_MCP_URL = 'https://mcp.example.test/org/';
+    let resourceSeen = '';
+    const mcpUrlRuntime = new AgentCardOrgRuntime(
+      async () => ({ structuredContent: { ok: true } }),
+      async (_input, init) => {
+        const form = new URLSearchParams(String(init?.body));
+        resourceSeen = String(form.get('resource') ?? '');
+        return new Response(JSON.stringify({ access_token: 'mcp-url-token', expires_in: 120 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+    );
+    await mcpUrlRuntime.callTool('list_cards', { limit: 1 });
+    assert.equal(resourceSeen, 'https://mcp.example.test/org');
+    if (originalMcpUrl === undefined) delete process.env.AGENTCARD_MCP_URL;
+    else process.env.AGENTCARD_MCP_URL = originalMcpUrl;
+
+    // Exhausted cold-start 5xx retries surface a typed token-unavailable error.
+    let exhaustedGrantRequests = 0;
+    const exhaustedGrantRuntime = new AgentCardOrgRuntime(
+      async () => {
+        throw new Error('tool must not run when every token grant attempt fails');
+      },
+      async () => {
+        exhaustedGrantRequests += 1;
+        return new Response(JSON.stringify({ error: 'server_error' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+    );
+    await assert.rejects(
+      () => exhaustedGrantRuntime.callTool('list_transfers', { limit: 100 }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 502 &&
+        error.code === 'agentcard_org_token_unavailable'
+    );
+    assert.equal(exhaustedGrantRequests, 10, 'cold-start grant retries stay bounded at 10');
+
+    // Non-timeout transport failures remap to 502 (not 504).
+    const unreachableRuntime = new AgentCardOrgRuntime(
+      async () => {
+        throw new Error('tool must not run when the token endpoint is unreachable');
+      },
+      async () => {
+        throw new Error('fetch failed');
+      }
+    );
+    await assert.rejects(
+      () => unreachableRuntime.callTool('get_company_wallet', {}),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 502 &&
+        /Could not reach the AgentCard Organization MCP token endpoint/.test(error.message)
+    );
 
     process.stdout.write('AgentCard org runtime tests passed\n');
   } finally {

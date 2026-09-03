@@ -6,7 +6,9 @@ cited in approvals must outlive that stack:
 
   * FE  → ``https://www.roselabs.ai/?agent-id=…`` after the run
     bundle is on the always-on Benchmark Hub (dual-write or explicit upload)
-    (``/open-agent?agent-id=…`` is an alias that redirects to the same URL)
+    (``/open-agent?agent-id=…`` is an alias that redirects to the same URL).
+    Verification fails closed unless every browser agent on that FE link has
+    terminated (``task_complete``) with a correctly attached recording.
   * LLM dump → HTML under ``/opt/cursor/artifacts/rca_evidence/<agent_id>/``
     (Cursor uploads these for multi-day reachability in the agent UI)
 
@@ -31,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -92,8 +95,160 @@ def upload_run_json(run_json: Path) -> str:
     return str(bundle.get("run_id") or "")
 
 
+def dual_write_claude_code_sessions(run_json: Path, agent_id: str) -> None:
+    """Mirror Claude Code transcripts into prod so durable FE terminals render."""
+    script = REPO_ROOT / "scripts" / "dual_write_claude_code_sessions.py"
+    if not script.is_file():
+        print(f"⚠ skip session dual-write — missing {script}")
+        return
+    cmd = [
+        sys.executable,
+        str(script),
+        "--run-json",
+        str(run_json),
+        "--agent-id",
+        agent_id,
+    ]
+    print(f"Dual-writing Claude Code sessions for {agent_id}…")
+    subprocess.run(cmd, check=True, cwd=str(REPO_ROOT))
+
+def _message_metadata(message: dict) -> dict:
+    meta = message.get("metadata")
+    if isinstance(meta, dict):
+        return meta
+    if isinstance(meta, str) and meta.strip():
+        try:
+            parsed = json.loads(meta)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _probe_recording_view_url(url: str, *, timeout: float = 20.0) -> bool:
+    request = urllib.request.Request(url, method="GET")
+    try:
+        with _opener().open(request, timeout=timeout) as response:
+            return int(response.status) < 400
+    except Exception:
+        return False
+
+
+def _probe_recording_file_pointer(
+    agent_id: str, pointer: dict, *, timeout: float = 30.0
+) -> bool:
+    file_id = pointer.get("id")
+    storage_path = pointer.get("storage_path")
+    if not isinstance(file_id, str) or not file_id:
+        return False
+    if not isinstance(storage_path, str) or not storage_path:
+        return False
+    quoted = urllib.parse.quote(storage_path, safe="")
+    url = (
+        f"{DEFAULT_HUB}/api/agents/{agent_id}/attachments/{file_id}"
+        f"/url?storage_path={quoted}"
+    )
+    request = urllib.request.Request(url, headers=_auth_headers(), method="GET")
+    try:
+        with _opener().open(request, timeout=timeout) as response:
+            payload = json.loads(response.read() or b"{}")
+    except Exception:
+        return False
+    signed = payload.get("signed_url") or payload.get("signedUrl") or payload.get("url")
+    if not isinstance(signed, str) or not signed:
+        return False
+    return _probe_recording_view_url(signed, timeout=timeout)
+
+
+def validate_browser_agents_terminated_with_recording(
+    agent_id: str, messages: list
+) -> list[str]:
+    """Return failure reasons when any browser task is still live or missing recording.
+
+    A browser task is any ``task_id`` that emitted ``spawn_browser_agent`` progress
+    (``action_type`` in browser/session/recording). Each such task must have:
+      * ``action_type=task_complete`` (terminated for FE panels)
+      * a FINISHED recording message with a reachable ``recording_view_url`` or a
+        fetchable ``recording_file_pointer``
+    Agents with no browser tasks pass.
+    """
+    tasks: dict[str, dict[str, bool]] = {}
+    recording_candidates: dict[str, list[dict]] = {}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        meta = _message_metadata(message)
+        task_id = meta.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        action = str(meta.get("action_type") or "")
+        tool_name = str(meta.get("toolName") or "")
+        browser_related = tool_name == "spawn_browser_agent" or action in {
+            "browser",
+            "session_init",
+            "session_started",
+            "task_started",
+            "recording",
+            "network_recording",
+            "task_complete",
+        }
+        if not browser_related:
+            continue
+        state = tasks.setdefault(
+            task_id, {"seen": False, "complete": False, "recording_ok": False}
+        )
+        if action in {
+            "browser",
+            "session_init",
+            "session_started",
+            "task_started",
+            "recording",
+            "network_recording",
+        }:
+            state["seen"] = True
+        if action == "task_complete":
+            state["complete"] = True
+            state["seen"] = True
+        if action == "recording" and str(meta.get("toolStatus") or "") == "FINISHED":
+            recording_candidates.setdefault(task_id, []).append(meta)
+
+    failures: list[str] = []
+    for task_id, state in sorted(tasks.items()):
+        if not state["seen"]:
+            continue
+        if not state["complete"]:
+            failures.append(
+                f"browser task {task_id} has not terminated (missing action_type=task_complete)"
+            )
+        recording_ok = False
+        for meta in recording_candidates.get(task_id, []):
+            view_url = meta.get("recording_view_url")
+            if isinstance(view_url, str) and view_url.strip():
+                if _probe_recording_view_url(view_url.strip()):
+                    recording_ok = True
+                    break
+            pointer = meta.get("recording_file_pointer")
+            if isinstance(pointer, dict) and _probe_recording_file_pointer(
+                agent_id, pointer
+            ):
+                recording_ok = True
+                break
+        if not recording_ok:
+            failures.append(
+                f"browser task {task_id} has no correctly attached recording "
+                "(need reachable recording_view_url or fetchable recording_file_pointer)"
+            )
+        else:
+            state["recording_ok"] = True
+    return failures
+
+
 def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str, int]:
-    """Probe archive-backed agent detail; return (status_label, message_count)."""
+    """Probe archive-backed agent detail; return (status_label, message_count).
+
+    Fails closed when any browser agent on the FE link is still live or missing
+    a correctly attached recording.
+    """
     url = f"{DEFAULT_HUB}/api/agents/{agent_id}"
     request = urllib.request.Request(url, headers=_auth_headers(), method="GET")
     try:
@@ -109,6 +264,13 @@ def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str
     if count <= 0:
         raise SystemExit(
             f"agent {agent_id} returned no messages — Hub archive not readable yet"
+        )
+    browser_failures = validate_browser_agents_terminated_with_recording(
+        agent_id, messages
+    )
+    if browser_failures:
+        raise SystemExit(
+            "FE link browser validation failed:\n- " + "\n- ".join(browser_failures)
         )
     fe = durable_fe_url(agent_id)
     fe_req = urllib.request.Request(fe, method="GET")
@@ -190,7 +352,9 @@ def main() -> int:
     agent_id = _normalize_agent_id(args.agent_id)
     run_id = ""
     if args.run_json and not args.skip_hub_upload:
-        run_id = upload_run_json(args.run_json.resolve())
+        run_path = args.run_json.resolve()
+        run_id = upload_run_json(run_path)
+        dual_write_claude_code_sessions(run_path, agent_id)
     dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
     dump_html = publish_llm_dump(dump, agent_id)
     if args.skip_fe_verify:

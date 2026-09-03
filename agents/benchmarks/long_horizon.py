@@ -47,12 +47,18 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "completion_summary_file_outputs",
     "response_schema_has_file_pointer",
     "first_level_gp_count",
+    "first_level_gp_explore_research",
+    "first_level_gp_july_trajectories",
+    "zero_live_spend",
+    "no_nested_general_purpose",
+    "principal_user_andy",
     "root_deliverable_markers",
     "tree_agent_status",
     "expected_gate",
     "expected_payment_receipt",
     "no_browser_agent_failures",
     "no_tool_failures",
+    "claude_code_session_output",
     "explore_research_not_reject_loop",
     "explore_completion_summary",
     # runner="sms" — trajectory checks over the literal outbound text thread.
@@ -74,6 +80,7 @@ TASK_STATUSES = {"ready", "incomplete", "retired"}
 #            Local-only: outbound Surge is intercepted by the benchmark stack's
 #            capture harness, so a run never texts a human. See sms_runner.py.
 TASK_RUNNERS = {"agent", "sms"}
+TASK_HARNESSES = {"rose", "codex"}
 # pipeline-e2e = e2e test that a harness pipe/quirk works (write locks trigger,
 # cookies inject, tool plumbing). rose-bench = harness-INDEPENDENT capability
 # measurement: fixture + prompt + evaluators are portable to any harness
@@ -167,6 +174,20 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
                 f"{item_id}: required_injectable_cookie_domains must be a subset of "
                 f"live_cookie_domains; missing from sync scope: {missing}"
             )
+    # needs_auth marks benches that require a *live* signed-in session (valid auth
+    # token), not merely injectable CookieBundles. Cookie presence is necessary but
+    # not sufficient — stale bundles still inject and the agent then correctly
+    # escalates to auth_assistance, which must be reported as an INFRA/fixture
+    # gap rather than an agent capability miss.
+    needs_auth = env.get("needs_auth")
+    if needs_auth is not None and not isinstance(needs_auth, bool):
+        raise ValueError(f"{item_id}: environment.needs_auth must be a boolean")
+    if needs_auth is True:
+        if not (required_cookie_domains or []):
+            raise ValueError(
+                f"{item_id}: environment.needs_auth=true requires non-empty "
+                f"required_injectable_cookie_domains (live session domains)"
+            )
     return env
 
 
@@ -249,6 +270,9 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     runner = raw.get("runner", "agent")
     if runner not in TASK_RUNNERS:
         raise ValueError(f"{item_id}: runner must be one of {sorted(TASK_RUNNERS)}")
+    harness = raw.get("harness", "rose")
+    if harness not in TASK_HARNESSES:
+        raise ValueError(f"{item_id}: harness must be one of {sorted(TASK_HARNESSES)}")
     if raw.get("bench") not in TASK_BENCHES:
         raise ValueError(f"{item_id}: bench must be declared explicitly, one of {sorted(TASK_BENCHES)}")
     min_steps = raw.get("min_steps")

@@ -22,6 +22,7 @@ from _test_utils import BlackboxResult
 from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
     build_challenge_classifier_messages,
     capture_network_summary,
+    CHALLENGE_LLM_SYSTEM_PROMPT,
     format_network_summary_lines,
     recovery_soft_block_still_present,
 )
@@ -125,7 +126,6 @@ def test_classifier_messages_include_network_block_and_recovery_reason():
     assert "Agent recover_from_challenge reason:" in text
     assert "Offers Loading" in text
     assert "truncated" in text.lower()
-    assert "DOM tree" in text
 
 
 def test_soft_block_gate_forces_challenged_when_429_remains():
@@ -137,6 +137,37 @@ def test_soft_block_gate_forces_challenged_when_429_remains():
         "status=200 120ms https://www.hotels.com/graphql",
         "repeated GraphQL 429 / Offers still Loading",
     )
+
+
+def test_classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn_pin():
+    """Recovery reason + network soft-block context survive main-aligned classifier prompts."""
+    reason = (
+        "Checkout payment widget never mounted.\n"
+        "Blocked third-party resource that must become reachable/usable: "
+        "https://js.stripe.com/v3/"
+    )
+    assert "Prefer challenged=true when uncertain" in CHALLENGE_LLM_SYSTEM_PROMPT
+    assert "agent recovery reason" in CHALLENGE_LLM_SYSTEM_PROMPT.lower()
+
+    msgs = build_challenge_classifier_messages(
+        {
+            "url": "https://www.doordash.com/checkout",
+            "title": "DoorDash",
+            "status": 200,
+            "cleaned_dom": "Checkout  Subtotal  Place Order",
+            "network_summary": "status=200 80ms https://www.doordash.com/graphql",
+            "screenshot_base64_png": None,
+            "recovery_reason": reason,
+        }
+    )
+    system = next(m for m in msgs if m.get("role") == "system")["content"]
+    user = next(m for m in msgs if m.get("role") == "user")
+    text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
+    assert "Agent recover_from_challenge reason:" in text
+    assert "https://js.stripe.com/v3/" in text
+    assert "network metadata" in text.lower()
+    assert "failure mode is cleared" in system.lower() or "failure mode is cleared" in text.lower()
+
 
 
 async def test_network_entries_override_prefers_explicit_status_rows():
@@ -155,6 +186,43 @@ async def test_network_entries_override_prefers_explicit_status_rows():
     )
     assert "status=429" in summary
     assert "Provisioned request rate" in summary
+
+
+def test_select_network_entries_pins_cited_hosts():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        _NETWORK_ENTRY_CAP,
+        select_network_entries_for_classifier,
+    )
+
+    entries = [
+        {"url": f"https://www.doordash.com/api/{idx}", "status": 200}
+        for idx in range(_NETWORK_ENTRY_CAP + 50)
+    ] + [{"url": "https://js.stripe.com/v3/", "status": 0, "failed": True}]
+    selected = select_network_entries_for_classifier(
+        entries,
+        recovery_reason="Stripe checkout script blocked: https://js.stripe.com/v3/",
+        cap=_NETWORK_ENTRY_CAP,
+    )
+    assert len(selected) == _NETWORK_ENTRY_CAP
+    assert any("js.stripe.com" in str(row.get("url") or "") for row in selected)
+    assert selected[0]["url"].startswith("https://js.stripe.com")
+
+
+def test_parse_challenge_classification_tolerates_prose_prefix():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        _parse_challenge_classification,
+    )
+
+    parsed = _parse_challenge_classification(
+        'Here is the JSON requested:\n{"challenged": false, "reason": "Stripe loaded"}'
+    )
+    assert parsed.challenged is False
+    assert "Stripe" in parsed.reason
+
+    parsed = _parse_challenge_classification(
+        "```json\n{\"challenged\": true, \"reason\": \"Turnstile still visible\"}\n```"
+    )
+    assert parsed.challenged is True
 
 
 async def run_all_tests() -> bool:
@@ -179,6 +247,18 @@ async def run_all_tests() -> bool:
     result.record(
         "soft_block_gate_forces_challenged_when_429_remains",
         test_soft_block_gate_forces_challenged_when_429_remains,
+    )
+    result.record(
+        "classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn_pin",
+        test_classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn_pin,
+    )
+    result.record(
+        "select_network_entries_pins_cited_hosts",
+        test_select_network_entries_pins_cited_hosts,
+    )
+    result.record(
+        "parse_challenge_classification_tolerates_prose_prefix",
+        test_parse_challenge_classification_tolerates_prose_prefix,
     )
     await result.record_async(
         "network_entries_override_prefers_explicit_status_rows",

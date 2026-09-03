@@ -430,6 +430,72 @@ describe('BrowserAgentChip recording', () => {
     expect(screen.getByTestId('recording-playhead')).toHaveTextContent('t=45.0s');
   });
 
+  it('clicking a trajectory step seeks the video to that step offset and shows the full title', async () => {
+    const longTitle =
+      'Browser challenge recovery failed: No stable browser configuration cleared the challenge (Steel fixed-IP proxies unavailable)';
+    const t0 = '2026-07-16T00:00:00.000Z';
+    const messages = [
+      { ...recordingMsg({ recording_view_url: KERNEL_VIEW_URL }), timestamp: t0 },
+      {
+        message_id: 'step-wait',
+        timestamp: '2026-07-16T00:00:10.000Z',
+        role: 'TOOL' as const,
+        text: '',
+        metadata: {
+          task_id: TASK,
+          toolName: 'spawn_browser_agent',
+          action_type: 'browser_challenge_recovery',
+          toolStatus: 'IN_PROGRESS',
+          title: 'Waiting for the browser provider automatic CAPTCHA solver',
+        },
+      },
+      {
+        message_id: 'step-fail',
+        timestamp: '2026-07-16T00:00:40.000Z',
+        role: 'TOOL' as const,
+        text: '',
+        metadata: {
+          task_id: TASK,
+          toolName: 'spawn_browser_agent',
+          action_type: 'browser_challenge_recovery',
+          toolStatus: 'ERROR',
+          title: longTitle,
+        },
+      },
+      anchorMsg,
+    ];
+    renderChip(messages, anchorMsg);
+    await openRecordingTab();
+
+    const video = (await screen.findByTitle('Browser recording')) as HTMLVideoElement;
+    Object.defineProperty(video, 'duration', { configurable: true, value: 120 });
+    let currentTime = 0;
+    Object.defineProperty(video, 'currentTime', {
+      configurable: true,
+      get: () => currentTime,
+      set: (v: number) => {
+        currentTime = v;
+      },
+    });
+    video.play = vi.fn(async () => {}) as unknown as typeof video.play;
+
+    // Full title is visible (not Cap…/Bro… truncated).
+    expect(screen.getByText(longTitle)).toBeInTheDocument();
+
+    // Click the failed recovery step → seek to its offset (40s).
+    fireEvent.click(screen.getByText(longTitle));
+    await waitFor(() => {
+      expect(currentTime).toBe(40);
+    });
+    fireEvent.seeked(video);
+    await waitFor(() => {
+      const active = screen.getByTestId('recording-active-step');
+      expect(active).toHaveAttribute('data-step-offset', '40');
+      expect(active).toHaveTextContent(longTitle);
+    });
+    expect(screen.getByTestId('recording-playhead')).toHaveTextContent('t=40.0s');
+  });
+
   it('exposes only Result and Recording tabs (trajectory lives inside Recording)', async () => {
     const messages = [anchorMsg, recordingMsg({ recording_view_url: KERNEL_VIEW_URL })];
     renderChip(messages, anchorMsg);

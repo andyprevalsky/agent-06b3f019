@@ -1,7 +1,3 @@
-import { Sandbox } from 'e2b';
-import { createHash } from 'crypto';
-import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import {
@@ -23,11 +19,22 @@ import {
 } from './gptCredentials';
 import {
   buildCodeAgentSystemPrompt,
+  buildCodexHarnessSystemPrompt,
   CODE_AGENT_ATTACHMENTS_DIR,
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
+import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import {
+  fileHash,
+  findLocalClaudeCodeWsServer,
+  findLocalCodexCodeWsServer,
+  overlayClaudeCodeWsServer,
+  overlayCodexCodeWsServer,
+} from './e2bWsServerOverlay';
+import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
+import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
@@ -80,7 +87,7 @@ if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
 }
 
 const WS_PORT = 3000;
-const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes
+const SANDBOX_TIMEOUT_MS = 1800000; // 30 minutes (matches agents MAX_RUNTIME_S)
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
@@ -89,65 +96,6 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 // Directories for file transfer
 const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
-const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
-
-function findLocalClaudeCodeWsServer(): string | null {
-  const candidates = [
-    join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs'),
-    join(process.cwd(), 'e2b-templates', 'claude-code', 'ws-server.mjs'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-function findLocalCodexCodeWsServer(): string | null {
-  const candidates = [
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-    join(process.cwd(), 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-function fileHash(path: string | null): string {
-  if (path === null || !existsSync(path)) return 'bundled';
-  return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
-}
-
-async function overlayClaudeCodeWsServer(
-  sandbox: Awaited<ReturnType<typeof Sandbox.create>>
-): Promise<void> {
-  const serverPath = findLocalClaudeCodeWsServer();
-  if (serverPath === null) {
-    log.warn('Claude Code ws-server overlay not found; using server bundled in E2B template');
-    return;
-  }
-
-  const content = readFileSync(serverPath);
-  await sandbox.files.write(CLAUDE_CODE_WS_SERVER_PATH, new Blob([content]));
-  await sandbox.commands.run(
-    `chmod +x ${CLAUDE_CODE_WS_SERVER_PATH} && chown 1000:1000 ${CLAUDE_CODE_WS_SERVER_PATH}`,
-    { timeoutMs: 10000 }
-  );
-  log.info(`Overlayed Claude Code ws-server from ${serverPath}`);
-}
-
-async function overlayCodexCodeWsServer(
-  sandbox: Awaited<ReturnType<typeof Sandbox.create>>
-): Promise<void> {
-  const serverPath = findLocalCodexCodeWsServer();
-  if (serverPath === null) {
-    log.warn('Codex Code ws-server overlay not found; using server bundled in E2B template');
-    return;
-  }
-
-  const content = readFileSync(serverPath);
-  await sandbox.files.write(CLAUDE_CODE_WS_SERVER_PATH, new Blob([content]));
-  await sandbox.commands.run(
-    `chmod +x ${CLAUDE_CODE_WS_SERVER_PATH} && chown 1000:1000 ${CLAUDE_CODE_WS_SERVER_PATH}`,
-    { timeoutMs: 10000 }
-  );
-  log.info(`Overlayed Codex Code ws-server from ${serverPath}`);
-}
-
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
  *
@@ -164,7 +112,38 @@ export async function createClaudeCodeSession(
   githubRepoUrl?: string,
   userId?: string,
   fastModeCacheEnabled?: boolean
-): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
+): Promise<{
+  wsUrl: string;
+  taskId: string;
+  sandboxId: string;
+  uploadedFiles: string[];
+}> {
+  // Serialize creates — concurrent reserve-script calls stampede E2B redis.
+  return withClaudeCodeCreateSlot(() =>
+    createClaudeCodeSessionUnlocked(
+      agentId,
+      goal,
+      attachments,
+      githubRepoUrl,
+      userId,
+      fastModeCacheEnabled
+    )
+  );
+}
+
+async function createClaudeCodeSessionUnlocked(
+  agentId: string,
+  goal: string,
+  attachments?: FilePointer[],
+  githubRepoUrl?: string,
+  userId?: string,
+  fastModeCacheEnabled?: boolean
+): Promise<{
+  wsUrl: string;
+  taskId: string;
+  sandboxId: string;
+  uploadedFiles: string[];
+}> {
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -357,16 +336,34 @@ export async function createClaudeCodeSession(
     log.info(`GitHub repo configured: ${githubRepoUrl}`);
   }
 
-  // Create sandbox first (before DB record) to avoid placeholder conflicts
-  const sandbox = await createSandboxWithRetry(
-    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
-    {
-      apiKey: process.env.E2B_API_KEY,
-      timeoutMs: SANDBOX_TIMEOUT_MS,
+  // Create sandbox first (before DB record) to avoid placeholder conflicts.
+  // When E2B team billing blocks creates, fall back to a same-host local
+  // Claude Code ws-server so code-agent benches can still make progress.
+  let sandbox;
+  try {
+    sandbox = await createSandboxWithRetry(
+      process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
+      {
+        apiKey: process.env.E2B_API_KEY,
+        timeoutMs: SANDBOX_TIMEOUT_MS,
+        envs,
+      },
+      'Claude Code'
+    );
+  } catch (err) {
+    const local = await createLocalClaudeCodeSessionIfBillingBlocked(err, {
+      taskId,
+      agentId,
+      goal,
       envs,
-    },
-    'Claude Code'
-  );
+      attachments,
+      claudeTokenSource,
+      claudeTokenIntegrationId:
+        credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+    });
+    if (local) return local;
+    throw err;
+  }
 
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);
@@ -479,7 +476,11 @@ export async function createCodexCodeSession(
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean
+  fastModeCacheEnabled?: boolean,
+  harnessOptions?: {
+    harnessMode?: 'code' | 'rose';
+    roseApiBaseUrl?: string;
+  }
 ): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
@@ -493,16 +494,25 @@ export async function createCodexCodeSession(
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
   const model = process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
+  const harnessMode = harnessOptions?.harnessMode ?? 'code';
+  const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const runtimeFingerprint = [
     `template:${templateId}`,
     `wrapper:${fileHash(findLocalCodexCodeWsServer())}`,
     `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
   ].join('|');
-  const systemPrompt = buildCodeAgentSystemPrompt({
-    githubRepoUrl,
-    workDir,
-  });
+  const systemPrompt =
+    harnessMode === 'rose' && roseApiBaseUrl
+      ? buildCodexHarnessSystemPrompt({
+          roseApiBaseUrl,
+          roseUserId: userId,
+          anchorAgentId: agentId,
+        })
+      : buildCodeAgentSystemPrompt({
+          githubRepoUrl,
+          workDir,
+        });
 
   const credentialMeta: GptCodeCredentialEnvelopeResult | null =
     await fetchGptCodeCredentialsWithMeta(userId);
@@ -524,7 +534,18 @@ export async function createCodexCodeSession(
     ...authEnvs,
     CODEX_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
+    CODE_AGENT_HARNESS_MODE: harnessMode,
   };
+  if (harnessMode === 'rose' && roseApiBaseUrl) {
+    const apiKey = process.env.BACKEND_API_KEY ?? '';
+    if (!apiKey) {
+      throw new Error('BACKEND_API_KEY is required for Codex rose harness sessions');
+    }
+    envs.ROSE_API_BASE_URL = roseApiBaseUrl;
+    envs.ROSE_API_KEY = apiKey;
+    envs.ROSE_USER_ID = userId!;
+    envs.ROSE_ANCHOR_AGENT_ID = agentId;
+  }
   if (credentialMeta) {
     log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);
   } else {
@@ -595,6 +616,9 @@ export async function createCodexCodeSession(
 
   log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
   await overlayCodexCodeWsServer(sandbox);
+  if (harnessMode === 'rose') {
+    await overlayCodexRoseBridge(sandbox);
+  }
 
   const uploadedFiles: string[] = [];
   if (attachments && attachments.length > 0) {

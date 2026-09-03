@@ -117,6 +117,7 @@ require_absent "$WORKFLOW" 'mandatory-human-approval-retrieved=true' "Auto RCA m
 require_text "$APPROVED_DEPLOY_WORKFLOW" 'ref: ${{ env.PR_HEAD_SHA }}' "approval guards must inspect the exact reviewed HEAD"
 require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-prompt-approval-guard' "formal review must satisfy the trusted prompt guard"
 require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-agent-behavior-approval-guard' "formal review must satisfy the trusted behavior guard"
+require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-llm-trajectory-injection-approval-guard' "formal review must satisfy the trusted trajectory-injection guard"
 require_text "$APPROVED_DEPLOY_WORKFLOW" 'mandatory-human-approval-retrieved=true --base-ref=origin/main' "formal review must apply only to the exact main-relative snapshot"
 require_text "$APPROVED_DEPLOY_WORKFLOW" 'name: Refuse approval while reviewer feedback is queued' "approval must not race queued reviewer feedback"
 [ "$(grep -Fc '/usr/local/bin/rose-auto-rca-tool feedback-batch' "$APPROVED_DEPLOY_WORKFLOW")" -eq 2 ] || fail "pending feedback must be checked before gates and immediately before merge"
