@@ -312,7 +312,6 @@ describe('BrowserAgentChip recording', () => {
     expect(screen.queryByTitle('Browser recording')).not.toBeInTheDocument();
   });
 
-
   it('shows a live trajectory side panel beside the recording', async () => {
     const t0 = '2026-07-16T00:00:00.000Z';
     const messages = [
@@ -432,7 +431,6 @@ describe('BrowserAgentChip recording', () => {
     expect(screen.getByTestId('recording-playhead')).toHaveTextContent('t=45.0s');
   });
 
-
   it('exposes only Result and Recording tabs (trajectory lives inside Recording)', async () => {
     const messages = [anchorMsg, recordingMsg({ recording_view_url: KERNEL_VIEW_URL })];
     renderChip(messages, anchorMsg);
@@ -442,5 +440,4 @@ describe('BrowserAgentChip recording', () => {
     expect(screen.getByText('Result')).toBeInTheDocument();
     expect(screen.queryByText(/^Trajectory/)).not.toBeInTheDocument();
   });
-
 });

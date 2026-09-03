@@ -35,7 +35,15 @@
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type SyntheticEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
@@ -261,10 +269,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     setPlayheadSec(playheadFromSegments(segmentDurationsRef.current, segIdx, video.currentTime));
   }
 
-  function handleVideoTimeSync(
-    event: SyntheticEvent<HTMLVideoElement>,
-    segIdx: number = 0,
-  ) {
+  function handleVideoTimeSync(event: SyntheticEvent<HTMLVideoElement>, segIdx: number = 0) {
     syncPlayheadFromVideo(event.currentTarget, segIdx);
   }
 
@@ -469,9 +474,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                         onSeeked={(e) => handleVideoTimeSync(e, segmentIndex)}
                         onLoadedMetadata={(e) => handleVideoTimeSync(e, segmentIndex)}
                         onEnded={() => {
-                          setSegmentIndex((i) =>
-                            i + 1 < recordingSource.urls.length ? i + 1 : i,
-                          );
+                          setSegmentIndex((i) => (i + 1 < recordingSource.urls.length ? i + 1 : i));
                         }}
                         className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
                       />
@@ -549,11 +552,7 @@ function RecordingWithLiveTrajectory({
   }, []);
 
   return (
-    <div
-      ref={anchorRef}
-      data-testid="recording-with-live-trajectory"
-      className="relative w-full"
-    >
+    <div ref={anchorRef} data-testid="recording-with-live-trajectory" className="relative w-full">
       {children}
       {panelStyle &&
         createPortal(
