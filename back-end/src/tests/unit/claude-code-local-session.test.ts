@@ -8,14 +8,10 @@ import {
 describe('claudeCodeLocalSession billing helpers', () => {
   it('detects E2B team payment-method blocks', () => {
     expect(
-      isE2bTeamBillingBlockError(
-        new Error('403: team is blocked: missing payment method')
-      )
+      isE2bTeamBillingBlockError(new Error('403: team is blocked: missing payment method'))
     ).toBe(true);
     expect(
-      isE2bTeamBillingBlockError(
-        new Error('{"message":"team is blocked: missing payment method"}')
-      )
+      isE2bTeamBillingBlockError(new Error('{"message":"team is blocked: missing payment method"}'))
     ).toBe(true);
     expect(isE2bTeamBillingBlockError(new Error('redis pool timeout'))).toBe(false);
   });

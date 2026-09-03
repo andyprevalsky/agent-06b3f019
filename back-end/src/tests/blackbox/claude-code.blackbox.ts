@@ -396,14 +396,6 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
   return typeof body.accessToken === 'string' && body.accessToken.startsWith('sk-ant-');
 }
 
-function isClaudeOAuthAuthFailure(text: string): boolean {
-  return (
-    /Invalid authentication credentials/i.test(text) ||
-    /Failed to authenticate/i.test(text) ||
-    /OAuth access token has been (?:expired|revoked)/i.test(text)
-  );
-}
-
 async function syncAndyProdClaudeTokensForSmoke(reason: string): Promise<void> {
   console.log(`    [info] ${reason} — syncing Andy (+19729777432) claude_code keys from prod…`);
   await syncAndyClaudeTokensFromProd({

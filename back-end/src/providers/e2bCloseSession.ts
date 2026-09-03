@@ -5,10 +5,7 @@ import { randomUUID } from './crypto';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { type FilePointer, uploadToStorage } from './storage';
-import {
-  closeLocalClaudeCodeSession,
-  isLocalClaudeCodeSandboxId,
-} from './claudeCodeLocalSession';
+import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 
 const log = createLogger('E2B');
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;

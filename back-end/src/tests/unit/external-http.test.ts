@@ -28,10 +28,7 @@ function jsonResponse(
 
 async function testValidation(): Promise<void> {
   assert.equal(assertExternalHttpMethod('get'), 'GET');
-  assert.throws(
-    () => assertExternalHttpMethod('TRACE'),
-    InvalidExternalHttpRequestError
-  );
+  assert.throws(() => assertExternalHttpMethod('TRACE'), InvalidExternalHttpRequestError);
   assert.equal(
     assertFetchableExternalUrl('https://api.github.com/search/repositories'),
     'https://api.github.com/search/repositories'
@@ -56,10 +53,14 @@ async function testSuccessfulJsonResponse(): Promise<void> {
   let callCount = 0;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     callCount += 1;
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const url =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     assert.match(url, /example\.com\/repos\?page=2&sort=stars/);
     assert.equal(init?.method, 'GET');
-    assert.equal(init?.headers instanceof Headers ? init.headers.get('authorization') : null, 'Bearer abc');
+    assert.equal(
+      init?.headers instanceof Headers ? init.headers.get('authorization') : null,
+      'Bearer abc'
+    );
     return jsonResponse({ items: [{ full_name: 'org/repo', stargazers_count: 10 }] });
   }) as typeof fetch;
 
@@ -82,7 +83,10 @@ async function testRetryOn429(): Promise<void> {
   globalThis.fetch = (async () => {
     callCount += 1;
     if (callCount === 1) {
-      return jsonResponse({ message: 'rate limited' }, { status: 429, headers: { 'retry-after': '0' } });
+      return jsonResponse(
+        { message: 'rate limited' },
+        { status: 429, headers: { 'retry-after': '0' } }
+      );
     }
     return jsonResponse({ ok: true });
   }) as typeof fetch;
@@ -144,7 +148,8 @@ async function testLargeJsonBodyNotTruncated(): Promise<void> {
     stargazers_count: 10_000 - index,
   }));
 
-  globalThis.fetch = (async () => jsonResponse({ total_count: items.length, items })) as typeof fetch;
+  globalThis.fetch = (async () =>
+    jsonResponse({ total_count: items.length, items })) as typeof fetch;
 
   const result = await executeExternalHttpRequest({
     method: 'GET',
@@ -160,7 +165,8 @@ async function testLargeJsonBodyNotTruncated(): Promise<void> {
 
 async function testTextXmlAndBinaryResponses(): Promise<void> {
   globalThis.fetch = (async (input: string | URL | Request) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const url =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     if (url.includes('/text')) {
       return new Response('plain text body', {
         status: 200,
@@ -204,7 +210,10 @@ async function testTextXmlAndBinaryResponses(): Promise<void> {
 async function testPostJsonBody(): Promise<void> {
   globalThis.fetch = (async (_input, init) => {
     assert.equal(init?.method, 'POST');
-    assert.equal(init?.headers instanceof Headers ? init.headers.get('content-type') : null, 'application/json; charset=utf-8');
+    assert.equal(
+      init?.headers instanceof Headers ? init.headers.get('content-type') : null,
+      'application/json; charset=utf-8'
+    );
     assert.equal(init?.body, JSON.stringify({ q: 'cuda' }));
     return jsonResponse({ total_count: 1 });
   }) as typeof fetch;

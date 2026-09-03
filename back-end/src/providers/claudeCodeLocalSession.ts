@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { retryWithBackoff } from './retry';
 import { type FilePointer, downloadFromStorage, uploadToStorage } from './storage';
 import { randomUUID } from './crypto';
 
@@ -55,6 +56,20 @@ export function shouldAllowLocalClaudeCodeFallback(): boolean {
   return !process.env.FLY_APP_NAME;
 }
 
+export async function createLocalClaudeCodeSessionIfBillingBlocked(
+  err: unknown,
+  params: Parameters<typeof createLocalClaudeCodeSession>[0]
+): Promise<Awaited<ReturnType<typeof createLocalClaudeCodeSession>> | null> {
+  if (!isE2bTeamBillingBlockError(err) || !shouldAllowLocalClaudeCodeFallback()) {
+    return null;
+  }
+  log.warn(
+    `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${params.agentId}`,
+    { error: err instanceof Error ? err.message : String(err) }
+  );
+  return createLocalClaudeCodeSession(params);
+}
+
 function findWsServerPath(): string {
   const candidates = [
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs'),
@@ -88,25 +103,31 @@ async function allocatePort(): Promise<number> {
 }
 
 async function waitForLocalPort(port: number, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const connected = await new Promise<boolean>((resolve) => {
-      const sock = new Socket();
-      const onDone = (ok: boolean) => {
-        sock.removeAllListeners();
-        sock.destroy();
-        resolve(ok);
-      };
-      sock.setTimeout(500);
-      sock.once('connect', () => onDone(true));
-      sock.once('timeout', () => onDone(false));
-      sock.once('error', () => onDone(false));
-      sock.connect(port, '127.0.0.1');
-    });
-    if (connected) return true;
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  return false;
+  const pollMs = 200;
+  const maxRetries = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  const connected = await retryWithBackoff(
+    () =>
+      new Promise<boolean>((resolve) => {
+        const sock = new Socket();
+        const onDone = (ok: boolean) => {
+          sock.removeAllListeners();
+          sock.destroy();
+          resolve(ok);
+        };
+        sock.setTimeout(500);
+        sock.once('connect', () => onDone(true));
+        sock.once('timeout', () => onDone(false));
+        sock.once('error', () => onDone(false));
+        sock.connect(port, '127.0.0.1');
+      }),
+    {
+      maxRetries,
+      fixedDelays: Array.from({ length: maxRetries }, () => pollMs),
+      shouldRetryResult: (ready) => !ready,
+      component: 'ClaudeCodeLocalPort',
+    }
+  );
+  return connected;
 }
 
 export async function createLocalClaudeCodeSession(params: {

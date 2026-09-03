@@ -9,15 +9,9 @@
 import { randomUUID } from 'node:crypto';
 
 import { prisma } from '../../providers/database';
-import {
-  markGptUserTokenRateLimited,
-} from '../../providers/gptCredentials';
-import {
-  markUserTokenRateLimited,
-} from '../../providers/claudeCredentials';
-import {
-  reconcileConnectionStatesFromIntegrations,
-} from '../../domains/compute-grants/integrationConnectionSync';
+import { markGptUserTokenRateLimited } from '../../providers/gptCredentials';
+import { markUserTokenRateLimited } from '../../providers/claudeCredentials';
+import { reconcileConnectionStatesFromIntegrations } from '../../domains/compute-grants/integrationConnectionSync';
 import { upsertAccountConnection } from '../../domains/compute-grants/repo';
 
 type TestFn = () => Promise<void>;

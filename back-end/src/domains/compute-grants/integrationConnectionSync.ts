@@ -15,10 +15,7 @@ import { createLogger } from '../../providers/logger';
 const log = createLogger('IntegrationConnectionSync');
 
 /** Observed in prod/local DB + markComputeTokenUnavailable / Claude Code paths. */
-export const INTEGRATION_AUTH_FAILURE_REASONS = [
-  'auth_error',
-  'claude_code_auth_error',
-] as const;
+export const INTEGRATION_AUTH_FAILURE_REASONS = ['auth_error', 'claude_code_auth_error'] as const;
 
 export type IntegrationAuthFailureReason = (typeof INTEGRATION_AUTH_FAILURE_REASONS)[number];
 
@@ -27,7 +24,9 @@ const AUTH_FAILURE_REASON_SET = new Set<string>(INTEGRATION_AUTH_FAILURE_REASONS
 export function isIntegrationAuthFailureReason(
   reason: string | null | undefined
 ): reason is IntegrationAuthFailureReason {
-  return reason !== null && reason !== undefined && reason !== '' && AUTH_FAILURE_REASON_SET.has(reason);
+  return (
+    reason !== null && reason !== undefined && reason !== '' && AUTH_FAILURE_REASON_SET.has(reason)
+  );
 }
 
 export function integrationNameToProvider(name: string): 'claude' | 'codex' | null {

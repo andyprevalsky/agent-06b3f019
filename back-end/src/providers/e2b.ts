@@ -1,7 +1,3 @@
-import { Sandbox } from 'e2b';
-import { createHash } from 'crypto';
-import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import {
@@ -29,10 +25,13 @@ import {
 import { workDirForGithubRepo } from './e2bWorkDir';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
-  createLocalClaudeCodeSession,
-  isE2bTeamBillingBlockError,
-  shouldAllowLocalClaudeCodeFallback,
-} from './claudeCodeLocalSession';
+  fileHash,
+  findLocalClaudeCodeWsServer,
+  findLocalCodexCodeWsServer,
+  overlayClaudeCodeWsServer,
+  overlayCodexCodeWsServer,
+} from './e2bWsServerOverlay';
+import { createLocalClaudeCodeSessionIfBillingBlocked } from './claudeCodeLocalSession';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   isRefreshOnlyOauthEnvelope,
@@ -95,65 +94,6 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 // Directories for file transfer
 const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
-const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
-
-function findLocalClaudeCodeWsServer(): string | null {
-  const candidates = [
-    join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs'),
-    join(process.cwd(), 'e2b-templates', 'claude-code', 'ws-server.mjs'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-function findLocalCodexCodeWsServer(): string | null {
-  const candidates = [
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-    join(process.cwd(), 'e2b-templates', 'codex-code', 'ws-server.mjs'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-function fileHash(path: string | null): string {
-  if (path === null || !existsSync(path)) return 'bundled';
-  return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
-}
-
-async function overlayClaudeCodeWsServer(
-  sandbox: Awaited<ReturnType<typeof Sandbox.create>>
-): Promise<void> {
-  const serverPath = findLocalClaudeCodeWsServer();
-  if (serverPath === null) {
-    log.warn('Claude Code ws-server overlay not found; using server bundled in E2B template');
-    return;
-  }
-
-  const content = readFileSync(serverPath);
-  await sandbox.files.write(CLAUDE_CODE_WS_SERVER_PATH, new Blob([content]));
-  await sandbox.commands.run(
-    `chmod +x ${CLAUDE_CODE_WS_SERVER_PATH} && chown 1000:1000 ${CLAUDE_CODE_WS_SERVER_PATH}`,
-    { timeoutMs: 10000 }
-  );
-  log.info(`Overlayed Claude Code ws-server from ${serverPath}`);
-}
-
-async function overlayCodexCodeWsServer(
-  sandbox: Awaited<ReturnType<typeof Sandbox.create>>
-): Promise<void> {
-  const serverPath = findLocalCodexCodeWsServer();
-  if (serverPath === null) {
-    log.warn('Codex Code ws-server overlay not found; using server bundled in E2B template');
-    return;
-  }
-
-  const content = readFileSync(serverPath);
-  await sandbox.files.write(CLAUDE_CODE_WS_SERVER_PATH, new Blob([content]));
-  await sandbox.commands.run(
-    `chmod +x ${CLAUDE_CODE_WS_SERVER_PATH} && chown 1000:1000 ${CLAUDE_CODE_WS_SERVER_PATH}`,
-    { timeoutMs: 10000 }
-  );
-  log.info(`Overlayed Codex Code ws-server from ${serverPath}`);
-}
-
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
  *
@@ -170,8 +110,13 @@ export async function createClaudeCodeSession(
   githubRepoUrl?: string,
   userId?: string,
   fastModeCacheEnabled?: boolean
-): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
-  // Concurrent creates stampede E2B reserve-script redis (see e2bCreateSlot.ts).
+): Promise<{
+  wsUrl: string;
+  taskId: string;
+  sandboxId: string;
+  uploadedFiles: string[];
+}> {
+  // Serialize creates — concurrent reserve-script calls stampede E2B redis.
   return withClaudeCodeCreateSlot(() =>
     createClaudeCodeSessionUnlocked(
       agentId,
@@ -191,7 +136,12 @@ async function createClaudeCodeSessionUnlocked(
   githubRepoUrl?: string,
   userId?: string,
   fastModeCacheEnabled?: boolean
-): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
+): Promise<{
+  wsUrl: string;
+  taskId: string;
+  sandboxId: string;
+  uploadedFiles: string[];
+}> {
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
@@ -399,22 +349,17 @@ async function createClaudeCodeSessionUnlocked(
       'Claude Code'
     );
   } catch (err) {
-    if (isE2bTeamBillingBlockError(err) && shouldAllowLocalClaudeCodeFallback()) {
-      log.warn(
-        `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${agentId}`,
-        { error: err instanceof Error ? err.message : String(err) }
-      );
-      return createLocalClaudeCodeSession({
-        taskId,
-        agentId,
-        goal,
-        envs,
-        attachments,
-        claudeTokenSource,
-        claudeTokenIntegrationId:
-          credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
-      });
-    }
+    const local = await createLocalClaudeCodeSessionIfBillingBlocked(err, {
+      taskId,
+      agentId,
+      goal,
+      envs,
+      attachments,
+      claudeTokenSource,
+      claudeTokenIntegrationId:
+        credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+    });
+    if (local) return local;
     throw err;
   }
 

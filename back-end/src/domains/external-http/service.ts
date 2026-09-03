@@ -89,7 +89,8 @@ async function readResponseBody(response: Response): Promise<{
   if (
     normalizedType.includes('application/json') ||
     normalizedType.includes('+json') ||
-    (text.trimStart().startsWith('{') || text.trimStart().startsWith('['))
+    text.trimStart().startsWith('{') ||
+    text.trimStart().startsWith('[')
   ) {
     try {
       return { body: JSON.parse(text), body_encoding: 'json', content_type: contentType };
@@ -98,7 +99,11 @@ async function readResponseBody(response: Response): Promise<{
     }
   }
 
-  if (normalizedType.startsWith('text/') || normalizedType.includes('xml') || normalizedType.includes('javascript')) {
+  if (
+    normalizedType.startsWith('text/') ||
+    normalizedType.includes('xml') ||
+    normalizedType.includes('javascript')
+  ) {
     return { body: text, body_encoding: 'text', content_type: contentType };
   }
 

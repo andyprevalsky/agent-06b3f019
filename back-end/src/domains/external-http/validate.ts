@@ -53,7 +53,9 @@ export function assertFetchableExternalUrl(url: string): string {
   return url.trim();
 }
 
-export function normalizeExternalHttpRequest(raw: ExternalHttpRequestBody): ExternalHttpRequestBody {
+export function normalizeExternalHttpRequest(
+  raw: ExternalHttpRequestBody
+): ExternalHttpRequestBody {
   if (raw === null || typeof raw !== 'object') {
     throw new InvalidExternalHttpRequestError('Request body must be an object');
   }
