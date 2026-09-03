@@ -4,6 +4,9 @@ import { mcpCallTool } from './runtime';
 const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token';
 const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
 const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
+/** AgentCard's client-credentials grant intermittently returns 5xx ("Token grant failed"). */
+const TOKEN_GRANT_MAX_ATTEMPTS = 6;
+const TOKEN_GRANT_BASE_DELAY_MS = 150;
 /**
  * AgentCard throttles the organization MCP per fixed window (observed: 120 requests/minute, shared
  * by EVERY org caller — card issuance, wallet reclaim polling, the minute cron reconciler and the
@@ -352,6 +355,30 @@ export class AgentCardOrgRuntime {
   }
 
   private async fetchAccessToken(): Promise<string> {
+    let lastError: AgentCardOrgRuntimeError | undefined;
+    for (let attempt = 1; attempt <= TOKEN_GRANT_MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.fetchAccessTokenOnce();
+      } catch (error) {
+        if (!(error instanceof AgentCardOrgRuntimeError)) throw error;
+        lastError = error;
+        if (!isRetryableOrgTokenError(error) || attempt === TOKEN_GRANT_MAX_ATTEMPTS) {
+          throw error;
+        }
+        await delay(TOKEN_GRANT_BASE_DELAY_MS * 2 ** (attempt - 1));
+      }
+    }
+    throw (
+      lastError ??
+      new AgentCardOrgRuntimeError(
+        'Could not obtain an AgentCard Organization MCP access token',
+        502,
+        'agentcard_org_token_unavailable'
+      )
+    );
+  }
+
+  private async fetchAccessTokenOnce(): Promise<string> {
     let response: Awaited<ReturnType<FetchLike>>;
     try {
       response = await this.fetchImpl(
@@ -367,7 +394,11 @@ export class AgentCardOrgRuntime {
             client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID'),
             client_secret: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_SECRET'),
             // Bind the token to the MCP audience (RFC 8707), matching the per-user OAuth flow.
-            resource: AGENTCARD_MCP_RESOURCE,
+            // Prefer live env so a late dotenv load cannot freeze a wrong module-init default.
+            resource: (process.env.AGENTCARD_MCP_URL?.trim() || AGENTCARD_MCP_RESOURCE).replace(
+              /\/+$/,
+              ''
+            ),
           }),
           // Fail fast instead of hanging wallet funding/monitoring/reconciliation if the token
           // endpoint stalls.
@@ -416,6 +447,12 @@ export class AgentCardOrgRuntime {
     };
     return this.cachedToken.accessToken;
   }
+}
+
+function isRetryableOrgTokenError(error: AgentCardOrgRuntimeError): boolean {
+  if (error.code !== 'agentcard_org_token_unavailable') return false;
+  // Provider 5xx is remapped to 502; timeouts are 504. Do not retry auth/config 4xx.
+  return error.status === 502 || error.status === 503 || error.status === 504;
 }
 
 const runtime = new AgentCardOrgRuntime();

@@ -183,7 +183,7 @@ async function testProbeRetriesAfterFirstCfChallenge(): Promise<void> {
 }
 
 async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
-  let evaluateCalls = 0;
+  let cdnEvaluateCalls = 0;
   let gotoCount = 0;
   const fakePage = {
     goto: async () => {
@@ -192,8 +192,9 @@ async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
     },
     url: () => 'https://shop.example.com/item/1',
     waitForTimeout: async () => undefined,
-    evaluate: async () => {
-      evaluateCalls += 1;
+    // DOM-clean evaluate (string / no CDN ProbeArg) is expected; CDN probe args are not.
+    evaluate: async (_fn: unknown, arg?: ProbeArg) => {
+      if (arg?.url) cdnEvaluateCalls += 1;
       return {};
     },
     title: async () => 'Product page',
