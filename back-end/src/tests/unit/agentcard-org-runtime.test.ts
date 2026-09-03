@@ -537,7 +537,7 @@ async function main(): Promise<void> {
         error.status === 502 &&
         error.code === 'agentcard_org_token_unavailable'
     );
-    assert.equal(exhaustedGrantRequests, 6, 'cold-start grant retries stay bounded at 6');
+    assert.equal(exhaustedGrantRequests, 10, 'cold-start grant retries stay bounded at 10');
 
     // Non-timeout transport failures remap to 502 (not 504).
     const unreachableRuntime = new AgentCardOrgRuntime(

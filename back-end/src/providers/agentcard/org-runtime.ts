@@ -5,8 +5,9 @@ const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token'
 const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
 const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
 /** AgentCard's client-credentials grant intermittently returns 5xx ("Token grant failed"). */
-const TOKEN_GRANT_MAX_ATTEMPTS = 6;
-const TOKEN_GRANT_BASE_DELAY_MS = 150;
+const TOKEN_GRANT_MAX_ATTEMPTS = 10;
+const TOKEN_GRANT_BASE_DELAY_MS = 200;
+const TOKEN_GRANT_MAX_DELAY_MS = 1_000;
 /**
  * AgentCard throttles the organization MCP per fixed window (observed: 120 requests/minute, shared
  * by EVERY org caller — card issuance, wallet reclaim polling, the minute cron reconciler and the
@@ -376,7 +377,9 @@ export class AgentCardOrgRuntime {
         if (!isRetryableOrgTokenError(error) || attempt === attempts) {
           throw error;
         }
-        await delay(TOKEN_GRANT_BASE_DELAY_MS * 2 ** (attempt - 1));
+        await delay(
+          Math.min(TOKEN_GRANT_MAX_DELAY_MS, TOKEN_GRANT_BASE_DELAY_MS * 2 ** (attempt - 1))
+        );
       }
     }
     throw (
