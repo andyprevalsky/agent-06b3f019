@@ -80,7 +80,6 @@ async function main(): Promise<void> {
     await flakyTokenRuntime.callTool('get_company_wallet', {});
     assert.equal(flakyTokenRequests, 3, 'token grant must retry transient 5xx until success');
 
-
     let concurrentTokenRequests = 0;
     let releaseTokenRequest: (() => void) | undefined;
     const tokenRequestReleased = new Promise<void>((resolve) => {
@@ -160,11 +159,7 @@ async function main(): Promise<void> {
       nowMs += 61_000;
       await proactiveRuntime.callTool('list_transfers', { limit: 100 });
       // Initial grant + one best-effort proactive refresh (no 5xx retry when cache can cover).
-      assert.equal(
-        proactiveTokenRequests,
-        2,
-        'the refresh window should trigger a token exchange'
-      );
+      assert.equal(proactiveTokenRequests, 2, 'the refresh window should trigger a token exchange');
       assert.deepEqual(
         proactiveToolTokens,
         ['still-valid-org-token', 'still-valid-org-token'],
@@ -505,10 +500,10 @@ async function main(): Promise<void> {
       async (_input, init) => {
         const form = new URLSearchParams(String(init?.body));
         resourceSeen = String(form.get('resource') ?? '');
-        return new Response(
-          JSON.stringify({ access_token: 'mcp-url-token', expires_in: 120 }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        );
+        return new Response(JSON.stringify({ access_token: 'mcp-url-token', expires_in: 120 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
     );
     await mcpUrlRuntime.callTool('list_cards', { limit: 1 });

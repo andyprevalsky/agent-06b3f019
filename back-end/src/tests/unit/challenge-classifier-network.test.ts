@@ -30,7 +30,9 @@ function testUrlsCitedInRecoveryReason(): void {
 function testCitedNetworkHosts(): void {
   assert.deepEqual(citedNetworkHosts(undefined), []);
   assert.deepEqual(
-    citedNetworkHosts('Hosts https://one.example/a and https://two.example/b and https://one.example/c'),
+    citedNetworkHosts(
+      'Hosts https://one.example/a and https://two.example/b and https://one.example/c'
+    ),
     ['one.example', 'two.example']
   );
 }

@@ -338,7 +338,6 @@ function testClassifierMessagesSurfaceRecoveryReasonWithoutHardCdnPin(): void {
   assert.match(text, /network metadata/i);
 }
 
-
 function testChallengeLlmClassifierCostRouting(): void {
   assert.equal(CHALLENGE_LLM_MODEL, 'rose-labs/rose-1-mini');
   const paid = challengeClassifierCostCents({
