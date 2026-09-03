@@ -36,8 +36,7 @@ export async function applyFingerprintInjection(
     const cdp = await page.context().newCDPSession(page);
     await cdp.send('Network.enable');
     await cdp.send('Network.setUserAgentOverride', userAgentOverride as never);
-    const timezone =
-      typeof fingerprint.timezone === 'string' ? fingerprint.timezone.trim() : '';
+    const timezone = typeof fingerprint.timezone === 'string' ? fingerprint.timezone.trim() : '';
     if (timezone) {
       await cdp.send('Emulation.setTimezoneOverride', { timezoneId: timezone });
     }
@@ -54,7 +53,11 @@ export async function applyFingerprintInjection(
       })();
     `);
     log.info('Fingerprint injection applied before probe navigation', {
-      platform: (userAgentOverride as { userAgentMetadata?: { platform?: string } }).userAgentMetadata?.platform ?? userAgentOverride.platform ?? null,
+      platform:
+        (userAgentOverride as { userAgentMetadata?: { platform?: string } }).userAgentMetadata
+          ?.platform ??
+        userAgentOverride.platform ??
+        null,
       timezone: timezone || null,
     });
     return true;

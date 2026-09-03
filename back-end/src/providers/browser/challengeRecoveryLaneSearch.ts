@@ -83,11 +83,7 @@ export async function runLaneConfigSearch(
     throw new Error('Challenge recovery requires at least one cookie storage lane');
   }
   const avoidConfigKey = options.avoidConfigKey;
-  const orderedConfigs = orderConfigsForLane(
-    configs,
-    avoidConfigKey,
-    options.blockedConfigKeys
-  );
+  const orderedConfigs = orderConfigsForLane(configs, avoidConfigKey, options.blockedConfigKeys);
   const abort = new AbortController();
   const claimLock = { claimed: false };
   /** Sessions still owned by in-flight sibling lanes — released on winner claim. */

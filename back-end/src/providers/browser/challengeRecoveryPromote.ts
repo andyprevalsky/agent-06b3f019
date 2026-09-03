@@ -1,0 +1,275 @@
+/** Config search + promote for browser challenge recovery (split for max-lines). */
+import type { Prisma } from '@prisma/client';
+import { prisma } from '../database';
+import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
+import { createLogger } from '../logger';
+import type {
+  ChallengeClassifierBilling,
+  ChallengeClassifierLlmUsage,
+} from './challengeLlmClassifier';
+import {
+  applyConfigBlacklist,
+  runLaneConfigSearch,
+  type ConfigSearchDependencies,
+} from './challengeRecoveryLaneSearch';
+import { buildPreferredBrowserConfig, closeValidationBrowser } from './challengeRecoverySupport';
+import {
+  bestSpecificity,
+  browserRecoveryCandidates,
+  shouldPreferSteelForChallengeTarget,
+} from './challengeRecoveryCandidates';
+import type { FingerprintInjectionData } from './fingerprintInjection';
+import {
+  browserConfigSearchRuntimeDependencies,
+  ChallengeConfigSearchExhaustedError,
+  recoveryConfigKeyForSession,
+  sameSiteNavigationUrl,
+  type BrowserConfigSearchRuntimeDependencies,
+  type RecoveryStorageLane,
+} from './challengeRecovery';
+
+const log = createLogger('BrowserChallengeRecovery');
+
+export async function searchAndPromoteBrowserConfig(
+  input: {
+    taskId: string;
+    userId?: string;
+    targetUrl: string;
+    storageState: Record<string, unknown>;
+    /** Parallel cookie-signature lanes; defaults to a single lane from storageState. */
+    storageLanes?: RecoveryStorageLane[];
+    userAgent?: string;
+    /** Failure-driven: blocked third-party URL that triggered this recovery. */
+    blockedResourceUrl?: string;
+    /** Agent recover_from_challenge reason for the LLM gate. */
+    recoveryReason?: string | null;
+    /** @deprecated Ignored — single LLM gate only. */
+    requirePaymentCdn?: boolean;
+    preserveAuth?: boolean;
+    /** Cross-recovery dead configs; expired automatically when all are blocked. */
+    blockedConfigKeys?: string[];
+    /** Optional override; defaults to the task owner's stored fingerprint. */
+    fingerprintInjection?: FingerprintInjectionData | null;
+  },
+  dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
+) {
+  const current = await prisma.browserSession.findFirst({
+    where: {
+      id: input.taskId,
+      ...(input.userId === undefined ? {} : { context: { userId: input.userId } }),
+    },
+    include: { context: true },
+  });
+  if (current === null) throw new Error(`Browser task not found: ${input.taskId}`);
+  const billing: ChallengeClassifierBilling = {
+    agentId: current.agentId,
+    userId: input.userId ?? current.context.userId,
+  };
+  const agent = await prisma.agent.findUnique({
+    where: { id: current.agentId },
+    select: { proxyCountry: true, proxyState: true, proxyCity: true },
+  });
+  const proxyLocation: ProxyGeoLocation = agent?.proxyCountry
+    ? {
+        country: agent.proxyCountry,
+        ...(agent.proxyState ? { state: agent.proxyState } : {}),
+        ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
+      }
+    : DEFAULT_GEOLOCATION;
+  const sessionAvoidConfigKey = recoveryConfigKeyForSession(current.provider, current.proxyTier);
+
+  const fingerprintInjection =
+    input.fingerprintInjection !== undefined
+      ? input.fingerprintInjection
+      : billing.userId
+        ? await import('../steel/files').then((mod) =>
+            mod.getFingerprintInjectionData(billing.userId!)
+          )
+        : null;
+  // Payment-CDN hard filter removed. blockedResourceUrl is evidence for the LLM gate.
+  void input.requirePaymentCdn;
+  const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, {
+    requirePaymentCdn: false,
+  });
+  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
+  const blacklist = applyConfigBlacklist(configs, input.blockedConfigKeys);
+  const searchableConfigs = blacklist.configs;
+  if (blacklist.blacklistExpired) {
+    log.info('Challenge recovery config blacklist expired; retrying full catalog', {
+      taskId: input.taskId,
+      blockedConfigKeys: input.blockedConfigKeys ?? [],
+      agentId: billing.agentId,
+    });
+  }
+  const lanes: RecoveryStorageLane[] =
+    input.storageLanes && input.storageLanes.length > 0
+      ? input.storageLanes
+      : [{ key: 'default', storageState: input.storageState }];
+
+  if (sessionAvoidConfigKey) {
+    log.info('Challenge recovery will deprioritize current failing exit', {
+      taskId: input.taskId,
+      avoidConfigKey: sessionAvoidConfigKey,
+      provider: current.provider,
+      proxyTier: current.proxyTier,
+    });
+  }
+  log.info('Challenge recovery lane search', {
+    taskId: input.taskId,
+    laneKeys: lanes.map((lane) => lane.key),
+    configKeys: searchableConfigs.map((config) => config.key),
+    blockedConfigKeys: input.blockedConfigKeys ?? [],
+    blacklistExpired: blacklist.blacklistExpired,
+    avoidConfigKey: sessionAvoidConfigKey ?? null,
+    preserveAuth: input.preserveAuth ?? null,
+    blockedResourceUrl: input.blockedResourceUrl ?? null,
+    agentId: billing.agentId,
+  });
+
+  const failedConfigKeys = new Set<string>();
+
+  const searchDependencies: ConfigSearchDependencies = {
+    create: async (config, signal) => {
+      if (signal.aborted) {
+        throw new Error('lane_aborted');
+      }
+      if (config.provider === 'kernel') {
+        const session = config.omitManagedProxy
+          ? await dependencies.createKernel(current.agentId, proxyLocation, {
+              omitManagedProxy: true,
+            })
+          : await dependencies.createKernel(current.agentId, proxyLocation, {
+              type: config.kernelProxyType ?? 'residential',
+              specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
+            });
+        if (signal.aborted) {
+          await closeValidationBrowser(session);
+          await dependencies.releaseKernel(session.sessionId).catch(() => {});
+          throw new Error('lane_aborted');
+        }
+        return { provider: 'kernel', ...session };
+      }
+      const session = await dependencies.createSteel({
+        proxyLocation,
+        proxyMode: config.steelProxyMode ?? 'managed',
+        userAgent: input.userAgent,
+      });
+      if (signal.aborted) {
+        await closeValidationBrowser(session);
+        await dependencies.releaseSteel(session.sessionId).catch(() => {});
+        throw new Error('lane_aborted');
+      }
+      return { provider: 'steel', ...session };
+    },
+    probe: async (config, session, lane, signal) => {
+      if (signal.aborted) {
+        throw new Error('lane_aborted');
+      }
+      const probe = await dependencies.probe(
+        session,
+        input.targetUrl,
+        lane.storageState,
+        {
+          configKey: config.key,
+          provider: config.provider,
+          proxyMode: config.proxyMode,
+          laneKey: lane.key,
+          blockedResourceUrl: input.blockedResourceUrl,
+          recoveryReason: input.recoveryReason,
+          fingerprintInjection,
+        },
+        billing,
+        signal
+      );
+      if (!(probe.stablePasses === probe.attempts && probe.attempts > 0)) {
+        failedConfigKeys.add(config.key);
+      }
+      return probe;
+    },
+    promote: async ({ config, session }) => {
+      const updated = await prisma.$transaction(async (tx) => {
+        const replaced = await tx.browserSession.updateMany({
+          where: { id: current.id, sessionId: current.sessionId },
+          data: {
+            sessionId: session.sessionId,
+            debugUrl: session.debugUrl,
+            wsUrl: session.wsUrl,
+            currentUrl: input.targetUrl,
+            status: 'ACTIVE',
+            closedAt: null,
+            provider: config.provider,
+            providerProfileId: session.profileId,
+            providerProfileSource: session.profileSource,
+            providerProfilePersist: false,
+            proxyTier: config.proxyMode,
+          },
+        });
+        if (replaced.count !== 1) return false;
+        await tx.browserContext.update({
+          where: { id: current.contextId },
+          data: {
+            preferredBrowserConfig: buildPreferredBrowserConfig(
+              config,
+              proxyLocation
+            ) as unknown as Prisma.InputJsonValue,
+          },
+        });
+        return true;
+      });
+      if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
+      if (current.provider === 'kernel') {
+        await dependencies.releaseKernel(current.sessionId).catch(() => {});
+      } else {
+        await dependencies.releaseSteel(current.sessionId).catch(() => {});
+      }
+    },
+    release: async (_config, session) => {
+      await closeValidationBrowser(session).catch(() => {});
+      if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
+      else await dependencies.releaseSteel(session.sessionId);
+    },
+  };
+
+  let winner: Awaited<ReturnType<typeof runLaneConfigSearch>>;
+  try {
+    winner = await runLaneConfigSearch(searchableConfigs, lanes, searchDependencies, {
+      avoidConfigKey: sessionAvoidConfigKey,
+      blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ChallengeConfigSearchExhaustedError(message, [...failedConfigKeys]);
+  }
+  const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [
+    ...(winner.probe.classifierLlmUsage ?? []),
+  ];
+
+  const resumeUrl =
+    sameSiteNavigationUrl(input.targetUrl, winner.probe.settledUrl) ?? input.targetUrl;
+  return {
+    task_id: current.id,
+    session_id: winner.session.sessionId,
+    debug_url: winner.session.debugUrl,
+    ws_url: winner.session.wsUrl,
+    saved_url: resumeUrl,
+    provider: winner.config.provider,
+    proxy_tier: winner.config.proxyMode,
+    config_key: winner.config.key,
+    storage_state_preloaded: true,
+    blacklist_expired: blacklist.blacklistExpired,
+    failed_config_keys: [...failedConfigKeys],
+    recovery_action:
+      winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
+    recovery_message: `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
+    classifier_llm_usage: classifierLlmUsage,
+    browser_session_metadata: {
+      provider: winner.config.provider,
+      proxy_source: winner.session.proxySource,
+      proxy_location: winner.session.proxyLocation,
+      proxy_tier: winner.config.proxyMode,
+      config_key: winner.config.key,
+      profile_id: null,
+      profile_source: winner.session.profileSource,
+    },
+  };
+}

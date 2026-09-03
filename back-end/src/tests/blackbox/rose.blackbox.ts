@@ -1966,11 +1966,7 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     messages,
     requestId: 'effort-default',
   });
-  assertEqual(
-    (codex.reasoning as Record<string, unknown>).effort,
-    'xhigh',
-    'codex default effort'
-  );
+  assertEqual((codex.reasoning as Record<string, unknown>).effort, 'xhigh', 'codex default effort');
 
   const openrouter = buildOpenRouterBody({
     model: 'openai/gpt-5.6-sol',
@@ -2049,7 +2045,10 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     { label: 'codex', effort: (codex.reasoning as Record<string, unknown>).effort },
     { label: 'openrouter', effort: (openrouter.reasoning as Record<string, unknown>).effort },
     { label: 'cerebras', effort: cerebras.reasoning_effort },
-    { label: 'openrouter-cerebras', effort: (orCerebras.reasoning as Record<string, unknown>).effort },
+    {
+      label: 'openrouter-cerebras',
+      effort: (orCerebras.reasoning as Record<string, unknown>).effort,
+    },
     { label: 'openrouter-fast', effort: (orFast.reasoning as Record<string, unknown>).effort },
   ];
   for (const { label, effort } of inventory) {
@@ -3664,7 +3663,10 @@ async function main(): Promise<void> {
       name: 'client / dump context writes request and output',
       fn: testClient_dumpContextWritesRequestAndOutput,
     },
-    { name: 'waterfall / body builders always stamp effort=xhigh', fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh },
+    {
+      name: 'waterfall / body builders always stamp effort=xhigh',
+      fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh,
+    },
     { name: 'waterfall / first 500 → second succeeds', fn: testWaterfall_firstFailsSecondSucceeds },
     { name: 'waterfall / all fail → RoseAllFailed', fn: testWaterfall_allFailRaisesRoseAllFailed },
     {

@@ -27,6 +27,7 @@ import {
   CODE_AGENT_ATTACHMENTS_DIR,
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
+import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import {
@@ -91,7 +92,6 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
 const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
-const CODEX_ROSE_BRIDGE_PATH = '/home/user/rose-bridge.mjs';
 
 function findLocalClaudeCodeWsServer(): string | null {
   const candidates = [
@@ -130,31 +130,6 @@ async function overlayClaudeCodeWsServer(
     { timeoutMs: 10000 }
   );
   log.info(`Overlayed Claude Code ws-server from ${serverPath}`);
-}
-
-function findLocalCodexRoseBridge(): string | null {
-  const candidates = [
-    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'rose-bridge.mjs'),
-    join(process.cwd(), 'e2b-templates', 'codex-code', 'rose-bridge.mjs'),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-async function overlayCodexRoseBridge(
-  sandbox: Awaited<ReturnType<typeof Sandbox.create>>
-): Promise<void> {
-  const bridgePath = findLocalCodexRoseBridge();
-  if (bridgePath === null) {
-    log.warn('Codex rose-bridge overlay not found; harness API calls may fail');
-    return;
-  }
-  const content = readFileSync(bridgePath);
-  await sandbox.files.write(CODEX_ROSE_BRIDGE_PATH, new Blob([content]));
-  await sandbox.commands.run(`chmod +x ${CODEX_ROSE_BRIDGE_PATH}`, { timeoutMs: 10000 });
-  log.info(`Overlayed Codex rose-bridge from ${bridgePath}`);
 }
 
 async function overlayCodexCodeWsServer(
