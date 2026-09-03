@@ -4206,6 +4206,41 @@ def test_no_tool_failures_counts_unrecovered_web_fetch_error():
     assert _run_declared_static_check(evaluator, data)[0] is False
 
 
+def test_no_tool_failures_ignores_recoverable_grep_error_after_web_search():
+    """Schema-invalid grep ERROR recovered via later web_search must not fail t10.
+
+    Local repro: test-mass-agent-run-0 Fast Mode replay (agent 65558d55…,
+    child 5af074c9…) had grep ERROR `Unsupported grep parameter: 'filters'`
+    then continued with FINISHED web_search calls and COMPLETED.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "grep",
+                    "toolCallId": "4b94286e-2a7b-42dc-a299-d46d283e9af4",
+                    "toolStatus": "ERROR",
+                },
+                "message": "Unsupported grep parameter: 'filters'.",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_search",
+                    "toolCallId": "recover-search",
+                    "toolStatus": "FINISHED",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data)[0] is True
+
+
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
 
@@ -17465,6 +17500,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_counts_unrecovered_web_fetch",
         test_no_tool_failures_counts_unrecovered_web_fetch_error,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_grep_after_search",
+        test_no_tool_failures_ignores_recoverable_grep_error_after_web_search,
     )
     r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",

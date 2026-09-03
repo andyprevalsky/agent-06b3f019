@@ -9416,6 +9416,31 @@ def _has_later_web_fetch_recovery(messages: list, start_index: int) -> bool:
     return False
 
 
+_RECOVERABLE_EXPLORE_TOOLS = frozenset(
+    {"web_fetch", "web_search", "grep", "people_search"}
+)
+
+
+def _has_later_explore_tool_recovery(messages: list, start_index: int) -> bool:
+    """True when later research progress proves the agent recovered from an explore-tool ERROR."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        if status != "FINISHED":
+            continue
+        if tool_name in _RECOVERABLE_EXPLORE_TOOLS or tool_name in {
+            "attempt_completion",
+            "completion_summary",
+        }:
+            return True
+    return False
+
+
 def _is_recoverable_web_fetch_failure(
     candidate: dict,
     *,
@@ -9440,6 +9465,32 @@ def _is_recoverable_web_fetch_failure(
     if messages is None or message_index is None:
         return False
     return _has_later_web_fetch_recovery(messages, message_index)
+
+
+def _is_recoverable_explore_tool_failure(
+    candidate: dict,
+    *,
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Explore-tool ERRORs recovered by later research/completion are not harness failures.
+
+    Fast Mode mass-agent cache trajectories include schema-invalid grep calls
+    (`Unsupported grep parameter: 'filters'`) and transient web_fetch ERRORs; children
+    pivot to web_search / alternate URLs and still COMPLETE. Local repro:
+    test-mass-agent-run-0 agent 65558d55… / child 5af074c9… had 3 unrecovered-by-same-tool
+    grep ERRORs then continued with dozens of FINISHED web_search calls. Unrecovered
+    terminal explore ERRORs (no later research/completion FINISHED) still count.
+    """
+    tool_name = str(candidate.get("toolName") or candidate.get("tool_name") or "")
+    if tool_name not in _RECOVERABLE_EXPLORE_TOOLS:
+        return False
+    status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+    if status not in {"ERROR", "FAILED"}:
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_explore_tool_recovery(messages, message_index)
 
 
 def _is_recoverable_browser_element_miss_failure(
@@ -9858,6 +9909,12 @@ def _tool_runtime_failures(data: dict) -> list[str]:
                 ):
                     continue
                 if _is_recoverable_web_fetch_failure(
+                    candidate,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_explore_tool_failure(
                     candidate,
                     messages=messages,
                     message_index=message_index,
