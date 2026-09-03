@@ -668,6 +668,31 @@ async def test_planner_activity_injects_reference_block_after_goal():
     assert result["result"]["title"] == POPULATION_PLAN["title"]
 
 
+async def test_planner_activity_keeps_injection_disabled_without_opt_in():
+    import helpers.llm as llm
+    from utils.tool_schemas import PlannerResponse
+
+    captured: dict[str, Any] = {}
+
+    async def fake_structured(**kwargs):
+        captured.update(kwargs)
+        return PlannerResponse.model_validate(POPULATION_PLAN), {"prompt_tokens": 1, "completion_tokens": 1}, None
+
+    with patch.object(llm, "call_llm_structured_streaming", new=fake_structured):
+        with _LocalArchive() as archive:
+            _seed_corpus(archive)
+            _publish_local_index()
+            os.environ.pop("PLANNER_RAG_ENABLED", None)
+            messages = [{"role": "user", "content": f"GOAL: {POPULATION_GOAL}\n\nPlan this goal into tasks."}]
+            result = await llm.call_planner_llm_activity(
+                messages, "m", "tools", "", None, claude_token_user_id="user-a"
+            )
+
+    assert [message["role"] for message in captured["messages"]] == ["system", "user"]
+    assert all(not message["content"].startswith("# Reference Plans") for message in captured["messages"])
+    assert result["planner_rag"] is None
+
+
 async def test_planner_activity_without_hits_sends_unchanged_messages():
     import helpers.llm as llm
     from utils.tool_schemas import PlannerResponse
@@ -889,6 +914,27 @@ async def test_warm_index_reports_availability():
         assert await warm_index() is False
 
 
+def test_planner_rag_injection_is_disabled_by_default():
+    from providers.planner_rag import planner_rag_enabled
+
+    keys = ("PLANNER_RAG_ENABLED", "BLACKBOX_TEST_CAPTURE_OUTBOUND")
+    old = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            os.environ.pop(key, None)
+        assert planner_rag_enabled() is False
+        os.environ["PLANNER_RAG_ENABLED"] = "1"
+        assert planner_rag_enabled() is True
+        os.environ["PLANNER_RAG_ENABLED"] = "0"
+        assert planner_rag_enabled() is False
+    finally:
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_no_outbound_http_calls():
     assert get_captured_requests() == [], get_captured_requests()
 
@@ -914,6 +960,9 @@ async def run_all_tests():
     await r.record_async("retrieve_end_to_end_timing", test_retrieve_reference_plans_end_to_end_with_timing)
     await r.record_async("retrieve_without_index_noop", test_retrieve_reference_plans_without_index_is_noop)
     await r.record_async("planner_activity_injects_block", test_planner_activity_injects_reference_block_after_goal)
+    await r.record_async(
+        "planner_activity_injection_disabled", test_planner_activity_keeps_injection_disabled_without_opt_in
+    )
     await r.record_async("planner_activity_no_hits", test_planner_activity_without_hits_sends_unchanged_messages)
     r.record("planner_goal_extraction", test_planner_goal_extraction)
     r.record("unique_goal_docs_idf_coverage", test_unique_goal_docs_and_idf_weighted_coverage)
@@ -921,6 +970,7 @@ async def run_all_tests():
     await r.record_async("cold_load_single_flight", test_cold_load_is_single_flight_under_concurrency)
     await r.record_async("stale_index_background_refresh", test_stale_index_is_served_warm_and_refreshed_in_background)
     await r.record_async("warm_index_availability", test_warm_index_reports_availability)
+    r.record("injection_disabled_by_default", test_planner_rag_injection_is_disabled_by_default)
     r.record("builder_cli_local", test_builder_cli_builds_local_index)
     r.record("no_outbound_http_calls", test_no_outbound_http_calls)
     teardown_mock()

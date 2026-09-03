@@ -268,13 +268,13 @@ def format_reference_plans(
 
 
 def planner_rag_enabled() -> bool:
-    """Feature switch. Off by default inside blackbox capture mode so unrelated tests never load an index."""
+    """Feature switch. Injection stays off unless explicitly enabled."""
     raw = os.environ.get("PLANNER_RAG_ENABLED", "").strip().lower()
     if raw in {"0", "false", "no", "off"}:
         return False
     if raw in {"1", "true", "yes", "on"}:
         return True
-    return not os.environ.get("BLACKBOX_TEST_CAPTURE_OUTBOUND")
+    return False
 
 
 def index_from_document(document: dict[str, Any], *, source: str) -> PlannerRagIndex:

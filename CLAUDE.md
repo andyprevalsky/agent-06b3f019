@@ -465,25 +465,6 @@ In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP 
   live in `src/providers/`. Grepping the old path silently returns nothing, which
   is how a whole authentication path was missed during an RCA.
 
-## Planner RAG (reference plans from the trace archive)
-
-`call_planner_llm_activity` retrieves successful past plans for goals similar to the user goal and injects them as a
-`# Reference Plans` **user** message right after the `GOAL:` turn — never into the system prompt — so the planner's
-cached static prefix (system blocks + tools) is byte-identical with or without retrieval, and the fast-mode fingerprint
-canonicalizes the block away (`providers/fast_cache/normalize.py`). Code: `agents/providers/planner_rag/`.
-
-- **Corpus:** derived (goal, accepted plan) entries extracted read-only from finalized, successful root bundles
-  (`manifest.json.gz.enc` → `run.root_goal`, latest `llm-updates/*-planner.json.gz.enc` → `output.content`).
-  Bundles under `trace-archive/` are never written; the index lives under its own `planner-rag/` prefix, encrypted with
-  the archive envelope. Credential-shaped values are redacted while loading/extracting and again while formatting;
-  raw bundles remain unchanged. Visibility at query time: benchmark runs are shared, private runs only to their own user.
-- **Build / publish:** `cd agents && python scripts/build_planner_rag_index.py [--publish]` (incremental via a scan-state
-  object; `--publish-only` pushes the local index to R2). **Time it:** `python scripts/time_planner_rag.py`.
-- **Runtime:** one index per worker process, warmed at worker start (`worker.py`), refreshed in the background every
-  `PLANNER_RAG_INDEX_TTL_S` (600s); a planner call is one in-memory BM25 query (~0.03ms warm). `PLANNER_RAG_ENABLED=0`
-  disables; `PLANNER_RAG_BACKEND=local` + `PLANNER_RAG_LOCAL_DIR` for tests. Logs: `planner_rag.retrieved`,
-  `[TIMING] Planner RAG retrieval`, span `planner_rag_retrieve`.
-
 ## Production Logs (Render)
 
 Fetch backend prod logs via Render API:
