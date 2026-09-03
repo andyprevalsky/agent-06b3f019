@@ -102,8 +102,11 @@ export async function fetchPublicAsset(
  * to force a real download. Centralizing the fetch here keeps domain
  * components compliant with the strict lint no-direct-fetch rule.
  */
-export async function downloadAttachmentAsBlob(url: string): Promise<Blob> {
-  const response = await fetch(url);
+export async function downloadAttachmentAsBlob(
+  url: string,
+  options?: { signal?: AbortSignal },
+): Promise<Blob> {
+  const response = await fetch(url, { signal: options?.signal });
   if (!response.ok) {
     throw new Error(`Failed to download attachment (status ${response.status})`);
   }
@@ -111,8 +114,11 @@ export async function downloadAttachmentAsBlob(url: string): Promise<Blob> {
 }
 
 /** Download a signed text attachment body for inline preview rendering. */
-export async function downloadAttachmentAsText(url: string): Promise<string> {
-  const response = await fetch(url);
+export async function downloadAttachmentAsText(
+  url: string,
+  options?: { signal?: AbortSignal },
+): Promise<string> {
+  const response = await fetch(url, { signal: options?.signal });
   if (!response.ok) {
     throw new Error(`Failed to download attachment (status ${response.status})`);
   }

@@ -44,6 +44,8 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "browser_agent_session_count",
     "completion_sms_event",
     "completion_summary_length",
+    "completion_summary_file_outputs",
+    "response_schema_has_file_pointer",
     "first_level_gp_count",
     "root_deliverable_markers",
     "tree_agent_status",

@@ -72,6 +72,7 @@
     "embla-carousel-react": "^8.3.0",
     "framer-motion": "^12.23.24",
     "input-otp": "^1.2.4",
+    "jszip": "^3.10.1",
     "libphonenumber-js": "^1.13.8",
     "lucide-react": "^0.462.0",
     "marked-react": "^3.0.2",
@@ -95,6 +96,7 @@
     "three": "^0.160.1",
     "unist-util-visit": "^5.0.0",
     "vaul": "^0.9.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.0.5"
   },
   "devDependencies": {
