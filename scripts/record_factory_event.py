@@ -18,6 +18,7 @@ VALID_EVENTS = {
         "approval-request": {
             "prompt-approval",
             "agent-behavior-approval",
+            "llm-trajectory-injection-approval",
             "combined",
         },
         "approval-decision": {"approved", "rejected"},

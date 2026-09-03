@@ -46,6 +46,15 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
             "row and browser-session init fails on AgentIdentity_userId_fkey."
         ),
     ),
+    "live-aman-food-plan-identity": LiveFixtureSpec(
+        name="live-aman-food-plan-identity",
+        description=(
+            "Complete live overlay for Aman Gottumukkala's DoorDash food-plan repro: "
+            "User row, scoped doordash.com browser auth, compute tokens, and the "
+            "benchmark run user retarget. Pairs with the frozen prod-derived grocery "
+            "manifest fixture for browser-doordash-food-plan-grocery-order."
+        ),
+    ),
 }
 
 # The production identity `live-tamy-identity` materializes, and the auth realms it
@@ -53,6 +62,11 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
 # contract is declared in one place alongside its description.
 TAMY_IDENTITY_USER_ID = "43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9"
 TAMY_IDENTITY_COOKIE_DOMAINS = ("amazon.com.mx", "amazon.com")
+
+# Aman's prod account was removed upstream; the food-plan repro now runs as the
+# dev identity that still owns live DoorDash auth in prod (see pinned_facts).
+AMAN_FOOD_PLAN_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+AMAN_FOOD_PLAN_COOKIE_DOMAINS = ("doordash.com",)
 
 LIVE_FIXTURE_NAMES = frozenset(LIVE_FIXTURES)
 

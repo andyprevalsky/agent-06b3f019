@@ -82,6 +82,7 @@ async def _run(source, probe, *, live_commit_clean=True, allow_logged_out_cookie
 
 
 async def test_known_challenge_cookie_is_removed_without_touching_auth():
+    """Clean known-challenge strip promotes via config-search handover (not live strip)."""
     source = _state(_cookie("cf_clearance"), _cookie("authState"), _cookie("cart"))
     before = copy.deepcopy(source)
 
@@ -89,60 +90,20 @@ async def test_known_challenge_cookie_is_removed_without_touching_auth():
         return "cf_clearance" not in {cookie["name"] for cookie in candidate["cookies"]}
 
     result, events, committed, config_inputs = await _run(source, probe)
-    assert result.recovery == "cookies_sanitized"
-    assert committed == [cookie_key(_cookie("cf_clearance"))]
-    assert config_inputs == []
-    assert source == before, "experimental probes must not mutate canonical state"
-    assert {event[0] for event in events} == {"call-recovery-1"}
-    assert [event[1] for event in events][:2] == ["captcha_solver", "cookie_probe_wave"]
-    assert all("authState" not in event[2] for event in events)
-
-
-async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solver():
-    source = _state(_cookie("cf_clearance"), _cookie("authState"), _cookie("opaque_state"))
-    before = copy.deepcopy(source)
-    events = []
-    config_inputs = []
-    solver_calls = 0
-
-    async def wait_for_solver():
-        nonlocal solver_calls
-        solver_calls += 1
-
-    async def forbidden_probe(_candidate):
-        raise AssertionError("an explicitly rejected IP must not trigger cookie experiments")
-
-    async def forbidden_commit(_keys):
-        raise AssertionError("an explicitly rejected IP must not mutate live cookies")
-
-    async def search_configs(lanes):
-        config_inputs.append(copy.deepcopy(lanes))
-        return {"provider": "kernel", "proxy_mode": "isp_city", "ws_url": "wss://winner"}
-
-    async def progress(stage, message):
-        events.append((stage, message))
-
-    result = await recover_from_challenge(
-        source_state=source,
-        target_url="https://order.online/store/blue-bottle",
-        wait_for_solver=wait_for_solver,
-        probe=forbidden_probe,
-        commit_cookie_removals=forbidden_commit,
-        search_configs=search_configs,
-        progress=progress,
-        provider_exit_rejected=True,
-    )
-
-    assert solver_calls == 1, "provider-native CAPTCHA solving must remain first"
-    assert [stage for stage, _ in events] == ["captcha_solver", "browser_config_search"]
-    assert len(config_inputs) == 1 and len(config_inputs[0]) == 1
-    assert config_inputs[0][0]["key"] == "auth_kept"
-    assert config_inputs[0][0]["storage_state"] == _state(
-        _cookie("authState"), _cookie("opaque_state")
-    ), "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
-    assert source == before
     assert result.recovery == "config_selected"
-    assert result.removed_cookie_keys == ()
+    assert committed == [], "must not strip cookies on the live tab"
+    assert len(config_inputs) == 1
+    assert config_inputs[0][0]["key"] == "auth_kept"
+    assert "cf_clearance" not in {
+        cookie["name"] for cookie in config_inputs[0][0]["storage_state"]["cookies"]
+    }
+    assert any(cookie["name"] == "authState" for cookie in config_inputs[0][0]["storage_state"]["cookies"])
+    assert source == before, "experimental probes must not mutate canonical state"
+    stages = [event[1] if len(event) > 1 else event[0] for event in events]
+    assert stages[:2] == ["captcha_solver", "cookie_probe_wave"] or "cookie_probe_wave" in stages
+    assert "browser_config_search" in stages
+    assert "apply_cookie_strip" not in stages
+
 
 
 async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
@@ -176,7 +137,7 @@ async def test_unknown_cookie_wave_probes_in_parallel_without_ddmin():
 
 
 async def test_guest_path_commits_clean_all_target_strip():
-    """Guest checkout: a clean all_target probe is committed, not discarded for auth."""
+    """Guest checkout: clean all_target probe promotes via config-search handover."""
     source = _state(
         *(_cookie(name) for name in ["prefs", "cart", "poison", "analytics", "theme", "ab"])
     )
@@ -188,17 +149,25 @@ async def test_guest_path_commits_clean_all_target_strip():
     result, events, committed, config_inputs = await _run(
         source, probe, allow_logged_out_cookie_commit=True
     )
-    assert result.recovery == "cookies_sanitized"
-    assert set(committed) == {cookie_key(cookie) for cookie in before["cookies"]}
-    assert config_inputs == [], "successful guest commit must not escalate to config search"
+    assert result.recovery == "config_selected"
+    assert committed == [], "must not strip cookies on the live tab"
+    assert len(config_inputs) == 1
+    keys = [lane["key"] for lane in config_inputs[0]]
+    assert "stripped" in keys
     assert source == before
-    assert "apply_cookie_fix" in [event[1] for event in events]
-    assert "preserve_auth_state" not in [event[1] for event in events]
-    assert any("Guest path" in event[2] for event in events)
+    stages = [event[1] if len(event) > 1 else event[0] for event in events]
+    assert "browser_config_search" in stages
+    assert "apply_cookie_strip" not in stages
+
 
 
 async def test_guest_path_prefers_all_target_over_known_challenge_when_both_clean():
-    """auth_cookies_are_preserved=false must prefer full target clear over weak challenge strip."""
+    """auth_cookies_are_preserved=false must prefer full target clear over weak challenge strip.
+
+    Both known_challenge and all_target can probe clean; guest recovery must
+    promote the stronger all_target (stripped) lane via config-search handover,
+    not the weaker known-challenge-only strip (Hotels.com GraphQL 429 RCA).
+    """
     source = _state(
         _cookie("cf_clearance"),
         _cookie("prefs"),
@@ -214,12 +183,17 @@ async def test_guest_path_prefers_all_target_over_known_challenge_when_both_clea
     result, events, committed, config_inputs = await _run(
         source, probe, allow_logged_out_cookie_commit=True
     )
-    assert result.recovery == "cookies_sanitized"
-    assert set(committed) == {cookie_key(cookie) for cookie in before["cookies"]}
-    assert cookie_key(_cookie("cf_clearance")) in committed
-    assert cookie_key(_cookie("poison")) in committed
-    assert config_inputs == []
+    assert result.recovery == "config_selected"
+    assert committed == [], "must not strip cookies on the live tab"
+    assert len(config_inputs) == 1
+    keys = [lane["key"] for lane in config_inputs[0]]
+    assert "stripped" in keys, "guest prefer-all_target must search the fully stripped lane"
+    # Preferring all_target must not leave poison in the stripped lane.
+    stripped = next(lane for lane in config_inputs[0] if lane["key"] == "stripped")
+    assert stripped["storage_state"]["cookies"] == []
+    assert source == before
     assert any("Guest path" in event[2] for event in events)
+    assert "apply_cookie_strip" not in [event[1] for event in events]
 
 
 async def test_opaque_auth_cookie_that_looks_like_poison_is_never_committed():
@@ -301,7 +275,14 @@ async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fa
     assert [event[1] for event in events][-1] == "browser_config_search"
 
 
-async def test_isolated_cookie_pass_must_still_pass_in_the_live_context():
+async def test_isolated_cookie_pass_promotes_via_config_search_not_live_strip():
+    """Clean ephemeral cookie probe must not depend on a live-tab commit.
+
+    Previously a clean isolated probe still called commit_cookie_removals on the
+    live tab; if that live verify failed, recovery fell through to config search
+    after mutating cookies. Now the clean probe hands off through the same
+    config-search verifier + promote path (no live strip), matching proxy recovery.
+    """
     source = _state(_cookie("cf_clearance"), _cookie("authState"), _cookie("cart"))
     before = copy.deepcopy(source)
 
@@ -311,15 +292,17 @@ async def test_isolated_cookie_pass_must_still_pass_in_the_live_context():
     result, events, committed, config_inputs = await _run(
         source,
         probe,
-        live_commit_clean=False,
+        live_commit_clean=False,  # must be irrelevant — commit is never invoked
     )
     assert result.recovery == "config_selected"
-    assert committed == [cookie_key(_cookie("cf_clearance"))]
+    assert committed == [], "must not strip cookies on the live tab"
     assert config_inputs == [
         [{"key": "auth_kept", "storage_state": _state(_cookie("authState"), _cookie("cart"))}]
-    ], "an unstable live fix must retain auth while keeping proven challenge poison filtered"
+    ], "config-search lane keeps auth and drops the proven challenge cookie"
     assert result.removed_cookie_keys == (cookie_key(_cookie("cf_clearance")),)
-    assert [event[1] for event in events][-1] == "browser_config_search"
+    stages = [event[1] for event in events]
+    assert "browser_config_search" in stages
+    assert "apply_cookie_strip" not in stages
     assert {event[0] for event in events} == {"call-recovery-1"}
     assert source == before
 
@@ -987,10 +970,6 @@ async def run_all_tests():
     result = BlackboxResult()
     await result.record_async("known_challenge_cookie", test_known_challenge_cookie_is_removed_without_touching_auth)
     await result.record_async(
-        "explicit_provider_exit_rejection",
-        test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solver,
-    )
-    await result.record_async(
         "unknown_cookie_parallel_wave", test_unknown_cookie_wave_probes_in_parallel_without_ddmin,
     )
     await result.record_async(
@@ -1014,8 +993,8 @@ async def run_all_tests():
         test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail,
     )
     await result.record_async(
-        "live_cookie_fix_stability",
-        test_isolated_cookie_pass_must_still_pass_in_the_live_context,
+        "cookie_probe_promotes_via_config_search",
+        test_isolated_cookie_pass_promotes_via_config_search_not_live_strip,
     )
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)

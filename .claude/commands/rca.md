@@ -1,5 +1,5 @@
 ---
-description: "Root-cause a bug the RIGHT way: read the RCA methodology, then produce a LOCAL REPRO that fails on the bug and a fix that makes it pass — never return with a theory."
+description: "Root-cause a bug the RIGHT way: read the RCA methodology, then produce a LOCAL REPRO that fails on the bug and a fix that makes it pass — never return with a theory. FE link validation: every browser agent on the cited agent must be terminated with its recording attached (enforced by publish_evidence_links)."
 ---
 
 # /RCA

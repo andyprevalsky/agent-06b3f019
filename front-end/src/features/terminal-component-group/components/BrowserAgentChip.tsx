@@ -18,7 +18,7 @@
  *                                                                  \--err-> [ERROR]
  *   (neither present => [UNAVAILABLE])
  *
- * RECORDING PLAYHEAD → LIVE TRAJECTORY (while RECORDING tab READY + <video>):
+ * RECORDING PLAYHEAD ↔ LIVE TRAJECTORY (while RECORDING tab READY + <video>):
  *   video.timeupdate|seeked
  *        │
  *        ▼
@@ -31,6 +31,15 @@
  *   side panel highlight + scrollIntoView
  *   (fixed portal hanging off the recording — no layout/scroll shift,
  *    z-index above terminal chrome so it stays visible)
+ *
+ * LIVE TRAJECTORY CLICK → VIDEO SEEK:
+ *   click step i
+ *        │
+ *        ▼
+ *   (segmentIndex, timeInSegment) = seekTargetFromOffset(step.offsetSec, durations)
+ *        │
+ *        ▼
+ *   setSegmentIndex + video.currentTime = timeInSegment (+ play)
  *
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
@@ -55,6 +64,7 @@ import {
   findActiveStepIndex,
   playheadFromSegments,
   resolveRecordingStartMs,
+  seekTargetFromOffset,
   type TrajectoryStep,
 } from './browser-agent-chip/recordingTrajectorySync';
 
@@ -85,6 +95,8 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   // video element so scrubbing / playback updates the live trajectory side panel.
   const [playheadSec, setPlayheadSec] = useState(0);
   const segmentDurationsRef = useRef<number[]>([]);
+  // Shared across stitched + multi-URL players so trajectory clicks can seek.
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const toolCallId = message.metadata?.toolCallId as string | undefined;
 
@@ -273,6 +285,35 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     syncPlayheadFromVideo(event.currentTarget, segIdx);
   }
 
+  /** Click a trajectory row → jump the recording to that step's wall-clock time. */
+  function seekRecordingToOffset(offsetSec: number) {
+    const { segmentIndex: nextSeg, timeInSegment } = seekTargetFromOffset(
+      offsetSec,
+      segmentDurationsRef.current,
+    );
+    if (nextSeg !== segmentIndex) {
+      setSegmentIndex(nextSeg);
+      // Segment swap remounts <video> (key=url). Apply currentTime once metadata loads.
+      requestAnimationFrame(() => {
+        const v = videoRef.current;
+        if (!v) return;
+        const apply = () => {
+          v.currentTime = timeInSegment;
+          void v.play().catch(() => {});
+          syncPlayheadFromVideo(v, nextSeg);
+        };
+        if (v.readyState >= 1) apply();
+        else v.addEventListener('loadedmetadata', apply, { once: true });
+      });
+      return;
+    }
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = timeInSegment;
+    void v.play().catch(() => {});
+    syncPlayheadFromVideo(v, segmentIndex);
+  }
+
   async function openRecording() {
     setTab('recording');
     if (recordingState !== 'idle' || !recordingSource) return;
@@ -415,8 +456,10 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                       steps={trajectory}
                       activeIndex={activeStepIndex}
                       playheadSec={playheadSec}
+                      onStepClick={seekRecordingToOffset}
                     >
                       <video
+                        ref={videoRef}
                         title="Browser recording"
                         src={recordingUrl}
                         controls
@@ -439,6 +482,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                     steps={trajectory}
                     activeIndex={activeStepIndex}
                     playheadSec={playheadSec}
+                    onStepClick={seekRecordingToOffset}
                   >
                     <div>
                       {recordingSource.urls.length > 1 && (
@@ -463,6 +507,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                         </div>
                       )}
                       <video
+                        ref={videoRef}
                         key={recordingSource.urls[segmentIndex]}
                         title="Browser recording"
                         src={recordingSource.urls[segmentIndex]}
@@ -504,11 +549,13 @@ function RecordingWithLiveTrajectory({
   steps,
   activeIndex,
   playheadSec,
+  onStepClick,
   children,
 }: {
   steps: TrajectoryStep[];
   activeIndex: number;
   playheadSec: number;
+  onStepClick?: (offsetSec: number) => void;
   children: React.ReactNode;
 }) {
   // Fixed portal anchored to the recording box — zero layout/scroll impact on the
@@ -517,7 +564,9 @@ function RecordingWithLiveTrajectory({
   const [panelStyle, setPanelStyle] = useState<CSSProperties | null>(null);
 
   useLayoutEffect(() => {
-    const PANEL_W = 288; // w-72
+    // Wider than w-72 so long action names (browser_challenge_recovery) leave
+    // room for wrapped titles instead of Cap…/Wai…/Bro… ellipsis.
+    const PANEL_W = 340;
     const GAP = 8;
 
     const sync = () => {
@@ -572,7 +621,12 @@ function RecordingWithLiveTrajectory({
                   t={playheadSec.toFixed(1)}s
                 </p>
               </div>
-              <TrajectoryList steps={steps} activeIndex={activeIndex} live />
+              <TrajectoryList
+                steps={steps}
+                activeIndex={activeIndex}
+                live
+                onStepClick={onStepClick}
+              />
             </div>
           </aside>,
           document.body,
@@ -585,10 +639,12 @@ function TrajectoryList({
   steps,
   activeIndex,
   live = false,
+  onStepClick,
 }: {
   steps: TrajectoryStep[];
   activeIndex: number;
   live?: boolean;
+  onStepClick?: (offsetSec: number) => void;
 }) {
   const activeRef = useRef<HTMLLIElement | null>(null);
 
@@ -606,31 +662,48 @@ function TrajectoryList({
       {steps.map((s, i) => {
         const isActive = i === activeIndex;
         const isPast = activeIndex >= 0 && i < activeIndex;
+        const clickable = typeof onStepClick === 'function';
         return (
           <li
             key={i}
             ref={isActive ? activeRef : undefined}
             data-testid={isActive ? 'recording-active-step' : undefined}
             data-step-index={i}
-            className={`flex items-start gap-2 rounded px-1.5 py-1 ${
-              isActive
-                ? 'bg-foreground/10 ring-1 ring-foreground/20'
-                : isPast
-                  ? 'opacity-70'
-                  : live
-                    ? 'opacity-40'
-                    : ''
-            }`}
+            data-step-offset={s.offsetSec}
           >
-            <span className="w-5 shrink-0 text-right text-muted-foreground">{i + 1}</span>
-            <span
-              className={`shrink-0 font-mono ${
-                s.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground'
+            <button
+              type="button"
+              disabled={!clickable}
+              onClick={() => onStepClick?.(s.offsetSec)}
+              title={clickable ? `Seek recording to t=${s.offsetSec.toFixed(1)}s` : s.title}
+              className={`flex w-full flex-col items-stretch gap-0.5 rounded px-1.5 py-1 text-left ${
+                clickable ? 'cursor-pointer hover:bg-foreground/5' : 'cursor-default'
+              } ${
+                isActive
+                  ? 'bg-foreground/10 ring-1 ring-foreground/20'
+                  : isPast
+                    ? 'opacity-70'
+                    : live
+                      ? 'opacity-40'
+                      : ''
               }`}
             >
-              {s.action}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{s.title}</span>
+              <div className="flex items-start gap-2">
+                <span className="w-5 shrink-0 text-right text-muted-foreground">{i + 1}</span>
+                <span
+                  className={`min-w-0 flex-1 break-words font-mono ${
+                    s.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground'
+                  }`}
+                >
+                  {s.action}
+                </span>
+              </div>
+              {s.title ? (
+                <p className="break-words whitespace-normal pl-7 text-[11px] leading-snug text-foreground/80">
+                  {s.title}
+                </p>
+              ) : null}
+            </button>
           </li>
         );
       })}

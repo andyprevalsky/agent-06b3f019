@@ -154,8 +154,8 @@ async function testDirectFailureFallsThroughToWaterfall(): Promise<void> {
     );
     assert.deepEqual(
       waterfallBody.reasoning,
-      { effort: 'minimal' },
-      'generator fallback must preserve its latency-bounded reasoning effort'
+      { effort: 'low' },
+      'generator fallback maps latency-bounded minimal effort to OpenRouter low'
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -261,10 +261,10 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
       'the GLM race branch must be allowed to spill beyond Cerebras'
     );
     assert.deepEqual(fastBody.response_format, directGeneratorOptions().response_format);
-    assert.equal(
+    assert.deepEqual(
       fastBody.reasoning,
-      undefined,
-      'the fast fallback must not opt into slow provider reasoning'
+      { effort: 'low' },
+      'fast fallback stamps latency-bounded minimal effort as OpenRouter low'
     );
 
     await new Promise((resolve) => setTimeout(resolve, 0));

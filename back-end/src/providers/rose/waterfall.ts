@@ -55,14 +55,22 @@ export function buildOpenRouterBody(opts: {
     messages: normalizeOpenAiToolCalls(opts.messages),
     stream: true,
     stream_options: { include_usage: true },
+    // Always stamp reasoning.effort (default xhigh) so every waterfall step
+    // body is well-formed. OpenRouter accepts max/xhigh/high/medium/low/none.
+    // Map our "minimal" sentinel → "low" (matches gpt_auth / PY waterfall).
+    reasoning: {
+      effort:
+        opts.reasoningEffort === 'max'
+          ? 'xhigh'
+          : opts.reasoningEffort === 'minimal'
+            ? 'low'
+            : (opts.reasoningEffort ?? 'xhigh'),
+    },
   };
   if (opts.responseFormat) body.response_format = opts.responseFormat;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
   if (opts.providerFastMode === true) body.speed = 'fast';
-  if (opts.reasoningEffort !== undefined) {
-    body.reasoning = { effort: opts.reasoningEffort };
-  }
   if (opts.tools) body.tools = opts.tools;
   if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice;
   return body;
