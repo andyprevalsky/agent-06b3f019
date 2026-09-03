@@ -2,7 +2,7 @@ import {
   isIntegrationAuthFailureReason,
   markConnectionNeedsReconnectFromIntegrationFailure,
   syncConnectionAfterIntegrationAuthFailure,
-} from '../domains/compute-grants/integrationConnectionSync';
+} from './integrationConnectionSync';
 import { prisma } from './database';
 import { decryptCredentialEnvelope } from './claudeCredentials';
 import { createLogger } from './logger';

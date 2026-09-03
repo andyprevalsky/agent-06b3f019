@@ -16,7 +16,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
-import { syncConnectionAfterIntegrationAuthFailure } from '../compute-grants/integrationConnectionSync';
+import { syncConnectionAfterIntegrationAuthFailure } from '../../providers/integrationConnectionSync';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';

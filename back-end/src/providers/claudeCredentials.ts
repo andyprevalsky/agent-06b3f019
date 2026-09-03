@@ -3,7 +3,7 @@ import {
   isIntegrationAuthFailureReason,
   markConnectionNeedsReconnectFromIntegrationFailure,
   syncConnectionAfterIntegrationAuthFailure,
-} from '../domains/compute-grants/integrationConnectionSync';
+} from './integrationConnectionSync';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -501,7 +501,7 @@ export async function markUserTokenRateLimited(
     const scopedWhere = {
       userId,
       name: 'claude_code' as const,
-      status: { in: ['CONNECTED', 'EXPIRED'] as const },
+      status: { in: ['CONNECTED', 'EXPIRED'] as Array<'CONNECTED' | 'EXPIRED'> },
       ...(options?.integrationId ? { id: options.integrationId } : {}),
       ...(options?.accountId ? { accountId: options.accountId } : {}),
     };

@@ -577,18 +577,17 @@ export async function markComputeTokenUnavailable(
     return;
   }
 
+  // Pool branch returned above; remaining tokens are user-owned.
   if (token.type === 'claude') {
     await markUserTokenRateLimited(token.userId, {
       ...options,
       accountId: token.accountId,
-      integrationId: token.source === 'pool' ? token.poolTokenId : undefined,
     });
     return;
   }
   await markGptUserTokenRateLimited(token.userId, {
     ...options,
     accountId: token.accountId,
-    integrationId: token.source === 'pool' ? token.poolTokenId : undefined,
   });
 }
 

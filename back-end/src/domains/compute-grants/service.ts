@@ -13,7 +13,7 @@
  * browser dependencies.
  */
 
-import { reconcileConnectionStatesFromIntegrations } from './integrationConnectionSync';
+import { reconcileConnectionStatesFromIntegrations } from '../../providers/integrationConnectionSync';
 import { createLogger } from '../../providers/logger';
 import { ComputeGrantReminter, type GrantMinter } from '../../providers/computeGrantRemint';
 import { registerGrantRecovery, type GrantRecoveryHook } from '../../providers/rose/grantRecovery';

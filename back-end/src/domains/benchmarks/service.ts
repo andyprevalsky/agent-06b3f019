@@ -2,7 +2,7 @@ import { benchmarkAgentPreviewEnabled as benchmarkAgentPreviewEnabledFromConfig 
 import { readCatalogTasks } from './catalog';
 import { createLogger } from '../../providers/logger';
 import { getAgentDetailForPreview } from '../../providers/agentDetailQuery';
-import * as claudeCodeService from '../claude-code/service';
+import { getClaudeCodeSession } from '../../providers/e2b';
 import { computeTaskStats } from './hubCatalogService';
 
 const log = createLogger('Benchmarks');
@@ -107,7 +107,20 @@ export async function getBenchmarkClaudeCodeSessionPreview(taskId: string) {
   if (!benchmarkAgentPreviewEnabled()) {
     return null;
   }
-  return claudeCodeService.getSession(taskId);
+  const session = await getClaudeCodeSession(taskId);
+  if (session === undefined || session === null) {
+    return null;
+  }
+  return {
+    task_id: session.id,
+    sandbox_id: session.sandboxId,
+    stream_url: session.streamUrl,
+    goal: session.goal,
+    status: session.status,
+    output: session.output,
+    created_at: session.createdAt,
+    closed_at: session.closedAt,
+  };
 }
 
 export * from './hubCatalogService';

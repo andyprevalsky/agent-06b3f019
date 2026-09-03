@@ -9,8 +9,8 @@
  * retry later, not prompt re-consent.
  */
 
-import { prisma } from '../../providers/database';
-import { createLogger } from '../../providers/logger';
+import { prisma } from './database';
+import { createLogger } from './logger';
 
 const log = createLogger('IntegrationConnectionSync');
 

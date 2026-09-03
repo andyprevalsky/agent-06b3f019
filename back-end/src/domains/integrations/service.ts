@@ -36,7 +36,7 @@ import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
 import { archiveJson } from '../../providers/traceArchive';
-import { clearConnectionNeedsReconnectFromIntegrationRecovery } from '../compute-grants/integrationConnectionSync';
+import { clearConnectionNeedsReconnectFromIntegrationRecovery } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
 
 const log = createLogger('Integrations');
