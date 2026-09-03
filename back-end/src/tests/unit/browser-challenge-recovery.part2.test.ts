@@ -6,8 +6,11 @@
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import {
+  applyConfigBlacklist,
+  browserRecoveryCandidates,
   buildPreferredBrowserConfig,
   compatiblePreferredBrowserConfig,
+  orderConfigsForLane,
   sameSiteNavigationUrl,
 } from '../../providers/browser/challengeRecovery';
 import { closeValidationBrowser } from '../../providers/browser/challengeRecoverySupport';
@@ -305,13 +308,9 @@ function testSameSiteNavigationUrl(): void {
 }
 
 function testClassifierMessagesSurfaceRecoveryReasonWithoutHardCdnPin(): void {
-  // The model must still see the recovery reason and anti-screenshot-overfit
-  // instructions without hard-pinned CDN wording in the user message block.
-  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /Critical anti-pattern/i);
-  assert.match(
-    CHALLENGE_LLM_SYSTEM_PROMPT,
-    /Do NOT return challenged=false just because the screenshot looks like the real product site/i
-  );
+  // Main-aligned classifier: recovery reason + soft-block network guidance, no hard CDN pin.
+  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /Prefer challenged=true when uncertain/i);
+  assert.match(CHALLENGE_LLM_SYSTEM_PROMPT, /agent recovery reason/i);
 
   const reason =
     'Checkout payment widget never mounted.\n' +
@@ -334,10 +333,11 @@ function testClassifierMessagesSurfaceRecoveryReasonWithoutHardCdnPin(): void {
           .filter((part) => part.type === 'text')
           .map((part) => part.text || '')
           .join('\n');
-  assert.match(text, /Agent recovery reason \(for context\):/i);
+  assert.match(text, /Agent recover_from_challenge reason:/i);
   assert.match(text, /https:\/\/js\.stripe\.com\/v3\//);
-  assert.match(text, /visual context only/i);
+  assert.match(text, /network metadata/i);
 }
+
 
 function testChallengeLlmClassifierCostRouting(): void {
   assert.equal(CHALLENGE_LLM_MODEL, 'rose-labs/rose-1-mini');
@@ -430,8 +430,13 @@ function testProbeAppliesFingerprintBeforeNavigationAndPassesToolParityInputs():
   // iframe markers retained for challenge widgets (tool-parity DOM, not script/style dump)
   assert.match(probeSource, /iframe/);
 
-  const searchStart = source.indexOf('export async function searchAndPromoteBrowserConfig');
-  const searchSource = source.slice(searchStart);
+  const promoteSource = readFileSync(
+    new URL('../../providers/browser/challengeRecoveryPromote.ts', import.meta.url),
+    'utf8'
+  );
+  const searchStart = promoteSource.indexOf('export async function searchAndPromoteBrowserConfig');
+  assert.ok(searchStart >= 0, 'promote composition root must exist');
+  const searchSource = promoteSource.slice(searchStart);
   assert.match(searchSource, /blockedConfigKeys/);
   assert.match(searchSource, /applyConfigBlacklist/);
   assert.match(searchSource, /blacklist_expired/);

@@ -346,15 +346,13 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
   assert.strictEqual(originStorageRestores, 1, 'origin auth is awaited before the clean probe');
   assert.strictEqual(defaultContextCloseCalls, 0, 'the promoted context must remain alive');
   assert.strictEqual(browserCloseCalls, 1, 'only the validation CDP connection is closed');
-  assert.deepStrictEqual(result, {
-    stablePasses: 1,
-    attempts: 1,
-    latencyMs: result.latencyMs,
-    paymentCdnOk: true,
-    paymentCdnHosts: {},
-    classifierLlmUsage: [],
-    settledUrl: 'https://order.online/store/blue-bottle',
-  });
+  assert.strictEqual(result.stablePasses, 1);
+  assert.strictEqual(result.attempts, 1);
+  assert.strictEqual(result.paymentCdnOk, true);
+  assert.deepStrictEqual(result.paymentCdnHosts, {});
+  assert.deepStrictEqual(result.classifierLlmUsage, []);
+  assert.strictEqual(result.settledUrl, 'https://order.online/store/blue-bottle');
+  assert.strictEqual(result.classifierChallenged, false);
 }
 
 function testPaymentCdnProbeUsesNoCorsForHostFetches(): void {

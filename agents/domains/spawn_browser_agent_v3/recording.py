@@ -3512,6 +3512,8 @@ class BrowserNetworkRecorder:
         return self.network_index_path
 
 
+_CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
+
 def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
     """True when the blocked resource should latch sticky require_payment_cdn.
 
@@ -3523,3 +3525,17 @@ def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
     trimmed = str(url).strip()
     return trimmed.startswith("http://") or trimmed.startswith("https://")
 
+def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:
+    """URL to re-verify after promote, or None when CF-clear alone is enough.
+
+    Only critical third-party resource blocks (CDN/script ORB/tunnel) carry a
+    re-verify URL. Same-origin API-challenge exits (e.g. Eventim
+    ``checkaddtocart``) must NOT - GET-probing that path false-fails recovery
+    after a good Steel promote.
+    """
+    if not isinstance(rejection, Mapping):
+        return None
+    if str(rejection.get("reason") or "") != _CRITICAL_RESOURCE_BLOCK_REASON:
+        return None
+    url = str(rejection.get("url") or "").strip()
+    return url or None

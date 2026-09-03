@@ -61,8 +61,17 @@ function testCandidateMatrix(): void {
 }
 
 function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
-  const source = readFileSync(
+  const facade = readFileSync(
     new URL('../../providers/browser/challengeRecovery.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(
+    facade,
+    /export \{ searchAndPromoteBrowserConfig \} from '\.\/challengeRecoveryPromote'/,
+    'challengeRecovery.ts must re-export the promote composition root'
+  );
+  const source = readFileSync(
+    new URL('../../providers/browser/challengeRecoveryPromote.ts', import.meta.url),
     'utf8'
   );
   const searchStart = source.indexOf('export async function searchAndPromoteBrowserConfig');

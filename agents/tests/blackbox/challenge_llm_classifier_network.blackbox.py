@@ -123,10 +123,9 @@ def test_classifier_messages_include_network_block_and_recovery_reason():
     text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
     assert "status=429" in text or "429" in text
     assert "Network metadata" in text
-    assert "Agent recovery reason (for context):" in text
+    assert "Agent recover_from_challenge reason:" in text
     assert "Offers Loading" in text
     assert "truncated" in text.lower()
-    assert "DOM tree" in text
 
 
 def test_soft_block_gate_forces_challenged_when_429_remains():
@@ -141,20 +140,14 @@ def test_soft_block_gate_forces_challenged_when_429_remains():
 
 
 def test_classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn_pin():
-    """23:40 failure mode: screenshot looked fine while js.stripe.com stayed blocked.
-
-    The classifier must still see the recovery reason and anti-screenshot-overfit
-    instructions without hard-pinned CDN wording in the user message block.
-    """
+    """Recovery reason + network soft-block context survive main-aligned classifier prompts."""
     reason = (
         "Checkout payment widget never mounted.\n"
         "Blocked third-party resource that must become reachable/usable: "
         "https://js.stripe.com/v3/"
     )
-    assert "screenshot looks like the real product site" in CHALLENGE_LLM_SYSTEM_PROMPT.lower() or (
-        "screenshot appearance alone never" in CHALLENGE_LLM_SYSTEM_PROMPT.lower()
-    )
-    assert "Evidence priority" in CHALLENGE_LLM_SYSTEM_PROMPT or "Evidence priority" in CHALLENGE_LLM_SYSTEM_PROMPT
+    assert "Prefer challenged=true when uncertain" in CHALLENGE_LLM_SYSTEM_PROMPT
+    assert "agent recovery reason" in CHALLENGE_LLM_SYSTEM_PROMPT.lower()
 
     msgs = build_challenge_classifier_messages(
         {
@@ -170,12 +163,10 @@ def test_classifier_prompt_and_messages_surface_recovery_reason_without_hard_cdn
     system = next(m for m in msgs if m.get("role") == "system")["content"]
     user = next(m for m in msgs if m.get("role") == "user")
     text = user["content"][0]["text"] if isinstance(user["content"], list) else user["content"]
-    assert "Agent recovery reason (for context):" in text
+    assert "Agent recover_from_challenge reason:" in text
     assert "https://js.stripe.com/v3/" in text
-    assert "visual context only" in text.lower()
     assert "network metadata" in text.lower()
-    # System prompt must override screenshot-as-ground-truth overweighting.
-    assert "do not return challenged=false just because the screenshot" in system.lower()
+    assert "failure mode is cleared" in system.lower() or "failure mode is cleared" in text.lower()
 
 
 

@@ -173,7 +173,7 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
     assert "Relatively expensive recovery to forcefully open" in description
     assert "Do not use when an alternate path can complete the goal" in description
-    assert "do not drag sliders" in description
+    assert "Do not drag sliders" in description
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
     assert "parallel cookie-group reductions" in description
@@ -324,7 +324,7 @@ def test_drag_tool_schema_requires_start_and_end():
 
 
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
-    prompt = build_browser_use_system_prompt([])
+    prompt = build_browser_use_system_prompt(["recover_from_challenge"])
 
     assert "- Use the cheapest viable authentication path for this single site." in prompt
     assert "- Priority:\n  - 1. Existing Steel/cookie session" in prompt
