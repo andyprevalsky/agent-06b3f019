@@ -2094,6 +2094,235 @@ def browser_network_recording_enabled() -> bool:
     return browser_recordings_enabled()
 
 
+def provider_exit_monitoring_enabled() -> bool:
+    """Keep the lightweight rejection signal active outside local recordings."""
+    value = os.getenv("BROWSER_AGENT_PROVIDER_EXIT_MONITORING", "").strip().lower()
+    if value in TRUE_VALUES:
+        return True
+    if value in FALSE_VALUES:
+        return False
+    return True
+
+
+_FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
+# Kept for log/search continuity; new exits use CRITICAL_RESOURCE_BLOCK_REASON.
+_PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
+_CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
+_API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
+# Network failures that mean "this exit cannot fetch the resource" — includes
+# ORB and classic proxy tunnel deaths.
+_RESOURCE_BLOCK_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_connection_refused",
+    "err_blocked_by_orb",
+    "err_blocked_by_response",
+    "err_blocked_by_client",
+)
+# Alias used by older call sites / tests.
+_TUNNEL_FAILURE_MARKERS = _RESOURCE_BLOCK_MARKERS
+# Optional noise: blocked analytics must not rotate the browser exit.
+_OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "googleadservices.com",
+    "doubleclick.net",
+    "facebook.net",
+    "facebook.com",
+    "hotjar.com",
+    "segment.com",
+    "segment.io",
+    "mixpanel.com",
+    "amplitude.com",
+    "sentry.io",
+    "newrelic.com",
+    "nr-data.net",
+    "clarity.ms",
+)
+_API_CHALLENGE_HTML_MARKERS = (
+    "access denied",
+    "attention required",
+    "just a moment",
+    "cf-chl-",
+    "/cdn-cgi/challenge-platform",
+    "challenges.cloudflare.com/turnstile",
+)
+_API_CHALLENGE_RESOURCE_TYPES = {"xhr", "fetch", "document"}
+# Cap automatic API-challenge exits so cookie-stage loops cannot be replaced by
+# an unbounded config-search thrash on a permanently blocked endpoint.
+_MAX_API_CHALLENGE_PROVIDER_EXITS = 2
+# Cap automatic critical-resource exit rotations per recorder so a bad proxy
+# cannot thrash recover_from_challenge forever.
+_MAX_CRITICAL_RESOURCE_PROVIDER_EXITS = 2
+# Backward-compat alias (tests + older call sites).
+_MAX_PAYMENT_CDN_PROVIDER_EXITS = _MAX_CRITICAL_RESOURCE_PROVIDER_EXITS
+_MAX_GENERIC_SCRIPT_PROVIDER_EXITS = 1
+
+
+def _host_looks_like_script_cdn(url: str) -> bool:
+    """Shape heuristic: ``js.*`` hosts (no vendor allowlists, no path markers)."""
+    host = (urlparse(url).hostname or "").lower()
+    if host and host.split(".", 1)[0] == "js":
+        return True
+    return False
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """True when both URLs share scheme, host, and effective port."""
+    left = urlparse(a or "")
+    right = urlparse(b or "")
+    if not left.scheme or not right.scheme or not left.hostname or not right.hostname:
+        return False
+    try:
+        left_port = left.port or {"http": 80, "https": 443}.get(left.scheme.lower())
+        right_port = right.port or {"http": 80, "https": 443}.get(right.scheme.lower())
+    except ValueError:
+        return False
+    return (left.scheme.lower(), left.hostname.lower(), left_port) == (
+        right.scheme.lower(),
+        right.hostname.lower(),
+        right_port,
+    )
+
+
+def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
+    """Backward-compatible critical script-CDN tunnel check (no vendor hosts)."""
+    err = (error_text or "").lower()
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
+        return False
+    return _host_looks_like_script_cdn(url or "")
+
+
+def _is_critical_resource_block(
+    url: str,
+    error_text: str,
+    *,
+    resource_type: str = "",
+    document_url: str | None = None,
+) -> bool:
+    """True when a page-critical third-party request is blocked on this exit.
+
+    Shape-based only: js.*/script-like hosts OR cross-origin ``script`` resources
+    that die with tunnel/ORB/client-block errors. Soft third-parties (analytics)
+    never rotate. No vendor host allowlists.
+    """
+    err = (error_text or "").lower()
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if any(fragment in host for fragment in _OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS):
+        return False
+    if _host_looks_like_script_cdn(url or ""):
+        # First-party script failures stay on the page; only third-party CDNs rotate.
+        if document_url and _same_origin(url or "", document_url):
+            return False
+        return True
+    if (resource_type or "").lower() != "script":
+        return False
+    if document_url:
+        return not _same_origin(url or "", document_url)
+    return True
+
+
+_API_CHALLENGE_LARGE_HTML_BYTES = 20_000
+_STATIC_ASSET_SUFFIXES = (
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".css",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".webp",
+    ".mp4",
+    ".webm",
+    ".map",
+)
+
+
+def _url_looks_like_static_asset(url: str) -> bool:
+    path = (urlparse(url).path or "").lower()
+    return any(path.endswith(suffix) for suffix in _STATIC_ASSET_SUFFIXES)
+
+
+def _is_api_challenge_html_response(
+    *,
+    status: Any,
+    url: str,
+    resource_type: str,
+    mime_type: str,
+    body_bytes: bytes,
+    document_url: str | None = None,
+) -> bool:
+    """True when a same-tab XHR/fetch/document returns CF challenge HTML.
+
+    Document GET can look clean while same-origin POSTs 403 with a large
+    challenge page. Cookie-stage recovery only GET-probes the document URL and
+    false-succeeds; treat the API challenge as a provider-exit signal instead.
+    When ``document_url`` is provided, require same-origin with ``url`` so a
+    third-party 403 HTML body cannot rotate the exit.
+
+    No cart/checkout path allowlists. Large HTML 403s count unless the URL is a
+    static asset (fonts/css/images) — those are not API challenge pages.
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if code != 403:
+        return False
+    resource = (resource_type or "").lower()
+    if resource and resource not in _API_CHALLENGE_RESOURCE_TYPES:
+        return False
+    if not (url or "").startswith("http"):
+        return False
+    if document_url and not _same_origin(url, document_url):
+        return False
+    sample = body_bytes[:12_000].decode("utf-8", errors="ignore").lower()
+    mime = (mime_type or "").lower()
+    looks_html = "html" in mime or "<html" in sample[:800] or "<!doctype html" in sample[:800]
+    if not looks_html:
+        return False
+    if any(marker in sample for marker in _API_CHALLENGE_HTML_MARKERS):
+        return True
+    if _url_looks_like_static_asset(url):
+        return False
+    return len(body_bytes) >= _API_CHALLENGE_LARGE_HTML_BYTES
+
+
+def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
+    """Rotate on critical third-party blocks for any real document URL.
+
+    No payment/checkout path allowlists and no inventory-path exclusions —
+    exit caps bound thrash instead.
+    """
+    return bool((document_url or "").strip())
+
+
+def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
+    """Treat a poison warning as an exit only when its enclosing verdict did not pass."""
+    if isinstance(value, dict):
+        recommendation = " ".join(str(value.get("recommendation") or "").strip().lower().split())
+        accepted_detections = value.get("success") is True and recommendation == "allow"
+        category = str(value.get("category") or "").strip().lower()
+        reason = " ".join(str(value.get("reason") or "").strip().lower().split())
+        if category == "fingerprint" and reason == _FINGERPRINT_POISON_REASON:
+            return True
+        return any(
+            _contains_actionable_fingerprint_poison_detection(item)
+            for key, item in value.items()
+            if not (accepted_detections and key == "detections")
+        )
+    if isinstance(value, list):
+        return any(_contains_actionable_fingerprint_poison_detection(item) for item in value)
+    return False
+
+
 def _captured_request_body(
     post_data: Any,
     *,
@@ -2258,6 +2487,11 @@ class BrowserNetworkRecorder:
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
+        self._provider_exit_rejections: List[Dict[str, Any]] = []
+        self._rejected_network_generations: set[int] = set()
+        self._payment_cdn_provider_exits = 0
+        self._generic_script_provider_exits = 0
+        self._api_challenge_provider_exits = 0
         self._cdp_client: Any = None
         self._network_cdp_session_id: str | None = None
         # CDP requestId values are scoped to one remote browser connection and
@@ -2311,7 +2545,7 @@ class BrowserNetworkRecorder:
         output_dir: Path,
     ) -> Optional["BrowserNetworkRecorder"]:
         persist_network_log = browser_network_recording_enabled()
-        if not persist_network_log or not task_id or not session_id:
+        if (not persist_network_log and not provider_exit_monitoring_enabled()) or not task_id or not session_id:
             return None
         if not hasattr(browser_session, "get_or_create_cdp_session"):
             logger.warning(
@@ -3063,14 +3297,99 @@ class BrowserNetworkRecorder:
             self._ignored_request_ids.discard(request_key)
             self._active_request_ids.discard(request_key)
         entry = self.entries.get(request_key) if request_id and request_key else None
+        meta = None
         if request_id and request_key:
             active_meta = getattr(self, "_active_request_meta", None)
             if active_meta is not None:
-                active_meta.pop(request_key, None)
+                meta = active_meta.pop(request_key, None)
         if entry is not None:
             entry["failed"] = True
             entry["failure"] = event.get("errorText")
             entry["terminal"] = True
+        # Prefer the capture row; fall back to meta retained across entry eviction
+        # so provider-exit classification still runs for in-flight critical scripts.
+        source = entry if entry is not None else meta
+        if not request_id or source is None:
+            return
+        # Critical third-party script/CDN died with tunnel/ORB — rotate the
+        # provider exit so recovery searches a fresh IP before the agent loops.
+        entry_generation = int(source.get("browser_generation") or generation or 0)
+        current_generation = int(getattr(self, "_network_generation", entry_generation))
+        rejected_generations = getattr(self, "_rejected_network_generations", set())
+        document_url = str(source.get("document_url") or "")
+        if (
+            entry_generation == current_generation
+            and entry_generation not in rejected_generations
+            and _is_critical_resource_block(
+                str(source.get("url") or ""),
+                str(event.get("errorText") or ""),
+                resource_type=str(source.get("resource_type") or ""),
+                document_url=document_url or None,
+            )
+        ):
+            if not _document_warrants_payment_cdn_exit(document_url):
+                logger.info(
+                    "Ignoring critical resource block on empty document URL",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    browser_generation=entry_generation,
+                    document_url=_redact_url_query(document_url),
+                    url=_redact_url_query(str(source.get("url") or "")),
+                )
+            else:
+                blocked_url = str(source.get("url") or "")
+                blocked_url_is_script_cdn = _host_looks_like_script_cdn(blocked_url)
+                payment_exits = int(getattr(self, "_payment_cdn_provider_exits", 0))
+                generic_exits = int(getattr(self, "_generic_script_provider_exits", 0))
+                if blocked_url_is_script_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
+                    logger.warning(
+                        "Critical resource block ignored: provider-exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
+                    )
+                elif (
+                    not blocked_url_is_script_cdn
+                    and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
+                ):
+                    logger.warning(
+                        "Critical resource block ignored: generic-script exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_GENERIC_SCRIPT_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(entry_generation)
+                    self._rejected_network_generations = rejected_generations
+                    if blocked_url_is_script_cdn:
+                        self._payment_cdn_provider_exits = payment_exits + 1
+                    else:
+                        self._generic_script_provider_exits = generic_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
+                            "url": _redact_url_query(blocked_url),
+                            "browser_generation": entry_generation,
+                            "document_url": _redact_url_query(document_url),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: critical third-party resource blocked",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(str(source.get("url") or "")),
+                        error=event.get("errorText"),
+                    )
 
     async def _fetch_response_body(
         self,
@@ -3096,6 +3415,79 @@ class BrowserNetworkRecorder:
             truncated = original_size > self._max_body_bytes
             if truncated:
                 body_bytes = body_bytes[: self._max_body_bytes]
+
+            generation = int(entry.get("browser_generation") or 0)
+            current_generation = int(getattr(self, "_network_generation", generation))
+            rejected_generations = getattr(self, "_rejected_network_generations", set())
+            if "json" in str(entry.get("mime_type", "")).lower():
+                with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+                    payload = json.loads(body_bytes.decode("utf-8"))
+                    if (
+                        generation == current_generation
+                        and generation not in rejected_generations
+                        and _contains_actionable_fingerprint_poison_detection(payload)
+                    ):
+                        rejected_generations.add(generation)
+                        self._rejected_network_generations = rejected_generations
+                        rejections = getattr(self, "_provider_exit_rejections", [])
+                        rejections.append(
+                            {
+                                "reason": _FINGERPRINT_POISON_REASON,
+                                "url": _redact_url_query(str(entry.get("url") or "")),
+                                "browser_generation": generation,
+                            }
+                        )
+                        self._provider_exit_rejections = rejections
+                        logger.warning(
+                            "Browser provider exit explicitly rejected by fingerprint detector",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=generation,
+                        )
+            if (
+                generation == current_generation
+                and generation not in rejected_generations
+                and _is_api_challenge_html_response(
+                    status=entry.get("status"),
+                    url=str(entry.get("url") or ""),
+                    resource_type=str(entry.get("resource_type") or ""),
+                    mime_type=str(entry.get("mime_type") or ""),
+                    body_bytes=body_bytes,
+                    document_url=entry.get("document_url"),
+                )
+            ):
+                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
+                    logger.warning(
+                        "API challenge HTML provider-exit ignored: cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(generation)
+                    self._rejected_network_generations = rejected_generations
+                    self._api_challenge_provider_exits = api_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _API_CHALLENGE_HTML_REASON,
+                            "url": _redact_url_query(str(entry.get("url") or "")),
+                            "browser_generation": generation,
+                            "status": entry.get("status"),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: API returned challenge HTML",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        status=entry.get("status"),
+                    )
 
             entry.update(
                 {
@@ -3139,6 +3531,13 @@ class BrowserNetworkRecorder:
                 url=entry.get("url"),
                 error=str(exc),
             )
+
+    def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
+        """Consume one explicit rejection verdict for the active browser exit."""
+        rejections = getattr(self, "_provider_exit_rejections", [])
+        if not rejections:
+            return None
+        return rejections.pop(0)
 
     def query_requests(  # noqa: C901
         self,
@@ -3512,8 +3911,6 @@ class BrowserNetworkRecorder:
         return self.network_index_path
 
 
-_CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
-
 def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
     """True when the blocked resource should latch sticky require_payment_cdn.
 
@@ -3525,12 +3922,13 @@ def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
     trimmed = str(url).strip()
     return trimmed.startswith("http://") or trimmed.startswith("https://")
 
+
 def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:
     """URL to re-verify after promote, or None when CF-clear alone is enough.
 
     Only critical third-party resource blocks (CDN/script ORB/tunnel) carry a
     re-verify URL. Same-origin API-challenge exits (e.g. Eventim
-    ``checkaddtocart``) must NOT - GET-probing that path false-fails recovery
+    ``checkaddtocart``) must NOT — GET-probing that path false-fails recovery
     after a good Steel promote.
     """
     if not isinstance(rejection, Mapping):
@@ -3539,3 +3937,4 @@ def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> st
         return None
     url = str(rejection.get("url") or "").strip()
     return url or None
+
