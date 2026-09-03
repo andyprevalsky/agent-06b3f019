@@ -87,7 +87,11 @@ def _history_entries(
     action_summaries: Iterable[Any] | None = None,
     action_entries: Iterable[Any] | None = None,
 ) -> list[str]:
-    return [_entry_blob(entry).lower() for entry in list(action_summaries or []) + list(action_entries or [])]
+    # Prefer structured action_entries when present — they are the chronological
+    # source of truth. Concatenating summaries+entries doubles the timeline and
+    # breaks submit/navigation index comparisons (CodeRabbit).
+    source = list(action_entries or []) or list(action_summaries or [])
+    return [_entry_blob(entry).lower() for entry in source]
 
 
 def history_has_submit_click(

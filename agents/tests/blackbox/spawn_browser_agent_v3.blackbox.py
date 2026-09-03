@@ -392,6 +392,45 @@ def test_visible_result_completion_ignores_pre_navigation_evidence_after_later_s
     )
 
 
+def test_visible_result_completion_prefers_entries_over_concatenated_summaries():
+    """Passing both summaries and entries must not concatenate timelines.
+
+    Handler always passes both. Concatenating summaries then entries makes a
+    navigate that only appears in summaries look like it precedes a later
+    submit that only appears in entries (or vice versa), breaking index math.
+    Prefer action_entries when present.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stated = 'Risk Score 0.11, Bot detected - form blocked'
+    # Summaries alone would show navigate AFTER submit (block force).
+    summaries = [
+        'click: {"text": "Submit (Protected by Invisible"}',
+        'navigate: https://webdecoy.com/other',
+    ]
+    # Entries alone: submit only, no navigate (would allow force).
+    entries = [
+        {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+    ]
+    # If concatenated (summaries+entries), last submit is in the entries half
+    # after navigate → nav_before_latest_submit true OR nav_after depending on
+    # indices. Preferring entries must allow force (no nav in entries).
+    assert should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning=stated,
+        action_summaries=summaries,
+        action_entries=entries,
+    )
+    # Summaries-only still respects navigate-after-submit.
+    assert not should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning=stated,
+        action_summaries=summaries,
+    )
+
+
 def test_visible_result_completion_does_not_rewrite_before_submit():
     from domains.spawn_browser_agent_v3.visible_result_completion import (
         should_force_visible_result_completion,
@@ -19344,6 +19383,14 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_does_not_rewrite_after_navigation",
         test_visible_result_completion_does_not_rewrite_after_navigation,
+    )
+    r.record(
+        "visible_result_completion_ignores_pre_navigation_evidence_after_later_submit",
+        test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit,
+    )
+    r.record(
+        "visible_result_completion_prefers_entries_over_concatenated_summaries",
+        test_visible_result_completion_prefers_entries_over_concatenated_summaries,
     )
     r.record(
         "visible_result_completion_does_not_rewrite_before_submit",
