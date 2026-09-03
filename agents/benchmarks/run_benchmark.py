@@ -8946,6 +8946,32 @@ async def _call_declared_agentic_llm_judge(
     return {"score": score, "reasoning": reasoning, "usage": usage}
 
 
+async def _resolve_benchmark_claude_max_token() -> tuple[Optional[str], Optional[str]]:
+    """Fetch the current benchmark user's Claude Max OAuth token when available.
+
+    Declared LLM judges (e.g. cuda-kernel ``top100-repo-quality``) force
+    ``rose-1-ultra``. When OpenRouter/Anthropic API keys are out of credits the
+    waterfall returns empty JSON and the evaluator fails as infrastructure, not
+    quality (cuda-kernel k=3 r13). Passing the user's Claude Max OAuth token
+    routes the judge through Rose→Anthropic direct at $0.
+    """
+    from helpers.llm import fetch_claude_max_token
+
+    user_id = _current_benchmark_user_id()
+    try:
+        result = await fetch_claude_max_token(user_id)
+    except Exception as exc:
+        print(f"  ⚠ Claude Max token fetch failed for judge user {user_id}: {exc}")
+        return None, None
+    if not result:
+        return None, None
+    token = result.get("accessToken") or result.get("access_token")
+    source = result.get("source")
+    if not token:
+        return None, None
+    return str(token), str(source) if source else "user"
+
+
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
@@ -8972,6 +8998,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
+    claude_token, claude_token_source = await _resolve_benchmark_claude_max_token()
     return await check_progress(
         context=[
             {
@@ -8987,6 +9014,9 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         response_schema=None,
         call_site="benchmark_declared_evaluator",
         agent_id=(data.get("agent") or {}).get("agent_id") or (data.get("agent") or {}).get("id"),
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_user_id=_current_benchmark_user_id() if claude_token else None,
     )
 
 

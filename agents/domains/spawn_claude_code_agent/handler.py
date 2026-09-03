@@ -72,6 +72,26 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
     return any(m in text for m in markers)
 
 
+def _is_recoverable_claude_billing_failure(error: BaseException) -> bool:
+    """True when Claude Code session create failed on Anthropic org billing.
+
+    Local repro (cuda-kernel k=3 r13, 2026-09-03): user Claude OAuth is accepted
+    for the Messages API, but session create returns ``403: team is blocked:
+    missing payment method`` (or credit-balance-too-low). Hard-ERROR trips
+    ``no_tool_failures`` even though the agent can retry later or continue with
+    non-CC tools. Soft-FINISH instead.
+    """
+    text = extract_error_message(error).upper()
+    markers = (
+        "MISSING PAYMENT METHOD",
+        "TEAM IS BLOCKED",
+        "CREDIT BALANCE IS TOO LOW",
+        "TOO LOW TO ACCESS THE ANTHROPIC API",
+        "YOUR CREDIT BALANCE IS TOO LOW",
+    )
+    return any(m in text for m in markers)
+
+
 def _soft_fail_github_clone_denial_result(
     *, code_provider: Optional[str], error: BaseException
 ) -> Dict[str, Any]:
@@ -104,12 +124,37 @@ def _soft_fail_sandbox_infra_result(
     }
 
 
+def _soft_fail_claude_billing_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Dict[str, Any]:
+    detail = extract_error_message(error)
+    return {
+        "success": False,
+        "message": (
+            "Code session could not start because Claude Code credentials hit an "
+            f"Anthropic billing/payment block ({detail}). Do not treat this as a "
+            "task failure. Retry spawn_claude_code_agent once later if needed, "
+            "prefer a single session at a time, and continue discovery with "
+            "non-code-agent tools (web_search / GitHub API) when Claude Code is "
+            "unavailable."
+        ),
+        "code_provider": code_provider,
+    }
+
+
 def _maybe_soft_fail_session_create_result(
     *, code_provider: Optional[str], error: BaseException
 ) -> Optional[Dict[str, Any]]:
     """Map recoverable session-create failures to soft-fail tool results."""
     if _is_recoverable_github_clone_denial(error):
         return _soft_fail_github_clone_denial_result(
+            code_provider=code_provider, error=error
+        )
+    # Billing markers must win over the broad sandbox "FAILED TO CREATE CODE
+    # SESSION" substring — otherwise Anthropic payment blocks are mislabeled as
+    # capacity flakes (cuda-kernel k=3 r13).
+    if _is_recoverable_claude_billing_failure(error):
+        return _soft_fail_claude_billing_result(
             code_provider=code_provider, error=error
         )
     if _is_recoverable_sandbox_infra_failure(error):

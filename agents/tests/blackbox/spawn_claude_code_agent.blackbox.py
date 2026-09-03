@@ -2763,9 +2763,14 @@ async def _assert_cc_sandbox_infra_soft_fail(activity_message: str, tool_call_id
     finished = next(e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED)
     assert finished.metadata.get("success") is False
     assert finished.metadata.get("action_type") == "task_complete"
-    assert "capacity" in finished.message.lower() or "sandbox" in finished.message.lower()
-    assert "retry" in finished.message.lower()
-
+    msg = finished.message.lower()
+    assert (
+        "capacity" in msg
+        or "sandbox" in msg
+        or "billing" in msg
+        or "payment" in msg
+    ), finished.message
+    assert "retry" in msg
 
 async def test_cc_execute_tool_sandbox_infra_soft_fails_finished():
     """E2B redis/sandbox capacity flakes must FINISH (not ERROR) for no_tool_failures.
@@ -2797,6 +2802,22 @@ async def test_cc_execute_tool_no_healthy_upstream_soft_fails_finished():
             '{"error":"503: no healthy upstream"}'
         ),
         "tc-sandbox-503",
+    )
+
+
+async def test_cc_execute_tool_missing_payment_method_soft_fails_finished():
+    """Anthropic team payment-method blocks must soft-FINISH like capacity flakes.
+
+    Local repro (cuda-kernel k=3 r13): Claude OAuth works for Messages API, but
+    session create returns ``403: team is blocked: missing payment method``.
+    Soft-fail so no_tool_failures stays green while the agent continues.
+    """
+    await _assert_cc_sandbox_infra_soft_fail(
+        (
+            "Failed to create code session (provider=claude): HTTP 500: "
+            '{"error":"403: team is blocked: missing payment method"}'
+        ),
+        "tc-missing-payment",
     )
 
 
@@ -3041,6 +3062,10 @@ async def run_all_tests():
     await r.record_async(
         "cc_exec_no_healthy_upstream_soft_fail",
         test_cc_execute_tool_no_healthy_upstream_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_missing_payment_method_soft_fail",
+        test_cc_execute_tool_missing_payment_method_soft_fails_finished,
     )
     r.record(
         "cc_spawn_activity_retries_capacity_flakes",
