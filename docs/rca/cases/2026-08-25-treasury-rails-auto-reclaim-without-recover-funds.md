@@ -14,11 +14,11 @@ symptoms:
 tags:
   - treasury-rails
   - agentcard
-  - recover_funds
+  - recover-funds
   - harness-contract
   - deploy-gate
 sources:
-  - /workspace/back-end/coverage/blackbox-run/treasury-rails.log (deploy coverage 2026-08-25)
+  - commit 88ae5ce1b
 repro: cd back-end && npx tsx src/tests/blackbox/treasury-rails.blackbox.ts
 status: fixed
 ---
@@ -37,6 +37,15 @@ Solo retries sometimes passed via the residual path; under the full coverage sui
 AgentCard more often settled by reclaiming the mint transfer directly without
 exposing cardholder residual.
 
+## Diagnosis
+
+The test modeled `recover_funds` residual yield as the only successful outcome,
+but the production state machine has two valid settlement paths. When automatic
+mint-transfer reclaim completed first, the test ignored the already-satisfied
+money invariant and waited for an event that correctly would never occur. The
+first bad boundary was therefore the blackbox oracle, whose accepted states did
+not match the production settlement contract.
+
 ## Solution
 
 `waitForRecoverable` now succeeds when either:
@@ -53,3 +62,11 @@ Pre-fix (coverage run): transfer JSON at timeout
 
 Post-fix (same blackbox):
 `(transfer already reclaimed with $13.00 on attempt 13; recover_funds not needed)` → PASS.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+Assert the durable business invariant across every valid state-machine success path instead of requiring one incidental event sequence.

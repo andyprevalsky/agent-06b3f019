@@ -5,7 +5,7 @@ title: Browser agent waits out the 420s cap after already stating the FCaptcha s
 surface: agents
 component: spawn-browser-agent-v3 / visible_result_completion
 classification: our-bug
-problem_class: loop-after-visible-success
+problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: "agents/domains/spawn_browser_agent_v3/handler.py live action loop — executes post-submit wait after reasoning already stated risk score + verdict"
 symptoms:
   - browser-biometrics-webdecoy smoke timeout / PAUSED at 426s / cap 420s
@@ -21,7 +21,6 @@ tags:
 sources:
   - agent c3762be3-59be-4aa4-af6c-83d8eed9aeb9
   - PR #1209
-  - relative of 2026-09-02-browser-biometrics-drag-record-action-tuple
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_visible_result_completion_rewrites_post_submit_wait
 status: fixed
 ---
@@ -59,6 +58,10 @@ already states the visible FCaptcha score and verdict. Do not raise the 420s
 smoke cap. Cement
 `test_visible_result_completion_rewrites_post_submit_wait` and the negative
 cases (no submit yet, non-wait action, no score).
+
+## Human feedback
+
+None recorded.
 
 ## Reusable lesson
 

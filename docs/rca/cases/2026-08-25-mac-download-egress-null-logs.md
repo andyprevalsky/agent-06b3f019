@@ -17,8 +17,7 @@ tags:
   - mac-app
   - monitor
 sources:
-  - https://github.com/Rose-Ai-Labs/rose/actions/runs/32897589028
-  - /tmp/mac-dl-art/report.json
+  - commit dae9b0c3f
 repro: cd back-end && DOWNLOAD_EGRESS_REPORT_PATH=/tmp/dl-egress-repro/report.json npx tsx scripts/download-egress-health.ts
 status: fixed
 ---
@@ -36,6 +35,14 @@ became a diagnostic incident. `prod-health.ts` already used `data.logs || []`.
 
 Archive search (`Render logs query returned no logs array download egress`,
 `download egress Render telemetry`): no prior case on this contract.
+
+## Diagnosis
+
+The monitor treated the optional `logs` collection as malformed whenever it
+was null, although Render uses null to represent a valid empty result window.
+That boundary converted healthy quiet periods into diagnostic failures. The
+deepest owned gap was that the response decoder did not distinguish an absent
+collection from a collection with an invalid non-array type.
 
 ## Solution
 
@@ -60,3 +67,11 @@ Live Render empty filter:
 ```
 
 Post-fix: same command exits 0 with empty diagnostic-failure list.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+Normalize a documented null collection to empty at the provider boundary while continuing to reject values of the wrong type.

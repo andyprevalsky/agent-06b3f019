@@ -2,7 +2,7 @@
 id: 2026-08-31-guest-recovery-prefers-known-challenge-over-all-target
 date: 2026-08-31
 title: Guest fresh-cookie recovery preferred weak known_challenge strip over all_target
-surface: browser
+surface: agents
 component: recover_from_challenge allow_logged_out_cookie_commit / auth_cookies_are_preserved
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
@@ -20,7 +20,7 @@ tags:
   - graphql-429
 sources:
   - agent 58721c46-7b48-4d2f-97a5-7131a1ddc222
-  - run 20260831_001446_browser-hotel-booking
+  - fleet run 20260831_001446_browser-hotel-booking
 repro: cd agents && source venv/bin/activate && python tests/blackbox/challenge_recovery.blackbox.py guest_path_prefers_all_target_over_known_challenge
 status: fixed
 ---
@@ -56,3 +56,7 @@ commit all-target **before** considering known-challenge. Cemented by
 
 User (2026-08-30): `auth_cookies_are_preserved=false` means explore fresh cookie
 state (may lose auth; may clear poisoned anti-bot cookie).
+
+## Reusable lesson
+
+When an explicit recovery mode authorizes a broader clean state, prefer that proven state over a weaker subset that can retain the original blocker.

@@ -5,7 +5,7 @@ title: Browser-use drag advertised but missing from service_actions dispatcher
 surface: agents
 component: spawn-browser-agent-v3 / service_actions
 classification: our-bug
-problem_class: advertised-tool-missing-from-runtime-dispatcher
+problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: "agents/domains/spawn_browser_agent_v3/service_actions.py `_INTERACTION_ACTIONS` — omitted `drag` while providers/rose/browser_use.py advertises it"
 symptoms:
   - browser-biometrics-webdecoy smoke timeout / PAUSED
@@ -46,6 +46,10 @@ unknown-action steps plus post-success scrolling without `done`.
 
 Register `drag` in `_INTERACTION_ACTIONS` and dispatch to `_execute_drag`.
 Cement with a blackbox that fails closed if drag returns Unknown action.
+
+## Human feedback
+
+None recorded.
 
 ## Reusable lesson
 
