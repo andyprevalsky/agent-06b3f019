@@ -6117,20 +6117,24 @@ async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_mo
 
 
 def test_post_verifier_rejection_browser_state_fetch_is_bounded():
-    """After a durable verifier rejection, refreshing browser state must stay bounded.
+    """After a durable verifier rejection, refreshing browser state must stay soft-bounded.
 
     polar-odysseys-440ed7f388a2 TREE STALL: challenge freeze left CDP hung, so
     the post-reject `get_browser_state` burned the full 300s BrowserStateRequest
     timeout with no further durable messages while Temporal keepalive heartbeats
     kept the activity alive. Tree-stall correctly paused at ~510s of silence.
     The rejection message was already persisted — this refresh is optional and
-    must not sit inside the verifier try/except as an unbounded CDP await.
+    must go through `_get_browser_state_soft` (≈10s × 2), never a bare CDP await
+    inside the verifier try/except.
     """
     import ast
     import inspect
     import textwrap
 
-    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3 import config, handler
+
+    assert config.BROWSER_STATE_SOFT_TIMEOUT_SECONDS == 10.0
+    assert config.BROWSER_STATE_SOFT_ATTEMPTS == 2
 
     source = textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real))
     tree = ast.parse(source)
@@ -6146,51 +6150,87 @@ def test_post_verifier_rejection_browser_state_fetch_is_bounded():
     assert reject_title_nodes, "expected Verifier rejected title in attempt_completion path"
     reject_lineno = min(node.lineno for node in reject_title_nodes)
 
-    unbounded_gets = []
+    soft_calls = []
+    bare_gets = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Await) or node.lineno < reject_lineno:
+            continue
+        if node.lineno >= reject_lineno + 80:
             continue
         call = node.value
         if not isinstance(call, ast.Call):
             continue
         func = call.func
-        if not (
+        if isinstance(func, ast.Name) and func.id == "_get_browser_state_soft":
+            soft_calls.append(node.lineno)
+            continue
+        if (
             isinstance(func, ast.Attribute)
             and func.attr == "get_browser_state"
             and isinstance(func.value, ast.Name)
             and func.value.id == "dom_service"
         ):
-            continue
-        # Walk parents via lineno window: bounded form is await asyncio.wait_for(...)
-        # Unbounded form is bare await dom_service.get_browser_state(...).
-        parent_wait = None
-        for parent in ast.walk(tree):
-            if not isinstance(parent, ast.Await):
-                continue
-            inner = parent.value
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr == "wait_for"
-                and isinstance(inner.func.value, ast.Name)
-                and inner.func.value.id == "asyncio"
-                and any(
-                    isinstance(arg, ast.Call)
-                    and isinstance(arg.func, ast.Attribute)
-                    and arg.func.attr == "get_browser_state"
-                    for arg in inner.args
-                )
-                and parent.lineno <= node.lineno <= parent.end_lineno
-            ):
-                parent_wait = parent
-                break
-        if parent_wait is None and node.lineno < reject_lineno + 80:
-            unbounded_gets.append(node.lineno)
+            bare_gets.append(node.lineno)
 
-    assert not unbounded_gets, (
-        "post-verifier-rejection get_browser_state must be wrapped in "
-        f"asyncio.wait_for; found unbounded await at line(s) {unbounded_gets}"
+    assert soft_calls, (
+        "post-verifier-rejection path must await _get_browser_state_soft; "
+        "found none after Verifier rejected"
     )
+    assert not bare_gets, (
+        "post-verifier-rejection path must not bare-await get_browser_state; "
+        f"found unbounded await at line(s) {bare_gets}"
+    )
+
+
+async def test_get_browser_state_soft_retries_then_returns_none_on_hang():
+    """Soft fetch times out per attempt, retries once, then returns None."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _get_browser_state_soft
+
+    calls = {"n": 0}
+
+    async def hang(*, include_screenshot: bool = False):
+        calls["n"] += 1
+        await asyncio.Event().wait()
+
+    started = asyncio.get_event_loop().time()
+    out = await _get_browser_state_soft(
+        SimpleNamespace(get_browser_state=hang),
+        include_screenshot=False,
+        timeout_seconds=0.05,
+        attempts=2,
+    )
+    elapsed = asyncio.get_event_loop().time() - started
+    assert out is None
+    assert calls["n"] == 2
+    assert 0.08 <= elapsed < 0.5, elapsed
+
+
+async def test_get_browser_state_soft_retries_after_timeout_then_succeeds():
+    """A single soft timeout is retried and can still return state."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _get_browser_state_soft
+
+    calls = {"n": 0}
+
+    async def flaky(*, include_screenshot: bool = False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.sleep(1)
+        return {"url": "https://example.com", "screenshot": None}
+
+    out = await _get_browser_state_soft(
+        SimpleNamespace(get_browser_state=flaky),
+        include_screenshot=False,
+        timeout_seconds=0.05,
+        attempts=2,
+    )
+    assert out == {"url": "https://example.com", "screenshot": None}
+    assert calls["n"] == 2
 
 
 async def test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite():
@@ -19829,6 +19869,14 @@ async def run_all_tests():
     r.record(
         "post_verifier_rejection_browser_state_fetch_bounded",
         test_post_verifier_rejection_browser_state_fetch_is_bounded,
+    )
+    await r.record_async(
+        "get_browser_state_soft_retries_then_none",
+        test_get_browser_state_soft_retries_then_returns_none_on_hang,
+    )
+    await r.record_async(
+        "get_browser_state_soft_retries_then_succeeds",
+        test_get_browser_state_soft_retries_after_timeout_then_succeeds,
     )
     await r.record_async(
         "recovery_preloaded_solver_cookies",

@@ -79,14 +79,16 @@ the Jul 2 keepalive-vs-silence class; novel at the post-verifier-reject site.
 
 ## Solution
 
-Proposed (pending approval; not landed):
+Landed:
 
-1. Wrap the post-reject `get_browser_state` in `asyncio.wait_for` (same supervisor
-   bound as sibling calls — do not raise TREE STALL / browser-state caps).
-2. Isolate refresh failures so they cannot become `Verification failed` or skip
-   `_append_browser_turn_messages` / `record_action` for the rejection.
-3. On timeout/error, continue with `screenshot=None` after the durable reject.
-4. Keep the new blackbox in the spawn_browser_agent_v3 suite.
+1. Added `BROWSER_STATE_SOFT_TIMEOUT_SECONDS=10` and `BROWSER_STATE_SOFT_ATTEMPTS=2`
+   (healthy IDLE gaps on the failing run sit near ~12s p95; 10s is the agreed
+   soft bound). Main action-loop still uses the challenge-survival 300s budget.
+2. Added `_get_browser_state_soft` — `asyncio.wait_for` per attempt, one retry,
+   returns `None` on exhaustion.
+3. Post-verifier-reject refresh calls the soft helper so CDP hangs cannot become
+   `Verification failed` or burn ~300s of silence after a durable reject.
+4. Blackbox: structural soft-call guard + retry/hang behavioral tests.
 
 Exact polar `scripts/run-bench --local polar-odysseys-440ed7f388a2` fail→pass
 remains required before marking this case fixed.

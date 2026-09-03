@@ -162,6 +162,17 @@ BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS = int(
 BROWSER_SUPERVISOR_MAX_RECOVERIES = int(os.getenv("BROWSER_SUPERVISOR_MAX_RECOVERIES", "8"))
 BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS = float(os.getenv("BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS", "5"))
 
+# Soft/optional get_browser_state budget (post-verifier reject screenshot, etc.).
+# Healthy IDLE gaps on browser runs sit near ~12s p95; 10s is the agreed soft
+# bound. One retry keeps transient CDP blips from dropping the refresh while
+# still finishing in << TREE STALL silence (~510s). Do NOT use this for the
+# main action-loop fetch — that path still needs the challenge-survival
+# BrowserStateRequest budget (90–260s freezes).
+BROWSER_STATE_SOFT_TIMEOUT_SECONDS = float(
+    os.getenv("BROWSER_STATE_SOFT_TIMEOUT_SECONDS", "10")
+)
+BROWSER_STATE_SOFT_ATTEMPTS = int(os.getenv("BROWSER_STATE_SOFT_ATTEMPTS", "2"))
+
 # MIME type mappings for file downloads
 MIME_TYPE_MAP = {
     "pdf": "application/pdf",

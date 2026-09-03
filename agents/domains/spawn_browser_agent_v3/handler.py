@@ -72,6 +72,8 @@ from .config import (
     browser_start_to_close_timeout_minutes,
     skip_browser_network_recording,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
+    BROWSER_STATE_SOFT_ATTEMPTS,
+    BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_MAX_RECOVERIES,
     BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
@@ -2131,6 +2133,50 @@ def _append_browser_turn_messages(
                 ],
             }
         )
+
+
+async def _get_browser_state_soft(
+    dom_service: Any,
+    *,
+    include_screenshot: bool = False,
+    timeout_seconds: float = BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
+    attempts: int = BROWSER_STATE_SOFT_ATTEMPTS,
+) -> Optional[Dict[str, Any]]:
+    """Best-effort browser state with a short timeout and one retry.
+
+    For optional refreshes only (e.g. screenshot after a durable verifier
+    rejection). Healthy fetches finish near ~10s p95; hanging CDP on a frozen
+    challenge page must not burn the 300s BrowserStateRequest budget or sit
+    inside a critical try/except. Returns None when every attempt times out or
+    errors — callers continue without the screenshot.
+    """
+    last_error: Optional[BaseException] = None
+    total_attempts = max(1, int(attempts))
+    per_attempt_timeout = float(timeout_seconds)
+    for attempt in range(1, total_attempts + 1):
+        try:
+            return await asyncio.wait_for(
+                dom_service.get_browser_state(include_screenshot=include_screenshot),
+                timeout=per_attempt_timeout,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Soft get_browser_state attempt failed",
+                attempt=attempt,
+                attempts=total_attempts,
+                timeout_seconds=per_attempt_timeout,
+                include_screenshot=include_screenshot,
+                error=str(exc)[:200],
+            )
+    if last_error is not None:
+        logger.warning(
+            "Soft get_browser_state exhausted attempts; continuing without state",
+            attempts=total_attempts,
+            timeout_seconds=per_attempt_timeout,
+            error=str(last_error)[:200],
+        )
+    return None
 
 
 async def _capture_recovery_storage_state(
@@ -8709,8 +8755,17 @@ Based on this feedback, I need to continue working on the task and address the i
                         extra_metadata={"verifierMessage": True},
                     )
 
-                    current_state = await dom_service.get_browser_state(include_screenshot=False)
-                    current_screenshot = current_state.get("screenshot")
+                    # Optional refresh only — rejection is already durable above.
+                    # Soft 10s×2 budget (healthy p95≈10–12s); never burn the 300s
+                    # challenge-survival BrowserStateRequest timeout here, and
+                    # never let a CDP hang become "Verification failed".
+                    current_state = await _get_browser_state_soft(
+                        dom_service,
+                        include_screenshot=False,
+                    )
+                    current_screenshot = (
+                        current_state.get("screenshot") if current_state else None
+                    )
 
                     rejection_result = {
                         "success": False,
