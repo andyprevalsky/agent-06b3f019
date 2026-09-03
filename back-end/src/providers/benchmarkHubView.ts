@@ -140,7 +140,7 @@ export function subtreeAgentsForBus<T extends { agent_id?: unknown; parent_agent
   const target = tree.find((node) => node.agent_id === busId);
   if (!target) return tree;
   const parent = target.parent_agent_id;
-  const isRoot = parent == null || parent === '' || parent === busId;
+  const isRoot = typeof parent !== 'string' || parent === '' || parent === busId;
   if (isRoot) return tree;
 
   const childrenByParent = new Map<string, T[]>();
