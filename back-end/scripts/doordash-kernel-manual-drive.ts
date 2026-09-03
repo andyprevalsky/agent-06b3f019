@@ -275,7 +275,6 @@ async function tryCheckout(page: Page): Promise<{ url: string; detail: string }>
     /checkout/i,
     /review order/i,
     /continue to checkout/i,
-    /place order/i,
   ]);
   if (clicked) {
     await page.waitForTimeout(12_000);
