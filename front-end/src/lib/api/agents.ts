@@ -53,7 +53,11 @@ export async function searchAgents(query: string, signal?: AbortSignal): Promise
 }
 
 // Get agent details with messages
-export async function getAgent(agentId: string, before?: string): Promise<AgentDetailResponse> {
+export async function getAgent(
+  agentId: string,
+  before?: string,
+  signal?: AbortSignal,
+): Promise<AgentDetailResponse> {
   const headers = getAuthHeaders();
   const url = before
     ? `${API_BASE_WITH_PATH}/agents/${agentId}?before=${before}`
@@ -61,6 +65,7 @@ export async function getAgent(agentId: string, before?: string): Promise<AgentD
 
   const response = await fetch(url, {
     headers,
+    signal,
   });
 
   if (!response.ok) {
@@ -70,12 +75,17 @@ export async function getAgent(agentId: string, before?: string): Promise<AgentD
   return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 
-export async function getBenchmarkAgentPreview(agentId: string): Promise<AgentDetailResponse> {
+export async function getBenchmarkAgentPreview(
+  agentId: string,
+  signal?: AbortSignal,
+): Promise<AgentDetailResponse> {
   if (!benchmarkAgentPreviewEnabled()) {
     throw new Error('Benchmark agent preview is disabled');
   }
 
-  const response = await fetch(`${API_BASE_WITH_PATH}/benchmarks/agent-preview/${agentId}`);
+  const response = await fetch(`${API_BASE_WITH_PATH}/benchmarks/agent-preview/${agentId}`, {
+    signal,
+  });
 
   if (!response.ok) {
     throw new Error('Failed to fetch benchmark agent preview');

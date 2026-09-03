@@ -25,6 +25,7 @@ export interface TreeNode {
 
 interface BusSubscription {
   nodes: Map<string, TreeNode>;
+  realtimeNodes: Map<string, TreeNode>;
   listeners: Set<(nodes: Map<string, TreeNode>) => void>;
   channel: RealtimeChannel | null;
   reconnectAttempt: number;
@@ -111,6 +112,7 @@ function fetchInitialTree(busId: string, subscription: BusSubscription, generati
       }
       const nodes = new Map<string, TreeNode>();
       agents.forEach((agent) => nodes.set(agent.agent_id, apiToTreeNode(agent)));
+      subscription.realtimeNodes.forEach((node, agentId) => nodes.set(agentId, node));
       publishNodes(subscription, nodes);
     })
     .catch((error) => {
@@ -137,7 +139,9 @@ function createHandlers(busId: string, subscription: BusSubscription, generation
         return;
       }
       const nodes = new Map(subscription.nodes);
-      nodes.set(data.agentId, realtimeToTreeNode(data));
+      const node = realtimeToTreeNode(data);
+      subscription.realtimeNodes.set(data.agentId, node);
+      nodes.set(data.agentId, node);
       publishNodes(subscription, nodes);
     },
     onDisconnect: () => {
@@ -158,6 +162,7 @@ function connectBus(busId: string, subscription: BusSubscription) {
   }
   subscription.connecting = true;
   subscription.generation += 1;
+  subscription.realtimeNodes = new Map();
   const generation = subscription.generation;
   if (subscription.channel) unsubscribe(subscription.channel);
   subscription.channel = null;
@@ -184,6 +189,7 @@ function connectBus(busId: string, subscription: BusSubscription) {
 function createSubscription(busId: string): BusSubscription {
   const subscription: BusSubscription = {
     nodes: new Map(),
+    realtimeNodes: new Map(),
     listeners: new Set(),
     channel: null,
     reconnectAttempt: 0,

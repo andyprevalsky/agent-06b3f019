@@ -25,7 +25,12 @@ import {
   cleanupSubscription,
 } from './realtimeHandlers';
 import { useDisconnectedAgentBackfill } from './useDisconnectedAgentBackfill';
-import { isAgentScopeActive, scopedSetter, type AgentScope } from './agentScope';
+import {
+  isAgentScopeActive,
+  isAgentScopeCurrent,
+  scopedSetter,
+  type AgentScope,
+} from './agentScope';
 
 export interface RealtimeSubscriptionDeps {
   selectedAgentId: string | null;
@@ -73,13 +78,14 @@ function createRealtimeHandlers(
   scheduleReconnect: () => void,
 ): AgentHandlers {
   const active = () => isScopeActive(deps, scope);
-  const setStreamingBubbles = scopedSetter(deps.setStreamingBubbles, active);
-  const setStreamingPlan = scopedSetter(deps.setStreamingPlan, active);
-  const setStreamingAttention = scopedSetter(deps.setStreamingAttention, active);
-  const setStreamingTools = scopedSetter(deps.setStreamingTools, active);
-  const setMessages = scopedSetter(deps.setMessages, active);
-  const setAgent = scopedSetter(deps.setAgent, active);
-  const setIsChatMode = scopedSetter(deps.setIsChatMode, active);
+  const current = () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope);
+  const setStreamingBubbles = scopedSetter(deps.setStreamingBubbles, active, current);
+  const setStreamingPlan = scopedSetter(deps.setStreamingPlan, active, current);
+  const setStreamingAttention = scopedSetter(deps.setStreamingAttention, active, current);
+  const setStreamingTools = scopedSetter(deps.setStreamingTools, active, current);
+  const setMessages = scopedSetter(deps.setMessages, active, current);
+  const setAgent = scopedSetter(deps.setAgent, active, current);
+  const setIsChatMode = scopedSetter(deps.setIsChatMode, active, current);
   return {
     onInsert: (data: InsertMessagePayload) => {
       if (!active()) return;
@@ -145,8 +151,8 @@ function createReconnectScheduler(deps: RealtimeSubscriptionDeps, scope: AgentSc
       if (deps.reconnectTimeoutRef.current !== timeoutId) return;
       deps.reconnectTimeoutRef.current = null;
       if (!isScopeActive(deps, scope) || typeof globalThis.window === 'undefined') return;
-      scopedSetter(deps.setForceResubscribeCounter, () => isScopeActive(deps, scope))(
-        (previous) => previous + 1,
+      deps.setForceResubscribeCounter((previous) =>
+        isAgentScopeCurrent(deps.selectedAgentIdRef, scope) ? previous + 1 : previous,
       );
     }, delay) as unknown as number;
     deps.reconnectTimeoutRef.current = timeoutId;
@@ -173,6 +179,7 @@ async function connectRealtime(
     await runPostSubscribeBackfill({
       selectedAgentId: scope.agentId,
       isCancelled: () => !isScopeActive(deps, scope),
+      isCurrentAgent: () => isAgentScopeCurrent(deps.selectedAgentIdRef, scope),
       initialLoadDoneRef: deps.initialLoadDoneRef,
       setMessages: deps.setMessages,
       setAgent: deps.setAgent,

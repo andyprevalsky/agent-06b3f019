@@ -81,6 +81,10 @@ export function useMessageAnimationBuffer({
   const [isAnimating, setIsAnimating] = useState(false);
   const [currentAnimatingId, setCurrentAnimatingId] = useState<string | null>(null);
   const isInitialLoadRef = useRef(true);
+  const selectedAgentIdRef = useRef(selectedAgentId);
+  const subAgentIdRef = useRef(subAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
+  subAgentIdRef.current = subAgentId;
 
   useLayoutEffect(() => {
     setMessageBuffer([]);
@@ -88,11 +92,19 @@ export function useMessageAnimationBuffer({
     setCurrentAnimatingId(null);
     isInitialLoadRef.current = true;
     assistantInsertedRef.current = false;
-  }, [assistantInsertedRef, selectedAgentId]);
+  }, [assistantInsertedRef, selectedAgentId, subAgentId]);
 
   useEffect(() => {
+    const ownerAgentId = selectedAgentId;
+    const ownerSubAgentId = subAgentId;
     const unregister = registerMessageHandler(subAgentId ?? null, (message) => {
       setMessageBuffer((prev) => {
+        if (
+          selectedAgentIdRef.current !== ownerAgentId ||
+          subAgentIdRef.current !== ownerSubAgentId
+        ) {
+          return prev;
+        }
         if (prev.some((m) => m.message_id === message.message_id)) return prev;
         return [...prev, message];
       });
@@ -101,7 +113,7 @@ export function useMessageAnimationBuffer({
       isInitialLoadRef.current = false;
     });
     return () => unregister();
-  }, [subAgentId, registerMessageHandler]);
+  }, [selectedAgentId, subAgentId, registerMessageHandler]);
 
   useEffect(() => {
     if (messageBuffer.length === 0 || isAnimating) return;

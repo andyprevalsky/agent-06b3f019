@@ -21,6 +21,7 @@ tags:
 sources:
   - commit d1615134058406b800aa3c8db34f5c40e1616182
   - commit b024ea1f5b7486764b951262fe1227e44fc0d617
+  - PR #1246
 repro: front-end/src/tests/blackbox/agent-isolation.blackbox.tsx
 status: fixed
 ---
@@ -92,9 +93,12 @@ unkeyed React state without proving that their owner was still the live selectio
 Every realtime subscription now owns an agent-scoped cancellation token and
 checks it against the live `selectedAgentIdRef`. All React setters used by that
 subscription are wrapped so the identity is checked inside the final functional
-updater, not only when the callback starts. Reconnect timers, subscription
+updater, not only when the callback starts. The final predicate is pure so React
+can replay an updater without repeating diagnostics or mutating subscription
+state. Reconnect timers, subscription
 resolution, connected backfill, disconnected polling, and stream-cleanup timers
-use the same boundary.
+use the same boundary. A disconnected detail request is abortable and bounded by
+a timeout, so one hung fetch cannot suppress every later reconciliation poll.
 
 Agent detail APIs reject a response whose `agent_id` differs from the requested
 ID. AgentContext exposes `applyAgentDetail(agentId, response)` instead of raw
@@ -116,7 +120,9 @@ refresh, delayed ancestor, animation buffer, browser cursor/auth URL,
 spawn-message cache, and agent-tree transition races. The delayed-refresh
 fixture supplies both the old raw setters and the new scoped callback, so it
 fails against the old implementation rather than passing on a caught fixture
-error.
+error. Additional review regressions cover sub-agent animation-buffer switches,
+missing-model reset, stable empty-tree identity, hung disconnected fetches, and
+initial API tree snapshots racing newer realtime nodes.
 
 Selection transitions and stale-work discards now emit identity-only console
 diagnostics (`previousAgentId`, `nextAgentId`, owner, active ID, and surface),

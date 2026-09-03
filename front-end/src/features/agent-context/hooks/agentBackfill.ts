@@ -18,6 +18,7 @@ export function applyAgentBackfill(
   setIsChatMode: React.Dispatch<React.SetStateAction<boolean>>,
   isCurrentAgent: () => boolean = () => true,
 ): void {
+  if (!isCurrentAgent()) return;
   setMessages((previous) => {
     if (!isCurrentAgent()) return previous;
     const apiIds = new Set(data.messages.map((message) => message.message_id));
@@ -49,6 +50,7 @@ function latestChatTurnNeedsCompletionBackfill(data: AgentDetail): boolean {
 interface PostSubscribeBackfillDeps {
   selectedAgentId: string;
   isCancelled: () => boolean;
+  isCurrentAgent: () => boolean;
   initialLoadDoneRef: React.MutableRefObject<string | null>;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>;
@@ -62,6 +64,7 @@ interface PostSubscribeBackfillDeps {
 export async function runPostSubscribeBackfill({
   selectedAgentId,
   isCancelled,
+  isCurrentAgent,
   initialLoadDoneRef,
   setMessages,
   setAgent,
@@ -72,8 +75,9 @@ export async function runPostSubscribeBackfill({
     let retryDelayMs = CONNECTED_COMPLETION_BACKFILL_POLL_MS;
     try {
       const data = await fetchAgentDetail(selectedAgentId);
-      if (isCancelled()) return;
-      applyAgentBackfill(data, setMessages, setAgent, setIsChatMode, () => !isCancelled());
+      if (isCancelled() || !isCurrentAgent()) return;
+      applyAgentBackfill(data, setMessages, setAgent, setIsChatMode, isCurrentAgent);
+      if (!isCurrentAgent()) return;
       initialLoadDoneRef.current = selectedAgentId;
       consecutiveFailures = 0;
       if (!latestChatTurnNeedsCompletionBackfill(data)) break;

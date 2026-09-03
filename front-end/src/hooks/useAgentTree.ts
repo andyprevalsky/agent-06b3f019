@@ -3,6 +3,8 @@ import { listenToAgentTree, type TreeNode } from './agentTreeSubscription';
 
 export type { TreeNode } from './agentTreeSubscription';
 
+const EMPTY_TREE = new Map<string, TreeNode>();
+
 /**
  * Subscribe to the shared sub-agent tree for one root bus.
  *
@@ -13,7 +15,7 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
   const [treeState, setTreeState] = useState<{
     busId: string | null;
     nodes: Map<string, TreeNode>;
-  }>({ busId, nodes: new Map() });
+  }>({ busId, nodes: EMPTY_TREE });
   const liveBusIdRef = useRef(busId);
   liveBusIdRef.current = busId;
 
@@ -26,7 +28,7 @@ export function useAgentTree(busId: string | null): Map<string, TreeNode> {
     });
   }, [busId]);
 
-  return treeState.busId === busId ? treeState.nodes : new Map();
+  return treeState.busId === busId ? treeState.nodes : EMPTY_TREE;
 }
 
 /** Filter tree nodes to the named spawn roots and all their descendants. */

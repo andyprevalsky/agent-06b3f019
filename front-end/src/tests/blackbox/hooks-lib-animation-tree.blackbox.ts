@@ -210,8 +210,11 @@ describe('useAgentTree helpers', () => {
     });
 
     it('returns empty map when busId is null', () => {
-      const { result } = renderHook(() => useAgentTree(null));
+      const { result, rerender } = renderHook(() => useAgentTree(null));
+      const emptyTree = result.current;
       expect(result.current.size).toBe(0);
+      rerender();
+      expect(result.current).toBe(emptyTree);
     });
 
     it('populates nodes from initial fetch and applies AGENT_STATE_CHANGED updates', async () => {
@@ -364,7 +367,9 @@ describe('useAgentTree helpers', () => {
         staleHandlers.onAgentStateChanged?.({ agentId: `stale-${index}` } as never);
       }
       expect(
-        discardSpy.mock.calls.filter(([message]) => message === 'Agent scope: discarded stale work'),
+        discardSpy.mock.calls.filter(
+          ([message]) => message === 'Agent scope: discarded stale work',
+        ),
       ).toHaveLength(1);
       discardSpy.mockRestore();
       survivor.unmount();

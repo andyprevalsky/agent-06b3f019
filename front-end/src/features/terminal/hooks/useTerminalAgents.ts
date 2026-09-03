@@ -14,6 +14,7 @@ import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 
 import type { TerminalView } from '../types';
+import { DEFAULT_MODEL } from '../config';
 
 import { useAgentList } from './useAgentList';
 import type { useAgentActions } from './useAgentActions';
@@ -37,16 +38,31 @@ export function overlaySelectedAgentTitle(
   );
 }
 
-function useSelectedAgentModel(
+export function useSelectedAgentModel(
+  selectedAgentId: string | null,
+  modelOwnerId: string | undefined,
   model: string | undefined,
   setSelectedModel: (model: string) => void,
   isInitialLoadRef: React.MutableRefObject<boolean>,
 ) {
   useEffect(() => {
-    if (!model) return;
-    setSelectedModel(model);
+    setSelectedModel(modelOwnerId === selectedAgentId ? (model ?? DEFAULT_MODEL) : DEFAULT_MODEL);
     isInitialLoadRef.current = true;
-  }, [isInitialLoadRef, model, setSelectedModel]);
+  }, [isInitialLoadRef, model, modelOwnerId, selectedAgentId, setSelectedModel]);
+}
+
+function useContextSelectedAgentModel(
+  ctx: ReturnType<typeof useAgentContext>,
+  messaging: ReturnType<typeof useMessageSending>,
+  isInitialLoadRef: React.MutableRefObject<boolean>,
+) {
+  useSelectedAgentModel(
+    ctx.selectedAgentId,
+    ctx.agent?.agent_id,
+    ctx.agent?.model,
+    messaging.setSelectedModel,
+    isInitialLoadRef,
+  );
 }
 
 export function useTerminalAgents(
@@ -81,9 +97,9 @@ export function useTerminalAgents(
   });
 
   const isInitialLoadRef = useRef(false);
-  const { setIsSendingMessage, setMessageInput, setSelectedModel } = messaging;
-  const { agent, setSelectedAgentId } = ctx;
-  useSelectedAgentModel(agent?.model, setSelectedModel, isInitialLoadRef);
+  const { setIsSendingMessage, setMessageInput } = messaging;
+  const { setSelectedAgentId } = ctx;
+  useContextSelectedAgentModel(ctx, messaging, isInitialLoadRef);
 
   const cleanupAgentState = useCallback(() => {
     setSelectedAgentId(null);

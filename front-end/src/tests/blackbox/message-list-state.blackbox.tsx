@@ -104,6 +104,42 @@ describe('MessageList state transitions', () => {
     expect(result.current.messageBufferLength).toBe(0);
   });
 
+  it('clears an in-flight animation when the displayed sub-agent changes', async () => {
+    let dispatch!: (message: Message) => void;
+    const registerMessageHandler = (_subAgentId: string | null, handler: (m: Message) => void) => {
+      dispatch = handler;
+      return () => {};
+    };
+    const streamedTextsRef = { current: new Set<string>() };
+    const assistantInsertedRef = { current: false };
+    const initialProps = { subAgentId: 'sub-agent-a' as string | undefined };
+    const { result, rerender } = renderHook(
+      ({ subAgentId }) =>
+        useMessageAnimationBuffer({
+          selectedAgentId: 'root-agent',
+          subAgentId,
+          registerMessageHandler,
+          streamedTextsRef,
+          assistantInsertedRef,
+        }),
+      { initialProps },
+    );
+
+    act(() => dispatch(msg('sub-a-answer', { role: 'ASSISTANT', text: 'secret from sub A' })));
+    await waitFor(() => expect(result.current.currentAnimatingId).toBe('sub-a-answer'));
+    const staleSubAgentHandler = dispatch;
+    rerender({ subAgentId: 'sub-agent-b' });
+    act(() =>
+      staleSubAgentHandler(
+        msg('late-sub-a-answer', { role: 'ASSISTANT', text: 'late secret from sub A' }),
+      ),
+    );
+
+    expect(result.current.currentAnimatingId).toBeNull();
+    expect(result.current.isAnimating).toBe(false);
+    expect(result.current.messageBufferLength).toBe(0);
+  });
+
   it('cleans up orphan IN_PROGRESS tools that came before the last ASSISTANT msg', () => {
     const now = Date.now();
     const ctx = makeAgentCtx({
