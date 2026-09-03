@@ -26,14 +26,7 @@ import { type CodeProvider } from '../types';
 import { normalizeTerminalWhitespace } from './claudeCodeChip.terminal';
 
 export type TranscriptBlockKind =
-  | 'agent'
-  | 'tool'
-  | 'command'
-  | 'output'
-  | 'exit'
-  | 'status'
-  | 'result'
-  | 'plain';
+  'agent' | 'tool' | 'command' | 'output' | 'exit' | 'status' | 'result' | 'plain';
 
 export interface TranscriptBlock {
   kind: TranscriptBlockKind;
@@ -80,13 +73,7 @@ function healSoftWrappedTranscriptLines(output: string): string {
       healed[healed.length - 1] = `${prev}${line}`;
       continue;
     }
-    if (
-      line &&
-      !startsMarker &&
-      prevStartsMarker &&
-      /[a-z,]$/.test(prev) &&
-      /^[a-z]/.test(line)
-    ) {
+    if (line && !startsMarker && prevStartsMarker && /[a-z,]$/.test(prev) && /^[a-z]/.test(line)) {
       healed[healed.length - 1] = `${prev}${prev.endsWith(' ') ? '' : ' '}${line}`;
       continue;
     }
@@ -128,10 +115,20 @@ function toolIcon(toolName: string): ReactNode {
   if (name === 'grep' || name === 'search') {
     return <Search className={className} />;
   }
-  if (name === 'websearch' || name === 'web_search' || name === 'webfetch' || name === 'web_fetch') {
+  if (
+    name === 'websearch' ||
+    name === 'web_search' ||
+    name === 'webfetch' ||
+    name === 'web_fetch'
+  ) {
     return <FileSearch className={className} />;
   }
-  if (name === 'todowrite' || name === 'todo_write' || name === 'todoread' || name === 'todo_read') {
+  if (
+    name === 'todowrite' ||
+    name === 'todo_write' ||
+    name === 'todoread' ||
+    name === 'todo_read'
+  ) {
     return <ListTodo className={className} />;
   }
   return <Wrench className={className} />;
@@ -322,7 +319,9 @@ function TranscriptBlockView({ block }: { block: TranscriptBlock }) {
           <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-violet-200/70">
             {block.title}
           </div>
-          <p className="whitespace-pre-wrap break-words text-[12.5px] leading-5 text-white/88">{body}</p>
+          <p className="whitespace-pre-wrap break-words text-[12.5px] leading-5 text-white/88">
+            {body}
+          </p>
         </div>
       </div>
     );

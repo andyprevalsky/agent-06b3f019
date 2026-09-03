@@ -53,12 +53,12 @@ vi.mock('@/features/agent-context', () => ({
   useAgentContext: () => ({ messages: messagesRef.current, agent: agentRef.current }),
 }));
 
-const fetchCodeAgentSessionMock = vi.fn<
-  (taskId: string, codeProvider?: string) => Promise<{ output?: string; status?: string } | null>
->();
+const fetchCodeAgentSessionMock =
+  vi.fn<
+    (taskId: string, codeProvider?: string) => Promise<{ output?: string; status?: string } | null>
+  >();
 vi.mock('@/features/terminal-component-group/api', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/features/terminal-component-group/api')>();
+  const actual = await importOriginal<typeof import('@/features/terminal-component-group/api')>();
   return {
     ...actual,
     fetchCodeAgentSession: (taskId: string, codeProvider?: string) =>

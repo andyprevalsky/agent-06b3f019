@@ -39,9 +39,7 @@ export function isClaudeCodeChipAnchor(message: Message): boolean {
   if (message.metadata?.toolName !== 'spawn_claude_code_agent') return false;
   const action = message.metadata?.action_type;
   return (
-    action === 'claude_code_started' ||
-    action === 'task_complete' ||
-    action === 'session_cancelled'
+    action === 'claude_code_started' || action === 'task_complete' || action === 'session_cancelled'
   );
 }
 

@@ -91,12 +91,12 @@ replay-tool gap, not a prompt win.
 Read the dumped system prompt and the owning prompt builder. Propose the
 smallest source edit that would flip the assertion, scored against:
 
-| Prefer | Reject |
-| --- | --- |
-| One short general invariant | Incident-named examples (this site, this benchmark) |
-| Resolving a contradiction between existing rules | Stacking a second rule that fights the first |
-| Deleting/rephrasing the guidance that caused the miss | Broad essays, bullet piles, or tool catalogs |
-| Class of work (API bulk fetch vs unknown discovery) | Single task goal paraphrase |
+| Prefer                                                | Reject                                              |
+| ----------------------------------------------------- | --------------------------------------------------- |
+| One short general invariant                           | Incident-named examples (this site, this benchmark) |
+| Resolving a contradiction between existing rules      | Stacking a second rule that fights the first        |
+| Deleting/rephrasing the guidance that caused the miss | Broad essays, bullet piles, or tool catalogs        |
+| Class of work (API bulk fetch vs unknown discovery)   | Single task goal paraphrase                         |
 
 Output format (mandatory):
 

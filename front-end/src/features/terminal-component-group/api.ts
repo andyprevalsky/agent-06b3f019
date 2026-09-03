@@ -27,7 +27,9 @@ async function fetchBenchmarkCodeAgentSessionPreview(
 ): Promise<ClaudeCodeSessionResponse | null> {
   if (!benchmarkAgentPreviewEnabled() || codeProvider !== 'claude') return null;
 
-  const response = await fetch(`${API_BASE_WITH_PATH}/benchmarks/claude-code-session-preview/${taskId}`);
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/benchmarks/claude-code-session-preview/${taskId}`,
+  );
   if (!response.ok) return null;
   return (await response.json()) as ClaudeCodeSessionResponse;
 }

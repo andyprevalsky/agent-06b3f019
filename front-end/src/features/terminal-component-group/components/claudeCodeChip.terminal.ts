@@ -66,7 +66,9 @@ function decorateTerminalLine(line: string, stream: TerminalStream): string {
 
   if (visible.startsWith('▌')) return line;
 
-  const toolCall = visible.match(/^\[(Codex|Claude)(?: Code)? tool\]\s+(\S+)\s*(?:·\s*(.*)|(.*))?$/i);
+  const toolCall = visible.match(
+    /^\[(Codex|Claude)(?: Code)? tool\]\s+(\S+)\s*(?:·\s*(.*)|(.*))?$/i,
+  );
   if (toolCall) {
     const toolName = toolCall[2] ?? 'Tool';
     const detail = (toolCall[3] ?? toolCall[4] ?? '').trim();
