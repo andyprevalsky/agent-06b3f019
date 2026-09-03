@@ -72,7 +72,11 @@ export function extractAgentCardOrgWallet(result: unknown): AgentCardOrgWallet {
   const structured = asRecord(outer?.structuredContent);
   const wallet = asRecord(structured?.wallet);
   if (wallet === undefined) {
-    throw new Error('AgentCard get_company_wallet returned no structured wallet');
+    const outerKeys = outer ? Object.keys(outer).join(',') : 'non-object';
+    const structuredKeys = structured ? Object.keys(structured).join(',') : 'none';
+    throw new Error(
+      `AgentCard get_company_wallet returned no structured wallet (outer=${outerKeys}; structured=${structuredKeys})`
+    );
   }
 
   return {

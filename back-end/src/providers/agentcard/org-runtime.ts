@@ -130,6 +130,32 @@ function looksLikeRateLimitError(error: unknown): boolean {
   );
 }
 
+function looksLikeTransientUnavailableError(error: unknown): boolean {
+  return /temporarily unavailable|service unavailable/i.test(errorMessage(error));
+}
+
+function shouldRetryOrgMcpError(error: unknown): boolean {
+  return looksLikeRateLimitError(error) || looksLikeTransientUnavailableError(error);
+}
+
+function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) return undefined;
+  const record = result as Record<string, unknown>;
+  const structured =
+    typeof record.structuredContent === 'object' && record.structuredContent !== null
+      ? (record.structuredContent as Record<string, unknown>)
+      : record;
+  const message = typeof structured.message === 'string' ? structured.message : '';
+  const status = structured.status;
+  if (
+    (status === 'error' || status === 'unavailable') &&
+    /temporarily unavailable|service unavailable/i.test(message)
+  ) {
+    return message;
+  }
+  return undefined;
+}
+
 /**
  * AgentCard reports `retryAfter` as an ABSOLUTE epoch-milliseconds window reset, not a duration.
  *
@@ -333,9 +359,11 @@ export class AgentCardOrgRuntime {
   }
 
   /**
-   * Calls an organization MCP tool, transparently recovering from the two failure modes that are
-   * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once) and a throttled
-   * request window (wait for the window to refill, bounded). Everything else propagates untouched.
+   * Calls an organization MCP tool, transparently recovering from the failure modes that are
+   * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once), a throttled
+   * request window (wait for the window to refill, bounded), and a structured
+   * `{status:"error", message:"…temporarily unavailable"}` tools/call result (HTTP 200 with a
+   * sandbox outage). Everything else propagates untouched.
    *
    * A throttle used to escape as a raw transport error, so every caller that lacked its own
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
@@ -366,13 +394,23 @@ export class AgentCardOrgRuntime {
     args: Record<string, unknown>,
     deadlineAtMs: number
   ): Promise<unknown> {
-    let lastRateLimitError: unknown;
+    let lastRetryError: unknown;
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
       try {
-        return await this.callToolOnce(toolName, args);
+        const result = await this.callToolOnce(toolName, args);
+        const transient = mcpStructuredResultIsTransientlyUnavailable(result);
+        if (transient !== undefined) {
+          throw new AgentCardOrgRuntimeError(
+            `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${transient}`,
+            503,
+            'agentcard_org_mcp_unavailable',
+            { tool: toolName, message: transient }
+          );
+        }
+        return result;
       } catch (error) {
-        if (!looksLikeRateLimitError(error)) throw error;
-        lastRateLimitError = error;
+        if (!shouldRetryOrgMcpError(error)) throw error;
+        lastRetryError = error;
         if (attempt === RATE_LIMIT_RETRY_ATTEMPTS) break;
         // Derived from the deadline, not decremented locally: time spent inside the throttled call
         // itself counts against the budget too, and a shared deadline already reflects every wait
@@ -381,6 +419,18 @@ export class AgentCardOrgRuntime {
         if (waitMs === null) break;
         await delay(waitMs);
       }
+    }
+    if (
+      looksLikeTransientUnavailableError(lastRetryError) &&
+      !looksLikeRateLimitError(lastRetryError)
+    ) {
+      throw new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP ${toolName} is temporarily unavailable ` +
+          `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+        503,
+        'agentcard_org_mcp_unavailable',
+        { tool: toolName, error: errorMessage(lastRetryError) }
+      );
     }
     // Keep the words "rate limit" in the message: callers that already detect provider throttling
     // by message text (the wallet-funding release observer) must keep recognising this outcome.
@@ -391,10 +441,10 @@ export class AgentCardOrgRuntime {
     // to characterise.
     throw new AgentCardOrgRuntimeError(
       `AgentCard Organization MCP rate limit exhausted for ${toolName} ` +
-        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRateLimitError)}`,
+        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
       429,
       'agentcard_org_mcp_rate_limited',
-      { tool: toolName, error: errorMessage(lastRateLimitError) }
+      { tool: toolName, error: errorMessage(lastRetryError) }
     );
   }
 

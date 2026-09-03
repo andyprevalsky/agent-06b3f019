@@ -218,6 +218,59 @@ async function main(): Promise<void> {
       'exceeding the delay budget must fail fast, not sleep'
     );
 
+    // Sandbox `get_company_wallet` can return HTTP 200 with
+    // `{status:"error", message:"…Service temporarily unavailable"}`. That is a
+    // provider outage, not a successful wallet read, so retry it the same way
+    // as a throttle rather than handing callers an empty wallet object.
+    let unavailableCalls = 0;
+    const unavailableRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+      assert.equal(toolName, 'get_company_wallet');
+      unavailableCalls += 1;
+      if (unavailableCalls === 1) {
+        return {
+          structuredContent: {
+            status: 'error',
+            message: 'get_company_wallet failed: Service temporarily unavailable',
+          },
+        };
+      }
+      return {
+        structuredContent: {
+          wallet: { livemode: false, balance_cents: 100, committed_cents: 0, available_cents: 100 },
+        },
+      };
+    });
+    assert.deepEqual(await unavailableRuntime.callTool('get_company_wallet', {}), {
+      structuredContent: {
+        wallet: { livemode: false, balance_cents: 100, committed_cents: 0, available_cents: 100 },
+      },
+    });
+    assert.equal(
+      unavailableCalls,
+      2,
+      'a structured MCP 503 must be retried instead of returned as a wallet'
+    );
+
+    let stuckUnavailableCalls = 0;
+    const stuckUnavailableRuntime = new AgentCardOrgRuntime(async () => {
+      stuckUnavailableCalls += 1;
+      return {
+        structuredContent: {
+          status: 'error',
+          message: 'get_company_wallet failed: Service temporarily unavailable',
+        },
+      };
+    });
+    await assert.rejects(
+      () => stuckUnavailableRuntime.callTool('get_company_wallet', {}),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 503 &&
+        error.code === 'agentcard_org_mcp_unavailable' &&
+        /temporarily unavailable/.test(error.message)
+    );
+    assert.equal(stuckUnavailableCalls, 3, 'transient-unavailable retries must stay bounded');
+
     // Non-throttle failures must never be retried — retrying a real error would multiply load.
     let hardFailureCalls = 0;
     const hardFailureRuntime = new AgentCardOrgRuntime(async () => {

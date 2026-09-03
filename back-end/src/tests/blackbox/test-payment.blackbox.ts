@@ -195,6 +195,17 @@ const tests: Array<[string, () => Promise<void>]> = [
           );
           return;
         }
+        if (
+          (connected.status === 502 || connected.status === 503) &&
+          /temporarily unavailable|service unavailable/i.test(JSON.stringify(connected.data))
+        ) {
+          writeLine(
+            `⚠️  SKIP: AgentCard sandbox organization MCP is temporarily unavailable ` +
+              `(${JSON.stringify(connected.data)}); provider-infra precondition, ` +
+              `not a code regression — connect/reset assertions skipped.`
+          );
+          return;
+        }
         assertStatus(connected.status, 200, connected.data);
         assert(
           (connected.data as { status?: string }).status === 'connected',

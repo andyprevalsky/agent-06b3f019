@@ -24,6 +24,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { loadDotenvWithCallerOverrides } from '../../providers/loadDotenvWithCallerOverrides';
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { extractAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
 import { recoverAllCardholderResiduals } from '../../providers/agentcard/fund-recovery';
@@ -32,6 +33,8 @@ import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
 import { planFloatReplenish } from '../../providers/brex/replenish';
+
+loadDotenvWithCallerOverrides();
 
 const usd = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -194,6 +197,12 @@ async function main(): Promise<void> {
     if (/invalid or expired organization token/i.test(message)) {
       console.log(
         'SKIP treasury-rails: AgentCard org token rejected by provider (credential-infra precondition)'
+      );
+      return;
+    }
+    if (/temporarily unavailable|service unavailable/i.test(message)) {
+      console.log(
+        'SKIP treasury-rails: AgentCard sandbox get_company_wallet is temporarily unavailable (provider-infra precondition)'
       );
       return;
     }
