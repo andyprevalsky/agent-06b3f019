@@ -52,13 +52,22 @@ export function readTasksFile(): unknown {
   return [...primary, ...polar];
 }
 
-/** ISO timestamp of the last tasks.json modification (for hub catalog metadata). */
+/**
+ * ISO timestamp of the latest catalog file modification (for hub metadata).
+ * Considers both tasks.json and polar_tasks.json so a polar-only edit still
+ * bumps `updated_at`.
+ */
 export function tasksFileUpdatedAtIso(): string {
-  try {
-    return fs.statSync(TASKS_PATH).mtime.toISOString();
-  } catch {
-    return new Date(0).toISOString();
+  let latestMs = 0;
+  for (const catalogPath of [TASKS_PATH, POLAR_TASKS_PATH]) {
+    try {
+      latestMs = Math.max(latestMs, fs.statSync(catalogPath).mtimeMs);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'ENOENT') throw err;
+    }
   }
+  return new Date(latestMs).toISOString();
 }
 
 export function benchmarkAgentPreviewEnabled(): boolean {

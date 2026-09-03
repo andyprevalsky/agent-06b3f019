@@ -142,6 +142,10 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
     let cancelled = false;
 
     const scheduleReconnect = () => {
+      // Bail before scheduling if the hook already cleaned up or jsdom tore
+      // down `window` — otherwise setup().catch can create a timer after unmount
+      // that no later cleanup can clear.
+      if (cancelled || typeof window === 'undefined') return;
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
@@ -152,8 +156,7 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       );
       reconnectAttemptRef.current += 1;
       reconnectTimeoutRef.current = window.setTimeout(() => {
-        // Guard against jsdom teardown races: a reconnect timer can fire after
-        // the test environment has torn down `window` / unmounted the hook.
+        // Keep the callback guard for timers that were already scheduled.
         if (cancelled || typeof window === 'undefined') return;
         setForceResubscribe((prev) => prev + 1);
       }, delay);
