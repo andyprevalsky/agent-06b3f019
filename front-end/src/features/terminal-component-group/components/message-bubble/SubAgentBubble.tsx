@@ -18,9 +18,8 @@
  *
  * Returns null when the message is not a general-purpose agent tool event.
  */
-import { useAgentContext } from '@/features/agent-context';
 import { userFacingMessageText } from '@/lib/userFacingMessage';
-import type { Message } from '../../hooks';
+import { useAgentContext, type Message } from '../../hooks';
 import SubAgentTree from '../SubAgentTree';
 import SubAgentToolBubble from '../SubAgentToolBubble';
 
