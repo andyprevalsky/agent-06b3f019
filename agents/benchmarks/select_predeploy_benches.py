@@ -692,6 +692,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.cap > DEFAULT_CAP:
+        print(
+            f"WARNING: --cap/{args.cap} exceeds hard ceiling {DEFAULT_CAP}; clamping",
+            file=sys.stderr,
+        )
+        args.cap = DEFAULT_CAP
     explicit: list[str] | None = None
     if args.changed_files_from is not None:
         explicit = [

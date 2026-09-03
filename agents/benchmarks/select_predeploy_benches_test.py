@@ -810,3 +810,55 @@ def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path) -> None:
     combined = result.stdout + result.stderr
     assert "HARD CAP HIT" in combined or "HARD CAP" in combined
     assert "DROPPED" in combined
+
+
+def test_cli_cap_clamps_above_default(tmp_path: Path) -> None:
+    """CLI/env caps above DEFAULT_CAP must clamp so launchers cannot overrun 20."""
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    # Keep floor tiny so clamping (not floor overflow) is what we exercise.
+    tasks = [
+        {
+            "name": "smoke-0",
+            "tags": ["smoke"],
+            "timeout_seconds": 60,
+            "deploy_category": "harness",
+        }
+    ] + [
+        {
+            "name": f"extra-{i}",
+            "tags": ["payment"],
+            "timeout_seconds": 60,
+            "deploy_category": "payment",
+            "deploy_canary": True,
+        }
+        for i in range(30)
+    ]
+    catalog.write_text(json.dumps(tasks))
+    rows: list[tuple[str, bool]] = [(task["name"], True) for task in tasks for _ in range(3)]
+    _write_attempts(attempts, rows)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SELECTOR),
+            "--catalog",
+            str(catalog),
+            "--attempts-file",
+            str(attempts),
+            "--format",
+            "names",
+            "--cap",
+            "50",
+            "--repo-root",
+            str(ROOT),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    names = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(names) <= DEFAULT_CAP
+    assert "clamping" in result.stderr.lower() or "ceiling" in result.stderr.lower()

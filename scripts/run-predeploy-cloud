@@ -14,6 +14,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 SELECTOR_SCRIPT="$ROOT_DIR/agents/benchmarks/select_predeploy_benches.py"
 PREDEPLOY_BENCH_CAP="${PREDEPLOY_BENCH_CAP:-20}"
+# Hard ceiling — launchers document a max of 20; refuse env overrides that
+# would silently expand the predeploy set beyond the scream budget.
+if [ "$PREDEPLOY_BENCH_CAP" -gt 20 ]; then
+    echo "⚠️  PREDEPLOY_BENCH_CAP=$PREDEPLOY_BENCH_CAP exceeds hard ceiling 20; clamping to 20" >&2
+    PREDEPLOY_BENCH_CAP=20
+fi
 
 read_predeploy_selection() {
     local format="${1:-names-and-report}"

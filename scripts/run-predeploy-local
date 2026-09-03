@@ -26,6 +26,12 @@ LOGGED_COMMAND="$ROOT_DIR/scripts/run_logged_command.py"
 HISTORY_FILE="$ROOT_DIR/agents/benchmarks/history/task_durations.jsonl"
 RUN_ROOT="$ROOT_DIR/.context/predeploy-runs"
 PREDEPLOY_BENCH_CAP="${PREDEPLOY_BENCH_CAP:-20}"
+# Hard ceiling — launchers document a max of 20; refuse env overrides that
+# would silently expand the predeploy set beyond the scream budget.
+if [ "$PREDEPLOY_BENCH_CAP" -gt 20 ]; then
+    echo "⚠️  PREDEPLOY_BENCH_CAP=$PREDEPLOY_BENCH_CAP exceeds hard ceiling 20; clamping to 20" >&2
+    PREDEPLOY_BENCH_CAP=20
+fi
 
 # Prints the human selection report to stdout, then yields selected names on
 # stdout after the machine delimiter. Callers that need names-only use --list.
