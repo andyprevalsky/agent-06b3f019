@@ -106,6 +106,13 @@ def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
     return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
 
 
+def should_skip_oai_demo_browser_spawn(workflow_instance) -> bool:
+    """Fast Mode test-mass-agent-run-0 must not open browser-agent sessions."""
+    return bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)) and is_oai_demo_mass_agent_task(
+        workflow_instance
+    )
+
+
 def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) -> bool:
     """Canonical explore demo class: explicit flag wins, else goal prefix only.
 

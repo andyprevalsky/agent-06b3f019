@@ -112,6 +112,7 @@ The curated tag vocabulary (each task carries zero or more):
 | `payment` | Payment and checkout flows |
 | `phone` | Phone-call tasks |
 | `plaid` | Plaid-connected finance tasks |
+| `polar-bench` | Odysseys + BU Bench V1 (polar-evals); opt-in suite, never daily |
 | `research` | Deep-research tasks |
 | `smoke` | Deploy-gate smoke suite |
 | `social` | Social-account tasks |
@@ -120,9 +121,10 @@ The curated tag vocabulary (each task carries zero or more):
 | `voice` | Voice tasks |
 | `wait-for` | wait_for scheduling tasks |
 
-Special suite selectors (not tags): `all` (every ready agent task), `auth`
-(cookie-auth task by default, anon tasks with `--anon` — split by task name),
-`rose-bench` / `pipeline-e2e` (bench axis).
+Special suite selectors (not tags): `all` (every ready first-party agent task;
+excludes `polar-bench`), `auth` (cookie-auth task by default, anon tasks with
+`--anon` — split by task name), `rose-bench` / `pipeline-e2e` (first-party bench
+axis). Run Polar Odysseys + BU Bench V1 with `--suite polar-bench`.
 
 ## Tasks
 

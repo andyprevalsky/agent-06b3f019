@@ -3298,6 +3298,47 @@ async def test_call_llm_verifier_uses_large_output_cap():
     assert all(value == VERIFIER_MAX_TOKENS for value in provider_max_tokens)
 
 
+async def test_call_llm_verifier_caps_declared_evaluator_output():
+    """Declared-evaluator judges must not reserve the 16000-token OpenRouter cap.
+
+    OpenRouter 402s when remaining credits cannot cover max_tokens. A score JSON
+    fits in 512 tokens; keep the large cap for live agent verifiers.
+    """
+    import httpx
+    from config import load_config
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import DECLARED_EVALUATOR_MAX_TOKENS, _call_llm_verifier
+
+    seen_max_tokens = []
+    body = _sse_body(
+        [
+            {
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 1.0}'}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        ]
+    )
+
+    def handler(req):
+        seen_max_tokens.append(json.loads(req.content.decode()).get("max_tokens"))
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        await _call_llm_verifier(
+            messages=[{"role": "user", "content": "x"}],
+            model="rose",
+            config=load_config(),
+            call_site="benchmark_declared_evaluator",
+        )
+
+    provider_max_tokens = [value for value in seen_max_tokens if value is not None]
+    assert provider_max_tokens
+    assert all(value == DECLARED_EVALUATOR_MAX_TOKENS for value in provider_max_tokens)
+    assert DECLARED_EVALUATOR_MAX_TOKENS == 512
+
+
 async def test_call_llm_verifier_bounds_provider_stream_time():
     """Verifier provider attempts carry explicit deadline, TTFT, and idle bounds."""
     from config import load_config
@@ -7468,6 +7509,10 @@ async def run_all_tests():
     )
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
     await r.record_async("call_llm_verifier_uses_large_output_cap", test_call_llm_verifier_uses_large_output_cap)
+    await r.record_async(
+        "call_llm_verifier_caps_declared_evaluator_output",
+        test_call_llm_verifier_caps_declared_evaluator_output,
+    )
     await r.record_async(
         "call_llm_verifier_bounds_provider_stream_time",
         test_call_llm_verifier_bounds_provider_stream_time,

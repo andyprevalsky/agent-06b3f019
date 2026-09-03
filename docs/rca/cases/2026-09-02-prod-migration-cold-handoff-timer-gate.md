@@ -1,93 +1,53 @@
 ---
 id: 2026-09-02-prod-migration-cold-handoff-timer-gate
 date: 2026-09-02
-title: Prod migration validation encoded a pre-handoff zero-timer contract
+title: Prod migration validation false-failed on cooperative handoff timers
 surface: harness
-component: prod-workflow-migration-validation
-classification: test-bug
-problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: back-end/scripts/validate-prod-workflow-migration.ts cold-history and activation-marker assertions modeled state that cooperative handoff intentionally no longer preserves
+component: validate-prod-workflow-migration cold handoff history gate
+classification: our-bug
+problem_class: fixture-environment-data-mismatch
+first_bad_boundary: validate-prod-workflow-migration.ts cold history gate sampled before cooperative handoff timer armed and assumed leftover activation markers
 symptoms:
-  - "cold_workflow_uses_no_resources_while_waiting"
-  - "cost_limit_reached_preserved"
-  - "out_of_credits_preserved"
-  - "same_sha_old_marker_is_retired_without_retiring_current_attempt"
-  - "WorkflowNotFoundError for navi-worker-deployment-activation:<merge-sha>:<run-attempt>"
+  - cold_workflow_uses_no_resources_while_waiting FAIL timers 0→1
+  - cost_limit_reached_preserved / out_of_credits_preserved FAIL
+  - same_sha_old_marker_is_retired_without_retiring_current_attempt WorkflowNotFoundError
 tags:
   - workflow-migration
+  - cooperative-cutover
   - temporal
-  - cooperative-handoff
-  - activation-marker
-  - harness-contract
+  - deploy-gate
 sources:
   - PR #1197
-  - commit 435f7093f
-repro: back-end/scripts/validate-prod-workflow-migration.ts --execute
+  - memory:prod-migration-cold-handoff-timer-gate
+repro: cd back-end && PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 npx tsx scripts/validate-prod-workflow-migration.ts --execute
 status: fixed
 ---
 
-# Prod migration validation false-failed on cooperative handoff timers
-
-**Date:** 2026-09-02
-**Deploy:** PR #1197 post-merge Step 13ac
-**Class:** harness-contract-drift / fixture-environment-data-mismatch
-
 ## Problem
 
-`PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 npx tsx scripts/validate-prod-workflow-migration.ts --execute` failed 4 rows after a successful cooperative Fly cutover:
-
-- `cold_workflow_uses_no_resources_while_waiting`
-- `cost_limit_reached_preserved`
-- `out_of_credits_preserved`
-- `same_sha_old_marker_is_retired_without_retiring_current_attempt`
-
-Cold rows asserted `timers:0 → timers:1` (and matching workflow-task/event growth) over a 1–2s observe window. The marker row failed with `WorkflowNotFoundError` for `navi-worker-deployment-activation:<merge-sha>:<run-attempt>`.
-
-## Evidence
-
-- Prod validation JSON retained under `/tmp/prod_workflow_migration_validation.txt` (deploy run after merge `435f7093f…`, token `33592438361-1`).
-- Live pointer after cutover: `navi-agent-tasks@4b82919d925b`; old queue drained to `open=0`.
-- Post-failure probe: **zero** running `RoseWorkerDeploymentActivationMarker` workflows; current deploy marker ID not found.
-- Code path for restored paused agents (`agent_workflow.py`): after bootstrap READY, `_wait_for_unpause_or_handoff` runs `fetch_agent_queue_pointer` then `workflow.wait_condition(..., timeout=30s)` — which **schedules a durable TimerStarted** immediately.
-- Stale comment above that call claimed "Consume no workflow timers or activities" — contradicted by the handoff helper (cooperative cutover design).
+Production workflow migration validation failed four rows after a successful
+cooperative Fly cutover because cold-history sampling raced handoff arming and
+the activation-marker check assumed leftover deploy state.
 
 ## Diagnosis
 
-1. **Cold history gate raced handoff arming.** Validation sampled history immediately after READY, then again 1–2s later. READY is published in `finalize_workflow_replacement_bootstrap` *before* the first handoff wait timer is scheduled, so the observe window often captured the intentional cooperative-cutover timer/activity and failed a "zero growth" assertion that predated paused handoff polling.
-
-2. **Activation-marker check assumed leftover deploy state.** Cooperative cutover does not leave `navi-worker-deployment-activation:<sha>:<token>` running after deploy. The test only minted the *old* marker and then `describe()`'d the missing current marker.
+READY is published before the first handoff wait timer is scheduled, so a 1–2s
+observe window often captured the intentional cooperative-cutover timer.
+Cooperative cutover also does not leave the current activation marker running.
 
 ## Solution
 
-Validation script + RCA only in the follow-up PR (comment correction in `agent_workflow.py` deferred so a comment-only edit does not force another surface-hash generation rollover).
-
-
-- Settle cold history until `timers >= 1` and counts stop moving, then assert no further growth inside the 30s poll window (`assertColdHandoffHistoryStable` in `validate-prod-workflow-migration.ts`).
-- Mint the current activation marker inside `same_sha_old_marker_…` before creating the superseded one.
-- Correct the outdated cold-pause comment in `agent_workflow.py`.
-
-## Local repro / proof
-
-```bash
-cd back-end
-PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
-  TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-  TEMPORAL_WORKER_BUILD_ID=<merge-sha> \
-  TEMPORAL_WORKER_DEPLOYMENT_TOKEN=<runId>-<attempt> \
-  npx tsx scripts/validate-prod-workflow-migration.ts --execute
-```
-
-- **Before:** 4 FAIL rows as above.
-- **After:** all rows PASS (re-run on fixed revision).
-
-## Prevention
-
-Prod migration validation must encode the cooperative-cutover cold contract (bounded handoff poll), not a pre-cutover "literally zero history events while paused" reading. Marker lifecycle tests must be self-contained.
+Settle cold history until `timers >= 1` and counts stop moving, then assert no
+further growth inside the poll window. Mint the current activation marker inside
+the same-sha marker test before creating the superseded one.
 
 ## Human feedback
 
-None recorded.
+Post-merge Step 13ac validation failed after an otherwise healthy cutover;
+failures were harness contract drift, not a bad candidate build.
 
 ## Reusable lesson
 
-Make migration validators create and settle the complete current lifecycle state instead of asserting obsolete zero-history or leftover-marker assumptions.
+Prod migration validation must encode the cooperative-cutover cold contract
+(bounded handoff poll), not a pre-cutover "literally zero history events while
+paused" reading. Marker lifecycle tests must be self-contained.

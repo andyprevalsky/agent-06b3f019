@@ -219,11 +219,26 @@
             "value": "COMPLETED"
           }
         ]
+      },
+      {
+        "id": "no-browser-agents",
+        "method": "static_check",
+        "criteria": [
+          "No browser agents spawn in the root or any child tree"
+        ],
+        "checks": [
+          {
+            "type": "browser_agent_session_count",
+            "min": 0,
+            "max": 0
+          }
+        ]
       }
     ],
     "source": [
       "oai-demo:july-mass-agent-0"
-    ]
+    ],
+    "deploy_category": "harness"
   },
   {
     "name": "single-creator-arm",
@@ -265,7 +280,8 @@
     "approval_handling": null,
     "start_phase": null,
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "spawn-sub-agents",
@@ -295,7 +311,8 @@
       "spawn_claude_code_agent": 0
     },
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "parallel-tool-calls",
@@ -326,7 +343,8 @@
       "spawn_claude_code_agent"
     ],
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "response-schema-non-goal-feedback",
@@ -987,7 +1005,9 @@
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
     "bench": "pipeline-e2e",
-    "group": "daily"
+    "group": "daily",
+    "deploy_category": "payment",
+    "deploy_canary": true
   },
   {
     "name": "gate-subscription-webhook-resume",
@@ -1498,7 +1518,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "deploy_category": "browser_stateful",
+    "deploy_canary": true
   },
   {
     "name": "browser-agent-amazon-passkey",
@@ -1691,7 +1713,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "deploy_category": "browser_stateful",
+    "deploy_canary": true
   },
   {
     "name": "browser-opentable-reservation",
@@ -2819,7 +2843,8 @@
     "approval_handling": null,
     "start_phase": "execute",
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "browser-smoke",
@@ -2844,7 +2869,8 @@
     "approval_handling": null,
     "start_phase": "execute",
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "browser-google-search-single-result",
@@ -3644,7 +3670,8 @@
     },
     "bench": "pipeline-e2e",
     "group": "pre-deploy",
-    "model": "rose-labs/rose-1-oss"
+    "model": "rose-labs/rose-1-oss",
+    "deploy_category": "harness"
   },
   {
     "name": "cache-coverage",
@@ -3723,6 +3750,150 @@
     "approval_handling": null,
     "start_phase": "plan",
     "bench": "pipeline-e2e",
+    "group": "daily"
+  },
+  {
+    "name": "summary-html-document-output",
+    "title": "HTML Document in Completion Summary",
+    "prompt": "Create a single self-contained HTML file named report.html. The page must include a visible heading exactly equal to 'Rose Labs Report' and one short paragraph of placeholder body text. Use a code agent (spawn_claude_code_agent / type=code) to write the file. When finished, return the HTML file as a file_pointer in your structured output (do NOT paste the HTML source as a string field). Do not ask questions. Do not spawn browser or explore agents.",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "response-schema",
+      "documents",
+      "regression"
+    ],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Produces an HTML deliverable as a file_pointer in Task Complete outputs so the FE summary document drawer + HTML iframe preview path stays cemented.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Code-agent writes report.html under the sandbox output dir; close-session uploads it as a FilePointer that must appear in completionSummary.outputs."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "completed-with-html-file-output",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include at least one file_pointer for an .html / text/html document"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".html",
+              ".htm"
+            ],
+            "mime_contains": [
+              "html"
+            ],
+            "min_files": 1
+          }
+        ]
+      }
+    ],
+    "source": [
+      "feature:summary-document-drawer-html-preview"
+    ],
+    "group": "daily"
+  },
+  {
+    "name": "summary-site-no-filetype",
+    "title": "Make Me a Site (No File Type Specified)",
+    "prompt": "Make me a site for a fictional coffee shop called Beam Roast. Include a hero title with the shop name and a short About section with two sentences of placeholder copy. Do not ask questions.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "response-schema",
+      "documents",
+      "regression"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "User asks for a website without naming HTML/file_pointer. Schema generator must force a file_pointer field, and the agent must return an HTML FilePointer (mime_type/extension) in Task Complete outputs.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "No pinned response_schema. Prompt never says HTML/file. Schema-gen must set file_pointer; completion outputs must include an HTML deliverable (mime_type/extension)."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "completed-with-inferred-html-site",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Generated response_schema includes a file_pointer field",
+          "Task Complete outputs include at least one HTML FilePointer (mime_type/extension)"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "response_schema_has_file_pointer"
+          },
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".html",
+              ".htm"
+            ],
+            "mime_contains": [
+              "html"
+            ],
+            "min_files": 1
+          }
+        ]
+      }
+    ],
+    "source": [
+      "feature:summary-document-drawer-html-preview"
+    ],
     "group": "daily"
   },
   {
@@ -4832,7 +5003,9 @@
     "enforce_declared_evaluators": true,
     "source": [
       "user:whatsapp-bench-2026-07-29"
-    ]
+    ],
+    "deploy_category": "grep",
+    "deploy_canary": true
   },
   {
     "name": "agent-payment-production-purchase",
@@ -5254,7 +5427,9 @@
     "enforce_declared_evaluators": true,
     "source": [
       "prod SMS thread +19729777432 2026-07-27T20:50Z; local bench run 2026-07-28 where the supervisor reported the closure and spawned an ordering agent anyway"
-    ]
+    ],
+    "deploy_category": "sms",
+    "deploy_canary": true
   },
   {
     "name": "browser-agent-amazon-mx-buy-under-5-usd",

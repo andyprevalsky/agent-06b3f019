@@ -65,7 +65,11 @@ async function main(): Promise<void> {
   await releaseBrowser(releaseFailure);
   assert.equal(releaseFailure.release, null);
 
+  let finishClosed = 0;
   const finishSuccess = entry('finish-success', {
+    close: () => {
+      finishClosed += 1;
+    },
     release: async () => {
       released += 1;
     },
@@ -74,6 +78,10 @@ async function main(): Promise<void> {
   await finish(finishSuccess);
   assert.equal(pending.has(finishSuccess.connectId), false);
   assert.equal(released, 2);
+  assert.equal(finishClosed, 1, 'finish left CDP open');
+  await finish(finishSuccess);
+  assert.equal(released, 2, 'finish released the same browser twice');
+  assert.equal(finishClosed, 1, 'finish closed CDP more than once');
 
   const finishEmpty = entry('finish-empty');
   pending.set(finishEmpty.connectId, finishEmpty);

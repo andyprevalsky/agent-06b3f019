@@ -5,7 +5,7 @@ title: Browser-use drag advertised but missing from service_actions dispatcher
 surface: agents
 component: spawn-browser-agent-v3 / service_actions
 classification: our-bug
-problem_class: logical-inconsistency-in-harness-contracts
+problem_class: new-tool-or-capability-required
 first_bad_boundary: "agents/domains/spawn_browser_agent_v3/service_actions.py `_INTERACTION_ACTIONS` — omitted `drag` while providers/rose/browser_use.py advertises it"
 symptoms:
   - browser-biometrics-webdecoy smoke timeout / PAUSED
@@ -26,21 +26,13 @@ status: fixed
 ## Problem
 
 Pre-deploy smoke `browser-biometrics-webdecoy` timed out (420s) with the agent
-PAUSED after max browser steps. Early in the run the browser TOOL stream showed
-two hard errors: `Unknown action: drag`.
+PAUSED after max browser steps. Early TOOL stream showed `Unknown action: drag`.
 
 ## Diagnosis
 
-`providers/rose/browser_use.py` advertises `drag` to the model and
-`normalize_browser_use_response` emits `action: drag`. Implementation exists in
-`browser_tools/tool_executor_v2._execute_drag`. The v3 `service_actions` dispatcher
-never listed `drag` in `_INTERACTION_ACTIONS`, so `execute_action` returned
-`Unknown action: drag`.
-
-On agent `8fadb018` the model tried drag twice to simulate natural mouse motion
-before falling back to coordinate clicks. The form eventually submitted (risk
-0.00) but the run still exhausted max steps / hit the smoke timeout — wasted
-unknown-action steps plus post-success scrolling without `done`.
+`providers/rose/browser_use.py` advertises `drag` and normalize emits
+`action: drag`, but v3 `service_actions` never listed `drag` in
+`_INTERACTION_ACTIONS`, so `execute_action` returned Unknown action.
 
 ## Solution
 
@@ -49,7 +41,8 @@ Cement with a blackbox that fails closed if drag returns Unknown action.
 
 ## Human feedback
 
-None recorded.
+Smoke burned steps on advertised-but-undispatched drag before falling back to
+coordinate clicks; form eventually submitted but run still timed out.
 
 ## Reusable lesson
 

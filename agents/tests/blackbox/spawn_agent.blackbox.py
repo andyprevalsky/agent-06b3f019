@@ -1234,6 +1234,82 @@ async def test_handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child(
     assert "skipping nested spawn" in str(events[0].message or "")
 
 
+async def test_handler_fast_mode_skips_browser_on_oai_demo_child():
+    """Only test-mass-agent-run-0 Fast Mode FINISH-skips browser-agent sessions."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    wf = _FakeWFInstance(
+        depth=1,
+        goal=(
+            "You are analyzing ONE creator for Andy Prevalsky. "
+            "Research the creator's public activity in the last 90 days "
+            "(approximately 2026-04-04 through 2026-07-03) across YouTube."  # pragma: allowlist secret
+        ),
+    )
+    wf.fast_mode_cache_enabled = True
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Browser done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_browser_manager
+    h.get_browser_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "browser",
+                    "goal": "Open the creator YouTube channel",
+                    "start_url": "https://youtube.com",
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc-oai-browser",
+            )
+        )
+    finally:
+        h.get_browser_manager = original
+
+    assert fake_mgr.last_call is None, "OAi demo browser must FINISH-skip without spawning"
+    assert len(events) == 1
+    assert events[0].status == MessageStatus.FINISHED
+    assert "skipping browser spawn" in str(events[0].message or "")
+    assert (events[0].metadata or {}).get("skippedBrowserSpawn") is True
+    assert "agentType" not in (events[0].metadata or {})
+
+
+async def test_handler_fast_mode_still_spawns_browser_on_non_demo():
+    """Non-demo Fast Mode trees still open browser-agent sessions."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
+
+    wf = _FakeWFInstance(depth=1, goal="Order a Vanilla Bean Shakerato from Blue Bottle")
+    wf.fast_mode_cache_enabled = True
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Browser done", message="ok", status=MessageStatus.FINISHED)]
+    )
+    original = h.get_browser_manager
+    h.get_browser_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "browser",
+                    "goal": "Open Blue Bottle",
+                    "start_url": "https://bluebottlecoffee.com",
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc-live-browser",
+            )
+        )
+    finally:
+        h.get_browser_manager = original
+
+    assert fake_mgr.last_call is not None, "non-demo browser must still spawn"
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any((e.metadata or {}).get("skippedBrowserSpawn") for e in events)
+
+
 async def test_handler_fast_mode_skips_second_root_for_each_on_oai_demo():
     """Root runs one for_each wave; a second 50-GP fan-out misses the 900s harness."""
     from tools.base import EventType, MessageStatus, ToolEvent
@@ -3933,6 +4009,14 @@ async def run_all_tests():
     await r.record_async(
         "handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child",
         test_handler_fast_mode_skips_nested_general_purpose_on_oai_demo_child,
+    )
+    await r.record_async(
+        "handler_fast_mode_skips_browser_on_oai_demo_child",
+        test_handler_fast_mode_skips_browser_on_oai_demo_child,
+    )
+    await r.record_async(
+        "handler_fast_mode_still_spawns_browser_on_non_demo",
+        test_handler_fast_mode_still_spawns_browser_on_non_demo,
     )
     await r.record_async(
         "handler_fast_mode_skips_second_root_for_each_on_oai_demo",

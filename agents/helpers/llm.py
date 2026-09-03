@@ -4118,6 +4118,7 @@ async def _call_llm_verifier(
             request_key_material as fast_cache_request_key_material,
         )
 
+        verifier_max_tokens = max_tokens_for_verifier_call_site(call_site)
         fast_cache_context = current_fast_cache_context()
         if fast_cache_context is not None and fast_cache_context.active and fast_cache_context.should_write:
             fast_cache_complete_kwargs: Dict[str, Any] = {
@@ -4125,7 +4126,7 @@ async def _call_llm_verifier(
                 "messages": messages,
                 "response_model": response_model,
                 "temperature": 0.3,
-                "max_tokens": VERIFIER_MAX_TOKENS,
+                "max_tokens": verifier_max_tokens,
                 "claude_auth": claude_auth_context,
                 "gpt_auth": gpt_auth_context,
                 "agent_id": agent_id,
@@ -4153,7 +4154,7 @@ async def _call_llm_verifier(
             messages=messages,
             response_model=response_model,
             temperature=0.3,
-            max_tokens=VERIFIER_MAX_TOKENS,
+            max_tokens=verifier_max_tokens,
             claude_auth=claude_auth_context,
             gpt_auth=gpt_auth_context,
             agent_id=agent_id,
@@ -5090,6 +5091,17 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 # this constant is the single source of truth for the verifier model.
 VERIFIER_MODEL = "rose-labs/rose-1-ultra"
 VERIFIER_MAX_TOKENS = 16000
+# Declared-evaluator judges return a short score JSON. OpenRouter reserves
+# max_tokens against remaining credits, so a 16000-token reservation 402s
+# an otherwise cheap cached judge when the account is low.
+DECLARED_EVALUATOR_MAX_TOKENS = 512
+
+
+def max_tokens_for_verifier_call_site(call_site: str) -> int:
+    """Output-token cap for one verifier/judge completion."""
+    if str(call_site or "") == "benchmark_declared_evaluator":
+        return DECLARED_EVALUATOR_MAX_TOKENS
+    return VERIFIER_MAX_TOKENS
 # A verifier is advisory and must never outlive the agent benchmark/activity
 # that requested it. Keep each provider attempt short enough to fall through,
 # while also fencing the entire retry loop so six individually bounded attempts

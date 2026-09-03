@@ -5,7 +5,7 @@ title: Browser agent waits out the 420s cap after already stating the FCaptcha s
 surface: agents
 component: spawn-browser-agent-v3 / visible_result_completion
 classification: our-bug
-problem_class: logical-inconsistency-in-harness-contracts
+problem_class: model-intelligence-limitation
 first_bad_boundary: "agents/domains/spawn_browser_agent_v3/handler.py live action loop — executes post-submit wait after reasoning already stated risk score + verdict"
 symptoms:
   - browser-biometrics-webdecoy smoke timeout / PAUSED at 426s / cap 420s
