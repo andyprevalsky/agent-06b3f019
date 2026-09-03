@@ -173,6 +173,38 @@ BROWSER_STATE_SOFT_TIMEOUT_SECONDS = float(
 )
 BROWSER_STATE_SOFT_ATTEMPTS = int(os.getenv("BROWSER_STATE_SOFT_ATTEMPTS", "2"))
 
+# `read_browser_state` replaced free per-turn DOM injection (d5b79a331). Counting
+# it against MAX_ITERATIONS burns the action budget on observation: smoke agent
+# b4b36b53 spent 16/60 steps on read_browser_state, hit max steps on Submit,
+# and never read the visible FCaptcha score (browser-biometrics-webdecoy).
+# Observation stays free up to a consecutive cap so a stuck model cannot loop
+# forever without advancing the wall-clock action budget.
+BUDGET_FREE_BROWSER_ACTIONS = frozenset({"read_browser_state"})
+MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS = int(
+    os.getenv("BROWSER_MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS", "5")
+)
+
+
+def adjust_iteration_after_action(
+    *,
+    iteration: int,
+    action_name: str,
+    consecutive_budget_free: int,
+) -> tuple[int, int]:
+    """Refund a step budget unit for observation-only tools.
+
+    Returns ``(new_iteration, new_consecutive_budget_free)``. After
+    ``MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS`` observation-only calls in a row,
+    further observations consume budget so the loop still terminates.
+    """
+    name = str(action_name or "").strip().lower()
+    if name in BUDGET_FREE_BROWSER_ACTIONS:
+        consecutive = int(consecutive_budget_free) + 1
+        if consecutive <= MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS:
+            return max(0, int(iteration) - 1), consecutive
+        return int(iteration), consecutive
+    return int(iteration), 0
+
 # Verifier DOM checkpoints retained across the browser activity (evaluate
 # always-on preserved_evidence + pre-write approval snapshots). Bounded so
 # long sessions cannot unbounded-grow verifier prompts; 20 covers multi-item

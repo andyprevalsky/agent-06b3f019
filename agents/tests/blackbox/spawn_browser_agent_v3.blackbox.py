@@ -301,6 +301,82 @@ def test_transient_session_init_failure_classification():
 # don't exist (ImportError) and the guarantees below don't hold.
 # ============================================================================
 
+# ============================================================================
+# RCA repro — read_browser_state must not burn the action step budget
+# ----------------------------------------------------------------------------
+# Bug (before): d5b79a331 replaced free per-turn DOM injection with an explicit
+# `read_browser_state` tool but still incremented MAX_ITERATIONS for every call.
+# Smoke agent b4b36b53 (browser-biometrics-webdecoy) spent 16/60 steps on
+# read_browser_state, hit max steps on the Submit click, and never read the
+# visible FCaptcha score before the 420s harness pause.
+#
+# Fix (after): adjust_iteration_after_action refunds the step for
+# read_browser_state (capped consecutive so a stuck model still terminates).
+# ============================================================================
+
+
+def test_read_browser_state_does_not_consume_step_budget():
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, consecutive = 5, 0
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="read_browser_state",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 4
+    assert consecutive == 1
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="Read_Browser_State",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 3
+    assert consecutive == 2
+
+
+def test_read_browser_state_budget_refund_caps_consecutive_observations():
+    from domains.spawn_browser_agent_v3.config import (
+        MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS,
+        adjust_iteration_after_action,
+    )
+
+    iteration, consecutive = 20, 0
+    for _ in range(MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS):
+        iteration, consecutive = adjust_iteration_after_action(
+            iteration=iteration,
+            action_name="read_browser_state",
+            consecutive_budget_free=consecutive,
+        )
+    assert iteration == 20 - MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    assert consecutive == MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    # Next observation consumes budget so the loop cannot spin forever.
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="read_browser_state",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 20 - MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    assert consecutive == MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS + 1
+
+
+def test_click_resets_budget_free_observation_streak():
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=3,
+        action_name="read_browser_state",
+        consecutive_budget_free=0,
+    )
+    assert iteration == 2 and consecutive == 1
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration + 1,  # loop already incremented for the click turn
+        action_name="click",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 3 and consecutive == 0
+
+
 def test_visible_result_completion_rewrites_post_submit_wait():
     """c3762be3 already stated score 0.07 + bot verdict, then waited 6–10s.
 
@@ -18916,6 +18992,18 @@ async def run_all_tests():
     r.record(
         "browser_fast_mode_timeout_is_demo_only",
         test_browser_fast_mode_timeout_is_demo_only,
+    )
+    r.record(
+        "read_browser_state_does_not_consume_step_budget",
+        test_read_browser_state_does_not_consume_step_budget,
+    )
+    r.record(
+        "read_browser_state_budget_refund_caps_consecutive_observations",
+        test_read_browser_state_budget_refund_caps_consecutive_observations,
+    )
+    r.record(
+        "click_resets_budget_free_observation_streak",
+        test_click_resets_budget_free_observation_streak,
     )
     r.record(
         "visible_result_completion_rewrites_post_submit_wait",

@@ -85,6 +85,7 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
+    adjust_iteration_after_action,
     NAVIGATE_TO_URL_TIMEOUT_SECONDS,
     SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
     SESSION_INIT_TRANSIENT_RETRY_SECONDS,
@@ -6855,6 +6856,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             return True
 
         observe_page_state: Dict[str, Any] = {}
+        consecutive_budget_free = 0
         while iteration < MAX_ITERATIONS:
             iteration += 1
             activity.heartbeat(f"Step {iteration}")
@@ -9461,6 +9463,23 @@ Based on this feedback, I need to continue working on the task and address the i
                         },
                     )
                 await browser_stream.finish_tools(status="ERROR")
+
+            # Observation-only tools (read_browser_state) replaced free per-turn
+            # DOM injection — refund the step so they do not burn the action
+            # budget. Cap consecutive refunds so a stuck model still terminates.
+            prior_iteration = iteration
+            iteration, consecutive_budget_free = adjust_iteration_after_action(
+                iteration=iteration,
+                action_name=action_name,
+                consecutive_budget_free=consecutive_budget_free,
+            )
+            if iteration != prior_iteration:
+                logger.info(
+                    "Observation action did not consume step budget",
+                    action=action_name,
+                    iteration=iteration,
+                    consecutive_budget_free=consecutive_budget_free,
+                )
 
             await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
 
