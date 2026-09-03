@@ -8773,6 +8773,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     assert hasattr(BrowserNetworkRecorder, "query_requests")
     assert hasattr(BrowserNetworkRecorder, "close")
     assert hasattr(BrowserNetworkRecorder, "export_diagnostics_bundle_bytes")
+    assert hasattr(BrowserNetworkRecorder, "pop_provider_exit_rejection")
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
