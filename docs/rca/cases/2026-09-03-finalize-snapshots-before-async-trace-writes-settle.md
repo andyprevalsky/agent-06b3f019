@@ -102,10 +102,32 @@ ciphertext SHA-256 failures quarantined rather than overwriting them.
 
 The planner index builder now clears existing entries for `--rescan-all` and
 replaces explicitly rescanned roots, so ineligible roots cannot survive in an
-append-only index. An exact rebuild over 55,040 R2 roots produced and published
-405 usable plan traces. Queue saturation/process-exit loss and direct DB terminal
-transitions remain separately reproducible sibling failure modes; manifest
-convergence does not claim to fix them.
+append-only index. A follow-up audit found historical planner updates whose
+filenames ended in `-update` before the call site was included in the filename.
+The extractor now accepts those updates only when the paired `llm/<dump-id>`
+context proves `call_site=planner`; schema-shaped outputs from other call sites
+remain excluded.
+
+An exact rebuild over 55,085 R2 roots produced and published 462 usable plan
+traces, up from 405. There were 465 successful, real/shadow planner candidates
+with goals and no explicit non-finalized marker, so planner-output recall is
+99.35% (462/465). Applying the archive's stricter gold policy to that candidate
+set left 446 bundles: 443 usable and three
+with genuinely unparseable planner output, or 99.33%. Full integrity passes
+validated the remaining 25,105 encrypted artifacts across all 446 gold bundles
+without another rejection. Queue saturation/process-exit loss and direct DB
+terminal transitions remain separately reproducible sibling failure modes;
+manifest convergence does not claim to fix them.
+
+A production impact audit for 2026-09-03 UTC found 327 root runs (972 agents
+including descendants). Of 213 roots with finalized archive manifests, 61 had
+hit this race and required reconciliation; among database-completed roots the
+impact was 59 of 195 (30.3%). The bulk pass had already repaired 54 affected
+roots, while seven newer completed roots became stale afterward because the
+runtime fix was not deployed. A second targeted pass restored 142 missing refs
+in each manifest surface across those seven roots. The immediate read-after-
+write audit then reported 213 current, 114 not-finalized, zero stale, and zero
+errors. More stale roots can recur until the runtime change is deployed.
 
 ## Human feedback
 

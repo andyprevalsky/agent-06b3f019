@@ -121,11 +121,17 @@ def _write_bundle(
     created_at: str = "2026-09-01T00:00:00.000Z",
     generated_at: str | None = None,
     planner_dump_ts: int = 1788400000000,
+    legacy_update: bool = False,
+    origin_call_site: str = "planner",
 ) -> None:
     from helpers.trace_archive import encrypt_artifact, store_encrypted_artifact
 
-    dump_path = f"llm-updates/0123456789ab-{planner_dump_ts}-planner.json.gz.enc"
+    suffix = "update" if legacy_update else "planner"
+    dump_path = f"llm-updates/0123456789ab-{planner_dump_ts}-{suffix}.json.gz.enc"
     refs = [{"ref": f"local://{root_id}/{dump_path}", "path": dump_path}] if plan is not None else []
+    context_path = "llm/0123456789ab.json.gz.enc"
+    if plan is not None and legacy_update:
+        refs.append({"ref": f"local://{root_id}/{context_path}", "path": context_path})
     manifest = {
         "schema_version": 1,
         "root_agent_id": root_id,
@@ -165,6 +171,8 @@ def _write_bundle(
     _store("manifest.json.gz.enc", manifest)
     if plan is not None:
         _store(dump_path, {"call_site": "planner", "output": {"content": json.dumps(plan)}})
+        if legacy_update:
+            _store(context_path, {"call_site": origin_call_site, "messages": []})
 
 
 POPULATION_GOAL = (
@@ -286,6 +294,31 @@ def test_extract_entry_uses_latest_planner_attempt():
         entry, reason = extract_entry("retry")
         assert reason == "ok" and entry is not None
         assert entry.plan.title == "Book Paris flight"
+
+
+def test_extract_entry_recovers_legacy_generic_planner_update():
+    from providers.planner_rag import extract_entry
+
+    with _LocalArchive() as archive:
+        _write_bundle(archive, "legacy", "goal", FLIGHT_PLAN, legacy_update=True)
+        entry, reason = extract_entry("legacy")
+        assert reason == "ok" and entry is not None
+        assert entry.plan.title == "Book Paris flight"
+
+
+def test_extract_entry_rejects_schema_shaped_nonplanner_update():
+    from providers.planner_rag import extract_entry
+
+    with _LocalArchive() as archive:
+        _write_bundle(
+            archive,
+            "not-planner",
+            "goal",
+            FLIGHT_PLAN,
+            legacy_update=True,
+            origin_call_site="execute_loop",
+        )
+        assert extract_entry("not-planner")[1] == "no_planner_dump"
 
 
 def test_scan_bundles_is_incremental_and_reprobes_transient():
@@ -866,6 +899,8 @@ async def run_all_tests():
     r.record("extract_entry_local_bundle", test_extract_entry_from_local_bundle)
     r.record("extract_entry_skip_reasons", test_extract_entry_skip_reasons)
     r.record("extract_entry_latest_attempt", test_extract_entry_uses_latest_planner_attempt)
+    r.record("extract_entry_legacy_update", test_extract_entry_recovers_legacy_generic_planner_update)
+    r.record("extract_entry_nonplanner_update", test_extract_entry_rejects_schema_shaped_nonplanner_update)
     r.record("scan_bundles_incremental", test_scan_bundles_is_incremental_and_reprobes_transient)
     r.record("index_store_roundtrip_encrypted", test_index_store_roundtrip_is_encrypted)
     r.record("store_refuses_bundle_writes", test_store_never_writes_under_trace_archive_prefix)

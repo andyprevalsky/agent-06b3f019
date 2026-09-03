@@ -35,6 +35,7 @@ REAL_WORLD_MODEL_MODES = {"real", "shadow"}
 TRANSIENT_SKIP_REASONS = {"no_public_manifest", "not_finalized", "no_llm_traces_recent"}
 _RECENT_WINDOW_S = 24 * 3600
 _DUMP_TS_RE = re.compile(r"^llm-updates/[0-9a-f]+-(\d+)-planner\.json\.gz\.enc$")
+_LEGACY_UPDATE_RE = re.compile(r"^llm-updates/([^/]+)-(\d+)-update\.json\.gz\.enc$")
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9_.-]")
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b((?:github\s+)?api[\s_-]?(?:key|token)|access[\s_-]?token|refresh[\s_-]?token|"
@@ -163,23 +164,49 @@ def read_encrypted_bundle_json(root_agent_id: str, path: str) -> Optional[dict[s
     return value if isinstance(value, dict) else None
 
 
-def planner_dump_paths(manifest: dict[str, Any]) -> list[str]:
-    """Planner LLM dump paths from a manifest, oldest first (by the ms timestamp in the filename)."""
+def _llm_trace_paths(manifest: dict[str, Any]) -> list[str]:
     sensitive = manifest.get("sensitive") if isinstance(manifest.get("sensitive"), dict) else {}
     refs = sensitive.get("llm_trace_refs")
     if not isinstance(refs, list) or not refs:
         refs = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
+    return [
+        path
+        for ref in refs
+        if isinstance(ref, dict) and isinstance((path := ref.get("path")), str) and path.startswith("llm")
+    ]
+
+
+def _dump_timestamp(path: str) -> int:
+    match = _DUMP_TS_RE.match(path) or _LEGACY_UPDATE_RE.match(path)
+    return int(match.group(2) if match and match.lastindex == 2 else match.group(1)) if match else 0
+
+
+def planner_dump_paths(manifest: dict[str, Any]) -> list[str]:
+    """Modern planner LLM dump paths from a manifest, oldest first."""
+    paths = [path for path in _llm_trace_paths(manifest) if path.endswith(PLANNER_DUMP_SUFFIX)]
+    return sorted(set(paths), key=_dump_timestamp)
+
+
+def legacy_planner_dump_paths(root_agent_id: str, manifest: dict[str, Any]) -> list[str]:
+    """Recover planner updates written before filenames carried the call site.
+
+    Historical updates ended in ``-update``. Their paired ``llm/<dump-id>``
+    context is authoritative for the original call site, so schema-shaped
+    outputs from other LLM calls cannot be mistaken for planner responses.
+    """
+    trace_paths = set(_llm_trace_paths(manifest))
     paths: list[str] = []
-    for ref in refs:
-        path = ref.get("path") if isinstance(ref, dict) else None
-        if isinstance(path, str) and path.endswith(PLANNER_DUMP_SUFFIX):
+    for path in trace_paths:
+        match = _LEGACY_UPDATE_RE.match(path)
+        if match is None:
+            continue
+        context_path = f"llm/{match.group(1)}.json.gz.enc"
+        if context_path not in trace_paths:
+            continue
+        context = read_encrypted_bundle_json(root_agent_id, context_path)
+        if context is not None and context.get("call_site") == "planner":
             paths.append(path)
-
-    def _ts(path: str) -> int:
-        match = _DUMP_TS_RE.match(path)
-        return int(match.group(1)) if match else 0
-
-    return sorted(set(paths), key=_ts)
+    return sorted(set(paths), key=_dump_timestamp)
 
 
 def _parse_plan(dump: dict[str, Any]) -> Optional[PlanExemplar]:
@@ -245,6 +272,8 @@ def extract_entry(root_agent_id: str) -> tuple[Optional[PlanEntry], str]:
         return None, f"simulated:{mode}"
 
     dump_paths = planner_dump_paths(manifest)
+    if not dump_paths:
+        dump_paths = legacy_planner_dump_paths(root_agent_id, manifest)
     if not dump_paths:
         return None, "no_planner_dump"
 
