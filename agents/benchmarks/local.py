@@ -2243,7 +2243,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
-    if stack.isolated:
+    # Isolated stacks and --use-existing local stacks both key browser-provider
+    # profiles per agent. Without this flag, run_benchmark serializes every
+    # requires_browser_agent task through a one-writer semaphore (concurrency=1),
+    # which makes a 300-task polar-bench run effectively sequential.
+    if stack.isolated or args.use_existing:
         # Both the service stack and run_benchmark.py inherit this. Provider
         # profiles are keyed per agent, so browser benchmarks can use the same
         # concurrency width as non-browser tasks without cross-run state writes.

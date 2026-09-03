@@ -31,6 +31,10 @@ Use with skill `.claude/skills/impl-bench/SKILL.md` for the next suite.
    which require a gate). `create_agent` therefore sets `write_lock_enabled=false` for
    polar tasks so Google-search / form submits do not pause agents forever. Override
    with `BENCHMARK_WRITE_LOCK_ENABLED=true` only when intentionally testing locks.
+10. **Isolated browser profiles on local/--use-existing** — without
+    `BENCHMARK_ISOLATED_BROWSER_PROFILES=true`, `run_benchmark` serializes all
+    browser tasks (concurrency=1). `local.py` now sets this for isolated stacks
+    **and** `--use-existing` so `--max-concurrency 8` actually overlaps agents.
 
 ## Key files
 

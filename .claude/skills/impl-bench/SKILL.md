@@ -138,3 +138,10 @@ open `AgentAttentionRequest` on Google search. Cause: `approval_handling=None`
 skips harness auto-approve, but product write-lock still arms. Fix: polar
 `create_agent` defaults `write_lock_enabled=false` (see
 `agents/benchmarks/run_benchmark.py`).
+
+## Polar concurrency=1 stall (RCA class)
+
+Symptom: `--max-concurrency 8` but only one live agent. Cause: without
+`BENCHMARK_ISOLATED_BROWSER_PROFILES=true`, browser tasks take a one-writer
+semaphore. `--use-existing` used to skip setting that flag (`isolated=False`).
+`local.py` now sets it for isolated **and** `--use-existing` runs.
