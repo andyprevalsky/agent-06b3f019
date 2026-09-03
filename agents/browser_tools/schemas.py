@@ -312,10 +312,16 @@ class SelectDropdownTool(BaseModel):
 
 
 class EvaluateTool(BaseModel):
-    """Execute JavaScript code in the browser console."""
+    """Execute JavaScript in the page; successful calls also retain a verifier DOM snapshot."""
 
     tool: Literal["evaluate"]
-    code: str = Field(description="JavaScript code to execute. Returns the result of the expression.")
+    code: str = Field(
+        description=(
+            "JavaScript code to execute. Returns the result of the expression. "
+            "After success, the runtime always retains a bounded browser-extracted DOM snapshot "
+            "for verification (no preserve flag)."
+        )
+    )
     timeout: Optional[float] = Field(
         default=None,
         ge=0.1,

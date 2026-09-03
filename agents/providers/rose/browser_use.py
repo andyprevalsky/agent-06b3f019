@@ -175,8 +175,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
             "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
-            "computed styles, dispatching events, querying iframe contents. Wrap in IIFE with try-catch. "
-            "NOT for extracting visible content; for that, use `extract`. NOT interchangeable with `extract`."
+            "computed styles, dispatching events, querying iframe contents, or reading visible product/cart "
+            "facts before navigating away. Wrap in IIFE with try-catch. Every successful evaluate also "
+            "retains a bounded browser-extracted DOM snapshot for the verifier (no flag); the JS return "
+            "value is not trusted as proof. Prefer evaluate over inventing page content."
         ),
         "params": {"code": {"type": "string", "description": "JavaScript code to execute", "required": True}},
     },
@@ -822,6 +824,11 @@ You must call exactly one available browser action tool. Do not write a JSON
 action envelope in text; use the provided tool call.
 
 {VERIFICATION_RULES.strip()}
+
+# Evidence Retention
+
+- Completion verification retains action results, the final DOM, bounded pre-write DOM checkpoints, and DOM snapshots captured after each successful `evaluate`, not arbitrary historical DOM.
+- Before navigating away from a page with load-bearing facts required by the goal (product name, size, price, quantity, wattage, model, etc.), call `evaluate` while those facts are still visible. The runtime always snapshots the live browser-extracted DOM after a successful evaluate; you do not pass a preserve flag.
 
 # Safety Rules
 
