@@ -326,9 +326,19 @@ export class AgentCardOrgRuntime {
     // for the same client). Joining it would resend the rejected credential and fail again — the
     // reachable case being the concurrent read fan-out, where one member of a burst gets a 401
     // while a sibling's proactive refresh is still pending.
+    //
+    // When a still-valid cached token can cover this call, proactive refresh is best-effort: one
+    // attempt, then fall back. Retrying 5xx here only burns the shared org token budget and delays
+    // every lifecycle fanout that can already succeed on the cache. Cold start and forced refresh
+    // keep the full retry budget — those have no usable fallback.
+    const canFallBackToCache =
+      !forceClientCredentials &&
+      cachedToken !== undefined &&
+      cachedToken.expiresAtMs > Date.now() + MIN_STALE_TOKEN_VALIDITY_MS;
+    const maxAttempts = canFallBackToCache ? 1 : TOKEN_GRANT_MAX_ATTEMPTS;
     let tokenPromise = this.inFlightToken;
     if (tokenPromise === undefined || forceClientCredentials) {
-      tokenPromise = this.fetchAccessToken().finally(() => {
+      tokenPromise = this.fetchAccessToken(maxAttempts).finally(() => {
         if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
       });
       this.inFlightToken = tokenPromise;
@@ -354,15 +364,16 @@ export class AgentCardOrgRuntime {
     }
   }
 
-  private async fetchAccessToken(): Promise<string> {
+  private async fetchAccessToken(maxAttempts = TOKEN_GRANT_MAX_ATTEMPTS): Promise<string> {
+    const attempts = Math.max(1, Math.min(maxAttempts, TOKEN_GRANT_MAX_ATTEMPTS));
     let lastError: AgentCardOrgRuntimeError | undefined;
-    for (let attempt = 1; attempt <= TOKEN_GRANT_MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
         return await this.fetchAccessTokenOnce();
       } catch (error) {
         if (!(error instanceof AgentCardOrgRuntimeError)) throw error;
         lastError = error;
-        if (!isRetryableOrgTokenError(error) || attempt === TOKEN_GRANT_MAX_ATTEMPTS) {
+        if (!isRetryableOrgTokenError(error) || attempt === attempts) {
           throw error;
         }
         await delay(TOKEN_GRANT_BASE_DELAY_MS * 2 ** (attempt - 1));
