@@ -21,6 +21,8 @@ vi.mock('@/lib/api/messages', async (importActual) => ({
   getAttachmentUrl: vi.fn(async () => 'https://signed.example/stitched.mp4'),
 }));
 
+import { getAttachmentUrl } from '@/lib/api/messages';
+
 const TASK = 'browser-task-1';
 const CALL = 'browser-call-1';
 const KERNEL_VIEW_URL =
@@ -277,6 +279,27 @@ describe('BrowserAgentChip recording', () => {
     const video = await screen.findByTitle('Browser recording');
     expect((video as HTMLVideoElement).src).toBe(KERNEL_VIEW_URL);
     expect(screen.queryByTestId('recording-segments')).not.toBeInTheDocument();
+  });
+
+  it('tells the viewer to sign in as the owner when attachment signing is denied', async () => {
+    vi.mocked(getAttachmentUrl).mockRejectedValueOnce(
+      new Error('Failed to get attachment URL (403)'),
+    );
+    const messages = [
+      anchorMsg,
+      recordingMsg({
+        recording_file_pointer: {
+          id: 'fp-1',
+          storage_path: 'owner/browser-recording.html',
+          mime_type: 'text/html',
+        },
+      }),
+    ];
+    renderChip(messages, anchorMsg);
+    await openRecordingTab();
+    expect(
+      await screen.findByText('Sign in as the agent owner to load this recording.'),
+    ).toBeInTheDocument();
   });
 
   it('shows "unavailable" when neither a view URL nor a file pointer is present', async () => {

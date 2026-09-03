@@ -68,6 +68,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   const [recordingState, setRecordingState] = useState<'idle' | 'loading' | 'ready' | 'error'>(
     'idle',
   );
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   // Which Kernel replay segment (one per session/rotation) is currently playing.
   // The segments auto-advance into one continuous recording (baseline -> each
   // rotation), so this is the playhead, not a manual tab selection.
@@ -213,6 +214,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     recordingLoadGeneration.current += 1;
     setRecordingState('idle');
     setRecordingUrl(null);
+    setRecordingError(null);
     setSegmentIndex(0);
     setPlayheadSec(0);
     segmentDurationsRef.current = [];
@@ -306,8 +308,17 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
       setPlayheadSec(0);
       segmentDurationsRef.current = [];
       setRecordingState('ready');
-    } catch {
+    } catch (err) {
       if (loadGeneration === recordingLoadGeneration.current) {
+        const message = err instanceof Error ? err.message : '';
+        // 403 from the sign endpoint means this session is not the agent owner
+        // (and not an admin). Dev auto-login can be shadowed by a stale wrong
+        // account — surface that instead of a generic failure.
+        setRecordingError(
+          /403|Access denied|Failed to get attachment URL/i.test(message)
+            ? 'Sign in as the agent owner to load this recording.'
+            : 'Failed to load recording.',
+        );
         setRecordingState('error');
       }
     }
@@ -382,7 +393,9 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                   <p className="text-xs text-muted-foreground">Loading recording…</p>
                 )}
                 {hasRecording && recordingState === 'error' && (
-                  <p className="text-xs text-red-500">Failed to load recording.</p>
+                  <p className="text-xs text-red-500">
+                    {recordingError ?? 'Failed to load recording.'}
+                  </p>
                 )}
                 {/* Stitched replay: rotate_ip's per-session segments were
                     concatenated server-side into ONE continuous MP4, so the whole

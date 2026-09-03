@@ -257,6 +257,69 @@ test('enabled CookieBundles with no injectable realm cookies are not selected', 
   }
 });
 
+test('enabled CookieBundles with only tracking cookies are not selected as auth', async () => {
+  // Epoch-8 Instacart: CookieBundle b28c0bc6 had 12 analytics cookies (_gcl_au,
+  // _ttp, device_uuid, …) and zero session cookies. selectTopCookieBundle still
+  // returned it (cookieCount>0), so injection recorded "Credential referenced"
+  // while the page stayed logged-out and the agent burned the budget on Google OTP.
+  const userId = await createUser();
+  try {
+    await prisma.cookieBundle.create({
+      data: {
+        id: randomUUID(),
+        userId,
+        authRealm: 'instacart.com',
+        browserSource: 'chrome',
+        browserProfile: 'TrackingOnly',
+      },
+    });
+    const trackingNames = [
+      '_gcl_au',
+      '_scid',
+      '_scid_r',
+      '_sctr',
+      '_tt_enable_cookie',
+      '_ttp',
+      '_uetvid',
+      'ahoy_visitor',
+      'device_uuid',
+      'privacy_opt_out',
+      'ttcsid',
+      'ttcsid_D23SJ1JC77U5781IKE5G',
+    ];
+    for (const [index, name] of trackingNames.entries()) {
+      await prisma.cookie.create({
+        data: {
+          userId,
+          domain: name.startsWith('ahoy') || name === 'device_uuid' || name === 'privacy_opt_out'
+            ? 'www.instacart.com'
+            : '.instacart.com',
+          name,
+          path: '/',
+          value: `track-${index}`,
+          browserSource: 'chrome',
+          browserProfile: 'TrackingOnly',
+          creationUtc: BigInt(6000 + index),
+          expiresUtc: 999999999999999n,
+          isSecure: name === 'device_uuid',
+          isHttpOnly: name === 'device_uuid',
+        },
+      });
+    }
+
+    const source = await resolveBrowserAuthCredentialSource({
+      userId,
+      authRealm: 'instacart.com',
+      steelContextId: null,
+    });
+
+    assert(source.kind === 'none', 'expected tracking-only CookieBundle to be ignored');
+    assert(source.credentialRef === null, 'expected no credential ref for tracking-only bundle');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
 test('Steel cookie summary is realm scoped and expiry aware without exposing values', () => {
   const summary = summarizeSteelCookiesForRealm(
     [

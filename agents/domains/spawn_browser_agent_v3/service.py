@@ -458,8 +458,9 @@ async def build_browser_verifier_context(
             preserved_number += 1
             section_title = f"### Preserved page evidence {preserved_number}"
             section_description = (
-                "This snapshot was extracted directly from the browser when the acting agent requested bounded "
-                "evidence retention; it is browser ground truth, not an agent claim."
+                "This snapshot was extracted directly from the browser after a successful evaluate; "
+                "it is browser ground truth, not an agent claim. Prefer it over later pages when those "
+                "pages no longer show the load-bearing facts."
             )
             destination = preserved_evidence_sections
         else:

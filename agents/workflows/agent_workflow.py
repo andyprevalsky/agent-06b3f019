@@ -707,6 +707,12 @@ class AgentWorkflow:
         self.subtree_cost_cents: float = 0.0  # own + sum(children) - what we report to parent
         self.price_limit_cents: int = 100  # Default price limit (100 cents = $1.00)
         self._cost_limit_reached: bool = False  # Flag for cost limit status
+        # When a successful spawn_browser_agent return itself trips the price
+        # limit (batched browser LLM costs applied on tool completion), allow
+        # one more agent turn so attempt_completion can latch COMPLETED instead
+        # of stranding a finished shopping run on COST_LIMIT_REACHED.
+        self._cost_limit_wrapup_pending: bool = False
+        self._cost_limit_wrapup_consumed: bool = False
         self._is_finished: bool = False  # Latched True after _mark_complete/_mark_failed runs
         # Debounce the tree-cost persist + Processing status broadcast. These two
         # activities fire from 4 call sites; unthrottled they flood the backend
@@ -2493,6 +2499,19 @@ class AgentWorkflow:
         await self._check_parent_state()
         # Yield to event loop so Temporal processes any pending signals before we read is_paused
         await asyncio.sleep(0)
+        if (
+            self._cost_limit_wrapup_pending
+            and self._cost_limit_reached
+            and not self._is_finished
+        ):
+            if not self._cost_limit_wrapup_consumed:
+                # First pause-check after arming wrap-up: allow one more turn.
+                self._cost_limit_wrapup_consumed = True
+                return False
+            # Wrap-up turn used without completing — re-assert the cost pause.
+            self.is_paused = True
+            self._cost_limit_wrapup_pending = False
+            return True
         return self.is_paused
 
     async def _check_orphaned(self) -> bool:
@@ -3148,6 +3167,29 @@ class AgentWorkflow:
                     rotation_signal = result.get("summarizer_rotation_signal")
                     # Extract actual result for caller
                     result = result.get("result", result)
+
+                # Successful browser runs apply batched LLM costs on tool return.
+                # If that sunk cost trips the price limit, do not strand the agent
+                # on COST_LIMIT_REACHED before attempt_completion can run — the
+                # limit authorizes *future* spend (see _check_cost_limit).
+                if (
+                    tool_name == "spawn_browser_agent"
+                    and self._cost_limit_reached
+                    and self.is_paused
+                    and isinstance(result, dict)
+                    and (
+                        result.get("success") is True
+                        or str(result.get("status") or "").lower() in {"completed", "success"}
+                    )
+                ):
+                    workflow.logger.warning(
+                        "💰 Successful spawn_browser_agent tripped the cost limit "
+                        f"({self.subtree_cost_cents:.1f}c >= {self.price_limit_cents}c); "
+                        "allowing one wrap-up turn for attempt_completion"
+                    )
+                    self.is_paused = False
+                    self._cost_limit_wrapup_pending = True
+                    self._cost_limit_wrapup_consumed = False
 
                 # Route rotation signals from the per-tool summarizer through
                 # _on_tokens so pool-token rotation kicks in on 401/429/stall

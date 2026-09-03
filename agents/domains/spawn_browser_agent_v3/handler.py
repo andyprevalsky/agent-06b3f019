@@ -636,15 +636,54 @@ def _browser_ground_truth_checkpoint(
 def _append_bounded_verifier_checkpoint(
     verifier_checkpoints: List[Dict[str, Any]],
     checkpoint: Optional[Dict[str, Any]],
+    *,
+    max_checkpoints: Optional[int] = None,
 ) -> bool:
     """Append distinct browser ground truth while enforcing the verifier payload cap."""
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+
     if not checkpoint:
         return False
     appended = not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
     if appended:
         verifier_checkpoints.append(checkpoint)
-    verifier_checkpoints[:] = verifier_checkpoints[-3:]
+    limit = VERIFIER_CHECKPOINT_MAX if max_checkpoints is None else int(max_checkpoints)
+    if limit < 1:
+        limit = 1
+    verifier_checkpoints[:] = verifier_checkpoints[-limit:]
     return appended
+
+
+async def _capture_preserved_evidence_after_evaluate(
+    *,
+    dom_service: Any,
+    verifier_checkpoints: List[Dict[str, Any]],
+    current_url: str,
+) -> Optional[Dict[str, Any]]:
+    """Always-on: snapshot live DOM after a successful evaluate for the verifier.
+
+    No model flag. The JS return value is not trusted as proof; only the
+    browser-extracted DOM checkpoint is.
+    """
+    if dom_service is None:
+        return None
+    try:
+        state = await dom_service.get_browser_state(include_screenshot=False)
+    except Exception as exc:
+        logger.warning(
+            "Failed to refresh browser state for preserved evaluate evidence",
+            error=str(exc)[:200],
+        )
+        return None
+    if not isinstance(state, dict):
+        return None
+    checkpoint = _browser_ground_truth_checkpoint(
+        state,
+        str(state.get("url") or current_url or ""),
+        kind="preserved_evidence",
+    )
+    _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
+    return state
 
 
 
@@ -5509,11 +5548,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
         ][-30:]
+        from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+
         verifier_checkpoints = [
             checkpoint
             for checkpoint in (write_lock_resume_state.get("verifier_checkpoints") or [])
             if isinstance(checkpoint, dict) and checkpoint.get("dom_tree")
-        ][-3:]
+        ][-VERIFIER_CHECKPOINT_MAX:]
         # H-06 heal: payment-card resume must unlock the merchant domain. Older
         # grants keyed Kernel live-view hosts (*.kernel.sh / *.onkernel.com);
         # re-resolve from start_url / visited merchant URLs when needed.
@@ -9260,6 +9301,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     title=title_done,
                     task_id=task_id,
                 )
+                if action_name == "evaluate":
+                    preserved_state = await _capture_preserved_evidence_after_evaluate(
+                        dom_service=dom_service,
+                        verifier_checkpoints=verifier_checkpoints,
+                        current_url=current_url,
+                    )
+                    if preserved_state:
+                        browser_state = preserved_state
+                        current_url = str(preserved_state.get("url") or current_url or "")
                 if input_page and _botsigged_diagnostics_enabled(start_url):
                     with contextlib.suppress(Exception):
                         await _capture_botsigged_diagnostics(

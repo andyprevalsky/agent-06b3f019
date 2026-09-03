@@ -125,7 +125,21 @@ export const FALSE_POSITIVE_COOKIES = [
   '_derived_epik',
   '_zitok',
   'receive-cookie-deprecation',
+  // Instacart / TikTok / Ahoy visitor markers (not login session)
+  'ttcsid',
+  'ahoy_visitor',
+  'device_uuid',
+  'privacy_opt_out',
 ];
+
+/** True when a cookie name looks like a real auth/session credential. */
+export function isAuthCredentialCookieName(name: string): boolean {
+  const nameLower = name.toLowerCase();
+  if (FALSE_POSITIVE_COOKIES.some((fp) => nameLower.includes(fp.toLowerCase()))) {
+    return false;
+  }
+  return AUTH_COOKIE_PATTERNS.some((pattern) => nameLower.includes(pattern.toLowerCase()));
+}
 
 // Ad/tracking domains to exclude — only pure ad-tech/tracking infrastructure
 // that no real user would intentionally log into

@@ -3,6 +3,7 @@
  */
 
 import { prisma } from '../database';
+import { isAuthCredentialCookieName } from '../../domains/integrations/config';
 import { canonicalAuthRealm } from '../authRealm';
 import { cookieSelectionWhere } from '../browserCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
@@ -126,19 +127,31 @@ async function cookieSummaryForBundle(params: {
   browserSource: string;
   browserProfile: string;
 }) {
-  const result = await prisma.cookie.aggregate({
+  // Count only auth-looking cookies. Analytics/tracking rows on the realm
+  // (Instacart `_gcl_au`/`_ttp`/`device_uuid`, etc.) previously made
+  // cookieCount>0 and selectTopCookieBundle returned the bundle as an
+  // "authentication source", which recorded "Credential referenced" while the
+  // page stayed signed-out and burned the agent on a login path.
+  const cookies = await prisma.cookie.findMany({
     where: {
       userId: params.userId,
       browserSource: params.browserSource,
       browserProfile: params.browserProfile,
       ...cookieDomainWhere(params.authRealm),
     },
-    _count: { _all: true },
-    _max: { creationUtc: true },
+    select: { name: true, creationUtc: true },
   });
+  const authCookies = cookies.filter((cookie) => isAuthCredentialCookieName(cookie.name));
+  let freshestCookieUtc: bigint | null = null;
+  for (const cookie of authCookies) {
+    if (cookie.creationUtc == null) continue;
+    if (freshestCookieUtc === null || cookie.creationUtc > freshestCookieUtc) {
+      freshestCookieUtc = cookie.creationUtc;
+    }
+  }
   return {
-    cookieCount: result._count._all,
-    freshestCookieUtc: result._max.creationUtc,
+    cookieCount: authCookies.length,
+    freshestCookieUtc,
   };
 }
 
@@ -171,10 +184,11 @@ async function selectTopCookieBundle(params: {
       })
   );
 
-  // An enabled marker without a matching cookie row is not an authentication
-  // source. Returning it records "credential applied" even though injectUserData
-  // has nothing to inject, which sends the browser down a misleading signed-out
-  // path and prevents fallback to another auth mechanism.
+  // An enabled marker without a matching *auth* cookie row is not an
+  // authentication source. Tracking-only realm cookies still produced
+  // cookieCount>0 historically and recorded "credential applied" while the
+  // page stayed signed-out. Require auth-looking names (same bar as
+  // authenticated-domain discovery in integrations/config.ts).
   const injectableCandidates = candidates.filter((candidate) => candidate.cookieCount > 0);
 
   injectableCandidates.sort((a, b) => {

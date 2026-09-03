@@ -70,4 +70,8 @@ def extract_error_message(e: Exception) -> str:
 
     if messages:
         return messages[-1] if len(messages) > 1 else messages[0]
+    # httpx.ReadTimeout and similar often have empty str(e); never hide the type.
+    type_name = type(e).__name__
+    if type_name and type_name not in {"Exception", "BaseException"}:
+        return type_name
     return _safe_error_text(e) or "Unknown error"
