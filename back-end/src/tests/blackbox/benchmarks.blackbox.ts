@@ -83,10 +83,20 @@ const BenchmarkTaskSchema = z.object({
     .array(
       z.object({
         id: z.string().min(1),
-        method: z.enum(['static_check', 'single_turn_llm_judge', 'agentic_llm_judge']),
+        method: z.enum(['static_check', 'single_turn_llm_judge', 'agentic_llm_judge', 'polar']),
         criteria: z.array(z.string().min(1)).min(1),
         checks: z.array(z.object({ type: z.string().min(1) }).passthrough()).optional(),
         judge_prompt: z.string().min(1).optional(),
+        rubrics: z
+          .array(
+            z.object({
+              id: z.string().min(1),
+              requirement: z.string().min(1),
+              verification: z.string().min(1),
+            })
+          )
+          .optional(),
+        pass_threshold: z.number().min(0).max(1).optional(),
       })
     )
     .optional(),

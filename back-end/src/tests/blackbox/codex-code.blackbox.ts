@@ -22,6 +22,7 @@ import {
 import {
   CredentialExhaustionSkip,
   codexSmokeCreditSkipReason,
+  detectCodexCreditExhaustion,
   testCreditExhaustion_neverOverridesSuccessSentinel,
   testDetectCreditExhaustion_negative,
   testDetectCreditExhaustion_observedOpenAiWording,
@@ -358,6 +359,17 @@ async function testSmoke_codexCompletesE2bTask() {
         goal: 'Create /home/user/output/codex-smoke.txt containing exactly CODEX_E2B_OK. Then reply with exactly CODEX_E2B_DONE.',
       }),
     });
+    // Create-time funding/billing blocks (OpenAI org or E2B team) never reach a
+    // sandbox — same deploy-approved SKIP as mid-run credential exhaustion.
+    if (createRes.status !== 200) {
+      const createBody = JSON.stringify(createRes.data ?? {});
+      const createSkip = detectCodexCreditExhaustion(createBody, []);
+      if (createSkip) {
+        throw new CredentialExhaustionSkip(
+          `Codex/E2B session create blocked by external funding/billing (${createRes.status}); smoke SKIPPED without failing the deploy gate. Signal: ${createSkip}. Body: ${createBody.slice(0, 400)}`
+        );
+      }
+    }
     assertStatus(createRes.status, 200, createRes.data);
 
     const body = createRes.data as { ws_url?: string; task_id?: string; sandbox_id?: string };
