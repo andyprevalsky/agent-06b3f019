@@ -3572,48 +3572,6 @@ def test_instacart_catalog_uses_complete_weekly_grocery_basket():
         assert requirement in criteria
 
 
-
-def test_doordash_food_plan_grocery_cart_reauth_contract():
-    """Cookie-sync-off sibling: full manifest cart then auth_assistance via existing guest kill-switch."""
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.spawn_contract import (
-        should_disable_saved_browser_auth,
-        tasks_require_disabled_saved_browser_auth,
-    )
-
-    task = get_task_by_name("browser-doordash-food-plan-grocery-cart-reauth")
-    assert task.group == "daily"
-    assert task.harness == "rose"
-    assert "exactly one browser agent" in task.prompt.lower()
-    assert "partial cart" in task.prompt.lower()
-    assert "manifest line item" in task.prompt.lower()
-    assert "do not try to login" in task.prompt.lower()
-    assert "auth assistance" in task.prompt.lower() or "reauthentication" in task.prompt.lower()
-    assert task.pinned_facts["manifest_source"] == "doordash-food-plan-grocery-fixture.json"
-    assert task.environment.get("live_fixtures") in (None, [],)
-    assert not task.environment.get("required_injectable_cookie_domains")
-    assert task.environment.get("needs_auth") is not True
-    assert "needs_auth" not in task.tags
-    assert "cart-reauth" in task.tags
-    assert task.expected_attention_kind == "auth_assistance"
-    assert task.expected_approval_count == 1
-    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
-    assert task.timeout_seconds == 2700
-    assert should_disable_saved_browser_auth(task) is True
-    assert tasks_require_disabled_saved_browser_auth([task.name]) is True
-    # Sibling write_lock bench must keep cookies + needs_auth and must NOT trip the kill-switch.
-    sibling = get_task_by_name("browser-doordash-food-plan-grocery-order")
-    assert sibling.environment.get("needs_auth") is True
-    assert sibling.expected_attention_kind == "write_lock"
-    assert should_disable_saved_browser_auth(sibling) is False
-    cart = task.evaluators[0]
-    assert cart["id"] == "doordash-food-plan-cart-reauth-completeness"
-    joined = " ".join(cart["criteria"]).lower()
-    assert "every required" in joined
-    assert "auth_assistance" in joined or "reauth" in joined
-    assert "write_lock" in joined  # explicitly forbidden terminal
-
-
 def test_doordash_food_plan_grocery_repro_contract():
     """DoorDash food-plan grocery repro requires manifest-exact Safeway cart, not one SKU."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -3635,8 +3593,6 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert task.pinned_facts["prod_user_id"] == "1f85ff25-6e29-4c1b-8739-f917bd101a30"
     assert "live-aman-food-plan-identity" in task.environment["live_fixtures"]
     assert task.environment["required_injectable_cookie_domains"] == ["doordash.com"]
-    assert task.environment.get("needs_auth") is True
-    assert "needs_auth" in task.tags
     assert task.expected_attention_kind == "write_lock"
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
@@ -3675,14 +3631,6 @@ def test_doordash_food_plan_grocery_repro_contract():
         manifest_lower = manifest_context.lower()
         assert "checkout-ready one-week manifest" in manifest_lower
         assert "93/7 lean ground beef" in manifest_lower
-        # Live apply caches summary metadata (benchmark_goal / *_chars) without the
-        # checkout table body. The frozen JSON still holds the authoritative table —
-        # judge context must keep it (regression: apply-cache path used to force "").
-        frozen = bench._doordash_food_plan_frozen_fixture()
-        assert frozen is not None
-        if frozen.get("checkout_manifest"):
-            assert frozen["checkout_manifest"] in manifest_context
-            assert "authoritative checkout manifest table" in manifest_lower
     finally:
         bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
         bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.update(prior_cache)
@@ -15272,55 +15220,6 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
         raised = "required_injectable_cookie_domains" in str(e) and "subset" in str(e)
     assert raised, "required auth domains outside the synchronized scope must fail validation"
 
-    # needs_auth requires injectable cookie domains (live session scopes).
-    needs_auth_without_domains = {**base_env, "needs_auth": True}
-    raised = False
-    try:
-        _validate_environment(needs_auth_without_domains, "t-needs-auth-empty")
-    except ValueError as e:
-        raised = "needs_auth" in str(e) and "required_injectable_cookie_domains" in str(e)
-    assert raised, "needs_auth without injectable cookie domains must fail validation"
-
-    needs_auth_ok = {
-        **base_env,
-        "live_fixtures": ["live"],
-        "live_cookie_domains": ["doordash.com"],
-        "required_injectable_cookie_domains": ["doordash.com"],
-        "needs_auth": True,
-    }
-    assert _validate_environment(needs_auth_ok, "t-needs-auth-ok")["needs_auth"] is True
-
-    raised = False
-    try:
-        _validate_environment({**base_env, "needs_auth": "yes"}, "t-needs-auth-type")
-    except ValueError as e:
-        raised = "needs_auth must be a boolean" in str(e)
-    assert raised, "non-boolean needs_auth must fail validation"
-
-
-def test_needs_auth_failure_reports_valid_auth_token_requirement():
-    """needs_auth benches rewrite auth_assistance mismatches into INFRA auth-token reports."""
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _annotate_needs_auth_failure
-
-    task = get_task_by_name("browser-doordash-food-plan-grocery-order")
-    assert task.environment.get("needs_auth") is True
-
-    raw = "Expected attention kind write_lock, observed auth_assistance"
-    data = {"_benchmark": {"unexpected_attention_kind": "auth_assistance"}}
-    annotated = _annotate_needs_auth_failure(task, raw, data)
-    assert annotated is not None
-    assert "needs a valid auth token" in annotated
-    assert "INFRA/fixture" in annotated
-    assert "doordash.com" in annotated
-    assert raw in annotated
-    assert data["_benchmark"]["needs_auth"] is True
-    assert data["_benchmark"]["auth_fixture_failure"] is True
-
-    # Non-auth failures stay untouched.
-    other = "Expected attention kind write_lock, observed payment_approval"
-    assert _annotate_needs_auth_failure(task, other, {}) == other
-
 
 def test_tag_slices_still_resolve():
     """Semantic tag slices (e.g. browser auth suite) survive catalog changes."""
@@ -17136,10 +17035,6 @@ async def run_all_tests():
         test_instacart_catalog_uses_complete_weekly_grocery_basket,
     )
     r.record(
-        "doordash_food_plan_grocery_cart_reauth_contract",
-        test_doordash_food_plan_grocery_cart_reauth_contract,
-    )
-    r.record(
         "doordash_food_plan_grocery_repro_contract",
         test_doordash_food_plan_grocery_repro_contract,
     )
@@ -17530,10 +17425,6 @@ async def run_all_tests():
     )
     r.record("live_fixture_is_single_and_explicit", test_live_fixture_is_single_and_explicit)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
-    r.record(
-        "needs_auth_failure_reports_valid_auth_token",
-        test_needs_auth_failure_reports_valid_auth_token_requirement,
-    )
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("eventim_1015_request_card_contract", test_eventim_1015_request_card_benchmark_contract)

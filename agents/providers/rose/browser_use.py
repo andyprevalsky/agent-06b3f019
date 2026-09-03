@@ -33,28 +33,6 @@ def recover_from_challenge_enabled() -> bool:
     raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
     return raw not in {"1", "true", "yes", "on"}
 
-
-# Temporary cookie/config primitives (DoorDash grocery A/B). Default ON.
-def cookie_config_tools_enabled() -> bool:
-    from domains.spawn_browser_agent_v3.cookie_config_tools import cookie_config_tools_enabled as _enabled
-
-    return _enabled()
-
-
-def _cookie_config_tool_names() -> tuple[str, ...]:
-    from domains.spawn_browser_agent_v3.cookie_config_tools import COOKIE_CONFIG_TOOL_NAMES
-
-    return tuple(COOKIE_CONFIG_TOOL_NAMES)
-
-
-COOKIE_CONFIG_TOOL_NAMES = (
-    "read_cookies",
-    "delete_cookies",
-    "restore_cookies",
-    "read_browser_config",
-    "set_browser_config",
-)
-
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
 
@@ -284,75 +262,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                     "session with a forced anti-bot). Defaults to true."
                 ),
                 "required": False,
-            },
-        },
-    },
-    "read_cookies": {
-        "description": (
-            "TEMPORARY experiment tool. Read the live browser cookie jar with full fields "
-            "(name, value, domain, path, expires, httpOnly, secure, sameSite). Do not truncate. "
-            "Optional domain filter scopes the dump. Use when diagnosing auth/challenge state "
-            "instead of recover_from_challenge."
-        ),
-        "params": {
-            "domain": {
-                "type": "string",
-                "description": "Optional domain filter (e.g. doordash.com)",
-                "required": False,
-            },
-        },
-    },
-    "delete_cookies": {
-        "description": (
-            "TEMPORARY experiment tool. Delete ONE named challenge/poison cookie from the live jar "
-            "(e.g. cf_clearance, __cf_bm). Cookie name is REQUIRED. Never delete by domain alone, "
-            "never wipe the jar, and never delete DoorDash login/session cookies — that logs the "
-            "user out and empties the cart. Prefer set_browser_config or restore_cookies for "
-            "bot walls; use delete_cookies only for a specific named challenge cookie."
-        ),
-        "params": {
-            "name": {
-                "type": "string",
-                "description": "Required cookie name to delete (challenge cookies only)",
-                "required": True,
-            },
-            "domain": {
-                "type": "string",
-                "description": "Optional domain filter; cannot be used without name",
-                "required": False,
-            },
-        },
-    },
-    "restore_cookies": {
-        "description": (
-            "TEMPORARY experiment tool. Re-inject the vaulted authenticated CookieBundle for the "
-            "current page's auth realm (same path as session init / prepare-auth). Prefer this "
-            "(or set_browser_config) when a challenge appears — do NOT wipe auth cookies with "
-            "delete_cookies. Do NOT try to login manually."
-        ),
-        "params": {},
-    },
-    "read_browser_config": {
-        "description": (
-            "TEMPORARY experiment tool. Read the current browser provider/proxy configuration, "
-            "last promoted config key, dead config keys, and the allowlisted config keys you may "
-            "pass to set_browser_config."
-        ),
-        "params": {},
-    },
-    "set_browser_config": {
-        "description": (
-            "TEMPORARY experiment tool. Switch this browser session to one allowlisted config key "
-            "(steel_fixed, kernel_mobile, kernel_residential_city, kernel_residential_state, "
-            "kernel_residential_country, steel_managed, kernel_isp). Creates a replacement session, "
-            "preserves storage when possible, and reconnects. Prefer this (or restore_cookies) over "
-            "reloading the same blocked store URL or wiping auth cookies."
-        ),
-        "params": {
-            "config_key": {
-                "type": "string",
-                "description": "Allowlisted browser config key",
-                "required": True,
             },
         },
     },
@@ -797,9 +706,6 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
         available_actions = [
             name for name in available_actions if name != "recover_from_challenge"
         ]
-    if not cookie_config_tools_enabled():
-        blocked = set(COOKIE_CONFIG_TOOL_NAMES)
-        available_actions = [name for name in available_actions if name not in blocked]
 
     known_actions = [name for name in available_actions if name in BROWSER_TOOL_MODELS]
     if not known_actions:
@@ -851,30 +757,17 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     present. Provider transforms strip the marker before sending the request.
     """
     _ = available_actions
-    available = set(available_actions or [])
     recover_enabled = (
-        recover_from_challenge_enabled() and "recover_from_challenge" in available
-    )
-    cookie_tools_on = cookie_config_tools_enabled() and (
-        "set_browser_config" in available or "restore_cookies" in available
+        recover_from_challenge_enabled()
+        and "recover_from_challenge" in set(available_actions or [])
     )
     if recover_enabled:
         challenge_rule = (
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. Prefer recover_from_challenge (or set_browser_config / "
-            "restore_cookies when available) over reloading or hopping between the same "
-            "store/convenience URLs. Do not thrash /convenience/store/{id}. Do not drag "
-            "sliders or solve challenge widgets yourself. Never call "
-            "request_user_assistance_for_authentication while a challenge interstitial is "
-            "still visible."
-        )
-    elif cookie_tools_on:
-        challenge_rule = (
-            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. Do NOT loop the same DoorDash store/convenience URL. "
-            "Prefer set_browser_config or restore_cookies. delete_cookies may only remove a "
-            "named challenge cookie (never domain-wide, never login/session cookies). Do not "
-            "drag sliders or solve challenge widgets yourself. Never call "
+            "are not authentication. recover_from_challenge is a relatively expensive way to "
+            "force-open a blocked page or service — do not use it when an alternate path can "
+            "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
+            "to solve challenge widgets yourself. Never call "
             "request_user_assistance_for_authentication while a challenge interstitial is "
             "still visible."
         )
@@ -882,8 +775,8 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
         challenge_rule = (
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
             "are not authentication. No challenge-recovery tool is available — wait briefly "
-            "for the provider auto-solver. Avoid repeatedly reloading the same blocked "
-            "store URL. Do not drag sliders, click verify buttons, or otherwise try to solve "
+            "for the provider auto-solver, try an alternate URL or path to complete the "
+            "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
             "challenge widgets yourself. Never call "
             "request_user_assistance_for_authentication while a challenge interstitial is "
             "still visible."
@@ -1303,11 +1196,6 @@ _VALID_ACTIONS = frozenset(
         # allowlist or normalize_browser_use_response() rejects the model's call and
         # the browser step aborts before the handler can run staged recovery.
         "recover_from_challenge",
-        "read_cookies",
-        "delete_cookies",
-        "restore_cookies",
-        "read_browser_config",
-        "set_browser_config",
         "read_browser_state",
         "read_logs",
         "read_network_requests",
@@ -1559,33 +1447,6 @@ def _normalize_action_params(
         out["label"] = label
     if params.get("reason"):
         out["reason"] = params["reason"]
-    if normalized_action == "read_cookies":
-        domain = params.get("domain")
-        if domain is None and isinstance(first_action.get("domain"), str):
-            domain = first_action.get("domain")
-        return {"domain": domain} if domain not in (None, "") else {}
-    if normalized_action == "delete_cookies":
-        name = params.get("name")
-        domain = params.get("domain")
-        if name is None and isinstance(first_action.get("name"), str):
-            name = first_action.get("name")
-        if domain is None and isinstance(first_action.get("domain"), str):
-            domain = first_action.get("domain")
-        out = {}
-        if name not in (None, ""):
-            out["name"] = name
-        if domain not in (None, ""):
-            out["domain"] = domain
-        return out
-    if normalized_action == "restore_cookies":
-        return {}
-    if normalized_action == "read_browser_config":
-        return {}
-    if normalized_action == "set_browser_config":
-        config_key = params.get("config_key") or params.get("key")
-        if config_key is None and isinstance(first_action.get("config_key"), str):
-            config_key = first_action.get("config_key")
-        return {"config_key": config_key}
     if normalized_action == "recover_from_challenge":
         raw_preserve = params.get("auth_cookies_are_preserved")
         if raw_preserve is None:
