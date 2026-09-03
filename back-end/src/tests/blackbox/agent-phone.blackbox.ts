@@ -66,7 +66,6 @@ async function cleanup(userId: string, operationKeys: string[] = []) {
   }
   await prisma.agent.deleteMany({ where: { userId } });
   await prisma.agentIdentity.deleteMany({ where: { userId } });
-  await prisma.agent.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
 }
 
