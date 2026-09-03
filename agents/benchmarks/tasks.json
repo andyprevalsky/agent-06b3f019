@@ -35,7 +35,7 @@
       "services": [],
       "secrets": ["FAST_MODE_CACHE_DATABASE_URL"],
       "live_targets": [],
-      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T1/T2/T6/T7-content/T9 are static_check. T3–T5 and T7-schema are single_turn_llm_judge. T1/T6 are static so Fast Mode trees cannot flake closed on invented 'tree truncated' LLM reasoning. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
+      "context_notes": "Pre-deploy smoke. Keep every hard-won T-row as its own existing evaluator: T8/T10/T7-length/T1/T2/T3/T4/T5/T6/T7-content/T9 are static_check. T7-schema remains single_turn_llm_judge. T1/T3–T6 are static so Fast Mode trees cannot flake closed on invented 'tree truncated' LLM reasoning. T7-length fails Fast Mode-ablated Task Complete cards and empty schema outputs on the root and first-level GPs. Isolated pre-deploy keeps the shared July Fast Mode cache for this task only and disables write-through so other smokes cannot poison prod cache."
     },
     "evaluators": [
       {
@@ -124,25 +124,37 @@
       },
       {
         "id": "t3-full-explore-trajectories",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
           "T3: Every explore child plays a full multi-turn research trajectory and ends with the real explore summary, not Thinking... or Research started."
         ],
-        "judge_prompt": "Score 1.0 only if every first-level GP replayed full explore/research work: explore_spawn_count >= 1 or research_tool_count >= 3, and has_traj_end_stub is false. Fast Mode may replay explore tools on the GP without a separate explore Agent row — that still counts. Compact evidence omits messages[] arrays — use typed tool_counts / explore_spawn_count / research_tool_count / first_level_gps. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL if first-level GPs have no explore spawns and no research tools. FAIL stub-only traj-end/cold nodes (has_traj_end_stub true). FAIL explore chips that replay research tools but never post a user-facing spawn_agent FINISHED summary (Research started. / Thinking... only). Unsupported assistant claims are not proof."
+        "checks": [
+          {
+            "type": "first_level_gp_explore_research"
+          }
+        ]
       },
       {
         "id": "t4-full-july-gp-trajectories",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": [
           "T4: Every first-level GP plays a full July-class trajectory"
         ],
-        "judge_prompt": "Score 1.0 only if every first-level general-purpose child replays a full July-class creator-analysis trajectory. Compact evidence omits messages[] arrays — use typed first_level_gps / message_count / tool_counts / research_tool_count / explore_spawn_count. PASS a GP when message_count >= 12 or research_tool_count >= 3 or explore_spawn_count >= 1. Agent.messageCount of 1 on all_agents is stale; ignore it. FAIL a GP with no research tools, no explore spawn, and message_count <= 12. FAIL traj-end/cold stubs as the only work (has_traj_end_stub true). Unsupported assistant claims are not proof."
+        "checks": [
+          {
+            "type": "first_level_gp_july_trajectories"
+          }
+        ]
       },
       {
         "id": "t5-zero-live-spend",
-        "method": "single_turn_llm_judge",
+        "method": "static_check",
         "criteria": ["T5: $0 spent and 0 tokens streamed from non-fast-cache"],
-        "judge_prompt": "Score 1.0 only when typed benchmark_state.usage proves honest Fast Mode replay: cost_cents is 0, cache_creation_input_tokens is 0, and live_output_tokens is 0 (tokens streamed from non-fast-cache). cache_read_input_tokens > 0 with those zeros is Fast Mode replay evidence — do not require a from_fast_cache field on each GP. FAIL if any first-level GP is stub-only (has_traj_end_stub true). Do not trust assistant claims of $0."
+        "checks": [
+          {
+            "type": "zero_live_spend"
+          }
+        ]
       },
       {
         "id": "t6-no-nested-gps",

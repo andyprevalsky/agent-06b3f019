@@ -14736,6 +14736,9 @@ def test_unified_catalog_delineates_bench_axes():
         "t7-completion-summary-length": ["completion_summary_length"],
         "t1-andy-only": ["principal_user_andy"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
+        "t3-full-explore-trajectories": ["first_level_gp_explore_research"],
+        "t4-full-july-gp-trajectories": ["first_level_gp_july_trajectories"],
+        "t5-zero-live-spend": ["zero_live_spend"],
         "t6-no-nested-gps": ["no_nested_general_purpose"],
         "t7-real-deliverable": ["root_deliverable_markers"],
         "t9-no-leftover-children": ["tree_agent_status"],
@@ -14771,9 +14774,6 @@ def test_unified_catalog_delineates_bench_axes():
         if evaluator["method"] == "single_turn_llm_judge"
     ]
     assert judge_ids == [
-        "t3-full-explore-trajectories",
-        "t4-full-july-gp-trajectories",
-        "t5-zero-live-spend",
         "t7-schema-task-complete",
     ]
     criteria = [criterion for evaluator in mass["evaluators"] for criterion in evaluator["criteria"]]

@@ -10760,6 +10760,76 @@ def _run_declared_static_check(
                     f"(of {len(gps)} first-level GPs); expected >= {minimum}",
                 )
             continue
+        if check_type == "first_level_gp_explore_research":
+            gps = _first_level_gps_from_data(data)
+            if not gps:
+                return False, "T3: first_level_gps was empty"
+            failures = []
+            for gp in gps:
+                explore = int(gp.get("explore_spawn_count") or 0)
+                research = int(gp.get("research_tool_count") or 0)
+                stub = bool(gp.get("has_traj_end_stub"))
+                if stub or (explore < 1 and research < 3):
+                    failures.append(gp)
+            if failures:
+                sample = failures[0]
+                return (
+                    False,
+                    "T3: first-level GP "
+                    f"{str(sample.get('agent_id') or '')[:8]} missing explore/research "
+                    f"(explore={int(sample.get('explore_spawn_count') or 0)}, "
+                    f"research={int(sample.get('research_tool_count') or 0)}, "
+                    f"stub={bool(sample.get('has_traj_end_stub'))}; "
+                    f"{len(failures)}/{len(gps)} failing)",
+                )
+            continue
+        if check_type == "first_level_gp_july_trajectories":
+            gps = _first_level_gps_from_data(data)
+            if not gps:
+                return False, "T4: first_level_gps was empty"
+            failures = []
+            for gp in gps:
+                messages = int(gp.get("message_count") or 0)
+                explore = int(gp.get("explore_spawn_count") or 0)
+                research = int(gp.get("research_tool_count") or 0)
+                stub = bool(gp.get("has_traj_end_stub"))
+                ok = (messages >= 12 or research >= 3 or explore >= 1) and not stub
+                if not ok:
+                    failures.append(gp)
+            if failures:
+                sample = failures[0]
+                return (
+                    False,
+                    "T4: first-level GP "
+                    f"{str(sample.get('agent_id') or '')[:8]} below July trajectory bar "
+                    f"(messages={int(sample.get('message_count') or 0)}, "
+                    f"research={int(sample.get('research_tool_count') or 0)}, "
+                    f"explore={int(sample.get('explore_spawn_count') or 0)}, "
+                    f"stub={bool(sample.get('has_traj_end_stub'))}; "
+                    f"{len(failures)}/{len(gps)} failing)",
+                )
+            continue
+        if check_type == "zero_live_spend":
+            compact = _compact_benchmark_state_for_judge(data)
+            usage = compact.get("usage") if isinstance(compact.get("usage"), dict) else {}
+            cost = int(usage.get("cost_cents") or 0)
+            cache_create = int(usage.get("cache_creation_input_tokens") or 0)
+            live_out = int(usage.get("live_output_tokens") or 0)
+            if cost != 0 or cache_create != 0 or live_out != 0:
+                return (
+                    False,
+                    "T5: live spend not zero "
+                    f"(cost_cents={cost}, cache_creation_input_tokens={cache_create}, "
+                    f"live_output_tokens={live_out})",
+                )
+            gps = list(compact.get("first_level_gps") or [])
+            stubs = [gp for gp in gps if isinstance(gp, dict) and gp.get("has_traj_end_stub")]
+            if stubs:
+                return (
+                    False,
+                    f"T5: {len(stubs)} first-level GP traj-end stubs while claiming $0 live spend",
+                )
+            continue
         if check_type == "no_nested_general_purpose":
             compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
             violations = _nested_general_purpose_violations(compact_tree)
