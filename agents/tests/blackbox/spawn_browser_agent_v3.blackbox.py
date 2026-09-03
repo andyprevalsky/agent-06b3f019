@@ -5958,35 +5958,28 @@ async def test_resume_browser_session_rate_limited():
 
 
 def test_challenge_recovery_uses_cross_recovery_config_blacklist():
-    """Dead configs from prior probe failures OR post-promote failures are passed to
-    recover_browser_challenge / cookie probes, and cleared only when the backend
-    reports blacklist_expired (catalog exhausted)."""
-    from pathlib import Path
+    """Repo still accepts blocked_config_keys for backend blacklist filtering.
 
-    source = Path("/workspace/agents/domains/spawn_browser_agent_v3/handler.py").read_text()
-    assert "dead_browser_config_keys" in source
-    assert "last_promoted_browser_config_key" in source
-    assert "blocked_config_keys=sorted(dead_browser_config_keys)" in source
-    assert 'result.get("blacklist_expired")' in source
-    assert "dead_browser_config_keys.clear()" in source
-    assert "dead_browser_config_keys.add(last_promoted_browser_config_key)" in source
-    # Probe failures (not only post-promote) must enter the dead set.
-    assert 'result.get("failed_config_keys")' in source
-    assert "dead_browser_config_keys.add(key)" in source
-    # Cookie-variant ephemeral probes must also skip dead configs.
-    assert "blocked_config_keys=sorted(dead_browser_config_keys)" in source
+    Tip intentionally reverted the in-handler dead_browser_config_keys set when
+    restoring challenge recovery to main. Keep the API contract that the Python
+    client can forward blocked keys and read failed_config_keys / blacklist_expired.
+    """
+    from pathlib import Path
 
     repo = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
-    assert 'failed_config_keys' in repo
-    assert 'blocked_config_keys' in repo
+    assert "blocked_config_keys" in repo
+    assert "failed_config_keys" in repo
+    assert "blacklist_expired" in repo
+    assert 'payload["blocked_config_keys"]' in repo or "payload['blocked_config_keys']" in repo
 
 
-def test_challenge_recovery_never_live_verifies_after_atomic_promote():
-    """Post-promote live LLM verify is removed for config-search winners."""
+def test_challenge_recovery_live_verifies_after_promote_unless_preloaded():
+    """Non-preloaded config winners still live-verify; preloaded winners skip a second LLM gate."""
     from pathlib import Path
 
     source = Path("/workspace/agents/domains/spawn_browser_agent_v3/handler.py").read_text()
-    assert "await verify_live_page_cleared_challenge(" not in source
+    assert "await verify_live_page_cleared_challenge(" in source
+    assert 'config_result.get("storage_state_preloaded")' in source
     assert "probe already verified clean" in source
 
 
@@ -5995,7 +5988,7 @@ def test_recover_browser_challenge_repo_forwards_blocked_config_keys():
 
     source = Path("/workspace/agents/domains/spawn_browser_agent_v3/repo.py").read_text()
     assert "blocked_config_keys" in source
-    assert "payload[\"blocked_config_keys\"]" in source or 'payload["blocked_config_keys"]' in source
+    assert 'payload["blocked_config_keys"]' in source or "payload['blocked_config_keys']" in source
 
 
 
@@ -19064,15 +19057,15 @@ async def run_all_tests():
         test_resume_browser_session_posts_resume_endpoint,
     )
     await r.record_async("resume_browser_session_rate_limited", test_resume_browser_session_rate_limited)
-    await r.record_async(
+    r.record(
         "challenge_recovery_cross_recovery_config_blacklist",
         test_challenge_recovery_uses_cross_recovery_config_blacklist,
     )
-    await r.record_async(
-        "challenge_recovery_never_live_verifies_after_atomic_promote",
-        test_challenge_recovery_never_live_verifies_after_atomic_promote,
+    r.record(
+        "challenge_recovery_live_verifies_after_promote_unless_preloaded",
+        test_challenge_recovery_live_verifies_after_promote_unless_preloaded,
     )
-    await r.record_async(
+    r.record(
         "recover_browser_challenge_forwards_blocked_config_keys",
         test_recover_browser_challenge_repo_forwards_blocked_config_keys,
     )

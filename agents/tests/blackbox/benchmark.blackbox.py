@@ -14532,7 +14532,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
-def test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows():
+def test_daily_ecommerce_v1_catalog_has_distinct_transaction_flows():
     """The daily ecommerce slice stays focused, complete, and stable."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.fixtures import DEFAULT_BASE_IMAGE
@@ -14544,6 +14544,7 @@ def test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows():
         "browser-instacart-grocery-order",
         "browser-doordash-usb-c-cable",
         "browser-doordash-food-plan-grocery-order",
+        "browser-doordash-food-plan-grocery-cart-reauth",
         "minted-agent-accounts-uber",
         "browser-agent-amazon-cookie-payment",
         "browser-alchemy-springs-sauna",
@@ -14558,7 +14559,7 @@ def test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows():
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 13
+    assert len(ecommerce) == len(expected_names)
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -14569,7 +14570,10 @@ def test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows():
         assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
         if name == "browser-doordash-food-plan-grocery-order":
             assert loaded.environment["live_fixtures"] == ["live-aman-food-plan-identity"]
-        elif name == "browser-blue-bottle-challenge-recovery":
+        elif name in {
+            "browser-blue-bottle-challenge-recovery",
+            "browser-doordash-food-plan-grocery-cart-reauth",
+        }:
             assert loaded.environment.get("live_fixtures", []) == []
         else:
             assert loaded.environment["live_fixtures"] == ["live"]
@@ -17633,7 +17637,7 @@ async def run_all_tests():
     )
     r.record(
         "daily_ecommerce_v1_catalog",
-        test_daily_ecommerce_v1_catalog_has_thirteen_distinct_transaction_flows,
+        test_daily_ecommerce_v1_catalog_has_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",
