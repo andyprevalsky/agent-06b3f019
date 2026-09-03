@@ -21,10 +21,14 @@ def benchmark_compute_token_type() -> Optional[Literal["claude", "gpt"]]:
 
     Prompt-cache ratchets compare repeated calls from one sequence. Letting the
     unified compute endpoint choose a different provider after an external
-    cooldown makes a healthy sequence unmeasurable (for example, GPT on turn
-    one and Claude on turn two). The predeploy harness pins one provider so a
-    provider outage fails honestly instead of silently changing the metric's
-    denominator. Production leaves this unset and retains normal rotation.
+    cooldown makes a healthy sequence unmeasurable (for example, Claude auth
+    failure on turn one → GPT lease on turn two zeros browser-smoke's
+    repeatable cache floor). The predeploy harness pins one provider so a
+    provider outage falls through to the OpenRouter waterfall and stays there
+    instead of silently changing the metric's denominator. Production leaves
+    this unset and retains normal rotation. The pin is enforced in
+    ``fetch_compute_token_activity`` even when ``_rotate_compute_token``
+    requests the opposite family.
     """
     value = os.getenv("BENCHMARK_COMPUTE_TOKEN_TYPE", "").strip().lower()
     if not value:

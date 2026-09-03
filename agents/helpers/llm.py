@@ -6438,10 +6438,29 @@ async def fetch_compute_token_activity(
     fast_cache_affinity_key: Optional[str] = None,
     token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch one provider-typed compute token across Claude/GPT from the backend."""
+    """Fetch one provider-typed compute token across Claude/GPT from the backend.
+
+    When ``BENCHMARK_COMPUTE_TOKEN_TYPE`` is set (predeploy smoke), the pin is a
+    hard constraint: cross-provider rotation requests are refused so a Claude
+    auth failure cannot silently lease a GPT token mid-sequence and zero the
+    repeatable prompt-cache ratchet (browser-smoke floor is 40%).
+    """
     config = load_config()
     pinned_benchmark_type = benchmark_compute_token_type()
     _safe_heartbeat("Fetching compute token")
+
+    if (
+        pinned_benchmark_type
+        and token_type in ("claude", "gpt")
+        and token_type != pinned_benchmark_type
+    ):
+        logger.info(
+            "Skipping compute token fetch: rotation asked for %s but "
+            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s (keep waterfall affinity)",
+            token_type,
+            pinned_benchmark_type,
+        )
+        return None
 
     try:
         async with httpx.AsyncClient() as client:
@@ -6454,12 +6473,13 @@ async def fetch_compute_token_activity(
                 params["rootAgentId"] = root_agent_id
             if fast_cache_affinity_key:
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
-            if token_type in ("claude", "gpt"):
+            if pinned_benchmark_type:
+                # Pin wins over callers (including _rotate_compute_token).
+                params["tokenType"] = pinned_benchmark_type
+            elif token_type in ("claude", "gpt"):
                 params["tokenType"] = token_type
             elif anthropic_family_excluded():
                 params["tokenType"] = "gpt"
-            elif pinned_benchmark_type:
-                params["tokenType"] = pinned_benchmark_type
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={
@@ -6474,6 +6494,14 @@ async def fetch_compute_token_activity(
                 token = data.get("accessToken")
                 provider_type = data.get("type")
                 if token and provider_type in ("claude", "gpt"):
+                    if pinned_benchmark_type and provider_type != pinned_benchmark_type:
+                        logger.warning(
+                            "Rejecting compute token type=%s under "
+                            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
+                            provider_type,
+                            pinned_benchmark_type,
+                        )
+                        return None
                     logger.info(
                         "✅ Compute token fetched",
                         user_id=user_id,

@@ -1635,6 +1635,43 @@ async def test_fetch_compute_token_activity_pins_benchmark_provider():
     assert "tokenType=claude" in call["url"]
 
 
+async def test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation():
+    """Claude pin must refuse GPT rotation so browser-smoke cache stays measurable.
+
+    Repro: smoke r16 browser-smoke — Claude auth_error → _rotate_compute_token
+    requested token_type=gpt → mid-sequence OpenRouter→Codex switch → 0%
+    repeatable cache (floor 40%). Pin must short-circuit before any HTTP lease.
+    """
+    setup_mock(
+        {
+            "/api/integrations/compute-code/credentials/token": {
+                "status": 200,
+                "json": {
+                    "type": "gpt",
+                    "accessToken": "should-not-lease",
+                    "accountId": "acct-1",
+                    "source": "user",
+                },
+            },
+        }
+    )
+
+    from helpers.httpx_capture import clear_captures, get_captures
+
+    clear_captures()
+    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch(
+        "temporalio.activity.heartbeat"
+    ):
+        from helpers.llm import fetch_compute_token_activity
+
+        result = await fetch_compute_token_activity("user-1", token_type="gpt")
+
+    assert result is None
+    assert get_captures() == [], (
+        "pinned cross-provider rotation must not HTTP-lease a compute token"
+    )
+
+
 def test_benchmark_compute_token_type_rejects_conflicting_provider_policy():
     """A Claude pin cannot silently defeat an explicit Anthropic exclusion."""
     from providers.rose.policy import benchmark_compute_token_type
@@ -7501,6 +7538,10 @@ async def run_all_tests():
     await r.record_async(
         "fetch_compute_token_activity_pins_benchmark_provider",
         test_fetch_compute_token_activity_pins_benchmark_provider,
+    )
+    await r.record_async(
+        "fetch_compute_token_activity_pin_blocks_cross_provider_rotation",
+        test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation,
     )
     r.record(
         "benchmark_compute_token_type_rejects_conflicting_provider_policy",
