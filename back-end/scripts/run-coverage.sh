@@ -40,6 +40,44 @@ case "${BROWSER_PROVIDER:-}" in
     ;;
 esac
 
+# Read the effective value of KEY from back-end/.env using dotenv last-in-wins
+# semantics (quoted values keep '#'; unquoted values drop inline comments).
+dotenv_effective_value() {
+  local env_name="$1"
+  local value
+  [[ -f "$BACKEND_DIR/.env" ]] || return 1
+  value="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${env_name}=" "$BACKEND_DIR/.env" | tail -1 || true)"
+  [[ -z "$value" ]] && return 1
+  value="${value#*=}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  case "$value" in
+    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    *)   value="${value%%#*}"
+         value="${value%"${value##*[![:space:]]}"}" ;;
+  esac
+  [[ -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
+# Cursor Cloud injects AGENTCARD_ORG_OAUTH_* / GITHUB_* as secrets. Those copies
+# drift from Render (and from back-end/.env after operators rotate sandbox
+# OAuth clients). Node dotenv will not override the injected values, so
+# treasury-rails / test-payment / external-http blackboxes fail with 502/401
+# even when .env is correct. Prefer .env for coverage so the gate tracks the
+# credentials maintained in this worktree.
+for _coverage_env_key in \
+  AGENTCARD_ORG_OAUTH_CLIENT_ID \
+  AGENTCARD_ORG_OAUTH_CLIENT_SECRET \
+  GITHUB_DISPATCH_TOKEN \
+  GITHUB_TOKEN
+do
+  if _coverage_env_val="$(dotenv_effective_value "$_coverage_env_key")"; then
+    export "${_coverage_env_key}=${_coverage_env_val}"
+  fi
+done
+unset _coverage_env_key _coverage_env_val
+
 REPORT_ONLY=0
 PRINT_COVERAGE_PORT=0
 HOLD_COVERAGE_LOCK=0

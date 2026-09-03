@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { PurchaseSpendStatus } from '@prisma/client';
+import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { lookupPurchase, mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
@@ -24,6 +24,7 @@ import {
   FakeCardProvider,
   FakeWalletFundingProvider,
   FundingInProgressCardProvider,
+  StubCardStateProvider,
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
 import { ROSE_AGENT_CARD_ID } from '../../providers/card-provider/static-card';
@@ -417,6 +418,50 @@ async function main(): Promise<void> {
     );
   });
 
+
+  await test('lookupPurchase does not mark CLEARED a held card closed for reclaim', async () => {
+    const userId = await seedSubscribedUser();
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'abandon reclaim race boundary' },
+    });
+    const fingerprint = `fp-${randomUUID()}`;
+    const cardId = `card-${randomUUID()}`;
+    const purchase = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId: agent.id,
+        fingerprint,
+        merchant: 'Abandon Race Merchant',
+        lineItemsJson: { totalCents: 4396 },
+        totalCents: 4396,
+        status: PurchaseSpendStatus.HELD,
+        cardId,
+        stripePaymentIntentId: `pi_${randomUUID()}`,
+      },
+    });
+    await prisma.purchaseWalletFunding.create({
+      data: {
+        purchaseId: purchase.id,
+        userId,
+        amountCents: 4396,
+        currency: 'usd',
+        status: PurchaseWalletFundingStatus.RECLAIMING,
+        providerTransferId: `owt_${randomUUID()}`,
+        idempotencyKey: `purchase-wallet-fund:${purchase.id}`,
+      },
+    });
+    const provider = new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 });
+    const result = await lookupPurchase(userId, fingerprint, provider);
+    assert.equal(result.found, true);
+    assert.equal(result.reusable, false);
+    assert.equal(result.purchase?.status, PurchaseSpendStatus.HELD);
+    assert.equal(
+      (await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } }))?.status,
+      PurchaseSpendStatus.HELD,
+      'closed card mid-reclaim must not be marked CLEARED'
+    );
+  });
+
   await test('durable benchmark agents bypass the static-card cutoff request by request', async () => {
     const userId = await seedSubscribedUser();
     const benchmarkAgent = await prisma.agent.create({
@@ -539,6 +584,7 @@ async function main(): Promise<void> {
 
 async function cleanup(): Promise<void> {
   for (const userId of createdUserIds) {
+    await prisma.purchaseWalletFunding.deleteMany({ where: { userId } });
     await prisma.purchaseSpend.deleteMany({ where: { userId } });
     await prisma.subscription.deleteMany({ where: { userId } });
     await prisma.agent.deleteMany({ where: { userId } });

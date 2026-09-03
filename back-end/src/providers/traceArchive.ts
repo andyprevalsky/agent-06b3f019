@@ -519,7 +519,10 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === 'bigint' ? value.toString() : value;
 }
 
-export async function listArchivedObjects(rootAgentId: string): Promise<ArchivedObjectSummary[]> {
+export async function listArchivedObjects(
+  rootAgentId: string,
+  options?: { throwOnError?: boolean }
+): Promise<ArchivedObjectSummary[]> {
   if (!archiveEnabled()) return [];
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   try {
@@ -538,6 +541,11 @@ export async function listArchivedObjects(rootAgentId: string): Promise<Archived
       root_agent_id: rootAgentId,
       error: error instanceof Error ? error.message : String(error),
     });
+    if (options?.throwOnError === true) {
+      throw error instanceof Error
+        ? error
+        : new Error(`Trace archive list failed: ${String(error)}`);
+    }
     return [];
   }
 }

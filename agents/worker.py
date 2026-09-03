@@ -45,6 +45,7 @@ from domains.gate.repo import (
     source_status_activity,
 )
 from domains.grep.repo import fetch_local_data_summary, grep_activity
+from domains.api_request.repo import api_request_activity
 from domains.knowledge_base.handler import query_blueprints_activity, save_blueprint_activity
 from domains.message_person.repo import (
     fetch_recent_messages_activity,
@@ -1101,6 +1102,7 @@ async def main():
         fetch_full_network_metadata,
         evaluate_condition_activity,
         grep_activity,
+        api_request_activity,
         fetch_local_data_summary,
         get_model_context_window,
         fetch_agent_tools,

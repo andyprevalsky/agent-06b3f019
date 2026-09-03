@@ -60,6 +60,12 @@ export class RoseInvalidRequest extends RoseError {
 }
 
 export class RoseServerError extends RoseError {
+  /**
+   * Provider unavailable (5xx after retries, or infra/edge 404).
+   * Unexpected statuses such as a Cloudflare/edge Codex 404 are raised as this
+   * type so isFallThroughError() walks openai-api-key / waterfall — bare
+   * RoseError is intentionally NOT fall-through.
+   */
   constructor(message: string, status?: number) {
     super(message, status);
     this.name = 'RoseServerError';

@@ -48,9 +48,23 @@ vi.mock('@/lib/supabase', () => ({
 
 // Agent context — drive ClaudeCodeChip messages deterministically.
 const messagesRef: { current: unknown[] } = { current: [] };
+const agentRef: { current: { status?: string } | null } = { current: null };
 vi.mock('@/features/agent-context', () => ({
-  useAgentContext: () => ({ messages: messagesRef.current }),
+  useAgentContext: () => ({ messages: messagesRef.current, agent: agentRef.current }),
 }));
+
+const fetchCodeAgentSessionMock =
+  vi.fn<
+    (taskId: string, codeProvider?: string) => Promise<{ output?: string; status?: string } | null>
+  >();
+vi.mock('@/features/terminal-component-group/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/terminal-component-group/api')>();
+  return {
+    ...actual,
+    fetchCodeAgentSession: (taskId: string, codeProvider?: string) =>
+      fetchCodeAgentSessionMock(taskId, codeProvider),
+  };
+});
 
 // Agent tree — drive SubAgentTree node map deterministically.
 const treeRef: { current: Map<string, unknown> } = { current: new Map() };
@@ -79,11 +93,16 @@ describe('ClaudeCodeChip', () => {
 
   beforeEach(() => {
     messagesRef.current = [];
+    agentRef.current = null;
+    fetchCodeAgentSessionMock.mockReset();
+    fetchCodeAgentSessionMock.mockResolvedValue(null);
     globalThis.WebSocket = originalWebSocket;
   });
 
   afterEach(() => {
     messagesRef.current = [];
+    agentRef.current = null;
+    fetchCodeAgentSessionMock.mockReset();
     globalThis.WebSocket = originalWebSocket;
   });
 
@@ -101,13 +120,14 @@ describe('ClaudeCodeChip', () => {
   it('renders spinning_up with forceShow terminal surface', () => {
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
     expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
-    expect(screen.getByText('0 turns completed')).toBeInTheDocument();
+    // Turn-count chip temporarily removed (code-agent verifier kill-switch work).
+    expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
     // The compact header shows Maximize2 button
     const buttons = screen.getAllByRole('button');
     expect(buttons.length).toBeGreaterThan(0);
   });
 
-  it('does not count heartbeat progress messages as completed turns', () => {
+  it('does not show a turn-count chip for heartbeat progress messages', () => {
     messagesRef.current = [
       makeMsg({
         metadata: {
@@ -136,11 +156,10 @@ describe('ClaudeCodeChip', () => {
     ];
 
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow />);
-    expect(screen.getByText('0 turns completed')).toBeInTheDocument();
-    expect(screen.queryByText('2 turns completed')).not.toBeInTheDocument();
+    expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
   });
 
-  it('shows explicit Codex completed turn count in code-agent headers', () => {
+  it('does not show a turn-count chip for Codex completed_turns metadata', () => {
     messagesRef.current = [
       makeMsg({
         metadata: {
@@ -173,7 +192,7 @@ describe('ClaudeCodeChip', () => {
     ];
 
     renderWithProviders(<ClaudeCodeChip taskId="task-1" forceShow codeProvider="codex" />);
-    expect(screen.getByText('1 turn completed')).toBeInTheDocument();
+    expect(screen.queryByText(/turns? completed/)).not.toBeInTheDocument();
   });
 
   it('shows completed state and structured response when expanded', async () => {
@@ -338,6 +357,170 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByText('Something broke')).toBeInTheDocument();
   });
 
+  it('clears spinning_up on pause cancel task_complete (Session Cancelled)', () => {
+    // Mirrors the durable pause path: activity/handler posts task_complete titled
+    // Session Cancelled. Without this, the chip stays on Spinning up forever.
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+          ws_url: 'wss://example.test',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (842s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_complete',
+          title: 'Session Cancelled',
+          toolStatus: 'ERROR',
+          success: false,
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
+  it('closes spinning chip when ClaudeCodeSession is CLOSED without task_complete', async () => {
+    fetchCodeAgentSessionMock.mockResolvedValue({
+      status: 'CLOSED',
+      output: '[Claude tool] Bash · ls\n',
+    });
+    agentRef.current = { status: 'FAILED' };
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-closed',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-closed',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (30s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-closed" />);
+    expect(screen.getByText('Claude Code Spinning up...')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+      expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+    });
+  });
+
+  it('marks closed session successful when root agent status is COMPLETED', async () => {
+    fetchCodeAgentSessionMock.mockResolvedValue({ status: 'CLOSED', output: '[Claude] done\n' });
+    agentRef.current = { status: 'COMPLETED' };
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-closed-ok',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-closed-ok" />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Claude Code Completed Successfully')).toBeInTheDocument();
+    });
+  });
+
+  it('keeps cancel terminal after a late agent_observation heartbeat', () => {
+    // Prod race: heartbeat can land after cancel (agent_logs showed working 872s
+    // after Session Cancelled). Terminality must be sticky.
+    messagesRef.current = [
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'task_complete',
+          title: 'Session Cancelled',
+          toolStatus: 'ERROR',
+          success: false,
+        },
+      }),
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'agent_observation',
+          title: 'Claude Code working (872s)',
+          toolStatus: 'FINISHED',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
+  it('treats legacy session_cancelled with task_id as terminal', () => {
+    messagesRef.current = [
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'session_cancelled',
+          title: 'Claude Code Session Cancelled',
+          toolStatus: 'ERROR',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
+  it('treats bare session_cancelled sharing toolCallId as terminal', () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          toolCallId: 'tc-cancel-1',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+        },
+      }),
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          // No task_id — handler cancel race; only toolCallId links it.
+          toolCallId: 'tc-cancel-1',
+          action_type: 'session_cancelled',
+          title: 'Claude Code Session Cancelled',
+          toolStatus: 'ERROR',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
   it('renders verifying state from system message metadata', () => {
     messagesRef.current = [
       makeMsg({
@@ -457,6 +640,76 @@ describe('code-agent terminal formatting', () => {
       'row_count=156',
     );
     expect(blocks.find((block) => block.title === 'Exited cleanly')?.tone).toBe('green');
+  });
+
+  it('parses Claude tool markers into icon tool rows instead of Claude notes', () => {
+    const blocks = parseCodeAgentTranscript(
+      [
+        '[Claude] Session started in /home/user',
+        "[Claude] I'll start by checking GitHub access.",
+        '[Claude tool] Bash · gh auth status',
+        '[Claude tool] Write · /home/user/discovery.py',
+        '[Claude] Confirmed: unauthenticated access only.',
+        '[Claude tool] Bash',
+        '[Claude result] done',
+      ].join('\n'),
+    );
+
+    expect(blocks.map((block) => block.kind)).toEqual([
+      'agent',
+      'tool',
+      'tool',
+      'agent',
+      'tool',
+      'result',
+    ]);
+    // Consecutive Claude notes merge into one coherent agent block.
+    expect(blocks[0]?.lines.join('\n')).toContain('Session started in /home/user');
+    expect(blocks[0]?.lines.join('\n')).toContain("I'll start by checking GitHub access.");
+    expect(blocks[0]?.title).toBe('Claude');
+    expect(blocks.find((block) => block.title === 'Bash')?.lines).toEqual(['gh auth status']);
+    expect(blocks.find((block) => block.title === 'Write')?.lines).toEqual([
+      '/home/user/discovery.py',
+    ]);
+    // Tools must not be swallowed under a "Claude note" dump.
+    expect(blocks.some((block) => block.title === 'Claude note')).toBe(false);
+  });
+
+  it('heals staircase mid-token wraps so tool rows stay readable', () => {
+    const blocks = parseCodeAgentTranscript(
+      [
+        '[Claude] Session started in /home/user',
+        "                                      [Claude] I'll start by checking GitHub access.",
+        '                                                           [Claude tool] Bas',
+        'h',
+        ' [Claude tool] Bash',
+        '                   [Claude tool] Write',
+        '[Claude] Now the discovery runner with checkpointi',
+        'ng/resumability:',
+      ].join('\n'),
+    );
+
+    expect(blocks.map((block) => block.kind)).toEqual(['agent', 'tool', 'tool', 'tool', 'agent']);
+    expect(blocks.filter((block) => block.kind === 'tool').map((block) => block.title)).toEqual([
+      'Bash',
+      'Bash',
+      'Write',
+    ]);
+    expect(blocks[blocks.length - 1]?.lines.join('\n')).toContain(
+      'discovery runner with checkpointing/resumability:',
+    );
+    expect(blocks.some((block) => block.title === 'Bas')).toBe(false);
+    expect(blocks.some((block) => block.title === 'Claude note')).toBe(false);
+  });
+
+  it('preserves word boundaries when a wrapped tool name is followed by its detail', () => {
+    const blocks = parseCodeAgentTranscript(
+      ['[Claude tool] Bash', 'npm test --runInBand'].join('\n'),
+    );
+    const bash = blocks.find((block) => block.kind === 'tool' && block.title === 'Bash');
+    expect(bash).toBeDefined();
+    expect(bash?.lines).toEqual(['npm test --runInBand']);
+    expect(blocks.some((block) => block.title === 'Bashnpm')).toBe(false);
   });
 });
 

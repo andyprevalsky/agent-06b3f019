@@ -3294,6 +3294,182 @@ def test_first_level_gp_count_static_uses_collected_transcripts():
     assert "T2:" in reason
 
 
+def test_no_nested_general_purpose_static_uses_typed_parentage():
+    """T6 is a named static row: nested GP under GP/explore fails; first-level GPs pass."""
+    from benchmarks.run_benchmark import (
+        _compact_benchmark_state_for_judge,
+        _run_declared_static_check,
+    )
+
+    evaluator = {"checks": [{"type": "no_nested_general_purpose"}]}
+    root = "root-mass"
+    gp0 = "gp-0"
+    explore0 = "explore-0"
+    nested = "gp-nested"
+    flat = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [],
+                },
+                gp0: {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+                explore0: {
+                    "parent_agent_id": gp0,
+                    "status": "COMPLETED",
+                    "agent_type": "explore",
+                    "goal": "Explore public posts for Huberman",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "ok",
+                            "metadata": {"toolName": "web_fetch", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, flat) == (True, "All declared static checks passed")
+    compact = _compact_benchmark_state_for_judge(flat)
+    assert compact["nested_general_purpose_count"] == 0
+    assert compact["nested_general_purpose_violations"] == []
+
+    nested_data = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                **flat["_benchmark"]["tree"],
+                nested: {
+                    "parent_agent_id": gp0,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Nested child.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, nested_data)
+    assert passed is False
+    assert "T6:" in reason
+    assert "nested general-purpose" in reason
+    nested_compact = _compact_benchmark_state_for_judge(nested_data)
+    assert nested_compact["nested_general_purpose_count"] == 1
+    assert nested_compact["nested_general_purpose_violations"][0]["agent_id"] == nested
+    assert nested_compact["nested_general_purpose_violations"][0]["parent_agent_id"] == gp0
+
+
+def test_principal_user_andy_static_ignores_schema_key_leftovers():
+    """T1 is a named static row: Andy principal wins; opportunities_for_aman does not fail."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {"checks": [{"type": "principal_user_andy"}]}
+    root = "root-mass"
+    good = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Task Complete",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "Andy’s differentiated positioning and 90-day calendar.",
+                        "outputs": [{"name": "opportunities_for_aman", "value": "gap"}],
+                    },
+                },
+            }
+        ],
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Task Complete",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Andy’s differentiated positioning and 90-day calendar.",
+                                    "outputs": [{"name": "opportunities_for_aman", "value": "gap"}],
+                                },
+                            },
+                        }
+                    ],
+                },
+                "gp-0": {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "search",
+                            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+                        }
+                    ],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, good) == (True, "All declared static checks passed")
+
+    aman_principal = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Build a personal brand for Aman Gottumukkala across health creators",
+                    "messages": [
+                        {
+                            "role": "TOOL",
+                            "message": "Task Complete",
+                            "metadata": {
+                                "toolName": "completion_summary",
+                                "toolStatus": "FINISHED",
+                                "completionSummary": {
+                                    "summary": "Aman’s personal brand calendar is ready.",
+                                    "outputs": [],
+                                },
+                            },
+                        }
+                    ],
+                }
+            }
+        },
+    }
+    passed, reason = _run_declared_static_check(evaluator, aman_principal)
+    assert passed is False
+    assert "T1:" in reason
+
+
 def test_root_deliverable_markers_use_dag_assemble_not_stub_card():
     """T7 is a named static row: DAG assemble counts when Task Complete is a stub."""
     from benchmarks.run_benchmark import _run_declared_static_check
@@ -4348,6 +4524,98 @@ def test_no_tool_failures_counts_unrecovered_evaluate_uncaught():
     assert _run_declared_static_check(evaluator, data)[0] is False
 
 
+def test_no_tool_failures_ignores_recoverable_web_fetch_error():
+    """Recovered web_fetch ERROR then later FINISHED fetch must not fail t10.
+
+    Local repro: test-mass-agent-run-0 Fast Mode replay (agent 4f078c58…,
+    child 84979949…) had one web_fetch ERROR on theunsubscribed.co/archive?sort=top
+    then 69 later FINISHED fetches; t10-no-tool-failures previously failed closed.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "bf0a44fa-d68d-4fdb-882d-f320c21e6b2e",
+                    "toolStatus": "ERROR",
+                },
+                "message": "Params: url=https://www.theunsubscribed.co/archive?sort=top",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "recover-1",
+                    "toolStatus": "FINISHED",
+                },
+                "message": "Params: url=https://www.theunsubscribed.co/archive",
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data)[0] is True
+
+
+def test_no_tool_failures_counts_unrecovered_web_fetch_error():
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "dead-fetch",
+                    "toolStatus": "ERROR",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "web_fetch dead-fetch status=ERROR",
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
+
+def test_no_tool_failures_ignores_recoverable_grep_error_after_web_search():
+    """Schema-invalid grep ERROR recovered via later web_search must not fail t10.
+
+    Local repro: test-mass-agent-run-0 Fast Mode replay (agent 65558d55…,
+    child 5af074c9…) had grep ERROR `Unsupported grep parameter: 'filters'`
+    then continued with FINISHED web_search calls and COMPLETED.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "grep",
+                    "toolCallId": "4b94286e-2a7b-42dc-a299-d46d283e9af4",
+                    "toolStatus": "ERROR",
+                },
+                "message": "Unsupported grep parameter: 'filters'.",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_search",
+                    "toolCallId": "recover-search",
+                    "toolStatus": "FINISHED",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data)[0] is True
+
 
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
@@ -4558,6 +4826,205 @@ def test_no_tool_failures_ignores_stale_element_index_after_evaluate_recovery():
     }
     assert _tool_runtime_failures(data) == []
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+
+def test_claude_code_session_output_static_check_is_fail_closed():
+    """Bench fails closed when Claude Code sessions lack stored transcripts."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
+        ],
+    }
+    good = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "_benchmark": {
+            "claude_code_sessions": [
+                {"id": "session-1", "output": "x" * 40},
+            ],
+        },
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    empty = deepcopy(good)
+    empty["_benchmark"]["claude_code_sessions"][0]["output"] = "   "
+    passed, reason = _run_declared_static_check(evaluator, empty)
+    assert passed is False
+    assert "stored transcripts" in reason.lower() or "chars" in reason.lower()
+
+    missing = deepcopy(good)
+    missing["_benchmark"]["claude_code_sessions"] = []
+    missing["_benchmark"]["claude_code_session_evidence_error"] = "api_base_url is missing"
+    passed, reason = _run_declared_static_check(evaluator, missing)
+    assert passed is False
+    assert "session count" in reason.lower()
+    assert "api_base_url is missing" in reason
+
+
+def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
+    """CUDA ranking bench requires coding-agent route with zero tool failures."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
+
+    assert "no_tool_failures" in RUNTIME_STATIC_CHECK_TYPES
+    task = get_task_by_name("cuda-kernel-github-top100-code-agent")
+    assert "spawn_claude_code_agent" in task.expected_tools
+    assert "api_request" not in task.expected_tools
+    # Force Claude Code (not Codex) so GitHub REST work stays on the CC path.
+    assert task.requires_claude_code is True
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    checks = {c["type"]: c for c in static["checks"]}
+    assert "no_tool_failures" in checks
+    assert checks["agent_status"]["value"] == "COMPLETED"
+    assert "Github API token:" in task.prompt
+    assert "{GITHUB_DISPATCH_TOKEN}" in task.prompt
+    assert "at most one Claude Code session at a time" in task.prompt
+
+
+def test_cuda_kernel_stall_limit_covers_full_claude_code_runtime():
+    """CC in-place progress chips must not trip the default ~510s tree-stall early-fail.
+
+    Local repro (k=3 r7, 2026-09-02): agent 193b753e failed at ~872s with
+    ``tree stalled … silent for 518s (threshold=510s)`` while Claude Code was
+    still mid-session updating a progress chip (message_count frozen). Stall
+    budget for CC tasks must cover MAX_RUNTIME_S + buffer; cost idle is also
+    required so a truly dead tree still fails fast.
+    """
+    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import AGENT_STALL_SECONDS, agent_stall_limit_seconds
+
+    cuda = get_task_by_name("cuda-kernel-github-top100-code-agent")
+    chat = get_task_by_name("chat-mode")
+    cuda_limit = agent_stall_limit_seconds(cuda)
+    chat_limit = agent_stall_limit_seconds(chat)
+
+    assert cuda.requires_claude_code is True
+    assert "spawn_claude_code_agent" in cuda.expected_tools
+    assert cuda_limit == max(AGENT_STALL_SECONDS, int(MAX_RUNTIME_S) + 120)
+    assert cuda_limit >= 1920
+    assert chat_limit == AGENT_STALL_SECONDS
+    assert chat_limit < cuda_limit
+
+
+async def test_declared_evaluator_hydrates_claude_code_sessions():
+    """Transcript static checks hydrate Claude Code sessions before grading."""
+    from dataclasses import replace
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    static_evaluator = {
+        "id": "claude-code-transcript",
+        "method": "static_check",
+        "checks": [
+            {"type": "claude_code_session_output", "min_sessions": 1, "min_chars": 32},
+        ],
+    }
+    task = replace(
+        get_task_by_name("cuda-kernel-github-top100-code-agent"),
+        evaluators=[static_evaluator],
+    )
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "COMPLETED"},
+        "messages": [],
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+
+    fake_response = AsyncMock()
+    fake_response.status_code = 200
+    fake_response.content = b"{}"
+    fake_response.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "durable transcript " + ("y" * 40)}]
+    }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return fake_response
+
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+    ):
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+
+    assert passed is True
+    assert reason is None
+    assert results[0]["passed"] is True
+    assert data["_benchmark"]["claude_code_sessions"][0]["id"] == "session-1"
+
+
+async def test_hydrate_claude_code_sessions_retries_until_transcript_persists():
+    """Cancel-persist can lag pause; hydrate retries while output is still empty."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    empty = AsyncMock()
+    empty.status_code = 200
+    empty.content = b"{}"
+    empty.json = lambda: {"sessions": [{"id": "session-1", "output": ""}]}
+
+    filled = AsyncMock()
+    filled.status_code = 200
+    filled.content = b"{}"
+    filled.json = lambda: {
+        "sessions": [{"id": "session-1", "output": "[Claude] Session started\n" + ("z" * 40)}]
+    }
+
+    responses = [empty, filled]
+    sleeps: list[float] = []
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None):
+            assert "/api/claude-code-session/agent/root-cuda" in url
+            return responses.pop(0)
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    data = {
+        "agent": {"agent_id": "root-cuda", "status": "ACTIVE"},
+        "_benchmark": {"api_base_url": "http://localhost:9999"},
+    }
+    with (
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test"})),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _FakeClient),
+        patch.object(bench.asyncio, "sleep", _fake_sleep),
+    ):
+        await bench._hydrate_claude_code_sessions(data)
+
+    sessions = data["_benchmark"]["claude_code_sessions"]
+    assert len(sessions) == 1
+    assert len(sessions[0]["output"].strip()) >= 32
+    assert sleeps == [2.0]
+    assert responses == []
 
 
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
@@ -14467,7 +14934,12 @@ def test_unified_catalog_delineates_bench_axes():
             "explore_completion_summary",
         ],
         "t7-completion-summary-length": ["completion_summary_length"],
+        "t1-andy-only": ["principal_user_andy"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
+        "t3-full-explore-trajectories": ["first_level_gp_explore_research"],
+        "t4-full-july-gp-trajectories": ["first_level_gp_july_trajectories"],
+        "t5-zero-live-spend": ["zero_live_spend"],
+        "t6-no-nested-gps": ["no_nested_general_purpose"],
         "t7-real-deliverable": ["root_deliverable_markers"],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
@@ -14502,11 +14974,6 @@ def test_unified_catalog_delineates_bench_axes():
         if evaluator["method"] == "single_turn_llm_judge"
     ]
     assert judge_ids == [
-        "t1-andy-only",
-        "t3-full-explore-trajectories",
-        "t4-full-july-gp-trajectories",
-        "t5-zero-live-spend",
-        "t6-no-nested-gps",
         "t7-schema-task-complete",
     ]
     criteria = [criterion for evaluator in mass["evaluators"] for criterion in evaluator["criteria"]]
@@ -15750,6 +16217,100 @@ def test_retired_tasks_hidden_from_suite_and_listing():
     with redirect_stdout(buf):
         _print_holding_set(tasks)
     assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
+
+
+def test_fetch_local_worker_logs_reads_benchmark_context_worker_files():
+    """Isolated stacks write worker*.log under BENCHMARK_CONTEXT_DIR — must be scraped."""
+    import tempfile
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = os.path.join(tmp, "logs")
+        os.makedirs(log_dir)
+        line = json.dumps(
+            {
+                "timestamp": "2026-08-31T03:00:00.000000+00:00",
+                "event": "[ClaudeCode] Code-agent event",
+                "agent_id": agent_id,
+                "event_type": "tool_use",
+                "tool_name": "Bash",
+            }
+        )
+        with open(os.path.join(log_dir, "worker.log"), "w") as handle:
+            handle.write(line + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-08-31T02:00:00.000000+00:00",
+                        "event": "too-old",
+                        "agent_id": agent_id,
+                    }
+                )
+                + "\n"
+            )
+            handle.write('{"event":"other-agent","agent_id":"ffffffff-0000-0000-0000-000000000000"}\n')
+
+        with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": tmp}, clear=False):
+            matched = logs.fetch_local_worker_logs(
+                agent_id,
+                datetime(2026, 8, 31, 2, 30, tzinfo=timezone.utc),
+            )
+
+    assert len(matched) == 1
+    assert "tool_use" in matched[0]
+    assert agent_id in matched[0]
+
+
+async def test_collect_logs_prefers_local_worker_logs_over_remote_placeholders():
+    """Run JSON must keep local Claude Code progress, not ClickHouse/Fly DNS stubs."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.logs as logs
+
+    agent_id = "11111111-2222-3333-4444-555555555555"
+    local_line = json.dumps(
+        {
+            "timestamp": "2026-08-31T03:10:00+00:00",
+            "event": "[ClaudeCode] Code-agent event",
+            "agent_id": agent_id,
+            "event_type": "tool_use",
+        }
+    )
+
+    with (
+        patch.object(logs, "fetch_local_worker_logs", return_value=[local_line]),
+        patch.object(logs, "get_flyio_logs_for_agent", return_value=[]),
+        patch.object(
+            logs,
+            "fetch_flyio_logs_snapshot",
+            new_callable=AsyncMock,
+            return_value=["[fly.io] 0 logs for agent 11111111-2222"],
+        ),
+        patch.object(
+            logs,
+            "fetch_clickhouse_worker_logs",
+            new_callable=AsyncMock,
+            return_value=["[clickhouse] Error: [Errno -2] Name or service not known"],
+        ),
+        patch.object(logs, "fetch_render_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "fetch_supabase_logs", new_callable=AsyncMock, return_value=[]),
+        patch.object(logs, "get_supabase_realtime_logs_for_agent", return_value=[]),
+        patch.object(logs, "extract_message_transcript", return_value=[]),
+    ):
+        result = await logs.collect_logs(
+            agent_id,
+            {},
+            datetime(2026, 8, 31, 3, 0, tzinfo=timezone.utc),
+        )
+
+    assert result["worker_logs"] == [local_line]
+    assert not any(line.startswith("[fly.io]") for line in result["worker_logs"])
+    assert not any(line.startswith("[clickhouse]") for line in result["worker_logs"])
 
 
 def test_agent_latency_reads_isolated_benchmark_stack_logs():
@@ -17297,6 +17858,14 @@ async def run_all_tests():
         test_first_level_gp_count_static_uses_collected_transcripts,
     )
     r.record(
+        "no_nested_general_purpose_static_uses_typed_parentage",
+        test_no_nested_general_purpose_static_uses_typed_parentage,
+    )
+    r.record(
+        "principal_user_andy_static_ignores_schema_key_leftovers",
+        test_principal_user_andy_static_ignores_schema_key_leftovers,
+    )
+    r.record(
         "root_deliverable_markers_use_dag_assemble_not_stub_card",
         test_root_deliverable_markers_use_dag_assemble_not_stub_card,
     )
@@ -17373,6 +17942,18 @@ async def run_all_tests():
         test_no_tool_failures_counts_unrecovered_evaluate_uncaught,
     )
     r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_web_fetch",
+        test_no_tool_failures_ignores_recoverable_web_fetch_error,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_web_fetch",
+        test_no_tool_failures_counts_unrecovered_web_fetch_error,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_grep_after_search",
+        test_no_tool_failures_ignores_recoverable_grep_error_after_web_search,
+    )
+    r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",
         test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field,
     )
@@ -17397,6 +17978,10 @@ async def run_all_tests():
         test_completion_summary_and_sms_static_checks_are_fail_closed,
     )
     r.record(
+        "claude_code_session_output_static_check_fail_closed",
+        test_claude_code_session_output_static_check_is_fail_closed,
+    )
+    r.record(
         "declared_static_completion_summary_rejects_fast_mode_ablation",
         test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs,
     )
@@ -17411,6 +17996,14 @@ async def run_all_tests():
     r.record(
         "blue_bottle_payment_card_request_contract",
         test_blue_bottle_catalog_stops_at_unresolved_payment_card_request,
+    )
+    r.record(
+        "cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures",
+        test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures,
+    )
+    r.record(
+        "cuda_kernel_stall_limit_covers_full_claude_code_runtime",
+        test_cuda_kernel_stall_limit_covers_full_claude_code_runtime,
     )
     await r.record_async(
         "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
@@ -17443,6 +18036,14 @@ async def run_all_tests():
     r.record(
         "blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract",
         test_blue_bottle_k5_timeout_e8caf9a1_fails_payment_contract,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration",
+        test_declared_evaluator_hydrates_claude_code_sessions,
+    )
+    await r.record_async(
+        "claude_code_session_output_hydration_retries_empty",
+        test_hydrate_claude_code_sessions_retries_until_transcript_persists,
     )
     r.record(
         "doordash_unresolved_place_order_write_lock_catalog",
@@ -17742,6 +18343,14 @@ async def run_all_tests():
     )
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
+    r.record(
+        "fetch_local_worker_logs_reads_benchmark_context",
+        test_fetch_local_worker_logs_reads_benchmark_context_worker_files,
+    )
+    await r.record_async(
+        "collect_logs_prefers_local_worker_logs",
+        test_collect_logs_prefers_local_worker_logs_over_remote_placeholders,
+    )
     r.record(
         "agent_latency_explicit_context_excludes_neighbor_stacks",
         test_agent_latency_explicit_context_excludes_neighbor_stacks,

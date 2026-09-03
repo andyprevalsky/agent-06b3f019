@@ -62,6 +62,7 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
+import { syncAndyClaudeTokensFromProd } from '../../../scripts/sync-andy-claude-tokens-from-prod';
 import { prisma } from '../../providers/database';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
@@ -395,19 +396,51 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
   return typeof body.accessToken === 'string' && body.accessToken.startsWith('sk-ant-');
 }
 
+async function syncAndyProdClaudeTokensForSmoke(reason: string): Promise<void> {
+  console.log(`    [info] ${reason} — syncing Andy (+19729777432) claude_code keys from prod…`);
+  await syncAndyClaudeTokensFromProd({
+    localDatabaseUrl: process.env.BLACKBOX_TEST_DATABASE_URL ?? process.env.DATABASE_URL,
+  });
+}
+
 /**
  * Ensure DEV_USER_ID can resolve a Claude Code OAuth token for the real E2B
  * smoke. macOS deploys refresh from Keychain; Linux/Cloud VMs have no Keychain,
  * so a pre-seeded local `claude_code` row (copied from prod) is enough.
+ *
+ * When local rows are missing or stale, fall back to a strict prod sync for Andy
+ * (+19729777432) only — never other users' pool tokens.
  */
 async function ensureSmokeUserClaudeCredentials(): Promise<void> {
   if (process.platform === 'darwin') {
-    await syncSmokeUserCredentialsFromKeychain();
-    return;
+    try {
+      await syncSmokeUserCredentialsFromKeychain();
+      return;
+    } catch (error) {
+      console.log(
+        `    [warn] Keychain Claude sync failed (${error instanceof Error ? error.message : String(error)}); trying prod fallback`
+      );
+    }
   }
+
+  if (process.env.BLACKBOX_SMOKE === '1' && process.platform !== 'darwin') {
+    await syncAndyProdClaudeTokensForSmoke(
+      'Claude Code E2B smoke on Linux/Cloud refreshes Andy prod keys before run'
+    );
+    if (await smokeUserHasResolvableClaudeToken()) {
+      return;
+    }
+  }
+
   if (await smokeUserHasResolvableClaudeToken()) {
     return;
   }
+
+  await syncAndyProdClaudeTokensForSmoke('Local Claude token unavailable');
+  if (await smokeUserHasResolvableClaudeToken()) {
+    return;
+  }
+
   // Linux/Cloud: when the OAuth pool is empty/revoked, Claude Code falls through
   // to the funded ANTHROPIC_API_KEY (see resolveClaudeCodeAuthEnvs). That is a
   // valid smoke path — do not hard-require Keychain on non-Darwin hosts.
@@ -418,8 +451,8 @@ async function ensureSmokeUserClaudeCredentials(): Promise<void> {
   throw new Error(
     'Claude Code smoke credentials unavailable on this host: no macOS Keychain ' +
       `(${CLAUDE_KEYCHAIN_SERVICE}), GET /api/integrations/claude-code/credentials/token ` +
-      'returned no sk-ant-* accessToken for DEV_USER_ID, and ANTHROPIC_API_KEY is unset. ' +
-      'Sync a usable claude_code integration or configure ANTHROPIC_API_KEY and retry.'
+      'returned no sk-ant-* accessToken for DEV_USER_ID after Andy prod sync, and ANTHROPIC_API_KEY is unset. ' +
+      'Sync usable claude_code integrations for +19729777432 in prod and retry.'
   );
 }
 
@@ -1431,8 +1464,6 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     }
   }
 }
-
-// ==================== ADDITIONAL COVERAGE ====================
 
 async function testCreate_withGithubRepoAndUserId() {
   // Valid user_id + github_repo_url but fake agent — exercises GitHub access check path

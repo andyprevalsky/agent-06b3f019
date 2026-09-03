@@ -191,7 +191,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         ) {
           writeLine(
-            `⚠️  SKIP: AgentCard sandbox org MCP token unavailable ` +
+            `⚠️  SKIP: AgentCard sandbox org token unavailable from provider ` +
               `(${JSON.stringify(connected.data)}); credential-infra precondition, ` +
               `not a code regression — connect/reset assertions skipped.`
           );

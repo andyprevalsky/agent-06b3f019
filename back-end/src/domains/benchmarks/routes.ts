@@ -262,4 +262,24 @@ router.get(
   })
 );
 
+/**
+ * GET /api/benchmarks/claude-code-session-preview/:taskId
+ * Benchmark-only retained-run session output for unauthenticated FE previews.
+ */
+router.get(
+  '/claude-code-session-preview/:taskId',
+  asyncHandler(async (req, res) => {
+    try {
+      const result = await service.getBenchmarkClaudeCodeSessionPreview(req.params.taskId);
+      if (result === null) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      res.json(result);
+    } catch {
+      res.status(500).json({ error: 'Failed to fetch benchmark Claude Code session preview' });
+    }
+  })
+);
+
 export default router;

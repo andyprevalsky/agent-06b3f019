@@ -35,6 +35,12 @@ Use with skill `.claude/skills/impl-bench/SKILL.md` for the next suite.
     `BENCHMARK_ISOLATED_BROWSER_PROFILES=true`, `run_benchmark` serializes all
     browser tasks (concurrency=1). `local.py` now sets this for isolated stacks
     **and** `--use-existing` so `--max-concurrency 8` actually overlaps agents.
+11. **Step budgets, not wall-clock** — Odysseys upstream caps by steps (paper default
+    100; ablation 200), not per-level timeouts. We disable wall-clock
+    (`timeout_seconds=0`) and set `max_steps.browser` by difficulty:
+    easy=100, medium=250, hard=500 (BU → 100). The harness pauses at the budget
+    and still runs the polar judge. `local.py` raises `BROWSER_MAX_ITERATIONS` from
+    the selected tasks' max step budgets.
 
 ## Key files
 

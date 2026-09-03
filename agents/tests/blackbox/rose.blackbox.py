@@ -3996,6 +3996,67 @@ async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
     assert meta.data.get("gpt_token_error") == "rate_limit"
 
 
+async def test_client_codex_404_falls_through_to_waterfall():
+    """Codex Cloudflare/edge 404 (empty body — same for garbage tokens) must NOT
+    fail the whole complete() call. It must raise RoseServerError (in
+    _FALL_THROUGH_ERRORS) so RoseClient walks openai-api-key / OpenRouter
+    waterfall. Regression: bare RoseError on 404 aborted spawn-subagents smoke
+    3× with `RoseError: Codex 404:` and never reached waterfall.
+    """
+    import os
+
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "waterfall after codex 404"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}},
+            ]
+        )
+    )
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+
+    def handler(req):
+        url = str(req.url)
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            seen["codex"] += 1
+            # Match the live edge failure: HTTP 404, empty body, cf-ray present.
+            return httpx.Response(404, text="", headers={"cf-ray": "test-codex-404"})
+        if url == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(500, text="openai key must not be required for this regression")
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev_gpt = os.environ.pop("GPT_API_KEY", None)
+    prev_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=gpt_auth_from_token("blocked-codex-token", "acct_404"),
+                call_site="test-codex-404-waterfall",
+            )
+        )
+    finally:
+        if prev_gpt is not None:
+            os.environ["GPT_API_KEY"] = prev_gpt
+        if prev_anthropic is not None:
+            os.environ["ANTHROPIC_API_KEY"] = prev_anthropic
+
+    assert seen["codex"] >= 1, "Codex route must be attempted"
+    assert seen["openrouter"] == 1, "OpenRouter waterfall must serve after Codex 404"
+    content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+    assert content == "waterfall after codex 404"
+    meta = next((c for c in chunks if c.kind == "metadata"), None)
+    assert meta is not None
+    assert meta.data.get("gpt_token_error") == "server_error"
+    assert classify_gpt_token_error(RoseServerError("Codex 404: ", status=404)) == "server_error"
+
+
 async def test_client_api_key_tier_402_falls_through_to_waterfall():
     """End-to-end: no compute token → funded api-key tier hit → 402 → backs off
     and falls through to the OpenRouter waterfall (which serves the response)."""
@@ -6350,6 +6411,10 @@ async def run_all_tests():
     await r.record_async(
         "gpt_token_usage_limit_to_openai_apikey",
         test_client_gpt_token_usage_limit_falls_back_to_openai_api_key,
+    )
+    await r.record_async(
+        "codex_404_falls_through_to_waterfall",
+        test_client_codex_404_falls_through_to_waterfall,
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall

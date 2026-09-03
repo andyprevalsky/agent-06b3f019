@@ -67,6 +67,30 @@ def test_polar_bench_group_and_tags_never_daily():
     assert get_task_by_name(odysseys[0].name).group == POLAR_GROUP
 
 
+def test_polar_step_budgets_disable_wall_clock():
+    """Polar evals are step-budgeted (easy/medium/hard), not wall-clock timed."""
+    from benchmarks.polar_catalog import (
+        polar_browser_step_budget,
+        polar_wall_clock_disabled,
+    )
+
+    polar = get_tasks_by_tag(POLAR_TAG)
+    assert all(t.timeout_seconds == 0 for t in polar)
+    assert all(polar_wall_clock_disabled(t) for t in polar)
+    assert all(t.max_steps.get("browser") for t in polar)
+
+    expected = {"easy": 100, "medium": 250, "hard": 500}
+    for level, budget in expected.items():
+        level_tasks = [t for t in polar if level in t.tags and "odysseys" in t.tags]
+        assert level_tasks
+        assert all(t.max_steps == {"browser": budget} for t in level_tasks)
+        assert all(polar_browser_step_budget(t) == budget for t in level_tasks)
+
+    bu = [t for t in polar if "bu-bench" in t.tags]
+    assert all(t.max_steps == {"browser": 100} for t in bu)
+    assert all(polar_browser_step_budget(t) == 100 for t in bu)
+
+
 def test_polar_bench_excluded_from_default_suites_and_browser_tag():
     assert all(not is_polar_bench_task(t) for t in suite_tasks())
     browser = get_tasks_by_tag("browser")
