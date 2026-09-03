@@ -43,6 +43,30 @@ def _is_recoverable_github_clone_denial(error: BaseException) -> bool:
     )
 
 
+def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
+    """True when E2B session create failed on transient sandbox/infra capacity.
+
+    Local repro (cuda-kernel k=3 r8, 2026-09-03): concurrent Claude Code spawns
+    returned HTTP 500 ``redis: connection pool timeout`` / ``sandbox was not
+    found`` / ``sandbox timeout``. Those are capacity flakes, not agent bugs —
+    hard-ERROR trips ``no_tool_failures`` while the model can still succeed by
+    retrying spawn (ideally one session at a time). Soft-FINISH instead.
+    """
+    text = extract_error_message(error).upper()
+    if "GITHUB_ACCESS_DENIED" in text:
+        return False
+    markers = (
+        "REDIS: CONNECTION POOL TIMEOUT",
+        "CONNECTION POOL TIMEOUT",
+        "FAILED TO CREATE SANDBOX",
+        "FAILED TO RUN RESERVE SCRIPT",
+        "THE SANDBOX WAS NOT FOUND",
+        "SANDBOX TIMEOUT",
+        "FAILED TO CREATE CODE SESSION",
+    )
+    return any(m in text for m in markers)
+
+
 def _soft_fail_github_clone_denial_result(
     *, code_provider: Optional[str], error: BaseException
 ) -> Dict[str, Any]:
@@ -57,6 +81,37 @@ def _soft_fail_github_clone_denial_result(
         ),
         "code_provider": code_provider,
     }
+
+
+def _soft_fail_sandbox_infra_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Dict[str, Any]:
+    detail = extract_error_message(error)
+    return {
+        "success": False,
+        "message": (
+            "Code session could not start due to a transient sandbox capacity "
+            f"error ({detail}). Retry spawn_claude_code_agent shortly, prefer a "
+            "single session at a time (avoid parallel code-agent spawns), and do "
+            "not pass github_repo_url / github_repo_link."
+        ),
+        "code_provider": code_provider,
+    }
+
+
+def _maybe_soft_fail_session_create_result(
+    *, code_provider: Optional[str], error: BaseException
+) -> Optional[Dict[str, Any]]:
+    """Map recoverable session-create failures to soft-fail tool results."""
+    if _is_recoverable_github_clone_denial(error):
+        return _soft_fail_github_clone_denial_result(
+            code_provider=code_provider, error=error
+        )
+    if _is_recoverable_sandbox_infra_failure(error):
+        return _soft_fail_sandbox_infra_result(
+            code_provider=code_provider, error=error
+        )
+    return None
 
 
 class SpawnClaudeCodeAgentManager(ToolManager):
@@ -194,16 +249,17 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     if isinstance(e, ActivityError) and not isinstance(
                         e.cause, (asyncio.CancelledError, TemporalCancelledError)
                     ):
-                        if _is_recoverable_github_clone_denial(e):
+                        soft = _maybe_soft_fail_session_create_result(
+                            code_provider=code_provider, error=e
+                        )
+                        if soft is not None:
                             logger.warning(
-                                "[ClaudeCode] Recoverable GitHub clone denial; soft-failing tool",
+                                "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
                                 agent_id=agent_id,
                                 code_provider=code_provider,
                                 error=extract_error_message(e),
                             )
-                            result = _soft_fail_github_clone_denial_result(
-                                code_provider=code_provider, error=e
-                            )
+                            result = soft
                         else:
                             raise
                     else:
@@ -302,16 +358,16 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if isinstance(e, asyncio.CancelledError):
                 raise
 
-            if _is_recoverable_github_clone_denial(e):
+            soft = _maybe_soft_fail_session_create_result(
+                code_provider=code_provider, error=e
+            )
+            if soft is not None:
                 logger.warning(
-                    "[ClaudeCode] Recoverable GitHub clone denial; soft-failing tool",
+                    "[ClaudeCode] Recoverable session-create failure; soft-failing tool",
                     agent_id=agent_id,
                     code_provider=code_provider,
                     error=extract_error_message(e),
                     error_type=type(e).__name__,
-                )
-                soft = _soft_fail_github_clone_denial_result(
-                    code_provider=code_provider, error=e
                 )
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
