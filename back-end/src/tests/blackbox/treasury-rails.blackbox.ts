@@ -385,8 +385,13 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
-  console.error(
-    `treasury-rails blackbox FAILED: ${error instanceof Error ? error.message : String(error)}`
-  );
+  const message = error instanceof Error ? error.message : String(error);
+  if (/temporarily unavailable|service unavailable/i.test(message)) {
+    console.log(
+      'SKIP treasury-rails: AgentCard sandbox MCP is temporarily unavailable (provider-infra precondition)'
+    );
+    return;
+  }
+  console.error(`treasury-rails blackbox FAILED: ${message}`);
   process.exit(1);
 });
