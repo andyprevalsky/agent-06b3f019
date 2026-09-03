@@ -3,7 +3,7 @@
  * and render file contents (HTML srcDoc, spreadsheet tables, text, etc.).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
@@ -182,7 +182,7 @@ describe('documentPreview.utils kinds', () => {
   });
 });
 
-describe('CompletionSummaryCard right drawer content', () => {
+describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
   beforeEach(() => {
     downloadBlobMock.mockReset();
     downloadTextMock.mockReset();
@@ -194,6 +194,44 @@ describe('CompletionSummaryCard right drawer content', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('shows an HTML mini-preview in the summary without opening the drawer', async () => {
+    const file = makeFile({ original_filename: 'report.html', mime_type: 'text/html' });
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'doc', label: 'Document', value: file }],
+        }}
+      />,
+    );
+
+    const mini = await screen.findByTestId('file-pointer-mini-preview');
+    expect(mini).toHaveAttribute('data-preview-kind', 'html');
+    expect(screen.getByTestId('file-pointer-mini-html')).toBeInTheDocument();
+    expect(screen.queryByTestId('document-preview-drawer')).not.toBeInTheDocument();
+  });
+
+  it('shows spreadsheet mini-preview cells in the summary', async () => {
+    const file = makeFile({
+      original_filename: 'budget.xlsx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    downloadBlobMock.mockResolvedValue(buildXlsxBlob());
+
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'sheet', label: 'Sheet', value: file }],
+        }}
+      />,
+    );
+
+    await screen.findByTestId('file-pointer-mini-spreadsheet');
+    expect(screen.getByText('Cloud')).toBeInTheDocument();
+    expect(screen.getByText('99')).toBeInTheDocument();
   });
 
   it('opens RIGHT drawer and renders HTML contents via srcDoc', async () => {
@@ -208,17 +246,18 @@ describe('CompletionSummaryCard right drawer content', () => {
       />,
     );
 
+    await screen.findByTestId('file-pointer-mini-html');
     await user.click(screen.getByTestId('file-pointer-chip'));
     const drawer = await screen.findByTestId('document-preview-drawer');
     expect(drawer.className).toMatch(/right-0|slide-in-from-right/);
 
-    const iframe = await screen.findByTestId('document-preview-html');
+    const iframe = await within(drawer).findByTestId('document-preview-html');
     expect(iframe.tagName).toBe('IFRAME');
     expect(iframe).toHaveAttribute('srcdoc', expect.stringContaining('Rose Labs Report'));
     expect(downloadTextMock).toHaveBeenCalled();
   });
 
-  it('renders Excel cell contents in a table', async () => {
+  it('renders Excel cell contents in the drawer table', async () => {
     const user = userEvent.setup();
     const file = makeFile({
       original_filename: 'budget.xlsx',
@@ -235,15 +274,15 @@ describe('CompletionSummaryCard right drawer content', () => {
       />,
     );
 
+    await screen.findByTestId('file-pointer-mini-spreadsheet');
     await user.click(screen.getByTestId('file-pointer-chip'));
-    await waitFor(() => {
-      expect(screen.getByTestId('document-preview-spreadsheet')).toBeInTheDocument();
-    });
-    expect(screen.getByText('Cloud')).toBeInTheDocument();
-    expect(screen.getByText('99')).toBeInTheDocument();
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    await within(drawer).findByTestId('document-preview-spreadsheet');
+    expect(within(drawer).getByText('Cloud')).toBeInTheDocument();
+    expect(within(drawer).getByText('99')).toBeInTheDocument();
   });
 
-  it('renders Numbers package CSV contents in a table', async () => {
+  it('renders Numbers package CSV contents in the drawer table', async () => {
     const user = userEvent.setup();
     const file = makeFile({
       original_filename: 'forecast.numbers',
@@ -260,15 +299,15 @@ describe('CompletionSummaryCard right drawer content', () => {
       />,
     );
 
+    await screen.findByTestId('file-pointer-mini-spreadsheet');
     await user.click(screen.getByTestId('file-pointer-chip'));
-    await waitFor(() => {
-      expect(screen.getByTestId('document-preview-spreadsheet')).toBeInTheDocument();
-    });
-    expect(screen.getByText('Revenue')).toBeInTheDocument();
-    expect(screen.getByText('Feb')).toBeInTheDocument();
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    await within(drawer).findByTestId('document-preview-spreadsheet');
+    expect(within(drawer).getByText('Revenue')).toBeInTheDocument();
+    expect(within(drawer).getByText('Feb')).toBeInTheDocument();
   });
 
-  it('renders CSV contents in a table', async () => {
+  it('renders CSV contents in the drawer table', async () => {
     const user = userEvent.setup();
     const file = makeFile({ original_filename: 'rows.csv', mime_type: 'text/csv' });
     downloadTextMock.mockResolvedValue('Name,Score\nAda,10\n');
@@ -282,14 +321,14 @@ describe('CompletionSummaryCard right drawer content', () => {
       />,
     );
 
+    await screen.findByTestId('file-pointer-mini-spreadsheet');
     await user.click(screen.getByTestId('file-pointer-chip'));
-    await waitFor(() => {
-      expect(screen.getByTestId('document-preview-spreadsheet')).toBeInTheDocument();
-    });
-    expect(screen.getByText('Ada')).toBeInTheDocument();
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    await within(drawer).findByTestId('document-preview-spreadsheet');
+    expect(within(drawer).getByText('Ada')).toBeInTheDocument();
   });
 
-  it('renders Word docx text contents', async () => {
+  it('renders Word docx text contents in mini + drawer', async () => {
     const user = userEvent.setup();
     const file = makeFile({
       original_filename: 'brief.docx',
@@ -306,14 +345,15 @@ describe('CompletionSummaryCard right drawer content', () => {
       />,
     );
 
+    await screen.findByTestId('file-pointer-mini-text');
+    expect(screen.getByTestId('file-pointer-mini-text')).toHaveTextContent(/Rose Labs Word Brief/);
     await user.click(screen.getByTestId('file-pointer-chip'));
-    await waitFor(() => {
-      expect(screen.getByTestId('document-preview-text')).toBeInTheDocument();
-    });
-    expect(screen.getByText(/Rose Labs Word Brief/)).toBeInTheDocument();
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    await within(drawer).findByTestId('document-preview-text');
+    expect(within(drawer).getByText(/Rose Labs Word Brief/)).toBeInTheDocument();
   });
 
-  it('renders PowerPoint pptx slide text contents', async () => {
+  it('renders PowerPoint pptx slide text contents in mini + drawer', async () => {
     const user = userEvent.setup();
     const file = makeFile({
       original_filename: 'deck.pptx',
@@ -330,10 +370,11 @@ describe('CompletionSummaryCard right drawer content', () => {
       />,
     );
 
+    await screen.findByTestId('file-pointer-mini-text');
+    expect(screen.getByTestId('file-pointer-mini-text')).toHaveTextContent(/Rose Labs Deck/);
     await user.click(screen.getByTestId('file-pointer-chip'));
-    await waitFor(() => {
-      expect(screen.getByTestId('document-preview-text')).toBeInTheDocument();
-    });
-    expect(screen.getByText(/Rose Labs Deck/)).toBeInTheDocument();
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    await within(drawer).findByTestId('document-preview-text');
+    expect(within(drawer).getByText(/Rose Labs Deck/)).toBeInTheDocument();
   });
 });

@@ -108,7 +108,7 @@ function OutputValue({ value }: OutputValueProps) {
   }
   if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
     return (
-      <div className="flex flex-wrap gap-1.5">
+      <div className="flex w-full flex-col gap-2">
         {value.map((fp, idx) => (
           <FilePointerDisplay key={idx} file={fp as FilePointer} />
         ))}

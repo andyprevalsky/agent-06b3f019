@@ -267,7 +267,8 @@ createRoot(document.getElementById('root')!).render(
       <div className="min-h-screen bg-[#EEEFF2] p-6 dark:bg-[#111]">
         <div className="mx-auto max-w-lg space-y-3">
           <h1 className="text-sm font-medium text-muted-foreground">
-            Document preview harness — click each chip (RIGHT drawer shows contents)
+            Document preview harness — each output shows an inline mini-preview; click for the RIGHT
+            drawer
           </h1>
           <p className="text-xs text-muted-foreground" data-testid="supported-kinds">
             Supported: HTML, PDF, PNG, Markdown, Text, JSON, CSV, Excel, Numbers, Word, PowerPoint
