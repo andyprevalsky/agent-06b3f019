@@ -15,6 +15,7 @@ import { createHmac, timingSafeEqual } from './crypto';
 import { createLogger } from './logger';
 import { logTruncate } from '../utils/log';
 import { archiveJson } from './traceArchive';
+import { buildMockWhatsAppSendResult, shouldMockBenchmarkWhatsAppSend } from './smsTransportMock';
 
 const log = createLogger('WhatsApp');
 
@@ -185,6 +186,39 @@ async function postWhatsAppMessage(
   phoneNumber: string,
   options: WhatsAppArchiveOptions
 ): Promise<WhatsAppSendResult> {
+  const mockSeed = `${options.archiveRootAgentId ?? 'no-agent'}:${JSON.stringify(requestBody)}`;
+  let shouldMockWhatsApp = false;
+  try {
+    shouldMockWhatsApp = await shouldMockBenchmarkWhatsAppSend(options.archiveRootAgentId);
+  } catch (error) {
+    const messageText = error instanceof Error ? error.message : String(error);
+    log.error('Benchmark WhatsApp mock eligibility lookup failed', { error: messageText });
+    return {
+      success: false,
+      error: `Benchmark WhatsApp mock eligibility lookup failed: ${messageText}`,
+      definitiveFailure: true,
+    };
+  }
+  if (shouldMockWhatsApp) {
+    const mocked = await buildMockWhatsAppSendResult({
+      phoneNumber,
+      seed: mockSeed,
+    });
+    await archiveWhatsAppTransportBoundary({
+      rootAgentId: options.archiveRootAgentId,
+      requestBody,
+      response: { messages: [{ id: mocked.messageSid }], mocked: true },
+      statusCode: 200,
+      success: true,
+      context: {
+        ...(options.archiveContext ?? {}),
+        message_id: mocked.messageSid,
+        benchmark_transport_mock: true,
+      },
+    });
+    return { success: true, messageSid: mocked.messageSid };
+  }
+
   const { phoneNumberId, accessToken, graphApiVersion } = getWhatsAppConfig();
 
   if (
