@@ -1215,7 +1215,12 @@ function isClaudeSmokeFundingFailure(output: string): boolean {
     /requires more credits, or fewer max_tokens/i.test(output) ||
     /can only afford \d+/i.test(output) ||
     /API Error:\s*402\b/i.test(output) ||
-    /insufficient credits/i.test(output)
+    /insufficient credits/i.test(output) ||
+    // E2B team billing block at sandbox-create time (observed 2026-09-03). Same
+    // external funding class as the Codex create-time SKIP — not a code regression.
+    /missing payment method/i.test(output) ||
+    /team is blocked/i.test(output) ||
+    /payment method required/i.test(output)
   );
 }
 
@@ -1245,6 +1250,10 @@ async function testSmokeCredentialFailureClassifier() {
     'Anthropic credit-balance copy must still classify as a funding skip'
   );
   assert(
+    isClaudeSmokeFundingFailure('403: team is blocked: missing payment method'),
+    'E2B team missing-payment-method must classify as a funding skip'
+  );
+  assert(
     !isClaudeSmokeFundingFailure('CLAUDE_E2B_DONE'),
     'a successful smoke sentinel must not classify as a funding skip'
   );
@@ -1265,14 +1274,22 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       user_id: DEV_USER_ID,
     }),
   });
-  if (res.status === 500) {
+  if (res.status !== 200) {
     const error =
       typeof res.data === 'object' && res.data !== null && 'error' in res.data
         ? String((res.data as { error?: unknown }).error ?? '')
-        : '';
+        : typeof res.data === 'string'
+          ? res.data
+          : JSON.stringify(res.data ?? {});
     if (error.includes(CODE_AGENT_CREDENTIALS_UNAVAILABLE)) {
       console.log(
         '    [skip] Claude E2B smoke could not start: code-agent credentials unavailable (credits/cooldown/auth)'
+      );
+      return;
+    }
+    if (isClaudeSmokeFundingFailure(error)) {
+      console.log(
+        `    [skip] Claude E2B smoke could not start: external funding/billing block (${res.status}); signal: ${error.slice(0, 200)}`
       );
       return;
     }

@@ -21,7 +21,6 @@ tags:
 sources:
   - agent 14eda9c6-8fbf-4e74-af14-2195bcdce3cc
   - PR #1209
-  - relative of 2026-07-07-failed-fast-cache-get-treated-as-a-miss-under-pool-exhaustion
 repro: agents/tests/fast_cache/test_fast_cache.py::test_get_error_on_allowlisted_bench_does_not_go_live
 status: fixed
 ---

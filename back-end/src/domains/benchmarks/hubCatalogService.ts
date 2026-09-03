@@ -149,12 +149,12 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
 const READY_STATUSES = new Set(['ready']);
 
 /** Canonical catalog-group tokens the Benchmarks page filters + renders on. */
-const CATALOG_GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'incomplete'] as const;
+const CATALOG_GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'polar-bench', 'incomplete'] as const;
 
 /**
  * Normalize a stored `group` label (from tasks.json) to a canonical token.
  * Tolerates casing + the human-readable aliases used historically
- * ("Daily", "Pre-Deploy", "Rose Bench", "Incomplete"). Returns null for an
+ * ("Daily", "Pre-Deploy", "Rose Bench", "Polar Bench", "Incomplete"). Returns null for an
  * absent or unrecognized label so the caller falls back to derivation.
  */
 function normalizeStoredGroup(raw: unknown): string | null {
@@ -172,12 +172,14 @@ function normalizeStoredGroup(raw: unknown): string | null {
  *   incomplete — not runnable (missing fixtures/judges; excluded from suites)
  *   pre-deploy — the `smoke` tag set (`run_benchmark.py --suite smoke`, the
  *                gate /deploy and scripts/test.sh run before merging)
+ *   polar-bench — Odysseys + BU Bench V1 external capability suite
  *   rose-bench — harness-independent capability benches (bench field)
  *   daily      — every other ready pipeline-e2e task (the broad eval suite)
  */
 function deriveTaskGroup(status: string | null, bench: string | null, tags: string[]): string {
   if (status !== null && !READY_STATUSES.has(status)) return 'incomplete';
   if (tags.includes('smoke')) return 'pre-deploy';
+  if (tags.includes('polar-bench')) return 'polar-bench';
   if (bench === 'rose-bench') return 'rose-bench';
   return 'daily';
 }

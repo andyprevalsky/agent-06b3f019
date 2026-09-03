@@ -54,7 +54,7 @@ async function createOwnedAgent(userId: string) {
     data: {
       id: agentId,
       userId,
-      goal: 'AgentPhone blackbox ownership fixture',
+      goal: 'AgentPhone black-box fixture',
     },
   });
   return agentId;
@@ -64,6 +64,7 @@ async function cleanup(userId: string, operationKeys: string[] = []) {
   if (operationKeys.length > 0) {
     await prisma.toolSideEffect.deleteMany({ where: { operationKey: { in: operationKeys } } });
   }
+  await prisma.agent.deleteMany({ where: { userId } });
   await prisma.agentIdentity.deleteMany({ where: { userId } });
   await prisma.agent.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
