@@ -3726,6 +3726,76 @@
     "group": "daily"
   },
   {
+    "name": "summary-html-document-output",
+    "title": "HTML Document in Completion Summary",
+    "prompt": "Create a single self-contained HTML file named report.html. The page must include a visible heading exactly equal to 'Rose Labs Report' and one short paragraph of placeholder body text. Use a code agent (spawn_claude_code_agent / type=code) to write the file. When finished, return the HTML file as a file_pointer in your structured output (do NOT paste the HTML source as a string field). Do not ask questions. Do not spawn browser or explore agents.",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "response-schema",
+      "documents",
+      "regression"
+    ],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Produces an HTML deliverable as a file_pointer in Task Complete outputs so the FE summary document drawer + HTML iframe preview path stays cemented.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Code-agent writes report.html under the sandbox output dir; close-session uploads it as a FilePointer that must appear in completionSummary.outputs."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "completed-with-html-file-output",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Task Complete outputs include at least one file_pointer for an .html / text/html document"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".html",
+              ".htm"
+            ],
+            "mime_contains": [
+              "html"
+            ],
+            "min_files": 1
+          }
+        ]
+      }
+    ],
+    "source": [
+      "feature:summary-document-drawer-html-preview"
+    ],
+    "group": "daily"
+  },
+  {
     "name": "agent-for-each",
     "title": "12-Agent For Each from CSV",
     "prompt": "Read the attached CSV file. For each entity (person/company) in the file, spawn a general-purpose agent to find one interesting fact about them from the web. Collect all facts and present them in a summary.",

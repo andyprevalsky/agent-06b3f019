@@ -9723,6 +9723,64 @@ def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: b
     return cards
 
 
+def _iter_completion_output_file_pointers(outputs: object) -> list[dict]:
+    """Collect FilePointer-shaped values from Task Complete outputs (single or list)."""
+    pointers: list[dict] = []
+    if not isinstance(outputs, list):
+        return pointers
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            filename = candidate.get("original_filename")
+            storage_path = candidate.get("storage_path")
+            if isinstance(filename, str) and filename.strip() and isinstance(storage_path, str) and storage_path.strip():
+                pointers.append(candidate)
+    return pointers
+
+
+def _completion_summary_file_outputs_check(data: dict, check: dict) -> tuple[bool, str]:
+    """Require Task Complete outputs to include FilePointers matching extension/mime filters."""
+    cards = _completion_cards_for_static_check(
+        data,
+        include_first_level_gps=bool(check.get("include_first_level_gps")),
+    )
+    if not cards:
+        return False, "No finished completion summary was observed"
+
+    extensions = [
+        str(ext).lower() if str(ext).startswith(".") else f".{str(ext).lower()}"
+        for ext in (check.get("extensions") or [])
+        if str(ext).strip()
+    ]
+    mime_contains = [str(part).lower() for part in (check.get("mime_contains") or []) if str(part).strip()]
+    min_files = int(check.get("min_files", 1))
+
+    matched: list[dict] = []
+    for card in cards:
+        for pointer in _iter_completion_output_file_pointers(card.get("outputs")):
+            filename = str(pointer.get("original_filename") or "").lower()
+            mime = str(pointer.get("mime_type") or "").lower()
+            if extensions and not any(filename.endswith(ext) for ext in extensions):
+                continue
+            if mime_contains and not any(part in mime for part in mime_contains):
+                continue
+            matched.append(pointer)
+
+    if len(matched) < min_files:
+        detail = f"extensions={extensions or ['*']}, mime_contains={mime_contains or ['*']}"
+        return (
+            False,
+            f"Task Complete outputs had {len(matched)} matching file_pointer(s); "
+            f"expected at least {min_files} ({detail})",
+        )
+    return True, f"Found {len(matched)} matching file_pointer output(s)"
+
+
 async def _hydrate_completion_sms_events(data: dict) -> None:
     """Attach durable completion-SMS provider receipts for static evaluators."""
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
@@ -9913,6 +9971,11 @@ def _run_declared_static_check(
                 outputs = card.get("outputs")
                 if require_outputs and (not isinstance(outputs, list) or not outputs):
                     return False, f"T7: {label} Task Complete has no schema outputs"
+            continue
+        if check_type == "completion_summary_file_outputs":
+            ok, reason = _completion_summary_file_outputs_check(data, check)
+            if not ok:
+                return False, reason
             continue
         if check_type == "completion_sms_event":
             events = benchmark_state.get("completion_sms_events") or []
