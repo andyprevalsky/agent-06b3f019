@@ -5,7 +5,7 @@ title: Successful CDP drag crashes in record_action on tuple coordinates
 surface: agents
 component: spawn-browser-agent-v3 / ActionHistory.record_action
 classification: our-bug
-problem_class: caller-callee-coordinate-shape-mismatch
+problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: "agents/browser_tools/dom_service.py ActionHistory.record_action — indexes coordinates['x'] while _execute_drag/_execute_click_coordinates pass (x, y)"
 symptoms:
   - browser-biometrics-webdecoy smoke timeout / PAUSED
@@ -17,11 +17,10 @@ tags:
   - drag
   - smoke
   - biometrics
-  - record_action
+  - record-action
 sources:
   - agent c247de84-7aeb-4405-b68a-53bfe3f41506
   - PR #1209
-  - relative of 2026-09-02-browser-biometrics-unknown-action-drag
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_execute_drag_records_through_real_action_history
 status: fixed
 ---
@@ -54,6 +53,10 @@ unmocked `_execute_drag` returned `success: False` after the same TypeError.
 `normalize_action_coordinates` accepts `{"x","y"}` or `(x, y)` / `[x, y]`.
 Cement with an unmocked `_execute_drag` + real `ActionHistory`, and a direct
 tuple `record_action` test. Do not raise the 420s smoke cap.
+
+## Human feedback
+
+None recorded.
 
 ## Reusable lesson
 

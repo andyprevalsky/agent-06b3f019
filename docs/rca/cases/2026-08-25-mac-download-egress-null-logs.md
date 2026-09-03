@@ -17,8 +17,7 @@ tags:
   - mac-app
   - monitor
 sources:
-  - https://github.com/Rose-Ai-Labs/rose/actions/runs/32897589028
-  - /tmp/mac-dl-art/report.json
+  - commit dae9b0c3
 repro: cd back-end && DOWNLOAD_EGRESS_REPORT_PATH=/tmp/dl-egress-repro/report.json npx tsx scripts/download-egress-health.ts
 status: fixed
 ---
@@ -36,6 +35,13 @@ became a diagnostic incident. `prod-health.ts` already used `data.logs || []`.
 
 Archive search (`Render logs query returned no logs array download egress`,
 `download egress Render telemetry`): no prior case on this contract.
+
+## Diagnosis
+
+`download-egress-health-lib.ts` rejected `logs: null` as a malformed Render
+response even though Render and the existing production-health parser use null
+for an empty log window. The monitor converted normal provider emptiness into a
+diagnostic failure.
 
 ## Solution
 
@@ -60,3 +66,12 @@ Live Render empty filter:
 ```
 
 Post-fix: same command exits 0 with empty diagnostic-failure list.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+Normalize provider-specific empty-result representations at the API boundary
+when an established sibling integration already defines their meaning.

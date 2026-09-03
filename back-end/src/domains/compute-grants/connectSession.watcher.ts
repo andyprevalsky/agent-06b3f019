@@ -178,11 +178,22 @@ export function startSignInWatcher(
     if (pollInFlight) return;
     pollInFlight = true;
     void watchSignInTick(entry, cfg, timer)
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
         log.warn('connect.watch_failed', {
           connect_id: entry.connectId,
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
         });
+        // Before a code is captured, a transient CDP read can recover on the
+        // next tick. Once exchange/persistence begins, however, retrying the
+        // same one-time code cannot recover and leaves the user pending while a
+        // remote browser bills until TTL. Surface that terminal failure and
+        // release the browser immediately.
+        if (entry.stage === 'capturing' || entry.stage === 'minting') {
+          clearInterval(timer);
+          entry.failed = message;
+          await releaseBrowser(entry);
+        }
       })
       .finally(() => {
         pollInFlight = false;

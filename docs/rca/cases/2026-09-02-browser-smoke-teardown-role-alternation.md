@@ -5,7 +5,7 @@ title: Browser FE teardown FINISHED reused spawn toolCallId and aborted smoke wi
 surface: agents
 component: spawn-browser-agent-v3 / context-validator
 classification: our-bug
-problem_class: fe-only-side-effect-pollutes-model-context-dedup
+problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: "agents/domains/spawn_browser_agent_v3/handler.py `_emit_browser_task_terminal_for_fe` — posts FINISHED teardown on the spawn toolCallId without excludeFromModel"
 symptoms:
   - predeploy smoke browser-smoke fails with role_alternation dual-write
@@ -16,7 +16,7 @@ tags:
   - browser-smoke
   - context-validator
   - role-alternation
-  - excludeFromModel
+  - exclude-from-model
   - teardown
 sources:
   - agent dabeeb92-8607-4a38-8762-61878aa0dfbd
@@ -66,6 +66,10 @@ teardown `excludeFromModel=True` and skip excluded rows before dedup → clean.
    before terminal dedup (mirrors `drop_rows_never_sent_to_model`).
 3. Cemented blackbox: buggy teardown shape fails; excluded teardown passes.
    Cleanup emitter asserts `excludeFromModel`.
+
+## Human feedback
+
+None recorded.
 
 ## Reusable lesson
 

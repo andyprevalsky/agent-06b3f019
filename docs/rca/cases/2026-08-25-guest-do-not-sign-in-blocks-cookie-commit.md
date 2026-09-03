@@ -2,7 +2,7 @@
 id: 2026-08-25-guest-do-not-sign-in-blocks-cookie-commit
 date: 2026-08-25
 title: Guest cookie-commit gated by tool param, not goal sniffing
-surface: browser
+surface: agents
 component: recover_from_challenge auth_cookies_are_preserved tool param
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
@@ -21,7 +21,7 @@ tags:
   - substring-false-positive
 sources:
   - agent 4bbd1e64-f570-4c40-8167-9f72ccafb217
-  - fleet/local run 20260825_185100_browser-hotel-booking
+  - fleet run 20260825_185100_browser-hotel-booking
 repro: cd agents && source venv/bin/activate && python tests/blackbox/rose_browser_use.blackbox.py recover_from_challenge_auth_cookies_are_preserved_flag
 status: fixed
 ---
@@ -84,3 +84,9 @@ property/room UI. Still **FAIL** timeout 1139s with no `payment_approval` —
 residual Hotels.com GraphQL HTTP 429 soft-block (same outcome gap as
 `2026-08-21-hotels-com-classifier-network-summary-omits-http-status` follow-up).
 Durable FE: https://www.roselabs.ai/?agent-id=58721c46-7b48-4d2f-97a5-7131a1ddc222
+
+## Reusable lesson
+
+Never gate recovery behavior on fragile goal-text substring sniffing when an
+explicit tool parameter can carry the intent; substring vetoes false-positive
+inside negations like "do not sign in."
