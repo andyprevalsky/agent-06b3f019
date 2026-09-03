@@ -71,7 +71,6 @@ export {
   reportAgentBug,
   downloadAttachmentAsBlob,
   downloadAttachmentAsText,
-  createAttachmentSignedUrl,
 } from './api';
 
 // ── API types (used by components alongside the functions above) ──────────

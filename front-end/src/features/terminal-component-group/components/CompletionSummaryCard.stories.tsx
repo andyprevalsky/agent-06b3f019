@@ -151,6 +151,69 @@ export const SMSSent: Story = {
   },
 };
 
+// Document outputs of mixed mime types (xlsx, numbers, html, pdf, …)
+export const WithDocumentOutputs: Story = {
+  args: {
+    data: {
+      summary: 'Generated the deliverable documents and attached them as structured outputs.',
+      outputs: [
+        {
+          key: 'report_html',
+          label: 'HTML Report',
+          value: {
+            id: 'fp-html',
+            storage_path: 'user/report.html',
+            original_filename: 'report.html',
+            mime_type: 'text/html',
+            size_bytes: 2048,
+            created_at: '2026-09-03T00:00:00Z',
+          },
+        },
+        {
+          key: 'workbook_xlsx',
+          label: 'Excel Workbook',
+          value: {
+            id: 'fp-xlsx',
+            storage_path: 'user/budget.xlsx',
+            original_filename: 'budget.xlsx',
+            mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            size_bytes: 8192,
+            created_at: '2026-09-03T00:00:00Z',
+          },
+        },
+        {
+          key: 'sheet_numbers',
+          label: 'Numbers Sheet',
+          value: {
+            id: 'fp-numbers',
+            storage_path: 'user/forecast.numbers',
+            original_filename: 'forecast.numbers',
+            mime_type: 'application/vnd.apple.numbers',
+            size_bytes: 12288,
+            created_at: '2026-09-03T00:00:00Z',
+          },
+        },
+        {
+          key: 'brief_pdf',
+          label: 'PDF Brief',
+          value: {
+            id: 'fp-pdf',
+            storage_path: 'user/brief.pdf',
+            original_filename: 'brief.pdf',
+            mime_type: 'application/pdf',
+            size_bytes: 4096,
+            created_at: '2026-09-03T00:00:00Z',
+          },
+        },
+      ],
+      toolUsage: [{ name: 'spawn_claude_code_agent', count: 1 }],
+      totalToolCalls: 1,
+      durationSeconds: 42,
+      costDollars: 0.04,
+    } satisfies CompletionSummaryData,
+  },
+};
+
 // Long running task
 export const LongRunningTask: Story = {
   args: {
