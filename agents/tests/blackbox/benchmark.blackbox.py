@@ -4148,6 +4148,63 @@ def test_no_tool_failures_counts_unrecovered_evaluate_uncaught():
     assert _run_declared_static_check(evaluator, data)[0] is False
 
 
+def test_no_tool_failures_ignores_recoverable_web_fetch_error():
+    """Recovered web_fetch ERROR then later FINISHED fetch must not fail t10.
+
+    Local repro: test-mass-agent-run-0 Fast Mode replay (agent 4f078c58…,
+    child 84979949…) had one web_fetch ERROR on theunsubscribed.co/archive?sort=top
+    then 69 later FINISHED fetches; t10-no-tool-failures previously failed closed.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "bf0a44fa-d68d-4fdb-882d-f320c21e6b2e",
+                    "toolStatus": "ERROR",
+                },
+                "message": "Params: url=https://www.theunsubscribed.co/archive?sort=top",
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "recover-1",
+                    "toolStatus": "FINISHED",
+                },
+                "message": "Params: url=https://www.theunsubscribed.co/archive",
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data)[0] is True
+
+
+def test_no_tool_failures_counts_unrecovered_web_fetch_error():
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_fetch",
+                    "toolCallId": "dead-fetch",
+                    "toolStatus": "ERROR",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "web_fetch dead-fetch status=ERROR",
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
 
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
@@ -17400,6 +17457,14 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_counts_unrecovered_evaluate_uncaught",
         test_no_tool_failures_counts_unrecovered_evaluate_uncaught,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_web_fetch",
+        test_no_tool_failures_ignores_recoverable_web_fetch_error,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_web_fetch",
+        test_no_tool_failures_counts_unrecovered_web_fetch_error,
     )
     r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",

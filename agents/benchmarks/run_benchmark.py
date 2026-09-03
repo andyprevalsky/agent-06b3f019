@@ -9399,6 +9399,49 @@ def _has_later_browser_recovery(messages: list, start_index: int) -> bool:
     return False
 
 
+def _has_later_web_fetch_recovery(messages: list, start_index: int) -> bool:
+    """True when a later web_fetch FINISHED proves the agent recovered from a fetch ERROR."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
+        if tool_name != "web_fetch":
+            continue
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        if status == "FINISHED":
+            return True
+    return False
+
+
+def _is_recoverable_web_fetch_failure(
+    candidate: dict,
+    *,
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Transient web_fetch ERRORs recovered by a later successful fetch are not tool failures.
+
+    Explore / GP children often hit a one-off fetch ERROR (timeout, 403, soft page) and
+    continue with alternate URLs. Counting those recovered rows in `no_tool_failures`
+    fails closed Fast Mode mass-agent replays whose historical trajectories include a
+    single recovered fetch ERROR (local repro: test-mass-agent-run-0 agent
+    4f078c58… / child 84979949… web_fetch bf0a44fa… then 69 later FINISHED fetches).
+    Unrecovered terminal web_fetch ERRORs still count.
+    """
+    tool_name = str(candidate.get("toolName") or candidate.get("tool_name") or "")
+    if tool_name != "web_fetch":
+        return False
+    status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+    if status not in {"ERROR", "FAILED"}:
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_web_fetch_recovery(messages, message_index)
+
+
 def _is_recoverable_browser_element_miss_failure(
     candidate: dict,
     *,
@@ -9810,6 +9853,12 @@ def _tool_runtime_failures(data: dict) -> list[str]:
                 if _is_recoverable_browser_evaluate_uncaught_failure(
                     candidate,
                     message_text=message_text,
+                    messages=messages,
+                    message_index=message_index,
+                ):
+                    continue
+                if _is_recoverable_web_fetch_failure(
+                    candidate,
                     messages=messages,
                     message_index=message_index,
                 ):
