@@ -174,7 +174,7 @@ async def test_api_request_manager_posts_events():
     assert result["result"]["ok"] is True
 
 
-async def _run_all():
+async def run_all_tests():
     tests = [
         ("happy_path", test_api_request_happy_path),
         ("boundary", test_api_request_boundary),
@@ -183,19 +183,23 @@ async def _run_all():
         ("manager_events", test_api_request_manager_posts_events),
     ]
     passed = 0
+    failed = 0
     for name, fn in tests:
         setup_mock({})
         try:
             await fn()
             passed += 1
             print(f"✅ api_request.{name}")
+        except Exception as exc:
+            failed += 1
+            print(f"❌ api_request.{name}: {exc}")
         finally:
             teardown_mock()
-    return passed, len(tests)
+    print(f"RESULTS: {passed}/{passed + failed} passed")
+    return failed == 0
 
 
 if __name__ == "__main__":
-    passed, total = asyncio.run(_run_all())
-    if passed != total:
+    ok = asyncio.run(run_all_tests())
+    if not ok:
         raise SystemExit(1)
-    print(f"RESULTS: {passed}/{total} passed")

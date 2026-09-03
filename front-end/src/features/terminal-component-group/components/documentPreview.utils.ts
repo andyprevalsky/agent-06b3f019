@@ -1,6 +1,6 @@
 /**
  * Pure helpers for classifying FilePointers and parsing tabular previews.
- * No React — side-effect free so blackbox tests can import them directly.
+ * No React - side-effect free so blackbox tests can import them directly.
  */
 
 import type { FilePointer } from '../hooks';
@@ -120,12 +120,12 @@ function isCsv(mime: string, name: string): boolean {
   );
 }
 
-/** OOXML .docx only — legacy CFB `.doc` is not a zip package and cannot be parsed here. */
+/** OOXML .docx only - legacy CFB `.doc` is not a zip package and cannot be parsed here. */
 function isDocx(mime: string, name: string): boolean {
   return mime.includes('wordprocessingml') || name.endsWith('.docx');
 }
 
-/** OOXML .pptx only — legacy CFB `.ppt` is not a zip package and cannot be parsed here. */
+/** OOXML .pptx only - legacy CFB `.ppt` is not a zip package and cannot be parsed here. */
 function isPptx(mime: string, name: string): boolean {
   return mime.includes('presentationml') || name.endsWith('.pptx');
 }

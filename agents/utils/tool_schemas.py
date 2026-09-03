@@ -202,7 +202,7 @@ class ResponseSchemaConfig(BaseModel):
     def _coerce_malformed_input(cls, value: Any) -> Any:
         # Models reliably emit output_schema in three malformed shapes that the
         # canonical {"fields": [...]} form does not match. Coerce each into the
-        # structured form rather than failing validation — failure forces a costly
+        # structured form rather than failing validation -  failure forces a costly
         # LLM retry loop (cache_hit_pct ~99% repeats the same shape) and burns the
         # entire ~50s timeout on smoke tasks like spawn-sub-agents.
         #
@@ -675,7 +675,7 @@ def first_url_in_text(text: Optional[str]) -> Optional[str]:
 
 
 def url_origin_for_log(url: str) -> str:
-    """Scheme + host (+ port) only — never credentials, path, query, or fragment.
+    """Scheme + host (+ port) only -  never credentials, path, query, or fragment.
 
     A URL recovered from free-form text can carry `user:password@` userinfo and
     secrets in the query string, so only the origin is ever safe to log.
@@ -824,7 +824,7 @@ class SpawnAgentTool(BaseModel):
             # ("Navigate to https://... then check out") and leave `start_url`
             # unset. Rejecting that costs a full re-generation, and because the
             # omission is a systematic model habit rather than a random glitch,
-            # the blind retry reproduces it — three strikes then kills the agent
+            # the blind retry reproduces it -  three strikes then kills the agent
             # before a browser session is ever created. Recover the URL instead;
             # only fail when the goal genuinely names no destination.
             # Only https is recoverable. The browser restores authenticated
@@ -851,7 +851,7 @@ class SpawnAgentTool(BaseModel):
             raise ValueError(f"output_schema is required when type='{self.type}'.")
         # Some models emit output_schema for explore type even though it has no effect
         # downstream (explore agents return free-form summary). Drop it silently rather
-        # than failing validation — rejecting forces a costly LLM retry loop.
+        # than failing validation -  rejecting forces a costly LLM retry loop.
         if self.type == "explore" and self.output_schema:
             self.output_schema = None
         return self
@@ -873,7 +873,7 @@ class SpawnAgentToolNoGP(BaseModel):
             "or authenticated web work; 'code' starts a coding agent (Claude Code / "
             "Codex CLI) in an ephemeral sandbox; 'explore' performs read-only "
             "research for web or user-data facts. "
-            "general_purpose and for_each are disabled for this run — use "
+            "general_purpose and for_each are disabled for this run -  use "
             "type='code' for GitHub discovery/ranking work."
         )
     )
@@ -954,7 +954,7 @@ class SpawnExploreAgentTool(BaseModel):
 
     Narrowed variant of SpawnAgentTool: during PLAN only explore agents are
     permitted. Schema-level narrowing is cheaper than a runtime rejection
-    loop — the LLM cannot pick an invalid `type` and we drop ~600 tokens of
+    loop -  the LLM cannot pick an invalid `type` and we drop ~600 tokens of
     per-type field guidance the model would otherwise have to reason past.
     """
 
@@ -1033,14 +1033,14 @@ class AttemptCompletionWithResultTool(BaseModel):
     your `result` must be complete and self-contained when you emit it.
 
     Requirements:
-    - Complete: do not defer the answer. There is no future turn.
-    - Grounded: every claim must be backed by evidence from your prior
+   - Complete: do not defer the answer. There is no future turn.
+   - Grounded: every claim must be backed by evidence from your prior
       tool results. If a fact cannot be found, report the gap explicitly
       ("No results for [X] after searching [keywords]") rather than
       fabricating it.
-    - Token-efficient, punctual, and information-dense. Strip filler;
+   - Token-efficient, punctual, and information-dense. Strip filler;
       every sentence should carry signal.
-    - Cite sources inline with [N] tags and end `result` with a
+   - Cite sources inline with [N] tags and end `result` with a
       `Sources:` block mapping each tag to its URL or source identifier.
 
     Emit a single `attempt_completion_with_result` tool_use block, do
@@ -1095,7 +1095,7 @@ TOOL_MODELS: ToolRegistry = {
     "set_plan": SetPlanTool,
     # Universal completion tool (available in both phases)
     "attempt_completion": AttemptCompletionTool,
-    # Sub-agent (skip_verification=True) completion tool — carries the
+    # Sub-agent (skip_verification=True) completion tool -  carries the
     # final handoff payload to the parent in `result`.
     "attempt_completion_with_result": AttemptCompletionWithResultTool,
     # Phone calling tool
@@ -1112,7 +1112,7 @@ PLAN_TOOL_MODELS: ToolRegistry = {
 }
 
 # Tools available inside the explore agent (subset of read-only tools).
-# Full registry list — callers that inject tools into an explore agent MUST use
+# Full registry list -  callers that inject tools into an explore agent MUST use
 # `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
 EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "api_request", "attempt_completion_with_result"]
 
@@ -1270,9 +1270,9 @@ def create_agent_action_model(
     Dynamically create an AgentAction Pydantic model based on available tools.
 
     This ensures:
-    - Only available tools are in the schema (better LLM guidance)
-    - Type-safe tool calls (Pydantic validates structure)
-    - No JSON string parsing hacks needed
+   - Only available tools are in the schema (better LLM guidance)
+   - Type-safe tool calls (Pydantic validates structure)
+   - No JSON string parsing hacks needed
 
     NOTE: reasoning is NOT part of this model anymore. Reasoning is handled via
     OpenRouter's reasoning_details which are extracted from API responses and

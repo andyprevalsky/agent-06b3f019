@@ -85,10 +85,16 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     e2bProvider.includes('resolveFastModeWriteEnabled(fastModeCacheEnabled, userId)'),
     'Claude Code must write through for the allowlisted account even when reads are off'
   );
+  const e2bWsOverlay = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'e2bWsServerOverlay.ts'),
+    'utf8'
+  );
   assert.ok(
-    e2bProvider.includes(
-      "join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs')"
-    )
+    e2bProvider.includes('overlayClaudeCodeWsServer') &&
+      e2bWsOverlay.includes(
+        "join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs')"
+      ),
+    'backend must overlay the checked-in Claude Code ws-server before launch'
   );
   assert.match(wsServer, /process\.env\.CLAUDE_CODE_MODEL\s*\|\|\s*["']claude-sonnet-5["']/);
   assert.ok(
@@ -106,7 +112,9 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'wrapper must pass Fast Mode through --settings'
   );
   assert.ok(
-    wsServer.includes('const REPO_WORKDIR = "/home/user/workspace"'),
+    wsServer.includes('const REPO_WORKDIR = join(home, "workspace")') ||
+      wsServer.includes("const REPO_WORKDIR = join(home, 'workspace')") ||
+      wsServer.includes('const REPO_WORKDIR = "/home/user/workspace"'),
     'Claude wrapper must clone generated repos into the stable cache replay workdir'
   );
   assert.ok(
