@@ -289,8 +289,8 @@ Always replace with a goal-anchored name. Examples:
   - list[int]: List of integers
   - object: Nested object — MUST include properties: [{ name, type }]
   - list[object]: List of objects — MUST include properties describing each item shape
-  - file_pointer: Reference to a file produced by the agent
-  - list[file_pointer]: List of file references
+  - file_pointer: Reference to a file produced by the agent. When the goal implies a concrete format, ALSO set file_types to the required extensions/MIME subtypes (e.g. ["png"], ["html"], ["pdf"], ["xlsx"]).
+  - list[file_pointer]: List of file references. Same file_types rule when every item must share a format.
   - session_file_pointer: Internal remote-session file reference
   - list[session_file_pointer]: List of internal remote-session file references
 
@@ -311,7 +311,11 @@ Goal: "Compare three cities by cost of living and rank them."
 GOOD fields: [{ "name": "cities", "type": "list[object]", "properties": [{ "name": "name", "type": "str" }, { "name": "cost_of_living_index", "type": "float" }, { "name": "rank", "type": "int" }] }]
 
 Goal: "Generate a logo as a PNG."
-GOOD fields: [{ "name": "logo", "type": "file_pointer" }]
+GOOD fields: [{ "name": "logo", "type": "file_pointer", "file_types": ["png"] }]
+
+Goal: "Make me a simple one-page website for my coffee shop."
+GOOD fields: [{ "name": "website", "type": "file_pointer", "file_types": ["html"] }]
+(Why file_types=["html"]: a website deliverable is an HTML document even when the user never says "HTML" or "file".)
 
 Goal: "Buy me a black beanie on Amazon that costs less than $35 and looks well-made."
 GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "order_confirmation_id", "type": "str" }]
@@ -392,6 +396,14 @@ class _GeneratedResponseSchemaField(BaseModel):
     properties: Optional[List[_GeneratedResponseSchemaNestedField]] = Field(
         default=None,
         description="Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.",
+    )
+    file_types: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "For file_pointer / list[file_pointer] only: required extensions or MIME subtypes "
+            'the deliverable MUST satisfy (e.g. ["html"], ["pdf"], ["png", "jpg"]). '
+            "Omit when any file type is acceptable."
+        ),
     )
 
     @model_validator(mode="after")
@@ -639,6 +651,8 @@ def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[st
         }
         if field.properties:
             item["properties"] = [prop.model_dump() for prop in field.properties]
+        if field.file_types:
+            item["file_types"] = list(field.file_types)
         fields.append(item)
     return {"fields": fields}
 
@@ -4910,6 +4924,20 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
             array_schema["description"] = field["description"]
         return array_schema, True
     if field_type == "file_pointer":
+        file_types = [str(t).strip().lstrip(".").lower() for t in (field.get("file_types") or []) if str(t).strip()]
+        filename_desc = "Original filename."
+        mime_desc = "MIME type (e.g., image/jpeg)."
+        if file_types:
+            filename_desc = (
+                "Original filename. MUST use one of these extensions: "
+                + ", ".join(f".{ext}" for ext in file_types)
+                + "."
+            )
+            mime_desc = (
+                "MIME type matching required file_types "
+                + str(file_types)
+                + " (e.g., text/html for html, application/pdf for pdf)."
+            )
         file_pointer_schema = {
             "type": "object",
             "properties": {
@@ -4923,11 +4951,11 @@ def _json_schema_for_response_field(field: Dict[str, Any]) -> tuple[Dict[str, An
                 },
                 "original_filename": {
                     "type": "string",
-                    "description": "Original filename.",
+                    "description": filename_desc,
                 },
                 "mime_type": {
                     "type": "string",
-                    "description": "MIME type (e.g., image/jpeg).",
+                    "description": mime_desc,
                 },
                 "size_bytes": {
                     "type": "integer",

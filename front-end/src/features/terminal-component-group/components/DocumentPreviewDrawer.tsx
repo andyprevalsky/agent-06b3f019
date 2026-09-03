@@ -15,6 +15,8 @@
  *   pdf          -> iframe
  *   spreadsheet  -> SheetJS -> SpreadsheetTable (xlsx/xls)
  *   numbers      -> zip QuickLook/CSV or SheetJS table when readable
+ *   docx         -> OOXML text extract -> <pre>
+ *   pptx         -> OOXML slide text extract -> <pre>
  *   download     -> last-resort metadata (unsupported binaries only)
  *
  * SYSTEM CONTEXT:
@@ -40,7 +42,9 @@ import {
   documentPreviewKind,
   documentTypeLabel,
   parseDelimitedTable,
+  parseDocxPackage,
   parseNumbersPackage,
+  parsePptxPackage,
   parseSpreadsheetBytes,
   type SpreadsheetPreview,
 } from './documentPreview.utils';
@@ -159,6 +163,20 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
               text: parsed.text,
             });
           }
+          return;
+        }
+
+        if (kind === 'docx') {
+          const blob = await downloadAttachmentAsBlob(downloadUrl);
+          const parsed = await parseDocxPackage(await blobToArrayBuffer(blob));
+          if (!cancelled) setLoadState({ status: 'ready', downloadUrl, text: parsed.text });
+          return;
+        }
+
+        if (kind === 'pptx') {
+          const blob = await downloadAttachmentAsBlob(downloadUrl);
+          const parsed = await parsePptxPackage(await blobToArrayBuffer(blob));
+          if (!cancelled) setLoadState({ status: 'ready', downloadUrl, text: parsed.text });
           return;
         }
 
@@ -328,7 +346,7 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
                 className="prose-sm max-w-none"
               />
             </div>
-          ) : kind === 'text' && loadState.text !== undefined ? (
+          ) : (kind === 'text' || kind === 'docx' || kind === 'pptx') && loadState.text !== undefined ? (
             <pre
               data-testid="document-preview-text"
               className="whitespace-pre-wrap break-words px-4 py-4 font-mono text-xs text-foreground"

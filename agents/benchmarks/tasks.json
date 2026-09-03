@@ -3796,6 +3796,85 @@
     "group": "daily"
   },
   {
+    "name": "summary-site-no-filetype",
+    "title": "Make Me a Site (No File Type Specified)",
+    "prompt": "Make me a site for a fictional coffee shop called Beam Roast. Include a hero title with the shop name and a short About section with two sentences of placeholder copy. Do not ask questions.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "response-schema",
+      "documents",
+      "regression"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "User asks for a website without naming HTML/file_pointer. Schema generator must force a file_pointer with file_types including html, and the agent must return an HTML file_pointer in Task Complete outputs.",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "No pinned response_schema. Prompt never says HTML/file. Schema-gen must set file_pointer + file_types=[html]; completion outputs must include an HTML deliverable."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "completed-with-inferred-html-site",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED",
+          "Generated response_schema includes a file_pointer field with file_types forcing HTML",
+          "Task Complete outputs include at least one HTML file_pointer"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "response_schema_has_file_pointer",
+            "required_file_types": [
+              "html",
+              "htm"
+            ]
+          },
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".html",
+              ".htm"
+            ],
+            "mime_contains": [
+              "html"
+            ],
+            "min_files": 1
+          }
+        ]
+      }
+    ],
+    "source": [
+      "feature:summary-document-drawer-html-preview",
+      "feature:response-schema-file-types"
+    ],
+    "group": "daily"
+  },
+  {
     "name": "agent-for-each",
     "title": "12-Agent For Each from CSV",
     "prompt": "Read the attached CSV file. For each entity (person/company) in the file, spawn a general-purpose agent to find one interesting fact about them from the web. Collect all facts and present them in a summary.",

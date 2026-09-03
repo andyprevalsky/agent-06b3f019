@@ -14,7 +14,23 @@ export type DocumentPreviewKind =
   | 'pdf'
   | 'spreadsheet'
   | 'numbers'
+  | 'docx'
+  | 'pptx'
   | 'download';
+
+/** Previewable kinds with in-drawer content renderers (not download-only). */
+export const PREVIEWABLE_DOCUMENT_KINDS: DocumentPreviewKind[] = [
+  'html',
+  'image',
+  'markdown',
+  'text',
+  'csv',
+  'pdf',
+  'spreadsheet',
+  'numbers',
+  'docx',
+  'pptx',
+];
 
 export type SpreadsheetPreview = {
   sheetNames: string[];
@@ -104,6 +120,24 @@ function isCsv(mime: string, name: string): boolean {
   );
 }
 
+function isDocx(mime: string, name: string): boolean {
+  return (
+    mime.includes('wordprocessingml') ||
+    mime === 'application/msword' ||
+    name.endsWith('.docx') ||
+    name.endsWith('.doc')
+  );
+}
+
+function isPptx(mime: string, name: string): boolean {
+  return (
+    mime.includes('presentationml') ||
+    mime.includes('ms-powerpoint') ||
+    name.endsWith('.pptx') ||
+    name.endsWith('.ppt')
+  );
+}
+
 /** Classify how a FilePointer should render inside the document preview drawer. */
 export function documentPreviewKind(file: FilePointer): DocumentPreviewKind {
   const mime = (file.mime_type || '').toLowerCase();
@@ -118,6 +152,8 @@ export function documentPreviewKind(file: FilePointer): DocumentPreviewKind {
   if (isSpreadsheet(mime, name)) return 'spreadsheet';
   if (isNumbers(mime, name)) return 'numbers';
   if (isCsv(mime, name)) return 'csv';
+  if (isDocx(mime, name)) return 'docx';
+  if (isPptx(mime, name)) return 'pptx';
   if (
     mime.startsWith('text/') ||
     TEXT_MIME_TYPES.has(mime) ||
@@ -262,4 +298,62 @@ export async function parseNumbersPackage(bytes: ArrayBuffer): Promise<{
   }
 
   return { previewImageUrl };
+}
+
+function stripXmlTags(xml: string): string {
+  return xml
+    .replace(/<w:tab\/>/g, '\t')
+    .replace(/<a:br\/>/g, '\n')
+    .replace(/<\/w:p>/g, '\n')
+    .replace(/<\/a:p>/g, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Extract readable plain text from a .docx (Office Open XML) package. */
+export async function parseDocxPackage(bytes: ArrayBuffer): Promise<{ text: string }> {
+  const JSZip = (await import('jszip')).default;
+  const zip = await JSZip.loadAsync(bytes);
+  const docXml = zip.files['word/document.xml'];
+  if (!docXml) {
+    throw new Error('docx package missing word/document.xml');
+  }
+  const xml = await docXml.async('string');
+  const text = stripXmlTags(xml);
+  if (!text) {
+    throw new Error('docx document contained no readable text');
+  }
+  return { text };
+}
+
+/** Extract readable plain text from a .pptx package (concatenated slide text). */
+export async function parsePptxPackage(bytes: ArrayBuffer): Promise<{ text: string }> {
+  const JSZip = (await import('jszip')).default;
+  const zip = await JSZip.loadAsync(bytes);
+  const slidePaths = Object.keys(zip.files)
+    .filter((path) => /^ppt\/slides\/slide\d+\.xml$/i.test(path))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  if (slidePaths.length === 0) {
+    throw new Error('pptx package has no slides');
+  }
+  const parts: string[] = [];
+  for (const path of slidePaths) {
+    const xml = await zip.files[path].async('string');
+    const slideText = stripXmlTags(xml);
+    if (slideText) {
+      parts.push(slideText);
+    }
+  }
+  const text = parts.join('\n\n').trim();
+  if (!text) {
+    throw new Error('pptx slides contained no readable text');
+  }
+  return { text };
 }

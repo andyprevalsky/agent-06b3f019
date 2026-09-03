@@ -78,6 +78,43 @@ async function buildNumbersBlob(): Promise<Blob> {
   return new Blob([bytes], { type: 'application/vnd.apple.numbers' });
 }
 
+async function buildDocxBlob(): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file(
+    'word/document.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Rose Labs Word Brief</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Docx contents visible in the right drawer.</w:t></w:r></w:p>
+  </w:body>
+</w:document>`,
+  );
+  const bytes = await zip.generateAsync({ type: 'arraybuffer' });
+  return new Blob([bytes], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+}
+
+async function buildPptxBlob(): Promise<Blob> {
+  const zip = new JSZip();
+  zip.file(
+    'ppt/slides/slide1.xml',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp><p:txBody><a:p><a:r><a:t>Rose Labs Deck</a:t></a:r></a:p>
+    <a:p><a:r><a:t>Slide text in the right drawer.</a:t></a:r></a:p></p:txBody></p:sp>
+  </p:spTree></p:cSld>
+</p:sld>`,
+  );
+  const bytes = await zip.generateAsync({ type: 'arraybuffer' });
+  return new Blob([bytes], {
+    type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  });
+}
+
 const HTML_BODY =
   '<!doctype html><html><body><h1>Rose Labs Report</h1><p>Rendered body</p></body></html>';
 
@@ -106,10 +143,42 @@ describe('documentPreview.utils kinds', () => {
       documentPreviewKind(makeFile({ original_filename: 'a.csv', mime_type: 'text/csv' })),
     ).toBe('csv');
     expect(
+      documentPreviewKind(
+        makeFile({
+          original_filename: 'a.docx',
+          mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+      ),
+    ).toBe('docx');
+    expect(
+      documentPreviewKind(
+        makeFile({
+          original_filename: 'a.pptx',
+          mime_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        }),
+      ),
+    ).toBe('pptx');
+    expect(
       documentTypeLabel(
         makeFile({ original_filename: 'a.xlsx', mime_type: 'application/octet-stream' }),
       ),
     ).toBe('Excel');
+    expect(
+      documentTypeLabel(
+        makeFile({
+          original_filename: 'a.docx',
+          mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+      ),
+    ).toBe('Word');
+    expect(
+      documentTypeLabel(
+        makeFile({
+          original_filename: 'a.pptx',
+          mime_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        }),
+      ),
+    ).toBe('PowerPoint');
   });
 });
 
@@ -218,5 +287,53 @@ describe('CompletionSummaryCard right drawer content', () => {
       expect(screen.getByTestId('document-preview-spreadsheet')).toBeInTheDocument();
     });
     expect(screen.getByText('Ada')).toBeInTheDocument();
+  });
+
+  it('renders Word docx text contents', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({
+      original_filename: 'brief.docx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    downloadBlobMock.mockResolvedValue(await buildDocxBlob());
+
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'doc', label: 'Brief', value: file }],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    await waitFor(() => {
+      expect(screen.getByTestId('document-preview-text')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Rose Labs Word Brief/)).toBeInTheDocument();
+  });
+
+  it('renders PowerPoint pptx slide text contents', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({
+      original_filename: 'deck.pptx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    });
+    downloadBlobMock.mockResolvedValue(await buildPptxBlob());
+
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'deck', label: 'Deck', value: file }],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    await waitFor(() => {
+      expect(screen.getByTestId('document-preview-text')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Rose Labs Deck/)).toBeInTheDocument();
   });
 });
