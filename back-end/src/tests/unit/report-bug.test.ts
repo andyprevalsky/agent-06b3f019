@@ -361,6 +361,32 @@ function testUncertainTransportClassifier(): void {
   assert.equal(isUncertainGithubTransportError(new Error('fetch failed')), true);
 }
 
+async function testAgentExistsForBugReportArchivedFallback(): Promise<void> {
+  const { agentExistsForBugReport } = await import('../../domains/agents/bugReportService');
+  assert.equal(
+    await agentExistsForBugReport('archived-agent-id', {
+      findAgentById: async () => null,
+      findAgentAcrossRuns: async (agentId: string) =>
+        agentId === 'archived-agent-id'
+          ? ({
+              run_id: 'run-1',
+              agent: { agent_id: agentId },
+              messages: [],
+              tree: [],
+            } as never)
+          : null,
+    }),
+    true
+  );
+  assert.equal(
+    await agentExistsForBugReport('missing-agent-id', {
+      findAgentById: async () => null,
+      findAgentAcrossRuns: async () => null,
+    }),
+    false
+  );
+}
+
 async function main(): Promise<void> {
   const cases: Array<[string, () => void | Promise<void>]> = [
     ['title keeps short descriptions', testTitleShortDescription],
@@ -383,6 +409,7 @@ async function main(): Promise<void> {
     ],
     ['uncertain transport classifier', testUncertainTransportClassifier],
     ['Cursor API launch passes AbortSignal', testLaunchPassesAbortSignal],
+    ['archived hub agent counts as reportable', testAgentExistsForBugReportArchivedFallback],
   ];
 
   let failed = 0;

@@ -17,6 +17,7 @@ import {
   llmKey,
   browserHttpKey,
 } from '../../domains/fast-cache/normalize';
+import { isOaiDemoGoal } from '../../providers/fastCacheNormalizeOaiDemo';
 
 let passed = 0;
 const failures: string[] = [];
@@ -586,6 +587,20 @@ test('worldModelCacheScope partitions simulated runs, real/shadow keys unchanged
   assert.strictEqual(llmKey('goal', 'site', { messages: [] }), realKey);
   delete process.env.BENCHMARK_WORLD_MODEL_MODE;
   delete process.env.WMH_MODEL_NAME;
+});
+
+test('isOaiDemoGoal matches only the mass-agent demo prefixes', () => {
+  assert.strictEqual(
+    isOaiDemoGoal(
+      "I'm building a personal brand for health, longevity, technology, founder journey [x]"
+    ),
+    true
+  );
+  assert.strictEqual(isOaiDemoGoal('You are analyzing ONE creator for Andy'), true);
+  assert.strictEqual(
+    isOaiDemoGoal('Order a Vanilla Bean Shakerato and waffle from Blue Bottle'),
+    false
+  );
 });
 
 if (failures.length > 0) {

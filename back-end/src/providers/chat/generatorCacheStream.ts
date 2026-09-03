@@ -1,5 +1,6 @@
 import type { CompletionChunk } from '../rose';
 import { cacheGet } from '../fastCacheStore';
+import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
 import { createLogger } from '../logger';
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
 
@@ -12,6 +13,7 @@ interface GeneratorCacheStreamOptions {
   createLive: (abortSignal: AbortSignal) => Promise<AsyncIterable<CompletionChunk>>;
   createCached: (json: string) => AsyncIterable<CompletionChunk>;
   onWinner: (winner: 'cache' | 'live') => void;
+  goal?: string | null;
 }
 
 /**
@@ -46,7 +48,7 @@ export function createGeneratorCacheStream(
       const delta = chunk.choices[0]?.delta;
       return Boolean(delta?.content?.length || delta?.reasoning?.length);
     },
-    awaitCacheFirst: true,
+    awaitCacheFirst: isOaiDemoGoal(options.goal),
     hangTimeoutMs: GENERATOR_CACHE_HANG_MS,
     onCacheError: (error) =>
       log.warn('fast_cache.chat_generator_read_failed', {

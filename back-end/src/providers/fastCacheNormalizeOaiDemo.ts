@@ -9,11 +9,21 @@
 export const OAI_DEMO_ROOT_GOAL_PREFIX =
   "I'm building a personal brand for health, longevity, technology, founder journey"; // pragma: allowlist secret
 export const OAI_DEMO_CHILD_WINDOW = '2026-04-04 through 2026-07-03'; // pragma: allowlist secret
+export const OAI_DEMO_CHILD_GOAL_PREFIX = 'You are analyzing ONE creator';
 const OAI_DEMO_CACHE_SOURCE_NAME = 'Aman Gottumukkala';
 const OAI_DEMO_CACHE_DISPLAY_NAME = 'Andy Prevalsky';
 
+export function isOaiDemoGoal(goal: string | null | undefined): boolean {
+  const text = goal ?? '';
+  return (
+    text.includes(OAI_DEMO_ROOT_GOAL_PREFIX) ||
+    text.includes(OAI_DEMO_CHILD_WINDOW) ||
+    text.includes(OAI_DEMO_CHILD_GOAL_PREFIX)
+  );
+}
+
 export function canonicalizeOaiDemoGoalForHash(goal: string): string {
-  if (!goal.includes(OAI_DEMO_ROOT_GOAL_PREFIX) && !goal.includes(OAI_DEMO_CHILD_WINDOW)) {
+  if (!isOaiDemoGoal(goal)) {
     return goal;
   }
   return goal

@@ -33,10 +33,34 @@ def get_max_iterations() -> int:
 MAX_ITERATIONS = get_max_iterations()
 MAX_CONSECUTIVE_API_FAILURES = 5
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 30
-# Fast Mode warm demos must not sit on a live Kernel navigate/network flood for
-# the full 30m activity budget (verify19 Huberman YouTube hang). Soft-complete
-# + cache hits should finish in seconds; 3m is a hard ceiling for FM stalls.
+# test-mass-agent-run-0 Fast Mode only. Live Fast Mode checkouts (Blue Bottle)
+# keep the 30m budget. Soft-complete + cache hits on the demo finish in
+# seconds; 3m is a hard ceiling so Huberman YouTube hangs cannot burn 30m.
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE = 3
+
+
+def browser_start_to_close_timeout_minutes(
+    *,
+    fast_mode: bool,
+    goal: str = "",
+    workflow_instance=None,
+) -> int:
+    """3m Fast Mode ceiling is demo-only; every other FM browser keeps 30m."""
+    from domains.spawn_agent.config import is_oai_demo_goal, is_oai_demo_mass_agent_task
+
+    demo = is_oai_demo_goal(goal)
+    if workflow_instance is not None:
+        demo = demo or is_oai_demo_mass_agent_task(workflow_instance)
+    if fast_mode and demo:
+        return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
+    return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+
+
+def skip_browser_network_recording(*, fast_mode: bool, goal: str = "") -> bool:
+    """Skip CDP Network.enable only on the demo Fast Mode tree."""
+    from domains.spawn_agent.config import is_oai_demo_goal
+
+    return bool(fast_mode and is_oai_demo_goal(goal))
 HEARTBEAT_TIMEOUT_SECONDS = 120
 # A background task heartbeats at this cadence independent of the main loop, so a
 # CPU-bound bot-challenge that freezes the page renderer (and every CDP call) for

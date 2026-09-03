@@ -25,11 +25,14 @@ import {
 import { assertExistingDescendantRequestMatches } from './agentDescendantStartService';
 import {
   applyFastModeDefault,
-  applyFastModeInheritance,
-  applyWorldModelModeInheritance,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
 } from './agentExecutionMode';
+import {
+  applyExecutionModeInheritanceForBatch,
+  inheritsBenchmarkFromBatchParent,
+  loadBatchParentExecutionFlags,
+} from './agentBatchParentFlags';
 import { resolveCreateMetadata } from './agentCreateMetadata';
 import type { CreateAgentBody } from './types';
 import * as repo from './repo';
@@ -61,7 +64,8 @@ function buildBatchItem(
   body: CreateAgentBody,
   userId: string,
   meta: ResolvedMetadata,
-  verifierType: string
+  verifierType: string,
+  isBenchmark = false
 ): BatchCreateAgentParams {
   const agentId = body.agent_id!;
   return {
@@ -89,6 +93,7 @@ function buildBatchItem(
       : {}),
     ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     verifierType,
+    ...(isBenchmark ? { isBenchmark: true } : {}),
     ...(body.attachments !== undefined
       ? { attachments: body.attachments as Array<Record<string, unknown>> }
       : {}),
@@ -243,31 +248,6 @@ async function resolveAllMetadata(
   return out;
 }
 
-async function applyExecutionModeInheritanceForBatch(bodies: CreateAgentBody[]): Promise<void> {
-  const parentIds = Array.from(
-    new Set(
-      bodies
-        .filter(
-          (body) =>
-            body.parent_agent_id !== undefined &&
-            (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined)
-        )
-        .map((body) => body.parent_agent_id!)
-    )
-  );
-  if (parentIds.length === 0) return;
-
-  const parents = await repo.findExecutionModeFlagsByIds(parentIds);
-  const parentById = new Map(parents.map((parent) => [parent.id, parent]));
-  for (const body of bodies) {
-    if (body.parent_agent_id === undefined) continue;
-    const parent = parentById.get(body.parent_agent_id);
-    applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
-    applyWorldModelModeInheritance(body, parent?.worldModelMode);
-    disableFastModeForWorldModel(body);
-  }
-}
-
 export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<BatchAgentResult[]> {
   const { bodies, userId, isInternal, clientIP } = args;
   const verifierType = 'FLOAT_LLM_JUDGE';
@@ -276,7 +256,8 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     for (const body of bodies) body.goal = resolvePromptSecrets(body.goal);
   }
   for (const body of bodies) applyFastModeDefault(body, userId);
-  await applyExecutionModeInheritanceForBatch(bodies);
+  const parentById = await loadBatchParentExecutionFlags(bodies, userId);
+  applyExecutionModeInheritanceForBatch(bodies, parentById);
   for (const body of bodies) {
     disableFastModeForWorldModel(body);
     assertWorldModelModeAccess(body, userId);
@@ -303,7 +284,15 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     (body) => existingById.get(body.agent_id!)?.temporalWorkflowStartPending === true
   );
   const metaMap = await resolveAllMetadata(newBodies, clientIP, userId);
-  const newItems = newBodies.map((b) => buildBatchItem(b, userId, metaMap.get(b)!, verifierType));
+  const newItems = newBodies.map((b) =>
+    buildBatchItem(
+      b,
+      userId,
+      metaMap.get(b)!,
+      verifierType,
+      inheritsBenchmarkFromBatchParent(b, parentById)
+    )
+  );
 
   if (newItems.length > 0) {
     // Phase 1: atomic create. Rolls back on any error.

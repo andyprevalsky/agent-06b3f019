@@ -37,6 +37,7 @@ export const KNOWN_TAGS = [
   'grep',
   'payment',
   'phone',
+  'ivr',
   'plaid',
   'transactions',
   'bot-challenge',
@@ -87,4 +88,17 @@ export const KNOWN_TAGS = [
   // into the canonical base fixture (see whatsapp-history-recall in tasks.json).
   'whatsapp',
   'messages',
+  // Polar-bench (Odysseys + BU Bench V1) — opt-in suite; tags mirror upstream
+  // sources in agents/benchmarks/polar/*.json via polar_catalog.py.
+  'polar-bench',
+  'odysseys',
+  'easy',
+  'medium',
+  'hard',
+  'bu-bench',
+  'interactiontests',
+  'webbenchread',
+  'om2w2',
+  'gaia',
+  'browsecomp',
 ];

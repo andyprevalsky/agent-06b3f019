@@ -25,10 +25,12 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from domains.spawn_agent.config import is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
         spawn_agent,
     )
+    from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
     from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
@@ -2758,7 +2760,7 @@ class AgentWorkflow:
                 workflow.logger.error(f"Failed to post message: {e}")
 
     async def _drain_fast_mode_explores(self) -> None:
-        """Wait for fire-and-track OAi-demo explores before terminal status."""
+        """No-op unless leftover explore handles were tracked."""
         if not getattr(self, "fast_mode_cache_enabled", False):
             return
         await drain_fast_mode_explores(self)
@@ -2778,7 +2780,11 @@ class AgentWorkflow:
             # bottleneck: each July GP step blocked on a 30s write. Start the
             # write and keep looping; flush before terminal status so the
             # transcript is durable when COMPLETED lands.
-            if self.fast_mode_cache_enabled and not self._is_finished:
+            if (
+                self.fast_mode_cache_enabled
+                and not self._is_finished
+                and is_oai_demo_mass_agent_task(self)
+            ):
                 handle = workflow.start_activity(
                     post_agent_message,
                     args=[self.agent_id, text, role, metadata],
@@ -3009,8 +3015,8 @@ class AgentWorkflow:
         (regression: smoke task `parallel-tool-calls`).
         """
         if tool_name == "attempt_completion":
-            # OAi-demo Fast Mode fire-and-track explores must finish before
-            # this agent claims completion (T3 full trajs, T9 no leftovers).
+            # Leftover-safe: Fast Mode waits for explore like live, so this
+            # is a no-op unless something still tracked a handle.
             await self._drain_fast_mode_explores()
         if tool_name not in TOOL_EXECUTORS:
             error_msg = f"Unknown tool: {tool_name}"
@@ -4314,6 +4320,7 @@ class AgentWorkflow:
         if (
             not explicit_status
             and self.message_count != 1
+            and is_oai_demo_mass_agent_task(self)
             and self._last_tree_state_emit_at is not None
             and (now - self._last_tree_state_emit_at) < _TREE_STATE_EMIT_MIN_INTERVAL
         ):
@@ -4428,9 +4435,13 @@ class AgentWorkflow:
             await self._wait_for_response_schema_refresh()
             verifier_progress = float(result.get("verifier_progress", 0.0) or 0.0)
             verifier_reasoning = str(result.get("verifier_reasoning") or "")
-            fm_trajectory_complete = bool(getattr(self, "fast_mode_cache_enabled", False)) and (
-                verifier_progress >= 1.0
-                or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+            fm_trajectory_complete = (
+                bool(getattr(self, "fast_mode_cache_enabled", False))
+                and is_oai_demo_mass_agent_task(self)
+                and (
+                    verifier_progress >= 1.0
+                    or "fast mode cache trajectory ended" in verifier_reasoning.lower()
+                )
             )
             if fm_trajectory_complete:
                 # Fast Mode replay hit the step cap after the verifier already
@@ -4584,8 +4595,7 @@ class AgentWorkflow:
         4. Signal parent with failure context for learning (if sub-agent)
         """
         workflow.logger.warning(f"❌ Marking task failed: {reason} - {message}")
-        # Drain fire-and-track explores before latching so leftover ACTIVE
-        # children cannot survive a FAILED parent (T9).
+        # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST — see _mark_complete for the regression
         # this prevents (status=ACTIVE clobbering FAILED on late child cost signals).
@@ -4788,8 +4798,7 @@ class AgentWorkflow:
         """
         await self._await_deferred_startup()
         workflow.logger.info("✓ Marking task complete")
-        # Drain fire-and-track explores before latching COMPLETED so T9 sees
-        # no leftover ACTIVE children under a finished GP.
+        # Leftover-safe drain (no-op when Fast Mode waited like live).
         await self._drain_fast_mode_explores()
         # Latch the terminal flag FIRST so any late child_cost_update signal
         # (which calls _update_cost_and_signal_parent → broadcast) cannot
@@ -4898,7 +4907,9 @@ class AgentWorkflow:
             summary = summary_result.get("summary", "")
             transcript = await self._completion_transcript(context)
             structured_response = self._coalesce_structured_response(transcript, structured_response)
-            if is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200:
+            if is_oai_demo_mass_agent_task(self) and (
+                is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200
+            ):
                 recovered = card_summary_from_evidence(transcript, structured_response)
                 if (
                     recovered
@@ -4906,6 +4917,30 @@ class AgentWorkflow:
                     and len(recovered) >= 200
                 ):
                     summary = recovered
+            if (
+                is_oai_demo_mass_agent_task(self)
+                and not self.parent_workflow_id
+                and isinstance(structured_response, dict)
+            ):
+                try:
+                    materialized = await workflow.execute_activity(
+                        materialize_oai_demo_report_files_activity,
+                        args=[self.user_id, structured_response, self.output_schema],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    if isinstance(materialized, dict):
+                        next_response = materialized.get("structured_response")
+                        if isinstance(next_response, dict):
+                            structured_response = next_response
+                        next_schema = materialized.get("output_schema")
+                        if isinstance(next_schema, dict):
+                            self.output_schema = next_schema
+                except Exception as report_exc:
+                    workflow.logger.error(
+                        f"oai demo report file materialization failed, keeping original outputs: {report_exc}"
+                    )
+
             if not summary and summary_error:
                 # Two consumers treat an empty summary as "nothing happened":
                 # the root completion SMS is gated on `summary` being truthy,

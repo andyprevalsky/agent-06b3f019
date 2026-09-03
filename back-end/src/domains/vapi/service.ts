@@ -4,6 +4,7 @@ import {
   OUTBOUND_PHONE_NUMBER_POOL,
   BASE_SYSTEM_PROMPT,
   buildCallAssistantConfig,
+  isIvrNavigationPrompt,
 } from './config';
 import type { CreateCallRequest, VapiCallResponse } from './types';
 import { logJson, logTruncate } from '../../utils/log';
@@ -21,27 +22,18 @@ import {
   agentIdFromOperationKey,
   archiveVapiJson,
   archiveVapiPollResult,
-  type VapiPollExchange,
+  buildVapiPollExchange,
 } from './archive';
 
 const log = createLogger('Vapi');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
-const VAPI_POLL_DIAGNOSTIC_HEADERS = [
-  'age',
-  'cache-control',
-  'cf-cache-status',
-  'date',
-  'etag',
-  'last-modified',
-  'server',
-  'via',
-  'x-cache',
-] as const;
 
 type PreparedCall = {
   vapiPrivateKey: string;
   phoneNumberId: string;
   fullSystemPrompt: string;
+  /** Caller-provided brief only (no base prompt) — used for IVR detection. */
+  userSystemPrompt: string;
   normalizedPhone: string;
   normalizedSchema: Record<string, unknown>;
   operationKey?: string;
@@ -72,9 +64,7 @@ function getIdempotencyOperationKey(idempotencyKey: string): string {
 }
 
 function getStoredCallStatus(response: unknown): string {
-  if (typeof response !== 'object' || response === null) {
-    return 'queued';
-  }
+  if (typeof response !== 'object' || response === null) return 'queued';
   const status = (response as Record<string, unknown>).status;
   return typeof status === 'string' && status !== '' ? status : 'queued';
 }
@@ -88,34 +78,6 @@ function getVapiPrivateKey(): string {
   return vapiPrivateKey;
 }
 
-export function buildVapiPollExchange(
-  requestUrl: string,
-  startedAt: Date,
-  receivedAt: Date,
-  response: Response
-): VapiPollExchange {
-  const headers = Object.fromEntries(
-    VAPI_POLL_DIAGNOSTIC_HEADERS.flatMap((name) => {
-      const value = response.headers.get(name);
-      return value === null ? [] : [[name, value]];
-    })
-  );
-  return {
-    request: {
-      method: 'GET',
-      url: requestUrl,
-      startedAt: startedAt.toISOString(),
-    },
-    response: {
-      status: response.status,
-      headers,
-      receivedAt: receivedAt.toISOString(),
-      durationMs: Math.max(0, receivedAt.getTime() - startedAt.getTime()),
-    },
-  };
-}
-
-/** Fetch wrapper that converts AbortError (timeout) into VapiApiError. */
 async function fetchVapi(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   try {
     return await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
@@ -128,11 +90,8 @@ async function fetchVapi(url: string, init: RequestInit, timeoutMs: number): Pro
 }
 
 function getRandomPhoneNumberId(): string {
-  if (OUTBOUND_PHONE_NUMBER_POOL.length === 0) {
-    throw new VapiNotConfiguredError();
-  }
-  const index = Math.floor(Math.random() * OUTBOUND_PHONE_NUMBER_POOL.length);
-  return OUTBOUND_PHONE_NUMBER_POOL[index];
+  if (OUTBOUND_PHONE_NUMBER_POOL.length === 0) throw new VapiNotConfiguredError();
+  return OUTBOUND_PHONE_NUMBER_POOL[Math.floor(Math.random() * OUTBOUND_PHONE_NUMBER_POOL.length)];
 }
 
 async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
@@ -149,6 +108,7 @@ async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
     vapiPrivateKey: getVapiPrivateKey(),
     phoneNumberId: getRandomPhoneNumberId(),
     fullSystemPrompt: identityPrefix + BASE_SYSTEM_PROMPT + system_prompt,
+    userSystemPrompt: system_prompt,
     normalizedPhone: normalizePhoneNumber(to),
     normalizedSchema: normalizeJsonSchema(output_schema),
     operationKey,
@@ -199,7 +159,14 @@ function buildCreateCallBody(call: PreparedCall): string {
     customer: {
       number: call.normalizedPhone,
     },
-    assistant: buildCallAssistantConfig(call.fullSystemPrompt, call.normalizedSchema, call.voiceId),
+    assistant: buildCallAssistantConfig(
+      call.fullSystemPrompt,
+      call.normalizedSchema,
+      call.voiceId,
+      {
+        calleeSpeaksFirst: isIvrNavigationPrompt(call.userSystemPrompt),
+      }
+    ),
   });
 }
 
@@ -236,13 +203,9 @@ export async function initiateCall(
 ): Promise<{ success: true; call_id: string; status: string }> {
   const call = await prepareCall(body);
   const existingCall = await getExistingIdempotentCall(call);
-  if (existingCall !== undefined) {
-    return existingCall;
-  }
+  if (existingCall !== undefined) return existingCall;
 
-  // Create outbound call via Vapi API
   const response = await createVapiCall(call);
-
   if (!response.ok) {
     const errorText = await response.text();
     log.error('Vapi API error', { status: response.status, details: logTruncate(errorText) });
@@ -284,35 +247,17 @@ export async function initiateCall(
     to: body.to.substring(0, 4) + '****',
     status: result.status,
   });
-
-  return {
-    success: true,
-    call_id: result.id,
-    status: result.status,
-  };
+  return { success: true, call_id: result.id, status: result.status };
 }
 
-/**
- * Poll call status from Vapi
- */
+/** Poll call status from Vapi. */
 export async function getCallStatus(callId: string): Promise<Record<string, unknown>> {
-  const vapiPrivateKey = VAPI_PRIVATE_KEY;
-  if (vapiPrivateKey === undefined || vapiPrivateKey === '') {
-    log.error('VAPI_PRIVATE_KEY not configured');
-    throw new VapiNotConfiguredError();
-  }
-
-  // Get call status from Vapi API
+  const vapiPrivateKey = getVapiPrivateKey();
   const requestUrl = `${VAPI_BASE_URL}/call/${callId}`;
   const startedAt = new Date();
   const response = await fetchVapi(
     requestUrl,
-    {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${vapiPrivateKey}`,
-      },
-    },
+    { method: 'GET', headers: { Authorization: `Bearer ${vapiPrivateKey}` } },
     15_000
   );
   const receivedAt = new Date();
@@ -327,7 +272,6 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
 
   const result = (await response.json()) as Record<string, unknown>;
   await archiveVapiPollResult(callId, result, exchange);
-
   log.info('Vapi call poll response', {
     callId,
     status: String(result.status),
@@ -335,6 +279,5 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
     endedReason: String(result.endedReason),
     fullResponse: logJson(result),
   });
-
   return result;
 }

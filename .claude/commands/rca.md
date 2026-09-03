@@ -14,6 +14,11 @@ Read it completely immediately before composing the request. The automated
 production-alert mode remains non-interactive and therefore emits no chat
 approval request.
 
+**Prompt / LLM-visible text:** the approval message must paste the **exact
+diff inline** (unified diff or before→after with every added/removed line). A
+`path:line` link alone is incomplete — see the "MUST paste the exact diff
+inline" rule in `.claude/shared/approval-format.md`.
+
 ## Step 0 — READ THE METHODOLOGY (mandatory, every time)
 
 Read `docs/root-cause-analysis.md` in full before forming any hypothesis. It is

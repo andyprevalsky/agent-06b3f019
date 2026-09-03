@@ -94,6 +94,10 @@ test('explicit sub-agent Fast Mode off is not overwritten by inheritance', () =>
 });
 
 test('batch-created sub-agents use parent Fast Mode inheritance', () => {
+  const batchParentFlags = readFileSync(
+    join(process.cwd(), 'src', 'domains', 'agents', 'agentBatchParentFlags.ts'),
+    'utf8'
+  );
   const batchService = readFileSync(
     join(process.cwd(), 'src', 'domains', 'agents', 'agentBatchService.ts'),
     'utf8'
@@ -103,7 +107,7 @@ test('batch-created sub-agents use parent Fast Mode inheritance', () => {
     'batch create must resolve parent execution-mode flags before insert/start'
   );
   assert.ok(
-    batchService.includes('applyFastModeInheritance(body, parent?.fastModeCacheEnabled)'),
+    batchParentFlags.includes('applyFastModeInheritance(body, parent?.fastModeCacheEnabled)'),
     'batch create must inherit Fast Mode from parent'
   );
 });

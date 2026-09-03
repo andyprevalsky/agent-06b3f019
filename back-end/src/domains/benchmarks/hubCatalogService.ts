@@ -36,6 +36,41 @@ export function lastFiveAttemptsPassed(passedFlagsOldestFirst: boolean[]): boole
   return recent.every((passed) => passed);
 }
 
+export interface AttemptSample {
+  passed: boolean;
+  status: string;
+  duration: number | null;
+  fastMode: boolean;
+  timestamp: string;
+  agentId: string | null;
+}
+
+/**
+ * Merge the committed attempts ledger with hub uploads. The same agent_id
+ * (ledger dual-write after a local bench) must count once, or a single pass
+ * plus four older hub passes can fake a 5-pass green check.
+ */
+export function mergeAttemptSamples(
+  ledger: AttemptSample[],
+  hub: AttemptSample[]
+): AttemptSample[] {
+  const seen = new Set<string>();
+  const merged: AttemptSample[] = [];
+  const pushUnique = (sample: AttemptSample): void => {
+    const key =
+      sample.agentId !== null
+        ? `id:${sample.agentId}`
+        : `ts:${sample.timestamp}:${sample.passed}:${sample.duration ?? ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(sample);
+  };
+  for (const sample of ledger) pushUnique(sample);
+  for (const sample of hub) pushUnique(sample);
+  merged.sort((a, b) => compareAttemptTimestamps(a.timestamp, b.timestamp));
+  return merged;
+}
+
 /**
  * Chronological comparator for attempt timestamps (ISO strings).
  * Equal timestamps return 0 so Array.sort stays stable / deterministic.
@@ -56,43 +91,40 @@ function percentile(sorted: number[], p: number): number | null {
  * run results (which cover runs after the last deploy/commit).
  */
 export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
-  interface Sample {
-    passed: boolean;
-    status: string;
-    duration: number | null;
-    fastMode: boolean;
-    timestamp: string;
-  }
-  const samples = new Map<string, Sample[]>();
-  const push = (task: string, s: Sample) => {
-    const list = samples.get(task) ?? [];
-    list.push(s);
-    samples.set(task, list);
+  const ledgerByTask = new Map<string, AttemptSample[]>();
+  const hubByTask = new Map<string, AttemptSample[]>();
+  const push = (into: Map<string, AttemptSample[]>, task: string, sample: AttemptSample) => {
+    const list = into.get(task) ?? [];
+    list.push(sample);
+    into.set(task, list);
   };
   for (const a of readTaskAttempts()) {
-    push(a.task, {
+    push(ledgerByTask, a.task, {
       passed: a.passed,
       status: a.status,
       duration: a.duration_seconds,
       fastMode: a.fast_mode_cache,
       timestamp: a.timestamp,
+      agentId: a.agent_id,
     });
   }
   for (const run of await hubStore.listRuns()) {
     if (run.live) continue; // only completed runs count toward stats
     for (const t of run.tasks) {
-      push(t.name, {
+      push(hubByTask, t.name, {
         passed: t.passed === true,
         status: t.status,
         duration: t.duration_seconds,
         fastMode: t.fast_mode,
         timestamp: run.timestamp,
+        agentId: t.agent_id,
       });
     }
   }
+  const tasks = new Set<string>([...ledgerByTask.keys(), ...hubByTask.keys()]);
   const stats = new Map<string, TaskStats>();
-  for (const [task, list] of samples) {
-    list.sort((a, b) => compareAttemptTimestamps(a.timestamp, b.timestamp));
+  for (const task of tasks) {
+    const list = mergeAttemptSamples(ledgerByTask.get(task) ?? [], hubByTask.get(task) ?? []);
     const passes = list.filter((s) => s.passed);
     const passDurations = passes
       .map((s) => s.duration)
@@ -117,12 +149,12 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
 const READY_STATUSES = new Set(['ready']);
 
 /** Canonical catalog-group tokens the Benchmarks page filters + renders on. */
-const CATALOG_GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'incomplete'] as const;
+const CATALOG_GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'polar-bench', 'incomplete'] as const;
 
 /**
  * Normalize a stored `group` label (from tasks.json) to a canonical token.
  * Tolerates casing + the human-readable aliases used historically
- * ("Daily", "Pre-Deploy", "Rose Bench", "Incomplete"). Returns null for an
+ * ("Daily", "Pre-Deploy", "Rose Bench", "Polar Bench", "Incomplete"). Returns null for an
  * absent or unrecognized label so the caller falls back to derivation.
  */
 function normalizeStoredGroup(raw: unknown): string | null {
@@ -140,12 +172,14 @@ function normalizeStoredGroup(raw: unknown): string | null {
  *   incomplete — not runnable (missing fixtures/judges; excluded from suites)
  *   pre-deploy — the `smoke` tag set (`run_benchmark.py --suite smoke`, the
  *                gate /deploy and scripts/test.sh run before merging)
+ *   polar-bench — Odysseys + BU Bench V1 external capability suite
  *   rose-bench — harness-independent capability benches (bench field)
  *   daily      — every other ready pipeline-e2e task (the broad eval suite)
  */
 function deriveTaskGroup(status: string | null, bench: string | null, tags: string[]): string {
   if (status !== null && !READY_STATUSES.has(status)) return 'incomplete';
   if (tags.includes('smoke')) return 'pre-deploy';
+  if (tags.includes('polar-bench')) return 'polar-bench';
   if (bench === 'rose-bench') return 'rose-bench';
   return 'daily';
 }

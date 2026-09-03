@@ -32,7 +32,7 @@ function FieldValue({
     const filePointers = value.filter(isFilePointer);
     if (filePointers.length > 0) {
       return (
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex w-full flex-col gap-2">
           {filePointers.map((fp) => (
             <FilePointerDisplay key={fp.id} file={fp} />
           ))}

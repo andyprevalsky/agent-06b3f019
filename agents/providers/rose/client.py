@@ -604,25 +604,20 @@ class RoseClient:
             stored: Any = None
             hit_key: Any = None
             try:
-                lookup_keys = ctx.llm_lookup_keys(call_site, _fc_request_key_material(kwargs))
-                stored, hit_key = await _fc.cache_get_first(lookup_keys)
-                if stored is None:
-                    stored, hit_key = await _fc.cache_get_position_fallback(
-                        ctx.goal_hash,
-                        call_site,
-                        ctx.base_step,
-                    )
-                from providers.fast_cache.rose_cache import july_explore_resolve
-                from providers.fast_cache.rose_cache import july_gp_resolve_execute
+                from providers.fast_cache.rose_cache import FastCacheLookupError
+                from providers.fast_cache.rose_cache import lookup_llm_cache
 
-                stored, hit_key = await july_gp_resolve_execute(
-                    ctx, call_site, stored, hit_key
+                stored, hit_key = await lookup_llm_cache(
+                    ctx, call_site, _fc_request_key_material(kwargs)
                 )
-                stored, hit_key = await july_explore_resolve(
-                    ctx, call_site, stored, hit_key
+            except FastCacheLookupError as exc:
+                logger.warning(
+                    "fast_cache.get_error",
+                    key=key,
+                    error=f"{type(exc).__name__}: {exc}"[:200],
                 )
-            except Exception as exc:
-                logger.warning("fast_cache.get_error", key=key, error=str(exc)[:200])
+                if ctx.soft_complete_allowed:
+                    raise
                 stored, hit_key = None, None
                 lookup_failed = True
             if stored is not None:

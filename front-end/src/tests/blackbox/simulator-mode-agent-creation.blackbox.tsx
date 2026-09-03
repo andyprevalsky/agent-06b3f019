@@ -53,13 +53,9 @@ describe('Simulator mode agent creation', () => {
         source: 'MAC_APP',
         world_model_mode: 'simulate',
       });
-      if (FAST_MODE_USER_IDS.includes(userId)) {
-        // Simulator forces Fast Mode off; allowlisted accounts still send the field.
-        expect(createPayload).toMatchObject({ fast_mode_cache_enabled: false });
-      } else {
-        // Legacy admin ids keep Simulator, but Fast Mode is current-identity only.
-        expect(createPayload).not.toHaveProperty('fast_mode_cache_enabled');
-      }
+      expect(FAST_MODE_USER_IDS).toContain(userId);
+      // Simulator forces Fast Mode off; admin accounts still send the field.
+      expect(createPayload).toMatchObject({ fast_mode_cache_enabled: false });
     },
   );
 });

@@ -6,6 +6,7 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Settings from '@/pages/Settings';
+import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -97,6 +98,7 @@ describe('Settings page', () => {
 
   afterEach(() => {
     localStorage.clear();
+    resetFastModeSessionOverride();
   });
 
   // ---------------------------------------------------------------------------
@@ -192,6 +194,42 @@ describe('Settings page', () => {
       expect(screen.getByLabelText('State')).toHaveValue('NY');
       expect(screen.getByLabelText('Postal Code')).toHaveValue('10001');
       expect(screen.getByLabelText('Country')).toHaveValue('United States');
+      expect(screen.queryByTestId('fast-mode-toggle')).toBeNull();
+    });
+
+    it('shows Fast Mode on the account-info tab when the verified phone is an admin number', async () => {
+      const user = userEvent.setup();
+      installSettingsHandlers({
+        userSettings: {
+          name: 'Andy Prevalsky',
+          email: 'andy@roselabs.ai',
+          phone: '+19729777432',
+          deliveryRecipientName: 'Aman Gottumukkala',
+          addressLine1: '88 Howard Street',
+          addressLine2: 'Apt 1413',
+          city: 'San Francisco',
+          state: 'CA',
+          postalCode: '94105',
+          country: 'United States',
+          systemName: 'Rose',
+          profilePicture: null,
+          customSystemPrompt: 'Be helpful',
+        },
+      });
+      renderWithProviders(<Settings />);
+      await waitFor(() => {
+        expect(screen.getByText('Settings')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('tab', { name: /personal info/i })); // pragma: allowlist secret
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Verified Phone')).toHaveValue('+19729777432');
+      });
+      const toggle = screen.getByTestId('fast-mode-toggle');
+      expect(toggle).toBeInTheDocument();
+      expect(toggle).toHaveTextContent('Fast Mode');
+      expect(screen.getByText(/same control as the chat query box/i)).toBeInTheDocument();
     });
 
     it('switches to Billing tab and shows subscription info', async () => {

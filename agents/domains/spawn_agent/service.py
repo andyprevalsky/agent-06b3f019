@@ -20,6 +20,7 @@ from domains.spawn_agent.config import (
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
     resolve_explore_depth,
+    resolve_explore_oai_demo,
 )
 from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
@@ -347,6 +348,7 @@ async def spawn_explore_agent_activity(
     max_iterations: Optional[int] = None,
     world_model_mode: str = "real",
     local_data_summary: str = "",
+    oai_demo: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
@@ -378,6 +380,11 @@ async def spawn_explore_agent_activity(
         _,
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
+    # Classification is the handler's mass-agent flag when provided. Do not
+    # re-read Fast Mode resolver goals — they disagree with truncated child
+    # goals and with resolver failures. Old callers omit the flag and fall
+    # back to the explore goal prefix only.
+    _oai_demo = resolve_explore_oai_demo(goal, oai_demo=oai_demo)
 
     # Do NOT re-promote depth from an independently resolved Fast Mode flag.
     # `_spawn_explore` already paired depth + max_iterations with the activity
@@ -462,12 +469,8 @@ async def spawn_explore_agent_activity(
             }
         )
 
-    # FE message posts are fire-and-forget so they never block the explore leaf's
-    # loop. Each post is a ~500ms createMessage round-trip (Fly->Render + awaited
-    # Supabase broadcast); awaiting one per cached turn serializes fanout leaves on
-    # UI/debug persistence. The explore runs with no poll_messages, so context is
-    # already in-process; the post is FE/persistence-only. Backgrounded tasks are
-    # drained after run_agent so no message is lost.
+    # Background FE posts so fanout does not serialize on createMessage.
+    # Fast Mode does not change this — cache only mocks external lib calls.
     _pending_fe_posts: "list[asyncio.Task]" = []
     # Tail of the in-flight post chain for each chip, keyed by toolCallId.
     _fe_post_chain: "dict[str, asyncio.Task]" = {}
@@ -665,7 +668,7 @@ async def spawn_explore_agent_activity(
                 # Fast Mode cold stubs replay attempt_completion_with_result
                 # forever. One reject is enough signal; accepting the next
                 # ends the leaf so the chip does not fill with 50 rejects.
-                if completion_no_evidence_rejects >= 2:
+                if completion_no_evidence_rejects >= 2 and _oai_demo:
                     return {"success": True, "message": "Completion accepted"}
                 return {
                     "error": True,
@@ -733,7 +736,7 @@ async def spawn_explore_agent_activity(
                         tool_call_id=tool_call_id,
                         tool_name=tool_name,
                     )
-                )
+                ),
             )
         await _maybe_drain_pending_fe_posts()
 
@@ -752,6 +755,7 @@ async def spawn_explore_agent_activity(
         effective_depth = resolve_explore_depth(
             depth,
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
+            oai_demo=_oai_demo,
         )
     depth_cap = explore_limits_for_depth(effective_depth)[0]
     if max_iterations is None:
@@ -812,15 +816,6 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             goal_text=_explore_fast_mode_goal,
         )
-    except asyncio.CancelledError:
-        # Heartbeat timeout / TRY_CANCEL after research. CancelledError is
-        # BaseException, so a bare try/finally used to skip wrap-up synthesis
-        # and leave the fire-and-track chip on "Research started."
-        result = {
-            "status": "completed" if (tool_call_results or has_usable_tool_evidence) else "error",
-            "final_response": "",
-            "message": "cancelled after research",
-        }
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()
@@ -891,8 +886,8 @@ async def spawn_explore_agent_activity(
         "tool_call_results": tool_call_results,
     }
     if final_response and init_tool_call_id:
-        # Same chip the fire-and-track path stamped "Research started." on.
-        # Post here so a later parent-side timeout still leaves T3 a summary.
+        # Same spawn_agent chip the parent left IN_PROGRESS. Post FINISHED
+        # here so a later parent-side timeout still leaves T3 a summary.
         _dispatch_fe_post(
             init_tool_call_id,
             lambda: save_explore_message(

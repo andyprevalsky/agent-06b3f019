@@ -7,6 +7,11 @@ from typing import List, Optional
 
 from benchmarks.fixtures import DEFAULT_BASE_IMAGE
 from benchmarks.live_fixtures import resolve_live_fixtures
+from benchmarks.polar_catalog import (
+    POLAR_TAG,
+    is_polar_bench_task,
+    load_polar_tasks_file,
+)
 
 # Runners run_benchmark.py can dispatch directly. "agent" drives the Temporal
 # agent workflow; "sms" drives the in-backend SMS supervisor through an inbound
@@ -87,10 +92,10 @@ class BenchmarkTask:
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
     context_gates: Optional[dict] = None  # Per-task user-context gates (helpers/get_user_context.py keys → bool), forwarded at agent creation
     model: Optional[str] = None  # Pin the ROOT agent to one Rose pool (e.g. 'rose-labs/rose-1-oss'). Only for tasks whose prompt a default-pool primary declines; forwarded at agent creation.
-    evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
+    evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge | polar)
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
-    group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | incomplete). Absent → backend derives from status/tags/bench.
+    group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | polar-bench | incomplete). Absent → backend derives from status/tags/bench.
     human_time: Optional[str] = None  # Approximate human-equivalent time for capability/complexity bucketing
     world_surface: Optional[str] = None  # "live" or "simulated"; binary world-model surface, independent of DB fixtures
     fast_cache: Optional[str] = None  # "on" or "off" for the intended benchmark run mode
@@ -110,6 +115,11 @@ class BenchmarkTask:
     expected_browser_session_metadata_values: Optional[dict] = None
     expected_pre_credential_message_contains: List[str] = field(default_factory=list)
     expected_post_credential_message_contains: List[str] = field(default_factory=list)
+    # Pre-deploy selection metadata (additive; ignored by the runtime runner).
+    # `select_predeploy_benches.py` reads these from tasks.json; keep them on the
+    # dataclass so catalog load does not reject the fields.
+    deploy_category: Optional[str] = None
+    deploy_canary: bool = False
 
     def effective_price_limit_cents(self) -> int:
         """Return the route-aware cap without weakening the default eval."""
@@ -190,7 +200,16 @@ def _default_environment() -> dict:
 def _load_tasks() -> List[BenchmarkTask]:
     with open(_TASKS_FILE) as f:
         raw = json.load(f)
-    tasks = [BenchmarkTask(**t) for t in raw]
+    if not isinstance(raw, list):
+        raise ValueError(f"{_TASKS_FILE} must contain a JSON array of tasks")
+    # Polar Odysseys + BU Bench V1 ship as polar_tasks.json (built from
+    # agents/benchmarks/polar/*.json). group/tag = polar-bench, never daily.
+    polar_raw = load_polar_tasks_file()
+    base_names = {t["name"] for t in raw if isinstance(t, dict) and "name" in t}
+    overlap = sorted(base_names & {t["name"] for t in polar_raw})
+    if overlap:
+        raise ValueError(f"polar catalog name collision with tasks.json: {overlap[:5]}")
+    tasks = [BenchmarkTask(**t) for t in [*raw, *polar_raw]]
     for t in tasks:
         if t.browser_profile_mode not in {"persistent", "fresh"}:
             raise ValueError(
@@ -250,14 +269,18 @@ def all_tasks() -> List[BenchmarkTask]:
     return _cached_tasks
 
 
-def suite_tasks() -> List[BenchmarkTask]:
+def suite_tasks(*, include_polar: bool = False) -> List[BenchmarkTask]:
     """Tasks eligible for suite runs: benchmark entries whose eval contract is complete.
 
     `status == "incomplete"` entries (missing fixtures/judge runner) are excluded
     from suite runs. Explicit `--task <name>` selection bypasses this filter for
-    dev iteration.
+    dev iteration. Polar-bench (Odysseys + BU Bench V1) is opt-in via
+    `--suite polar-bench` so `--suite all` does not fan out ~300 live browser tasks.
     """
-    return [t for t in all_tasks() if t.status == "ready" and not t.production_only]
+    tasks = [t for t in all_tasks() if t.status == "ready" and not t.production_only]
+    if include_polar:
+        return tasks
+    return [t for t in tasks if not is_polar_bench_task(t)]
 
 
 def get_task_by_name(name: str) -> BenchmarkTask:
@@ -285,7 +308,12 @@ def get_tasks_by_tag(tag: str) -> List[BenchmarkTask]:
         "sub-agent-fan-out": "mass-agent",
     }
     normalized = aliases.get(tag, tag)
-    return [t for t in all_tasks() if normalized in t.tags]
+    tasks = [t for t in all_tasks() if normalized in t.tags]
+    # polar-bench is its own suite slice; other tag suites (browser, auth, …)
+    # stay on the first-party catalog so they are not flooded by Odysseys/BU.
+    if normalized == POLAR_TAG:
+        return tasks
+    return [t for t in tasks if not is_polar_bench_task(t)]
 
 
 def list_all_tasks() -> None:

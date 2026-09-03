@@ -207,12 +207,17 @@ while true; do
     break
   fi
   if [ "$SECONDS" -ge "$drain_deadline" ]; then
-    echo "⏰ 45m SLO reached with $OPEN workflows still on $OLD_QUEUE — force-migrating stragglers"
-    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
-      TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
-      TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
-      WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
-      npx tsx scripts/migrate-open-agent-workflows.ts --execute
+    echo "⏰ 45m SLO reached with $OPEN workflows still on $OLD_QUEUE — force-clearing stragglers"
+    if ! npx tsx scripts/force-clear-generation-queue.ts --queue "$OLD_QUEUE" --execute; then
+      OPEN_AFTER="$(
+        npx tsx scripts/count-open-workflows-on-queue.ts --queue "$OLD_QUEUE" 2>/dev/null || echo "?"
+      )"
+      if [ "$OPEN_AFTER" != "0" ]; then
+        echo "❌ force-clear left $OPEN_AFTER workflow(s) on $OLD_QUEUE" >&2
+        exit 1
+      fi
+      echo "⚠️  force-clear reported errors but old queue is empty — continuing cutover"
+    fi
     break
   fi
   sleep "$DRAIN_POLL_SECONDS"

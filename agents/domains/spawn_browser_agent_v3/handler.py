@@ -73,8 +73,8 @@ from .challenge_recovery import (
 from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
-    ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
-    ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
+    browser_start_to_close_timeout_minutes,
+    skip_browser_network_recording,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_MAX_RECOVERIES,
@@ -144,6 +144,10 @@ from .service import (
     extract_session_files,
     safe_time,
     select_auth_assistance_current_url,
+)
+from .visible_result_completion import (
+    forced_visible_result_completion_action,
+    should_force_visible_result_completion,
 )
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
@@ -3774,6 +3778,12 @@ async def _emit_browser_task_terminal_for_fe(
     **not** close the chip — timeout/cancel paths historically left hub
     transcripts with FINISHED recordings and an IN_PROGRESS ``browser`` row,
     so every FE link kept showing an active browser panel.
+
+    Reuses the spawn ``tool_call_id`` so the FE can associate the terminal with
+    the open panel, but marks ``excludeFromModel=True``: this row is FE-only.
+    Without that flag, late teardown FINISHED wins LLM tool-result dedup over
+    the real "Browser automation complete" / "✓ Task Completed" payload and
+    smoke context validation reports a false role_alternation dual-write.
     """
     if not task_id:
         return
@@ -3788,6 +3798,7 @@ async def _emit_browser_task_terminal_for_fe(
             action_type="task_complete",
             tool_call_id=tool_call_id or str(uuid_module.uuid4()),
             is_completion_message=True,
+            extra_metadata={"excludeFromModel": True},
         )
 
 
@@ -6207,8 +6218,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # Instagram navigations flood the recorder and stall the activity
             # for tens of minutes while every LLM decision was already a cache
             # hit (verify19 Huberman hang).
-            if fast_mode_cache_enabled:
+            if skip_browser_network_recording(fast_mode=fast_mode_cache_enabled, goal=goal):
                 return None
+            if fast_mode_cache_enabled:
+                from providers.fast_cache.client import soft_complete_allowed_for_agent
+
+                if await soft_complete_allowed_for_agent(agent_id, goal):
+                    return None
             if not recording_output_dir:
                 return None
             recorder = await BrowserNetworkRecorder.create(
@@ -7371,6 +7387,22 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     task_id,
                     stream_id=llm_result.get("_thinking_stream_id"),
                 )
+
+            if should_force_visible_result_completion(
+                action_name=action_name,
+                last_reasoning=thinking,
+                prior_reasoning_messages=reasoning_messages,
+                action_summaries=action_summary,
+                action_entries=action_entries,
+            ):
+                logger.info(
+                    "Forcing attempt_completion after visible FCaptcha result already stated",
+                    rejected_action=action_name,
+                    iteration=iteration,
+                )
+                unified_action = forced_visible_result_completion_action(thinking)
+                llm_result = {**llm_result, "action": unified_action}
+                action_name = "attempt_completion"
 
             action_summary.append(_summarize_browser_action_history_entry(action_name, unified_action))
             if len(action_summary) > 20:
@@ -9734,10 +9766,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
                 ):
                     fm_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-                    browser_timeout_minutes = (
-                        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
-                        if fm_enabled
-                        else ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
+                    browser_timeout_minutes = browser_start_to_close_timeout_minutes(
+                        fast_mode=fm_enabled,
+                        goal=goal,
+                        workflow_instance=workflow_instance,
                     )
                     activity_handle = workflow.start_activity(
                         spawn_browser_agent_activity_v3,

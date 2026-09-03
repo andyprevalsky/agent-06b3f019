@@ -63,6 +63,7 @@ from benchmarks.benchmark_tasks import (
     get_timeout_floor,
     list_all_tasks,
 )
+from benchmarks.polar_catalog import is_polar_bench_task
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
     AMAN_FOOD_PLAN_COOKIE_DOMAINS,
@@ -313,6 +314,21 @@ def _benchmark_env_bool(name: str) -> Optional[bool]:
     if normalized in ("0", "false", "no", "off"):
         return False
     raise ValueError(f"{name} must be one of true/false/1/0/yes/no/on/off")
+
+
+def _resolve_write_lock_enabled(task: BenchmarkTask) -> Optional[bool]:
+    """Resolve write-lock for agent create.
+
+    Polar public-web tasks use ``approval_handling=None`` (no required gate).
+    Product write-lock still pauses on Google search / form submits by default,
+    which leaves the harness unable to auto-approve and stalls the suite.
+    Default polar agents to write-lock off unless ``BENCHMARK_WRITE_LOCK_ENABLED``
+    is set explicitly.
+    """
+    write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+    if write_lock_enabled is None and is_polar_bench_task(task):
+        return False
+    return write_lock_enabled
 
 
 def _minted_clear_existing_auth_enabled() -> bool:
@@ -1626,6 +1642,19 @@ def _extract_agent_payment_output_blob(data: dict) -> str:
     return json.dumps(blobs, default=str) if blobs else ""
 
 
+# Grounded test-payment confirmation ids are always `tp_` + exactly 8 lowercase hex chars.
+# Matching this in the populated browser output is sufficient for the shop contract; the LLM
+# judge exists only for key-name-agnostic recovery when the id is present under an unexpected
+# shape that a regex might miss. Prefer the deterministic check so a successful checkout cannot
+# false-fail when the judge waterfall is out of credits (OpenAI/Anthropic/OpenRouter 402).
+_AGENT_PAYMENT_CONFIRMATION_ID_RE = re.compile(r"\btp_[0-9a-f]{8}\b")
+
+
+def agent_payment_blob_has_grounded_confirmation_id(blob: str) -> bool:
+    """True when the agent output already contains a grounded tp_<8 hex> confirmation id."""
+    return bool(_AGENT_PAYMENT_CONFIRMATION_ID_RE.search(blob or ""))
+
+
 async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id: str) -> Optional[str]:
     """Semantic gate for the payment lifecycle's browser-purchase step. The browser agent's populated
     output must let the STANDARD semantic output judge recover a grounded payment confirmation id
@@ -1635,6 +1664,8 @@ async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id
     blob = _extract_agent_payment_output_blob(data)
     if not blob:
         return "agent did not return a grounded browser payment confirmation order id"
+    if agent_payment_blob_has_grounded_confirmation_id(blob):
+        return None
     return await _judge_output_recovers_expected_fields(
         root_agent_id,
         blob,
@@ -2216,7 +2247,7 @@ async def create_agent(
     if local_task_queue:
         body["task_queue"] = local_task_queue
 
-    write_lock_enabled = _benchmark_env_bool("BENCHMARK_WRITE_LOCK_ENABLED")
+    write_lock_enabled = _resolve_write_lock_enabled(task)
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
 
@@ -3232,6 +3263,7 @@ async def _judge_output_recovers_expected_fields(
     if not expected_schema.get("fields"):
         return None
 
+    claude_auth = await _benchmark_judge_claude_auth_kwargs()
     judged = await check_progress(
         context=[
             {
@@ -3248,6 +3280,7 @@ async def _judge_output_recovers_expected_fields(
         response_schema=expected_schema,
         call_site="semantic_output_field_recovery_judge",
         agent_id=root_agent_id,
+        **claude_auth,
     )
     score = float(judged.get("score", 0.0))
     if score >= 1.0:
@@ -9258,6 +9291,35 @@ async def _call_declared_agentic_llm_judge(
     return {"score": score, "reasoning": reasoning, "usage": usage}
 
 
+async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dict:
+    """Fetch Claude OAuth for harness-side judges (declared evaluators / semantic judges).
+
+    Agent workflows already resolve Claude auth via Temporal activities. Harness-side
+    ``check_progress`` calls (post-run judges) previously omitted the token, so Rose
+    fell through OpenAI → Anthropic API key → OpenRouter and failed with 402 when
+    those funded paths were empty — even though the same user's Claude OAuth worked
+    for the agent itself. Pass the OAuth token so judges share the agent auth path.
+    """
+    from helpers.llm import fetch_claude_max_token
+
+    resolved_user_id = (user_id or "").strip() or _current_benchmark_user_id()
+    if not resolved_user_id:
+        return {}
+    try:
+        token_data = await fetch_claude_max_token(resolved_user_id)
+    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+        print(f"    ⚠ Declared-judge Claude auth fetch failed: {exc}")
+        return {}
+    if not token_data or not token_data.get("accessToken"):
+        return {}
+    return {
+        "claude_token": token_data["accessToken"],
+        "claude_token_source": token_data.get("source"),
+        "claude_token_pool_id": token_data.get("poolTokenId"),
+        "claude_token_user_id": resolved_user_id,
+    }
+
+
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
@@ -9305,6 +9367,13 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
                     "metadata": {"evidence_type": "doordash_food_plan_cart_itemization"},
                 }
             )
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    judge_user_id = (
+        agent.get("userId")
+        or agent.get("user_id")
+        or _current_benchmark_user_id()
+    )
+    claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
     return await check_progress(
         context=[
             {
@@ -9319,14 +9388,59 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         verifier_system_prompt=verifier_prompt,
         response_schema=None,
         call_site="benchmark_declared_evaluator",
-        agent_id=(data.get("agent") or {}).get("agent_id") or (data.get("agent") or {}).get("id"),
+        agent_id=agent.get("agent_id") or agent.get("id"),
+        **claude_auth,
     )
+
+
+def _iter_benchmark_messages(data: dict) -> list[dict]:
+    """Root transcript plus every collected tree-node transcript.
+
+    Browser sessions on this bench spawn from first-level GPs, not the root.
+    Session-count checks must walk the same tree the FE paints.
+    """
+    seen_ids: set[str] = set()
+    out: list[dict] = []
+
+    def add(message: object) -> None:
+        if not isinstance(message, dict):
+            return
+        message_id = str(message.get("message_id") or message.get("id") or "")
+        if message_id:
+            if message_id in seen_ids:
+                return
+            seen_ids.add(message_id)
+        out.append(message)
+
+    for message in data.get("messages") or []:
+        add(message)
+    tree = (data.get("_benchmark") or {}).get("tree") or {}
+    if isinstance(tree, dict):
+        for node in tree.values():
+            if not isinstance(node, dict):
+                continue
+            for message in node.get("messages") or []:
+                add(message)
+    return out
+
+
+def _skipped_browser_spawn_ids(messages: list[dict]) -> set[str]:
+    """Tool-call ids whose browser spawn was FINISH-skipped (never a session)."""
+    skipped: set[str] = set()
+    for message in messages:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict) or not metadata.get("skippedBrowserSpawn"):
+            continue
+        call_id = metadata.get("toolCallId") or metadata.get("tool_call_id")
+        if call_id:
+            skipped.add(str(call_id))
+    return skipped
 
 
 def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     """Return distinct browser attempts and grounded failed lifecycle events."""
     failures: list[str] = []
-    messages = data.get("messages", []) or []
+    messages = _iter_benchmark_messages(data)
     for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
@@ -9340,7 +9454,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
             is_browser = tool_name == "spawn_browser_agent" or (
                 tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
             )
-            if not is_browser:
+            if not is_browser or candidate.get("skippedBrowserSpawn"):
                 continue
             call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
             session_id = (
@@ -9386,7 +9500,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     # turns one seven-step browser into seven "sessions". Reuse the trajectory
     # grouper, which unions orchestration IDs, task IDs, and sub-agent IDs into
     # the stable browser instance while retaining separate browser attempts.
-    browser_instances = _agent_class_step_counts(data).get("browser", {})
+    browser_instances = _agent_class_step_counts({"messages": messages}).get("browser", {})
     return len(browser_instances), failures
 
 
@@ -9438,6 +9552,9 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
             parents[right_root] = left_root
 
     messages = data.get("messages", []) or []
+    skipped_browser_ids = _skipped_browser_spawn_ids(
+        [message for message in messages if isinstance(message, dict)]
+    )
     for message in messages:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
@@ -9446,9 +9563,14 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
             if not isinstance(tool_call, dict):
                 continue
             tool_name = tool_call.get("tool")
+            call_id = tool_call.get("tool_call_id") or tool_call.get("toolCallId")
             agent_class = tool_call.get("type") or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
+            if str(call_id or "") in skipped_browser_ids and (
+                tool_name == "spawn_browser_agent" or agent_class == "browser"
+            ):
+                continue
             if tool_name == "spawn_agent" or tool_name in _AGENT_CLASS_BY_RUNTIME_TOOL:
-                register(agent_class, tool_call.get("tool_call_id") or tool_call.get("toolCallId"))
+                register(agent_class, call_id)
 
     step_events: list[tuple[tuple[str, str], dict, bool]] = []
     for message in messages:
@@ -9459,10 +9581,17 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
         for candidate in candidates:
+            if candidate.get("skippedBrowserSpawn"):
+                continue
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             agent_class = (
                 candidate.get("agentType") or candidate.get("agent_type") or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
             )
+            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if str(tool_call_id or "") in skipped_browser_ids and (
+                tool_name == "spawn_browser_agent" or agent_class == "browser"
+            ):
+                continue
             if not agent_class:
                 continue
             direct_ids = [
@@ -9472,7 +9601,6 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
                 candidate.get("taskId"),
             ]
             nodes = [node for value in direct_ids if (node := register(agent_class, value))]
-            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
             if tool_name in _AGENT_ORCHESTRATION_TOOLS:
                 tool_node = register(agent_class, tool_call_id)
                 if tool_node:
@@ -10098,6 +10226,86 @@ def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: b
     return cards
 
 
+def _iter_completion_output_file_pointers(outputs: object) -> list[dict]:
+    """Collect FilePointer-shaped values from Task Complete outputs (single or list)."""
+    pointers: list[dict] = []
+    if not isinstance(outputs, list):
+        return pointers
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            filename = candidate.get("original_filename")
+            storage_path = candidate.get("storage_path")
+            if isinstance(filename, str) and filename.strip() and isinstance(storage_path, str) and storage_path.strip():
+                pointers.append(candidate)
+    return pointers
+
+
+
+def _response_schema_has_file_pointer_check(data: dict, check: dict) -> tuple[bool, str]:
+    """Require the agent's generated response_schema to include a file_pointer field.
+
+    Format constraints belong on produced FilePointer mime_type/extension
+    (see completion_summary_file_outputs), not a second schema field.
+    """
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    schema = agent.get("response_schema") or agent.get("output_schema") or {}
+    fields = schema.get("fields") if isinstance(schema, dict) else None
+    if not isinstance(fields, list) or not fields:
+        return False, "response_schema missing fields"
+    file_fields = [
+        f
+        for f in fields
+        if isinstance(f, dict) and f.get("type") in ("file_pointer", "list[file_pointer]")
+    ]
+    if not file_fields:
+        types = [str(f.get("type")) for f in fields if isinstance(f, dict)]
+        return False, f"response_schema has no file_pointer field (types={types})"
+    return True, f"Found {len(file_fields)} file_pointer field(s)"
+
+def _completion_summary_file_outputs_check(data: dict, check: dict) -> tuple[bool, str]:
+    """Require Task Complete outputs to include FilePointers matching extension/mime filters."""
+    cards = _completion_cards_for_static_check(
+        data,
+        include_first_level_gps=bool(check.get("include_first_level_gps")),
+    )
+    if not cards:
+        return False, "No finished completion summary was observed"
+
+    extensions = [
+        str(ext).lower() if str(ext).startswith(".") else f".{str(ext).lower()}"
+        for ext in (check.get("extensions") or [])
+        if str(ext).strip()
+    ]
+    mime_contains = [str(part).lower() for part in (check.get("mime_contains") or []) if str(part).strip()]
+    min_files = int(check.get("min_files", 1))
+
+    matched: list[dict] = []
+    for card in cards:
+        for pointer in _iter_completion_output_file_pointers(card.get("outputs")):
+            filename = str(pointer.get("original_filename") or "").lower()
+            mime = str(pointer.get("mime_type") or "").lower()
+            if extensions and not any(filename.endswith(ext) for ext in extensions):
+                continue
+            if mime_contains and not any(part in mime for part in mime_contains):
+                continue
+            matched.append(pointer)
+
+    if len(matched) < min_files:
+        detail = f"extensions={extensions or ['*']}, mime_contains={mime_contains or ['*']}"
+        return (
+            False,
+            f"Task Complete outputs had {len(matched)} matching file_pointer(s); "
+            f"expected at least {min_files} ({detail})",
+        )
+    return True, f"Found {len(matched)} matching file_pointer output(s)"
+
+
 async def _hydrate_completion_sms_events(data: dict) -> None:
     """Attach durable completion-SMS provider receipts for static evaluators."""
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
@@ -10288,6 +10496,16 @@ def _run_declared_static_check(
                 outputs = card.get("outputs")
                 if require_outputs and (not isinstance(outputs, list) or not outputs):
                     return False, f"T7: {label} Task Complete has no schema outputs"
+            continue
+        if check_type == "completion_summary_file_outputs":
+            ok, reason = _completion_summary_file_outputs_check(data, check)
+            if not ok:
+                return False, reason
+            continue
+        if check_type == "response_schema_has_file_pointer":
+            ok, reason = _response_schema_has_file_pointer_check(data, check)
+            if not ok:
+                return False, reason
             continue
         if check_type == "completion_sms_event":
             events = benchmark_state.get("completion_sms_events") or []
@@ -10506,7 +10724,7 @@ async def _run_declared_evaluators(
         await _hydrate_completion_sms_events(data)
 
     needs_tree_evidence = any(
-        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge"}
+        evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge", "polar"}
         for evaluator in task.evaluators
     )
     if needs_tree_evidence and base_url:
@@ -10543,6 +10761,20 @@ async def _run_declared_evaluators(
                 reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
                 usage = judged.get("usage")
                 passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            elif method == "polar":
+                # Isolated Odysseys-faithful path — see benchmarks/polar_evaluator.py.
+                # Does not share prompts/evidence builders with other judge methods.
+                from benchmarks.polar_evaluator import run_polar_evaluator
+
+                judged = await run_polar_evaluator(
+                    task_prompt=task.prompt,
+                    evaluator=evaluator,
+                    data=data,
+                )
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "polar judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
             else:
                 passed = False
                 score = 0.0
@@ -10562,6 +10794,13 @@ async def _run_declared_evaluators(
             result["evidence_mode"] = evidence_mode
         if usage is not None:
             result["usage"] = usage
+        if method == "polar":
+            # Surface per-rubric detail for hub / run JSON without affecting other methods.
+            polar_results = locals().get("judged")
+            if isinstance(polar_results, dict) and polar_results.get("rubric_results") is not None:
+                result["rubric_results"] = polar_results["rubric_results"]
+                result["perfect"] = polar_results.get("perfect")
+                result["num_screenshots_sent"] = polar_results.get("num_screenshots_sent")
         results.append(result)
         if not passed:
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
@@ -11578,7 +11817,10 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             )
     elif args.suite:
         if args.suite == "all":
-            tasks = all_tasks()
+            # Default "all" stays on the first-party catalog. Polar Odysseys +
+            # BU Bench V1 (~300 live browser tasks) are opt-in via
+            # `--suite polar-bench` so full-suite / daily fleets never fan out.
+            tasks = [t for t in all_tasks() if not is_polar_bench_task(t)]
         elif args.suite == "auth":
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
@@ -11589,11 +11831,17 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             # Bench axis: rose-bench = harness-independent capability evals,
             # pipeline-e2e = harness plumbing tests. Orthogonal to tag slices.
-            tasks = [t for t in all_tasks() if t.bench == args.suite]
+            # Polar tasks also declare bench=rose-bench but stay behind the
+            # polar-bench suite tag so this axis stays first-party-sized.
+            tasks = [
+                t
+                for t in all_tasks()
+                if t.bench == args.suite and not is_polar_bench_task(t)
+            ]
         else:
             tasks = get_tasks_by_tag(args.suite)
     else:
-        tasks = all_tasks()
+        tasks = [t for t in all_tasks() if not is_polar_bench_task(t)]
 
     if not explicit_task_names:
         # Suite selection only runs complete benchmark evals. `status == "incomplete"`

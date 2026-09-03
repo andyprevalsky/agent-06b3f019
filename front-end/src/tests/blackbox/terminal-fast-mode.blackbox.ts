@@ -7,6 +7,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
+import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 
 const mocks = vi.hoisted(() => {
   const authState = {
@@ -121,6 +122,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
 
   afterEach(() => {
     localStorage.clear();
+    resetFastModeSessionOverride();
   });
 
   it('defaults allow-listed accounts to Fast Mode on and still allows switching off', async () => {
@@ -131,6 +133,19 @@ describe('useTerminalAgents Fast Mode bridge', () => {
     act(() => result.current.setFastMode(false));
 
     expect(result.current.fastMode).toBe(false);
+  });
+
+  it('defaults Fast Mode on for a phone-matched admin whose id is not allow-listed', async () => {
+    const { result } = renderHook(() =>
+      useMessageSending(
+        messageSendingArgs({
+          userId: 'not-an-allowlisted-admin-id',
+          user: { id: 'not-an-allowlisted-admin-id', phone: '+19729777432' },
+        }),
+      ),
+    );
+
+    await waitFor(() => expect(result.current.fastMode).toBe(true));
   });
 
   it('defaults other allow-listed accounts on as well', async () => {

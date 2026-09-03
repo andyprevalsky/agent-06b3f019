@@ -47,6 +47,10 @@ GATES = (
         "canonical-seed-whatsapp-content",
         ("bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"),
     ),
+    Gate(
+        "benchmark-sms-transport-mock",
+        ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
+    ),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(

@@ -16,8 +16,11 @@ from _test_utils import BlackboxResult, teardown_mock
 def _wait_for_file(path: Path, timeout: float = 5.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if path.exists():
-            return
+        try:
+            if path.read_text().strip():
+                return
+        except FileNotFoundError:
+            pass
         time.sleep(0.05)
     raise AssertionError(f"timed out waiting for {path}")
 
@@ -183,12 +186,17 @@ def test_local_runner_persists_console_log_and_summary() -> None:
             repo_root / "agents/benchmarks/predeploy_metrics.py",
             fixture / "agents/benchmarks/predeploy_metrics.py",
         )
+        shutil.copy(
+            repo_root / "agents/benchmarks/select_predeploy_benches.py",
+            fixture / "agents/benchmarks/select_predeploy_benches.py",
+        )
+        (fixture / "agents/benchmarks/history/task_attempts.jsonl").write_text("")
         (fixture / "agents/benchmarks/tasks.json").write_text(
             json.dumps(
                 [
-                    {"name": "short-task", "tags": ["smoke"]},
-                    {"name": "medium-task", "tags": ["smoke"]},
-                    {"name": "long-task", "tags": ["smoke"]},
+                    {"name": "short-task", "tags": ["smoke"], "timeout_seconds": 60, "deploy_category": "harness"},
+                    {"name": "medium-task", "tags": ["smoke"], "timeout_seconds": 60, "deploy_category": "harness"},
+                    {"name": "long-task", "tags": ["smoke"], "timeout_seconds": 60, "deploy_category": "harness"},
                 ]
             )
         )
@@ -293,8 +301,22 @@ def test_timing_wrappers_terminate_child_groups_and_record_signal() -> None:
             repo_root / "agents/benchmarks/predeploy_metrics.py",
             fixture / "agents/benchmarks/predeploy_metrics.py",
         )
+        shutil.copy(
+            repo_root / "agents/benchmarks/select_predeploy_benches.py",
+            fixture / "agents/benchmarks/select_predeploy_benches.py",
+        )
+        (fixture / "agents/benchmarks/history/task_attempts.jsonl").write_text("")
         (fixture / "agents/benchmarks/tasks.json").write_text(
-            json.dumps([{"name": "slow-task", "tags": ["smoke"]}])
+            json.dumps(
+                [
+                    {
+                        "name": "slow-task",
+                        "tags": ["smoke"],
+                        "timeout_seconds": 60,
+                        "deploy_category": "harness",
+                    }
+                ]
+            )
         )
         (fixture / "agents/benchmarks/history/task_durations.jsonl").write_text("")
         local_pid_file = temp_dir / "local-child.pid"

@@ -239,6 +239,8 @@ Prompt modifications are high-risk behavior changes. **Any prompt modification M
 
 **MANDATORY for EVERY human-approval request in this deploy (Step 0p, Step 0b, Step 0c, and any other escalation): link the file(s) under review.** Whenever you stop for human approval, present each affected item as a clickable `repo-relative/path:line` reference — one per file/hunk — so the human can open and read the exact code before approving. Pasting a snippet is not enough on its own; the link is required. An approval request without file:line links is incomplete — do not ask for approval until you have listed the precise files + line ranges to review.
 
+**For prompt / LLM-visible text (Step 0p): also paste the exact diff inline.** A `path:line` link is required but not sufficient. The approval message itself must show the precise unified diff or before/after text being approved (every added/removed line). Do not ask the human to open the file to learn what changed — that is an incomplete prompt approval under `.claude/shared/approval-format.md`.
+
 **What "prompt modification" means — LLM-visible text, not file membership.** The rule reviews changes to what an LLM actually reads: prompt/instruction text baked in at compile time (system prompts, tool descriptions, skill/command instructions, tasks.json `prompt`/`description` fields, template files) AND text assembled at runtime (string-building logic, template interpolation, context-chunk selection, truncation — anything that changes the bytes an LLM ultimately sees). The guard script flags candidate FILES, which over-approximates: a validation helper, UI accessibility tweak, or state-handling fix inside a flagged file is NOT a prompt modification. When the guard fires:
 
 1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
@@ -474,6 +476,7 @@ their assertions or test counts:
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
+`bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
@@ -871,7 +874,7 @@ cd "$(git rev-parse --show-toplevel)"
 bash scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local
 ```
 
-`scripts/run-predeploy-local` derives the task set from every catalog entry tagged `smoke` (identical selection to the cloud path, so they can't drift) and runs them through `scripts/run-bench --local` at full selected-task concurrency on the isolated stack. It orders tasks longest-recent-median first when an emergency/debug concurrency cap is supplied. It exits non-zero unless every requested task passes, so the command IS the gate.
+`scripts/run-predeploy-local` selects tasks via `agents/benchmarks/select_predeploy_benches.py` (identical selection to the cloud path, so they can't drift): **existing `smoke` always runs**, then **history gate for added canaries/path extras only** (last 3 eligibility attempts in `agents/benchmarks/history/task_attempts.jsonl` all passed; predeploy/worktree attempts excluded so assignment cannot self-invalidate), then a **category floor** (one history-qualified canary per floor category: payment, grep, sms, browser_stateful) plus **path-triggered depth** from the git diff, hard-capped at **20**. Before running it prints a clear selection report (`TOTAL SELECTED: N / 20`, plus skipped-for-history and uncovered floor categories). Hitting the hard cap prints a loud scream and drops extras (floor always fits or the gate fails closed). New catalog tasks auto-attach by `deploy_category` / tags — set `deploy_canary: true` to prefer a task as its category canary. Override the cap only with review via `PREDEPLOY_BENCH_CAP`. It then runs the selected set through `scripts/run-bench --local` at full selected-task concurrency on the isolated stack, ordering longest-recent-median first when an emergency/debug concurrency cap is supplied. It exits non-zero unless every requested task passes, so the command IS the gate.
 
 Every invocation tees its console output to `.context/predeploy-runs/<run-id>/runner.log` and writes actual start/end time, total wall duration, status, concurrency, task set, and schedule to `summary.json` beside it. Inspect the accumulated actual totals plus per-task pass history at any time:
 
@@ -1941,7 +1944,12 @@ echo "✅ /api/agents -> 200 (DB/Prisma path healthy)"
 #     ComputeTokenFastCacheAffinity tables never migrated -> every compute-token
 #     fetch 500'd -> every agent fell to the paid waterfall, while /api/agents
 #     stayed 200). This probe hits the compute-token route plus other domains.
-cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/prod-endpoint-smoke.ts
+#     Cloud agents often inject SMOKE_BASE_URL=http://localhost:<port> — unset it
+#     so the script's prod default wins (script also refuses localhost unless
+#     SMOKE_ALLOW_LOCAL=1).
+cd "$(git rev-parse --show-toplevel)/back-end" && \
+  env -u SMOKE_BASE_URL -u SMOKE_HEALTH_URL -u SMOKE_FRONTEND_URL \
+  npx tsx scripts/prod-endpoint-smoke.ts
 ```
 
 `GET /api/agents` is the canonical warmup probe because it runs an authenticated `prisma.agent.findMany()` — the same query class that broke on 2026-06-27. Step (c) then runs `back-end/scripts/prod-endpoint-smoke.ts`, which probes one DB-backed endpoint per domain (agents, models, benchmarks, user-settings, people, tool-usage, **integrations/compute-code token**, …) and fails on any 5xx. **When you add a new domain whose runtime path is independent of the ones already probed, add a line to the `PROBES` array in that script** — that is how we keep the post-deploy check from going stale.

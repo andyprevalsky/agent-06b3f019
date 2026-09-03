@@ -41,15 +41,17 @@ def resolve_explore_depth(
     requested_depth: str | None,
     *,
     fast_mode_cache_enabled: bool = False,
+    oai_demo: bool = False,
 ) -> str:
     """Pick explore thoroughness for a spawn.
 
-    Under Fast Mode, always use EXPLORE_FAST_MODE_DEPTH: July OAi-demo explore
-    caches often reach attempt_completion at turn ~26–36, so both the live
-    default (quick=5) and an explicit medium=20 abort mid-replay. Outside Fast
-    Mode, explicit medium/deep win; otherwise the live default applies.
+    Under Fast Mode on test-mass-agent-run-0 only, use EXPLORE_FAST_MODE_DEPTH:
+    July OAi-demo explore caches often reach attempt_completion at turn ~26–36,
+    so both the live default (quick=5) and an explicit medium=20 abort mid-replay.
+    Other Fast Mode trees keep the requested/live depth. Outside Fast Mode,
+    explicit medium/deep win; otherwise the live default applies.
     """
-    if fast_mode_cache_enabled:
+    if fast_mode_cache_enabled and oai_demo:
         return EXPLORE_FAST_MODE_DEPTH
     if requested_depth in EXPLORE_DEPTH_LIMITS:
         return requested_depth
@@ -68,12 +70,9 @@ SUB_ACTIVITY_MAX_ATTEMPTS = 2
 # ── For-each ──
 FOR_EACH_MAX_DEPTH = 4
 FOR_EACH_MAX_INFLIGHT = 5
-# OAi-demo Fast Mode only: fire-and-track explores so a Huberman-class GP
-# (224–336 sequential explores) can overlap instead of paying p50~32s each
-# on the parent execute_loop. Cap is per GP workflow so 50 first-level GPs
-# stay within the isolated worker's ~500 activity slots (50×16=800 queued;
-# Temporal backpressures). Not a shared fan-in — each GP tracks its own
-# handles. Other Fast Mode trees keep the blocking explore path.
+# Legacy inflight cap from the removed fire-and-track path. Fast Mode now
+# waits for each explore like live; this constant is only used by leftover
+# slot helpers that no spawn path calls.
 FM_EXPLORE_INFLIGHT_CAP = 16
 
 # test-mass-agent-run-0 / July OAi demo only. Nested GP skip and the Andy
@@ -88,18 +87,43 @@ OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist sec
 OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
 
 
+def is_oai_demo_goal(text: str | None) -> bool:
+    """True only for test-mass-agent-run-0 root, child-window, or for_each prefix."""
+    blob = str(text or "")
+    return (
+        OAI_DEMO_ROOT_GOAL_PREFIX in blob
+        or OAI_DEMO_CHILD_WINDOW in blob
+        or OAI_DEMO_CHILD_GOAL_PREFIX in blob
+    )
+
+
 def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
     """True only for the mass-agent-0 root or its per-creator for_each children."""
     chunks = (
         getattr(workflow_instance, "fast_cache_goal", None) or "",
         getattr(workflow_instance, "goal", None) or "",
     )
-    text = "\n".join(str(chunk) for chunk in chunks)
-    return (
-        OAI_DEMO_ROOT_GOAL_PREFIX in text
-        or OAI_DEMO_CHILD_WINDOW in text
-        or OAI_DEMO_CHILD_GOAL_PREFIX in text
+    return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
+
+
+def should_skip_oai_demo_browser_spawn(workflow_instance) -> bool:
+    """Fast Mode test-mass-agent-run-0 must not open browser-agent sessions."""
+    return bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)) and is_oai_demo_mass_agent_task(
+        workflow_instance
     )
+
+
+def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) -> bool:
+    """Canonical explore demo class: explicit flag wins, else goal prefix only.
+
+    `_spawn_explore` computes `is_oai_demo_mass_agent_task` once and passes it
+    as the activity's trailing `oai_demo`. Direct/old callers omit the flag;
+    those fall back to `is_oai_demo_goal(goal)` and must not re-read Fast Mode
+    resolver goals — truncated child goals and resolver failures disagree.
+    """
+    if oai_demo is not None:
+        return bool(oai_demo)
+    return is_oai_demo_goal(goal)
 
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0

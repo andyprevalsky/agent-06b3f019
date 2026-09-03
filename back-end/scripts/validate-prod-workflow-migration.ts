@@ -29,9 +29,13 @@ import {
   cleanupSupersededWorkerActivationMarkers,
   getTemporalClient,
   startAgentWorkflowExecution,
-  workerDeploymentActivationWorkflowId,
   type TemporalWorkflowExecutionRef,
 } from '../src/providers/temporal';
+import {
+  sameWorkflowHistoryMetrics,
+  summarizeWorkflowHistory,
+  type WorkflowHistoryMetrics,
+} from '../src/providers/workflowHistoryMetrics';
 import {
   runWorkflowDeploymentCutover,
   waitForWorkflowReplacementBootstrap,
@@ -392,33 +396,53 @@ async function startAndReady(prepared: PreparedAgentWorkflowReplacement): Promis
 
 async function activityCount(
   handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>
-) {
+): Promise<WorkflowHistoryMetrics> {
   const history = await handle.fetchHistory();
-  return {
-    totalEvents: history.events?.length ?? 0,
-    activities:
-      history.events?.filter((event) => event.activityTaskScheduledEventAttributes != null)
-        .length ?? 0,
-    markers:
-      history.events?.filter((event) => event.markerRecordedEventAttributes != null).length ?? 0,
-    workflowTaskFailures:
-      history.events?.filter((event) => event.workflowTaskFailedEventAttributes != null).length ??
-      0,
-    workflowTasks:
-      history.events?.filter(
-        (event) =>
-          event.workflowTaskScheduledEventAttributes != null ||
-          event.workflowTaskStartedEventAttributes != null ||
-          event.workflowTaskCompletedEventAttributes != null
-      ).length ?? 0,
-    timers:
-      history.events?.filter(
-        (event) =>
-          event.timerStartedEventAttributes != null ||
-          event.timerFiredEventAttributes != null ||
-          event.timerCanceledEventAttributes != null
-      ).length ?? 0,
-  };
+  const events = history.events ?? [];
+  const metrics = summarizeWorkflowHistory(events);
+  // Ignore protobuf null placeholders; count only real workflow-task failures.
+  const workflowTaskFailures = events.filter(
+    (event) => event.workflowTaskFailedEventAttributes != null
+  ).length;
+  assert.strictEqual(workflowTaskFailures, metrics.workflowTaskFailures);
+  return metrics;
+}
+
+/**
+ * Cooperative cutover parks restored PAUSED / COST_LIMIT / OUT_OF_CREDITS agents
+ * in `_wait_for_unpause_or_handoff`: one pointer activity + a 30s wait_condition
+ * timer per poll cycle. READY can land before that first timer is scheduled, so
+ * a naive before/after sample races the handoff arming. Settle until an *active*
+ * handoff timer is present (started, not yet fired/canceled) and history stops
+ * moving, then prove no further growth inside the poll window (no LLM/tool burn
+ * while cold).
+ */
+async function assertColdHandoffHistoryStable(
+  handle: ReturnType<Awaited<ReturnType<typeof getTemporalClient>>['workflow']['getHandle']>,
+  {
+    settleMs = 8_000,
+    observeMs = 2_000,
+  }: { settleMs?: number; observeMs?: number } = {}
+): Promise<WorkflowHistoryMetrics> {
+  const settleDeadline = Date.now() + settleMs;
+  let last = await activityCount(handle);
+  while (Date.now() < settleDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const next = await activityCount(handle);
+    if (sameWorkflowHistoryMetrics(next, last) && next.activeTimers >= 1) {
+      last = next;
+      break;
+    }
+    last = next;
+  }
+  assert.ok(
+    last.activeTimers >= 1,
+    `expected armed cooperative handoff wait timer while cold-paused; got ${JSON.stringify(last)}`
+  );
+  await new Promise((resolve) => setTimeout(resolve, observeMs));
+  const after = await activityCount(handle);
+  assert.deepStrictEqual(after, last);
+  return after;
 }
 
 async function main(): Promise<void> {
@@ -1262,11 +1286,8 @@ async function main(): Promise<void> {
   });
   await check('cold_workflow_uses_no_resources_while_waiting', async () => {
     assert(pausedHandle);
-    const before = await activityCount(pausedHandle.handle);
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
-    const after = await activityCount(pausedHandle.handle);
-    assert.deepStrictEqual(after, before);
-    return `${after.totalEvents} total history events; zero activity/task/timer/history growth while paused`;
+    const after = await assertColdHandoffHistoryStable(pausedHandle.handle);
+    return `${after.totalEvents} total history events; handoff timer armed; zero growth inside poll window`;
   });
   await check('fresh_history_has_no_patch_or_nondeterminism', async () => {
     assert(pausedHandle);
@@ -1404,9 +1425,8 @@ async function main(): Promise<void> {
         await ready.handle.query('is_cost_limit_reached_query'),
         status === 'COST_LIMIT_REACHED'
       );
-      const before = await activityCount(ready.handle);
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      assert.deepStrictEqual(await activityCount(ready.handle), before);
+      await assertColdHandoffHistoryStable(ready.handle, { observeMs: 1_000 });
+      return `${status} restored cold; handoff timer armed; zero growth inside poll window`;
     });
   }
 
@@ -1646,9 +1666,13 @@ async function main(): Promise<void> {
 
   await check('same_sha_old_marker_is_retired_without_retiring_current_attempt', async () => {
     const buildId = process.env.TEMPORAL_WORKER_BUILD_ID!;
-    const deploymentToken = process.env.TEMPORAL_WORKER_DEPLOYMENT_TOKEN!;
-    const currentMarkerId = workerDeploymentActivationWorkflowId(buildId, deploymentToken);
-    const oldToken = `validation-${runId}`;
+    // Mint both markers under unique validation tokens. Cooperative cutover does
+    // not keep deploy activation markers running, and a prior validation pass may
+    // leave the real deploy-token marker TERMINATED (activate then throws).
+    const currentToken = `validation-current-${runId}`;
+    const oldToken = `validation-old-${runId}`;
+    const currentMarkerId = await activateTemporalWorkerBuild(buildId, currentToken);
+    workflowIds.add(currentMarkerId);
     const oldMarkerId = await activateTemporalWorkerBuild(buildId, oldToken);
     workflowIds.add(oldMarkerId);
     assert.notStrictEqual(oldMarkerId, currentMarkerId);

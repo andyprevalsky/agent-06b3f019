@@ -1,23 +1,39 @@
 #!/usr/bin/env bash
-# Dispatch the catalog's Pre-Deploy/smoke group through the production Benchmark
+# Dispatch the catalog's Pre-Deploy selection through the production Benchmark
 # Hub, execute it on the isolated cloud fleet, and require the visible Hub run
 # to finish with every task passing.
+#
+# Task set comes from `agents/benchmarks/select_predeploy_benches.py` (same
+# algorithm as `run-predeploy-local`, surface=cloud so local-only canaries are
+# excluded) — existing smoke always; last-3-eligibility-pass gate for added
+# canaries/path extras only (predeploy/worktree attempts excluded); then
+# category floor + path-triggered depth, hard capped at 20.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+SELECTOR_SCRIPT="$ROOT_DIR/agents/benchmarks/select_predeploy_benches.py"
+PREDEPLOY_BENCH_CAP="${PREDEPLOY_BENCH_CAP:-20}"
+# Hard ceiling — launchers document a max of 20; refuse env overrides that
+# would silently expand the predeploy set beyond the scream budget.
+if [ "$PREDEPLOY_BENCH_CAP" -gt 20 ]; then
+    echo "⚠️  PREDEPLOY_BENCH_CAP=$PREDEPLOY_BENCH_CAP exceeds hard ceiling 20; clamping to 20" >&2
+    PREDEPLOY_BENCH_CAP=20
+fi
+
+read_predeploy_selection() {
+    local format="${1:-names-and-report}"
+    PREDEPLOY_BENCH_CAP="$PREDEPLOY_BENCH_CAP" \
+        python3 "$SELECTOR_SCRIPT" \
+            --catalog "$ROOT_DIR/agents/benchmarks/tasks.json" \
+            --surface cloud \
+            --cap "$PREDEPLOY_BENCH_CAP" \
+            --format "$format" \
+            --repo-root "$ROOT_DIR"
+}
 
 read_predeploy_tasks() {
-    python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1]) as handle:
-    tasks = json.load(handle)
-for task in tasks:
-    if "smoke" in (task.get("tags") or []):
-        print(task["name"])
-PY
+    read_predeploy_selection names
 }
 
 if [ "${1:-}" = "--list" ]; then
@@ -30,10 +46,19 @@ if [ "$#" -ne 0 ]; then
 fi
 
 PREDEPLOY_TASKS=()
+SELECTION_OUTPUT="$(read_predeploy_selection names-and-report)"
+printf '%s\n' "$SELECTION_OUTPUT"
 while IFS= read -r task; do
     [ -n "$task" ] && PREDEPLOY_TASKS+=("$task")
-done < <(read_predeploy_tasks)
-[ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no smoke-tagged benchmark tasks found" >&2; exit 1; }
+done < <(
+    printf '%s\n' "$SELECTION_OUTPUT" \
+        | sed -n '/^---PREDEPLOY_BENCH_NAMES---$/,/^---END_PREDEPLOY_BENCH_NAMES---$/p' \
+        | sed '1d;$d'
+)
+[ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no predeploy benchmark tasks selected" >&2; exit 1; }
+if [ "${#PREDEPLOY_TASKS[@]}" -ge "$PREDEPLOY_BENCH_CAP" ]; then
+    echo "🚨 PREDEPLOY BENCH COUNT AT HARD CAP: ${#PREDEPLOY_TASKS[@]}/$PREDEPLOY_BENCH_CAP" >&2
+fi
 
 run_predeploy_stage() {
     local label="$1"
@@ -120,6 +145,8 @@ BACKEND_API_KEY="$BACKEND_API_KEY" \
 HUB_CLAIM_SCOPE="$scope" \
 HUB_SKIP_CATALOG_EXPORT=1 \
 BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
+BENCHMARK_ATTEMPT_SUITE=predeploy \
+BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
 "$HUB_POLLER_BIN" --once &
 POLLER_PID=$!
 wait "$POLLER_PID"

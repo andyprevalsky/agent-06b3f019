@@ -163,7 +163,7 @@ async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   const groups = new Set(tasks.map((t) => t.group));
   for (const g of groups) {
     assert(
-      ['pre-deploy', 'daily', 'rose-bench', 'incomplete'].includes(g),
+      ['pre-deploy', 'daily', 'rose-bench', 'polar-bench', 'incomplete'].includes(g),
       `unexpected group: ${g}`
     );
   }
@@ -173,6 +173,13 @@ async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   assert(groups.has('pre-deploy'), 'no pre-deploy (smoke) tasks found');
   assert(groups.has('daily'), 'no daily tasks found');
   assert(groups.has('rose-bench'), 'no rose-bench tasks found');
+  assert(groups.has('polar-bench'), 'no polar-bench tasks found');
+  const polarTask = tasks.find((task) => task.group === 'polar-bench');
+  assert(polarTask, 'expected at least one polar-bench catalog task');
+  assert(
+    polarTask.name.startsWith('polar-'),
+    `polar-bench task name should be polar-*: ${polarTask.name}`
+  );
   // Every task must carry a resolvable group (label or derived fallback).
   for (const t of tasks) {
     assert(typeof t.group === 'string' && t.group.length > 0, `task ${t.name} has no group`);

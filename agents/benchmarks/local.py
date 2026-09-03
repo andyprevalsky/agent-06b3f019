@@ -33,7 +33,12 @@ REPO_ROOT = AGENTS_DIR.parent
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
-from benchmarks.benchmark_tasks import RUNNABLE_TASK_RUNNERS, all_tasks, selected_tasks_require_gate_type
+from benchmarks.benchmark_tasks import (
+    RUNNABLE_TASK_RUNNERS,
+    all_tasks,
+    selected_tasks_require_gate_type,
+)
+from benchmarks.polar_catalog import is_polar_bench_task
 
 
 def selected_tasks_need_shared_fast_cache(task_names: Sequence[str]) -> bool:
@@ -304,8 +309,12 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
     )
 
 
-def known_task_names() -> list[str]:
-    return [task.name for task in all_tasks()]
+def known_task_names(*, include_polar: bool = False) -> list[str]:
+    """First-party ready catalog names by default; polar-bench is opt-in."""
+    tasks = all_tasks()
+    if not include_polar:
+        tasks = [task for task in tasks if not is_polar_bench_task(task)]
+    return [task.name for task in tasks]
 
 
 def validate_task_names(names: Sequence[str]) -> list[str]:
@@ -315,7 +324,8 @@ def validate_task_names(names: Sequence[str]) -> list[str]:
     ``run_benchmark.py --task`` / cloudbench-run behavior. Callers that want a
     unique set must dedupe themselves.
     """
-    known = set(known_task_names())
+    # Allow explicit polar-bench names even though --full / --suite all omit them.
+    known = set(known_task_names(include_polar=True))
     unknown = sorted(set(names) - known)
     if unknown:
         raise ValueError(f"Unknown benchmark task(s): {', '.join(unknown)}")
@@ -2023,15 +2033,24 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
             raise ValueError(f"No failed tasks found in {run_path}")
         return validate_task_names(names)
     if args.full:
-        return known_task_names()
+        return known_task_names(include_polar=False)
     if args.suite:
         if args.suite == "all":
-            selected = [task for task in all_tasks() if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready"]
+            selected = [
+                task
+                for task in all_tasks()
+                if task.runner in RUNNABLE_TASK_RUNNERS
+                and task.status == "ready"
+                and not is_polar_bench_task(task)
+            ]
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             selected = [
                 task
                 for task in all_tasks()
-                if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready" and task.bench == args.suite
+                if task.runner in RUNNABLE_TASK_RUNNERS
+                and task.status == "ready"
+                and task.bench == args.suite
+                and not is_polar_bench_task(task)
             ]
         else:
             selected = [
@@ -2039,6 +2058,10 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
                 for task in all_tasks()
                 if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready" and args.suite in task.tags
             ]
+            # Non-polar tag suites (browser, smoke, …) must not inherit the
+            # Odysseys/BU flood just because those tasks also carry `browser`.
+            if args.suite != "polar-bench":
+                selected = [task for task in selected if not is_polar_bench_task(task)]
         if not selected:
             raise ValueError(f"No ready agent benchmark tasks matched suite/tag: {args.suite}")
         return validate_task_names([task.name for task in selected])
@@ -2228,7 +2251,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
-    if stack.isolated:
+    # Isolated stacks and --use-existing local stacks both key browser-provider
+    # profiles per agent. Without this flag, run_benchmark serializes every
+    # requires_browser_agent task through a one-writer semaphore (concurrency=1),
+    # which makes a 300-task polar-bench run effectively sequential.
+    if stack.isolated or args.use_existing:
         # Both the service stack and run_benchmark.py inherit this. Provider
         # profiles are keyed per agent, so browser benchmarks can use the same
         # concurrency width as non-browser tasks without cross-run state writes.

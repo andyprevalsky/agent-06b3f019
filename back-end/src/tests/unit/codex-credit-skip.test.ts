@@ -45,6 +45,8 @@ test('skips on every other known funding signal', () => {
     'purchase more credits',
     'out of credits',
     'billing hard limit reached',
+    'team is blocked: missing payment method',
+    '{"error":"403: team is blocked: missing payment method"}',
   ]) {
     assert.ok(
       detectCodexCreditExhaustion(signal, []) !== null,
@@ -60,6 +62,7 @@ test('does NOT skip on auth/OAuth revocation — that must stay a hard failure',
     'authentication failed',
     'invalid_api_key',
     'token has been revoked',
+    'Expected status 200, got 403: {"error":"Forbidden"}',
   ]) {
     assert.equal(
       detectCodexCreditExhaustion(signal, []),

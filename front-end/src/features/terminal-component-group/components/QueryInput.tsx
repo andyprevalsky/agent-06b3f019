@@ -16,7 +16,8 @@
  * MODEL SELECTOR:      owned by `ModelSelector`
  * COST / PRICE LIMIT:  owned by `CostIndicator` + `usePriceLimit`
  * ATTACHMENTS:         owned by `useAttachments`
- * FAST MODE:           shown for allow-listed users in both create + chat query boxes
+ * FAST MODE:           shown for admin operators (id, verified phone, impersonation)
+ *                      in create + chat query boxes; labeled "Fast Mode" next to the wrench
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button
@@ -24,11 +25,12 @@
 
 import { useRef } from 'react';
 import { useIsMobile } from '@/hooks/use-mobile';
-import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
+import { canUseFastMode } from '@/lib/fastModeAccounts';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
+import { isAdminOperator } from '@/lib/adminAccounts';
 import { cn } from '@/lib/utils';
 import { useAuth, useToast } from '../hooks';
-import { IS_DEV_MODE, ADMIN_USER_IDS, DEFAULT_RESTART_THRESHOLD, DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
+import { IS_DEV_MODE, DEFAULT_RESTART_THRESHOLD, DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
 import { type QueryInputProps, DEFAULT_DRIP_STYLES } from './query-input/types';
 import { useAttachments } from './query-input/useAttachments';
 import { usePriceLimit, type UsePriceLimitResult } from './query-input/usePriceLimit';
@@ -102,12 +104,15 @@ function useSubmitHandler(
   };
 }
 
-function getQueryInputVisibility(isMobile: boolean, userId: string | null | undefined) {
+function getQueryInputVisibility(
+  isMobile: boolean,
+  user: { id?: string; phone?: string } | null,
+) {
+  const userId = user?.id;
   return {
-    showTestPrompts:
-      !isMobile && (IS_DEV_MODE || (userId != null && ADMIN_USER_IDS.includes(userId))),
-    showFastMode: userId != null && FAST_MODE_USER_IDS.includes(userId),
-    showSimulator: userId != null && SIMULATOR_USER_IDS.includes(userId),
+    showTestPrompts: !isMobile && (IS_DEV_MODE || isAdminOperator(user)),
+    showFastMode: canUseFastMode(user),
+    showSimulator: userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId),
   };
 }
 
@@ -149,7 +154,7 @@ function QueryInputBody(props: QueryInputBodyProps) {
   } = props;
   const { user: authUser } = useAuth();
   const isMobile = useIsMobile();
-  const visibility = getQueryInputVisibility(isMobile, authUser?.id);
+  const visibility = getQueryInputVisibility(isMobile, authUser);
   const agentCompleted = agentDetail?.status === 'COMPLETED' || agentDetail?.status === 'FAILED';
 
   return (

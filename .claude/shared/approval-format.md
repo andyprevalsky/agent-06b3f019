@@ -12,6 +12,14 @@ decision necessarily covers them together. Include clickable file-and-line links
 for every code, prompt, instruction, test, configuration, or migration hunk in
 scope.
 
+**Prompt / LLM-visible text approvals MUST paste the exact diff inline.** A
+`path:line` link alone is not enough for prompt, instruction, skill, command,
+tool-description, or other LLM-visible text. In Detail (and again near the
+approval question when helpful), show the precise unified diff or before/after
+text the human is approving — every added/removed line — so they can review it
+without opening the file. Saying "see the file" or linking the path without the
+diff body is invalid for prompt-scoped approvals.
+
 ## TL;DR
 
 Open with a `## TL;DR` section: exactly one sentence stating, in plain language,
@@ -136,6 +144,11 @@ Evidence uses the same `Not applicable — <reason>` form.
 List the approval snapshot ID or Git SHA when the approval is snapshot-scoped.
 Then list the complete scope as clickable file-and-line links.
 
+When any in-scope hunk is prompt / LLM-visible text, also paste that hunk's
+**exact diff inline** in this section (unified diff or explicit before→after).
+The human must be able to read the full approved text change in the approval
+message itself; file links are additive context, not a substitute for the diff.
+
 ## Before Behavior
 
 Describe the observable behavior before the proposed change or action. State
@@ -166,6 +179,8 @@ An approval is invalid if any required section, Evidence field, in-scope file
 link, **What failed:** task-framed sentence, concrete FE agent link, last-call
 rendered LLM dump, local-repro `Tests:` sentence plus steps and measured
 wall-clock, or Environment triple (evaluators with how they are checked,
-fixtures, task prompt) is missing. `Not applicable — <reason>` counts as present; a blank field does
+fixtures, task prompt) is missing. For prompt / LLM-visible text approvals it
+is also invalid if the exact diff body is omitted or replaced by a file link
+alone. `Not applicable — <reason>` counts as present; a blank field does
 not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
 approval ID and present all six sections again.

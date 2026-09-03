@@ -49,6 +49,12 @@ require_text "$FORMAT" "reproduction command that failed before the change and n
   "Detail must name the unchanged failing-then-passing test"
 require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
+require_text "$FORMAT" "Prompt / LLM-visible text approvals MUST paste the exact diff inline" \
+  "prompt approvals must require the exact diff body inline, not only a file link"
+require_text "$FORMAT" "Saying \"see the file\" or linking the path without the" \
+  "prompt approvals must forbid link-only presentation of LLM-visible text"
+require_text "$FORMAT" "exact diff body is omitted or replaced by a file link" \
+  "invalidation rules must reject prompt approvals that omit the inline diff"
 require_text "$FORMAT" '**What failed:** When <the agent doing the task goal>' \
   "approval requests must frame the failure inside the agent's task"
 require_text "$FORMAT" 'the LLM called `<tool>` to <attempt>' \

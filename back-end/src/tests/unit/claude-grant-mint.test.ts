@@ -15,6 +15,7 @@ import {
 
 type EvaluationMode = 'success' | 'no-button' | 'no-code';
 let evaluationMode: EvaluationMode = 'success';
+let navigatedOAuthState = '';
 
 function cdpResponse(command: CdpCommand): Record<string, unknown> {
   if (command.method === 'Target.getTargets') {
@@ -22,6 +23,11 @@ function cdpResponse(command: CdpCommand): Record<string, unknown> {
   }
   if (command.method === 'Target.attachToTarget') {
     return { result: { sessionId: 'page-session' } };
+  }
+  if (command.method === 'Page.navigate') {
+    const url = String((command.params as { url?: string }).url ?? '');
+    navigatedOAuthState = new URL(url).searchParams.get('state') ?? '';
+    return { result: {} };
   }
   if (command.method === 'Runtime.evaluate') {
     const expression = String((command.params as { expression?: string }).expression ?? '');
@@ -31,10 +37,12 @@ function cdpResponse(command: CdpCommand): Record<string, unknown> {
     if (expression.includes('JSON.stringify({url:')) {
       return { result: { result: { value: '{"url":"https://claude.ai"}' } } };
     }
-    if (expression.includes('oauth\\/code\\/callback')) {
+    if (expression.includes("location.origin !== 'https://platform.claude.com'")) {
       return {
         result: {
-          result: { value: evaluationMode === 'success' ? 'oauth-code#embedded-state' : null },
+          result: {
+            value: evaluationMode === 'success' ? `oauth-code#${navigatedOAuthState}` : null,
+          },
         },
       };
     }
@@ -158,16 +166,35 @@ async function main(): Promise<void> {
       )
     );
 
-    const exchanged = await exchangeAuthorizationCode('fresh-code', 'verifier', 'fallback-state');
+    const exchanged = await exchangeAuthorizationCode(
+      'fresh-code#expected-state',
+      'verifier',
+      'expected-state'
+    );
     assert.equal(exchanged.accessToken, 'setup-token');
     assert.equal(exchanged.clickAttempts, 0);
-    assert.equal(JSON.parse(requestBodies.at(-1) ?? '{}').state, 'fallback-state');
-    await exchangeAuthorizationCode('fresh-code#inside-code', 'verifier', 'fallback-state');
+    assert.equal(JSON.parse(requestBodies.at(-1) ?? '{}').state, 'expected-state');
+    await exchangeAuthorizationCode('fresh-code#inside-code', 'verifier', 'inside-code');
     assert.equal(JSON.parse(requestBodies.at(-1) ?? '{}').state, 'inside-code');
+
+    const requestsBeforeStateRejection = requestBodies.length;
+    await expectReject(
+      () => exchangeAuthorizationCode('fresh-code#stale-state', 'verifier', 'expected-state'),
+      /Claude OAuth state mismatch/
+    );
+    await expectReject(
+      () => exchangeAuthorizationCode('fresh-code', 'verifier', 'expected-state'),
+      /Claude OAuth callback omitted state/
+    );
+    assert.equal(
+      requestBodies.length,
+      requestsBeforeStateRejection,
+      'invalid callback state reached the token endpoint'
+    );
 
     tokenStatus = 400;
     await expectReject(
-      () => exchangeAuthorizationCode('bad-code', 'verifier', 'state'),
+      () => exchangeAuthorizationCode('bad-code#state', 'verifier', 'state'),
       /exchange failed 400: bad exchange/
     );
     tokenStatus = 200;

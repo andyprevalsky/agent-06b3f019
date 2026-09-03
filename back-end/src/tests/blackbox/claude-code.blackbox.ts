@@ -1200,6 +1200,65 @@ async function testBoundary_createGithubMissingUserIdNoOutbound() {
  *  - WebSocket never connects
  *  - Claude Code output never contains "4" within 90s
  */
+function isClaudeSmokeCredentialFailure(output: string): boolean {
+  return (
+    output.includes('Invalid authentication credentials') ||
+    /oauth access token has been revoked/i.test(output) ||
+    /failed to authenticate/i.test(output)
+  );
+}
+
+/** Provider-funding failures that should skip the E2B smoke, not burn the 240s timeout. */
+function isClaudeSmokeFundingFailure(output: string): boolean {
+  return (
+    /credit balance is too low/i.test(output) ||
+    /requires more credits, or fewer max_tokens/i.test(output) ||
+    /can only afford \d+/i.test(output) ||
+    /API Error:\s*402\b/i.test(output) ||
+    /insufficient credits/i.test(output) ||
+    // E2B team billing block at sandbox-create time (observed 2026-09-03). Same
+    // external funding class as the Codex create-time SKIP — not a code regression.
+    /missing payment method/i.test(output) ||
+    /team is blocked/i.test(output) ||
+    /payment method required/i.test(output)
+  );
+}
+
+async function testSmokeCredentialFailureClassifier() {
+  assert(
+    isClaudeSmokeCredentialFailure(
+      '[Claude] Failed to authenticate. API Error: 401 OAuth access token has been revoked.'
+    ),
+    'revoked OAuth must classify as a smoke credential skip, not a 240s timeout'
+  );
+  assert(
+    isClaudeSmokeCredentialFailure('Invalid authentication credentials'),
+    'legacy 401 copy must still classify as a smoke credential skip'
+  );
+  assert(
+    !isClaudeSmokeCredentialFailure('CLAUDE_E2B_DONE'),
+    'a successful smoke sentinel must not classify as a credential skip'
+  );
+  assert(
+    isClaudeSmokeFundingFailure(
+      'API Error: 402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 13672.'
+    ),
+    'OpenRouter 402 / can-only-afford must classify as a funding skip, not a 240s timeout'
+  );
+  assert(
+    isClaudeSmokeFundingFailure('credit balance is too low'),
+    'Anthropic credit-balance copy must still classify as a funding skip'
+  );
+  assert(
+    isClaudeSmokeFundingFailure('403: team is blocked: missing payment method'),
+    'E2B team missing-payment-method must classify as a funding skip'
+  );
+  assert(
+    !isClaudeSmokeFundingFailure('CLAUDE_E2B_DONE'),
+    'a successful smoke sentinel must not classify as a funding skip'
+  );
+}
+
 async function testSmoke_claudeCodeAnswersQuestion() {
   await ensureSmokeUserClaudeCredentials();
 
@@ -1215,14 +1274,22 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       user_id: DEV_USER_ID,
     }),
   });
-  if (res.status === 500) {
+  if (res.status !== 200) {
     const error =
       typeof res.data === 'object' && res.data !== null && 'error' in res.data
         ? String((res.data as { error?: unknown }).error ?? '')
-        : '';
+        : typeof res.data === 'string'
+          ? res.data
+          : JSON.stringify(res.data ?? {});
     if (error.includes(CODE_AGENT_CREDENTIALS_UNAVAILABLE)) {
       console.log(
         '    [skip] Claude E2B smoke could not start: code-agent credentials unavailable (credits/cooldown/auth)'
+      );
+      return;
+    }
+    if (isClaudeSmokeFundingFailure(error)) {
+      console.log(
+        `    [skip] Claude E2B smoke could not start: external funding/billing block (${res.status}); signal: ${error.slice(0, 200)}`
       );
       return;
     }
@@ -1284,8 +1351,8 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
         if (
           clean.includes('CLAUDE_E2B_DONE') ||
-          clean.includes('Invalid authentication credentials') ||
-          /credit balance is too low/i.test(clean)
+          isClaudeSmokeCredentialFailure(clean) ||
+          isClaudeSmokeFundingFailure(clean)
         ) {
           clearTimeout(timeout);
           ws.close();
@@ -1309,18 +1376,19 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     const finalOutput = await outputPromise;
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
-    if (finalOutput.includes('Invalid authentication credentials')) {
+    if (isClaudeSmokeCredentialFailure(finalOutput)) {
       console.log(
         '    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)'
       );
       return;
     }
-    // Same credential-health class as Anthropic WARN: exhausted API credits are
-    // not a harness regression. Subscription/OAuth tokens are preferred; when
-    // only a depleted API key is available, skip rather than fail /deploy.
-    if (/credit balance is too low/i.test(finalOutput)) {
+    // Same credential-health class as Anthropic WARN: exhausted API / OpenRouter
+    // credits are not a harness regression. Subscription/OAuth tokens are preferred;
+    // when only a depleted funded path is available, skip rather than fail /deploy
+    // (and do not burn the 240s timeout on a known 402).
+    if (isClaudeSmokeFundingFailure(finalOutput)) {
       console.log(
-        '    [skip] Claude E2B smoke reached the SDK server, but Anthropic credits are exhausted'
+        '    [skip] Claude E2B smoke reached the SDK server, but Claude/OpenRouter credits are exhausted'
       );
       return;
     }
@@ -1489,6 +1557,10 @@ async function runAll() {
     {
       name: 'sandbox retry -- transient transport errors retry, rejections do not',
       fn: async () => testSandboxRetry_classifiesTransientOnly(),
+    },
+    {
+      name: 'smoke classifier -- revoked OAuth is a credential skip, not a timeout',
+      fn: testSmokeCredentialFailureClassifier,
     },
     {
       name: 'agent context -- repo-less agent resolves credential owner',

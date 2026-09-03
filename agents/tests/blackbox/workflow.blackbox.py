@@ -3937,11 +3937,13 @@ async def test_workflow_handle_incomplete_max_iterations():
 
 
 async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
-    """Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
+    """Demo Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
-    wf.goal = "g"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
     wf.parent_workflow_id = None
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
@@ -3974,6 +3976,49 @@ async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
         )
         assert result["status"] == "completed"
         assert events == ["refresh", "complete"]
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_handle_incomplete_max_iterations_fast_mode_fails_outside_demo():
+    """Live Fast Mode hitting the step cap must still FAIL."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.goal = "Order a Vanilla Bean Shakerato from Blue Bottle"
+    wf.parent_workflow_id = None
+    wf.fast_mode_cache_enabled = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        events = []
+
+        async def wait_for_refresh():
+            events.append("refresh")
+
+        async def mark_failed(**_kwargs):
+            events.append("failed")
+
+        async def mark_complete(*_args, **_kwargs):
+            events.append("complete")
+
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        wf._mark_failed = mark_failed
+        wf._mark_complete = mark_complete
+        result = await wf._handle_incomplete(
+            {
+                "status": "max_iterations",
+                "context": [],
+                "verifier_progress": 1.0,
+                "verifier_reasoning": (
+                    "Fast Mode cache trajectory ended; prior tool evidence is sufficient"
+                ),
+            },
+            phase="EXECUTE",
+        )
+        assert result["status"] == "failed"
+        assert result["reason"] == "max_iterations"
+        assert events == ["refresh", "failed"]
     finally:
         _restore_workflow(original)
 
@@ -5519,6 +5564,115 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
+    """Root OAi demo Task Complete outputs become markdown file_pointers."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "oai-demo-root"
+    wf.user_id = "u-demo"
+    wf.goal = OAI_DEMO_ROOT_GOAL_PREFIX
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "positioning_statement", "type": "str"},
+            {"name": "ninety_day_content_calendar", "type": "list[object]"},
+        ]
+    }
+    pointer = {
+        "id": "fp-pos",
+        "storage_path": "u-demo/positioning-statement.md",
+        "original_filename": "positioning-statement.md",
+        "mime_type": "text/markdown",
+        "size_bytes": 12,
+        "created_at": "2026-09-03T00:00:00Z",
+    }
+    calendar_pointer = {
+        **pointer,
+        "id": "fp-cal",
+        "storage_path": "u-demo/90-day-content-calendar.md",
+        "original_filename": "90-day-content-calendar.md",
+    }
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "x" * 200,
+        "tool_counts": {},
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    fake.activity_returns["materialize_oai_demo_report_files_activity"] = {
+        "structured_response": {
+            "positioning_statement": pointer,
+            "ninety_day_content_calendar": calendar_pointer,
+        },
+        "output_schema": {
+            "fields": [
+                {"name": "positioning_statement", "type": "file_pointer"},
+                {"name": "ninety_day_content_calendar", "type": "file_pointer"},
+            ]
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[],
+            structured_response={
+                "positioning_statement": "Longevity OS for founders.",
+                "ninety_day_content_calendar": "Week 1 / Substack",
+            },
+        )
+        names = [name for name, _args in fake.activity_calls]
+        assert "materialize_oai_demo_report_files_activity" in names
+        summary_args = next(
+            args
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        outputs = (summary_args[3] or {}).get("completionSummary", {}).get("outputs") or []
+        by_key = {item["key"]: item["value"] for item in outputs}
+        assert by_key["positioning_statement"]["original_filename"] == "positioning-statement.md"
+        assert by_key["ninety_day_content_calendar"]["original_filename"] == "90-day-content-calendar.md"
+        assert wf.output_schema["fields"][0]["type"] == "file_pointer"
+        finished_args = next(args for name, args in fake.activity_calls if name == "mark_finished")
+        assert finished_args[8]["positioning_statement"]["original_filename"] == "positioning-statement.md"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_skips_report_files_for_oai_demo_child():
+    """Per-creator children keep structured fields; only the root report becomes files."""
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "oai-demo-child"
+    wf.user_id = "u-demo"
+    wf.goal = OAI_DEMO_CHILD_GOAL_PREFIX
+    wf.parent_workflow_id = "oai-demo-root"
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": [{"name": "creator_name", "type": "str"}]}
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "x" * 200,
+        "tool_counts": {},
+        "usage": {},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response={"creator_name": "Huberman"})
+        assert "materialize_oai_demo_report_files_activity" not in [name for name, _args in fake.activity_calls]
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll():
     """Explore chips are subAgentId-tagged; Task Complete still needs their bodies."""
     wf = _bare_workflow_instance()
@@ -6219,7 +6373,7 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
 
 
 async def test_workflow_attempt_completion_drains_fast_mode_explores():
-    """attempt_completion must await fire-and-track OAi-demo explores first."""
+    """attempt_completion still drains leftover tracked explores if any exist."""
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"
@@ -6895,9 +7049,12 @@ async def test_workflow_query_parent_state_skips_throttle_when_paused_by_parent(
 
 
 async def test_workflow_fast_mode_post_message_does_not_block_loop():
-    """Fast Mode replay must not await each post_message activity."""
+    """Demo Fast Mode replay must not await each post_message activity."""
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+
     wf = _bare_workflow_instance()
     wf.agent_id = "fm-child"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
     blocker = asyncio.Event()
@@ -6919,16 +7076,17 @@ async def test_workflow_fast_mode_post_message_does_not_block_loop():
 
 
 async def test_workflow_post_message_throttles_tree_updates():
-    """Per-message tree broadcasts under 50-way fan-out must coalesce."""
+    """Per-message tree broadcasts under 50-way demo fan-out must coalesce."""
     from datetime import timedelta
 
+    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
     from workflows.agent_workflow import _TREE_STATE_EMIT_MIN_INTERVAL
 
     wf = _bare_workflow_instance()
     wf.agent_id = "child-1"
     wf.bus_id = "bus-1"
     wf.parent_agent_id = "root-1"
-    wf.goal = "analyze"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
@@ -6944,6 +7102,24 @@ async def test_workflow_post_message_throttles_tree_updates():
         tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
         assert len(tree_calls) == 3
         assert _TREE_STATE_EMIT_MIN_INTERVAL == timedelta(seconds=3)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
+    """Live Fast Mode trees must keep per-message tree broadcasts."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "child-1"
+    wf.bus_id = "bus-1"
+    wf.parent_agent_id = "root-1"
+    wf.goal = "Order a Vanilla Bean Shakerato from Blue Bottle"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._post_message("first", "ASSISTANT", {"toolCallId": "tc-1"})
+        await wf._post_message("second", "TOOL", {"toolCallId": "tc-1"})
+        tree_calls = [c for c in fake.activity_calls if c[0] == "update_agent_tree_state"]
+        assert len(tree_calls) == 2
     finally:
         _restore_workflow(original)
 
@@ -7198,6 +7374,10 @@ async def run_all_tests():
         "wf_handle_incomplete_max_iterations_fast_mode_completes",
         test_workflow_handle_incomplete_max_iterations_fast_mode_completes,
     )
+    await r.record_async(
+        "wf_handle_incomplete_max_iterations_fast_mode_fails_outside_demo",
+        test_workflow_handle_incomplete_max_iterations_fast_mode_fails_outside_demo,
+    )
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
     await r.record_async("wf_check_credits_no_credits", test_workflow_check_credits_no_credits_pauses)
@@ -7269,6 +7449,14 @@ async def run_all_tests():
         "wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
+    await r.record_async(
+        "wf_mark_complete_materializes_oai_demo_report_files",
+        test_workflow_mark_complete_materializes_oai_demo_root_report_files,
+    )
+    await r.record_async(
+        "wf_mark_complete_skips_report_files_for_oai_demo_child",
+        test_workflow_mark_complete_skips_report_files_for_oai_demo_child,
+    )
     await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
     await r.record_async(
         "wf_mark_complete_survives_summary_failure",
@@ -7380,6 +7568,10 @@ async def run_all_tests():
         test_workflow_query_parent_state_skips_throttle_when_paused_by_parent,
     )
     await r.record_async("wf_post_message_throttles_tree", test_workflow_post_message_throttles_tree_updates)
+    await r.record_async(
+        "wf_post_message_no_throttle_outside_demo",
+        test_workflow_post_message_does_not_throttle_tree_outside_demo,
+    )
     await r.record_async(
         "wf_fast_mode_post_message_nonblocking",
         test_workflow_fast_mode_post_message_does_not_block_loop,

@@ -8,6 +8,7 @@ PREFLIGHT="$ROOT/back-end/src/domains/agents/agentRestartPreflight.ts"
 MANIFEST="$ROOT/back-end/src/providers/workflowDeploymentManifest.ts"
 PROD_VALIDATOR="$ROOT/back-end/scripts/validate-prod-workflow-migration.ts"
 CANDIDATE_VALIDATOR="$ROOT/back-end/scripts/validate-candidate-workflow-image.ts"
+HISTORY_METRICS="$ROOT/back-end/src/providers/workflowHistoryMetrics.ts"
 CLASSIFIER="$ROOT/scripts/classify-agent-runtime-changes.sh"
 FLEET_GATE="$ROOT/scripts/verify-agent-candidate-fleet.sh"
 MIGRATION_SQL="$ROOT/back-end/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
@@ -88,7 +89,12 @@ require_text "$CANDIDATE_VALIDATOR" "deployment_initialized_query" "candidate va
 require_text "$CANDIDATE_VALIDATOR" "workflowTaskFailedEventAttributes" "candidate validator must reject nondeterministic workflow tasks"
 require_text "$CANDIDATE_VALIDATOR" "workflowTaskFailedEventAttributes != null" "candidate validator must ignore protobuf nulls while rejecting real workflow-task failures"
 require_text "$CANDIDATE_VALIDATOR" "activityTaskScheduledEventAttributes != null" "candidate validator must count only real initialization activities"
-require_text "$PROD_VALIDATOR" "workflowTaskFailedEventAttributes != null" "production validator must ignore protobuf nulls while rejecting real workflow-task failures"
+# Prod validator delegates history counting to workflowHistoryMetrics so cold/
+# handoff gates share one protobuf-null-safe implementation (Temporal may emit
+# attributes as explicit null). The helper must reject both null and undefined.
+require_text "$PROD_VALIDATOR" "summarizeWorkflowHistory" "production validator must summarize history via shared helper"
+require_text "$HISTORY_METRICS" "event.workflowTaskFailedEventAttributes !== null" "production validator must ignore protobuf nulls while rejecting real workflow-task failures"
+require_text "$HISTORY_METRICS" "event.workflowTaskFailedEventAttributes !== undefined" "history metrics must also ignore missing workflow-task-failure attributes"
 require_text "$PROD_VALIDATOR" "assertSameInstant" "production validator must compare restored timestamps as instants, not format strings"
 require_text "$PROD_VALIDATOR" "prisma.toolUsage.createMany" "production validator must seed durable accounting checkpoints"
 require_text "$PROD_VALIDATOR" "tokenCountCheckpoint: 950" "production validator must preserve the durable context checkpoint"
@@ -374,8 +380,8 @@ migrate_exec_line=$(grep -n 'migrate-open-agent-workflows.ts --execute' "$DEPLOY
 # incident this redesign fixes). No external-driver hold, and a fail-safe rollback.
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'set-agent-queue-pointer.ts' \
   "deploy workflow must self-drive the routing-pointer flip via cooperative cutover"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'migrate-open-agent-workflows.ts --execute' \
-  "force-migrate remains available after the 45m cooperative drain SLO"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-generation-queue.ts' \
+  "force-clear remains available after the 45m cooperative drain SLO"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
   "self-driving cutover must use the prod DB secret"
 # Cooperative cutover keeps old-gen workers until drain/SLO. Pointer stays on the
@@ -383,8 +389,8 @@ require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
 if grep -q 'rollback-' "$DEPLOY_AGENTS_WORKFLOW" "$ROOT/scripts/deploy-agents-cooperative-cutover.sh"; then
   fail "cutover must NOT roll the routing pointer back to a drained generation on migrate failure"
 fi
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-migrating stragglers' \
-  "after the 45m SLO, cutover force-migrates stragglers while routing stays on the new generation"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clearing stragglers' \
+  "after the 45m SLO, cutover force-clears stragglers while routing stays on the new generation"
 if grep -Fq 'timeout-minutes: 125' "$DEPLOY_AGENTS_WORKFLOW"; then
   fail "the 125-minute external-driver hold must be gone (replaced by a self-driving cutover)"
 fi
@@ -436,8 +442,10 @@ require_file "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" \
   "cooperative cutover script must exist"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'DRAIN_TIMEOUT_SECONDS' \
   "cooperative cutover script must honor the drain SLO"
-require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'migrate-open-agent-workflows.ts --execute' \
-  "cooperative cutover must force-migrate only after the drain SLO"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-generation-queue.ts' \
+  "generation cutover must force-clear stragglers on the old queue (not deployment migrate)"
+require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" '--execute' \
+  "generation force-clear must require --execute"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'count-open-workflows-on-queue.ts' \
   "cooperative cutover must poll open workflows on the old generation queue"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--image-label' \
