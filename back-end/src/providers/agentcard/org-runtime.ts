@@ -169,18 +169,36 @@ function delay(ms: number): Promise<void> {
  * `initialize` 401s on a healthy secret while `tools/call` succeeds, so the org
  * runtime posts JSON-RPC tools/call directly instead of using the MCP SDK session.
  */
-function parseMcpJsonRpcBody(bodyText: string): Record<string, unknown> {
+function parseMcpJsonRpcFrames(bodyText: string): Record<string, unknown>[] {
   const trimmed = bodyText.trim();
   if (trimmed.startsWith('{')) {
-    return JSON.parse(trimmed) as Record<string, unknown>;
+    return [JSON.parse(trimmed) as Record<string, unknown>];
   }
+  const frames: Record<string, unknown>[] = [];
   for (const line of trimmed.split(/\r?\n/)) {
     if (!line.startsWith('data:')) continue;
     const payload = line.slice('data:'.length).trim();
-    if (payload === '' || payload === '[DONE]') continue;
-    return JSON.parse(payload) as Record<string, unknown>;
+    if (payload === '' || payload === '[DONE]' || !payload.startsWith('{')) continue;
+    try {
+      frames.push(JSON.parse(payload) as Record<string, unknown>);
+    } catch {
+      // Streamable HTTP may emit a non-JSON endpoint URL as the first data line.
+    }
   }
-  return { message: trimmed };
+  return frames;
+}
+
+function selectMcpJsonRpcFrame(
+  frames: Record<string, unknown>[],
+  bodyText: string
+): Record<string, unknown> {
+  const withResult = [...frames].reverse().find((frame) => 'result' in frame);
+  if (withResult !== undefined) return withResult;
+  const withError = [...frames]
+    .reverse()
+    .find((frame) => frame.error !== undefined && frame.error !== null);
+  if (withError !== undefined) return withError;
+  return frames.at(-1) ?? { message: bodyText.trim() };
 }
 
 async function callOrgMcpTool(
@@ -209,11 +227,12 @@ async function callOrgMcpTool(
     const bodyText = await response.text();
     let parsed: Record<string, unknown>;
     try {
-      parsed = parseMcpJsonRpcBody(bodyText);
+      parsed = selectMcpJsonRpcFrame(parseMcpJsonRpcFrames(bodyText), bodyText);
     } catch {
       parsed = { message: bodyText };
     }
     const rpcError = parsed.error;
+    const hasRpcError = rpcError !== undefined && rpcError !== null && rpcError !== '';
     const errorText =
       typeof rpcError === 'string'
         ? rpcError
@@ -222,7 +241,7 @@ async function callOrgMcpTool(
           : typeof parsed.message === 'string'
             ? parsed.message
             : bodyText.slice(0, 200);
-    if (!response.ok || (typeof rpcError === 'string' && rpcError.length > 0)) {
+    if (!response.ok || hasRpcError) {
       lastError = new AgentCardOrgRuntimeError(
         `AgentCard Organization MCP ${toolName} failed: ${errorText}`,
         response.status >= 400 && response.status < 500 ? response.status : 502,
@@ -241,7 +260,12 @@ async function callOrgMcpTool(
       continue;
     }
     if ('result' in parsed) return parsed.result;
-    return parsed;
+    throw new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} failed: missing JSON-RPC result`,
+      502,
+      'agentcard_org_mcp_unavailable',
+      { status: response.status, message: parsed.message }
+    );
   }
   throw (
     lastError ??

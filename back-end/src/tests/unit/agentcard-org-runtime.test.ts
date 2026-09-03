@@ -62,6 +62,40 @@ async function main(): Promise<void> {
     });
     assert.equal(jsonRpcCalls, 1);
 
+    let handshakeCalls = 0;
+    const handshakeRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      handshakeCalls += 1;
+      return new Response(
+        'event: endpoint\ndata: /mcp?session=abc\n\n' +
+          'event: message\ndata: {"result":{"structuredContent":{"cardholders":[{"id":"ch-1"}]}}}\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      );
+    });
+    assert.deepEqual(await handshakeRuntime.callTool('list_cardholders', {}), {
+      structuredContent: { cardholders: [{ id: 'ch-1' }] },
+    });
+    assert.equal(
+      handshakeCalls,
+      1,
+      'a Streamable HTTP endpoint event must not be parsed as the tool result'
+    );
+
+    const rpcErrorRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          error: { code: -32000, message: 'no cardholders' },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    await assert.rejects(
+      () => rpcErrorRuntime.callTool('list_cardholders', {}),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError && /no cardholders/.test(error.message)
+    );
+
     let authRetries = 0;
     const authRetryRuntime = new AgentCardOrgRuntime(undefined, async () => {
       authRetries += 1;
