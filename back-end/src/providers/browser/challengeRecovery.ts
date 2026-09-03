@@ -16,10 +16,7 @@ import {
 } from './challengeClassifierNetwork';
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
-import {
-  raceProbeAbort,
-  sameSiteNavigationUrl,
-} from './challengeRecoveryShared';
+import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
 import type { BrowserProviderName } from './types';
 
 export { recoveryConfigKeyForSession, sameSiteNavigationUrl } from './challengeRecoveryShared';

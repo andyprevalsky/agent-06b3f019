@@ -619,8 +619,6 @@ function testSteelPreferredWhenCdnHardFilterActive(): void {
   assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }
 
-
-
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
