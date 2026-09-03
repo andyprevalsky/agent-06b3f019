@@ -19,16 +19,34 @@ export const DEFAULT_OUTBOUND_VOICE_ID = '6fZce9LFNG3iEITDfqZZ';
 export const BASE_SYSTEM_PROMPT = `You are making an outbound phone call. Be polite, professional, and conversational.
 If the person is busy or uninterested, thank them for their time and end the call.
 Extract the information defined in your output schema through natural conversation.
+When you reach an automated phone menu or IVR that asks you to press a button or enter digits on the keypad, use the dtmf function to send keypad tones. Never speak digits aloud or say "press one" — send the actual tones. For a single menu digit, send just that digit (for example keys: "2"). For multi-digit entry ending in #, wait until the prompt finishes, then send one dtmf call with a short leading pause and light grouping pauses so the IVR can register tones (for example keys: "ww245w133w8820#"). Do not put a w pause between every single digit, and do not omit pauses entirely on long sequences.
+After you send DTMF, stay silent and listen for the IVR's next prompt or result. Do not hang up on an intermediate retry prompt; wait for the information you need (or a clear final failure) before using endCall.
 When the conversation goal is complete, say a brief goodbye and use the endCall tool.
 
 `;
+
+/**
+ * True when the *caller-provided* call brief is navigating an automated menu.
+ * Must NOT match {@link BASE_SYSTEM_PROMPT} alone — that text always mentions
+ * DTMF/IVR as general guidance for every outbound call.
+ */
+export function isIvrNavigationPrompt(systemPrompt: string): boolean {
+  const hasMenuNav = /\b(dtmf|ivr|keypad|phone menu|call tree|automated (?:phone )?menu)\b/i.test(
+    systemPrompt
+  );
+  const hasDigitEntryGoal =
+    /\b(tracking number|track (?:a )?package|account number|pound key|followed by #|enter (?:the |your )?\d|press (?:the )?\d)/i.test(
+      systemPrompt
+    );
+  return hasMenuNav && hasDigitEntryGoal;
+}
 
 export const DEFAULT_CALL_ASSISTANT_CONFIG: JsonObject = {
   name: 'Rose Outbound Call Agent',
   model: {
     provider: 'openai',
     model: 'gpt-4o',
-    tools: [{ type: 'endCall' }],
+    tools: [{ type: 'endCall' }, { type: 'dtmf' }],
   },
   voice: {
     provider: '11labs',
@@ -79,7 +97,8 @@ function deepMergeJson(base: JsonObject, overrides: JsonObject): JsonObject {
 export function buildCallAssistantConfig(
   systemPrompt: string,
   structuredDataSchema: Record<string, unknown>,
-  voiceId?: string
+  voiceId?: string,
+  options?: { calleeSpeaksFirst?: boolean }
 ): JsonObject {
   const configuredAssistant = DEFAULT_CALL_ASSISTANT_CONFIG;
   const configuredModel = isJsonObject(configuredAssistant.model) ? configuredAssistant.model : {};
@@ -87,9 +106,20 @@ export function buildCallAssistantConfig(
   const configuredAnalysisPlan = isJsonObject(configuredAssistant.analysisPlan)
     ? configuredAssistant.analysisPlan
     : {};
+  // IVR callees speak first (menu prompt). Greeting over the menu wastes the
+  // turn and makes the outbound agent less likely to send DTMF immediately.
+  // Detect from the caller-provided brief only (see isIvrNavigationPrompt).
+  const calleeSpeaksFirst =
+    options?.calleeSpeaksFirst === true || isIvrNavigationPrompt(systemPrompt);
 
   return {
     ...configuredAssistant,
+    ...(calleeSpeaksFirst
+      ? {
+          firstMessage: '',
+          firstMessageMode: 'assistant-waits-for-user',
+        }
+      : {}),
     model: {
       ...configuredModel,
       messages: [{ role: 'system', content: systemPrompt }],

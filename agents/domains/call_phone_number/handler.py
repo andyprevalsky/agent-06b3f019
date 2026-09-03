@@ -36,6 +36,7 @@ from domains.call_phone_number.service import (
     build_completion_message,
     calculate_duration_from_timestamps,
     compute_service_usage,
+    enrich_transcript_with_dtmf,
     format_phone_number,
     save_phone_call_message,
 )
@@ -377,7 +378,15 @@ async def _call_phone_number_activity_real(
 
             if status == "ended":
                 # Call completed - extract all results
-                transcript = poll_result.get("transcript", "")
+                transcript = poll_result.get("transcript", "") or ""
+                artifact = poll_result.get("artifact") or {}
+                messages = poll_result.get("messages")
+                if not messages and isinstance(artifact, dict):
+                    messages = artifact.get("messages")
+                transcript = enrich_transcript_with_dtmf(
+                    transcript,
+                    messages if isinstance(messages, list) else None,
+                )
                 analysis = poll_result.get("analysis", {})
                 summary = poll_result.get("summary") or analysis.get("summary", "")
                 recording_url = poll_result.get("recordingUrl", "")

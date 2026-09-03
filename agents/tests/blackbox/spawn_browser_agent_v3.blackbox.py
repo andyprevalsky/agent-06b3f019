@@ -289,6 +289,55 @@ def test_transient_session_init_failure_classification():
 # don't exist (ImportError) and the guarantees below don't hold.
 # ============================================================================
 
+def test_visible_result_completion_rewrites_post_submit_wait():
+    """c3762be3 already stated score 0.07 + bot verdict, then waited 6–10s.
+
+    A post-submit wait after that reasoning must become attempt_completion so
+    the 420s smoke cap cannot be burned on PoW retries.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        forced_visible_result_completion_action,
+        should_force_visible_result_completion,
+    )
+
+    stated = (
+        'A risk score of "0.07" is shown, but there\'s a "Bot detected - form blocked" '
+        'message. The form was blocked with reason "pow_not_satisfied".'
+    )
+    prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
+    assert should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning=stated,
+        action_summaries=prior_submit,
+    )
+    forced = forced_visible_result_completion_action(stated)
+    assert forced["action"] == "attempt_completion"
+    assert "0.07" in forced["params"]["reasoning"]
+
+
+def test_visible_result_completion_does_not_rewrite_before_submit():
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stated = 'A risk score of "0.07" is shown, Bot detected - form blocked'
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning=stated,
+        action_summaries=['click: {"text": "I\'m not a robot"}'],
+    )
+    assert not should_force_visible_result_completion(
+        action_name="click",
+        last_reasoning=stated,
+        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
+    )
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning="Scrolling to bring the checkbox into view.",
+        action_summaries=['click: {"text": "Submit (Protected by Invisible"}'],
+    )
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -8338,6 +8387,63 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     assert drag_mock.await_args.args[1] is ah
     assert drag_mock.await_args.args[2]["start_x"] == 1
     assert drag_mock.await_args.args[2]["end_y"] == 4
+
+
+async def test_action_history_record_action_accepts_tuple_coordinates():
+    """Drag/click executors pass (x, y); record_action used to index that as a dict.
+
+    Repro: browser-biometrics-webdecoy agent c247de84 — CDP drag succeeded, then
+    ``coordinates["x"]`` raised TypeError and the TOOL step failed.
+    """
+    from browser_tools.dom_service import ActionHistory
+
+    history = ActionHistory()
+    dom = SimpleNamespace(selector_map={}, get_element_at_coordinates=AsyncMock(return_value=None))
+    entry = await history.record_action(
+        dom_service=dom,
+        action="drag",
+        coordinates=(100, 200),
+    )
+    assert entry.coordinates == {"x": 100, "y": 200}
+
+    dict_entry = await history.record_action(
+        dom_service=dom,
+        action="click",
+        coordinates={"x": 3, "y": 4},
+    )
+    assert dict_entry.coordinates == {"x": 3, "y": 4}
+
+
+async def test_execute_drag_records_through_real_action_history():
+    """Unmocked record_action after a successful CDP drag must not TypeError."""
+    from browser_tools.dom_service import ActionHistory
+    from browser_tools.tool_executor_v2 import _execute_drag
+
+    send = AsyncMock()
+    cdp_session = SimpleNamespace(
+        session_id="sess-1",
+        cdp_client=SimpleNamespace(
+            send=SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=send))
+        ),
+    )
+    session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp_session))
+    history = ActionHistory()
+    with patch("browser_tools.tool_executor_v2.asyncio.sleep", new_callable=AsyncMock):
+        out = await _execute_drag(
+            SimpleNamespace(
+                session=session,
+                selector_map={},
+                get_element_at_coordinates=AsyncMock(return_value=None),
+            ),
+            history,
+            {"start_x": 10, "start_y": 20, "end_x": 30, "end_y": 40, "steps": 2},
+        )
+    assert out["success"] is True
+    assert out["start"] == {"x": 10, "y": 20}
+    entries = history.get_entries()
+    assert entries[-1]["action"] == "drag"
+    assert entries[-1]["coordinates"] == {"x": 10, "y": 20}
+    assert entries[-1]["params"] == {"end": {"x": 30, "y": 40}, "steps": 2}
 
 
 def test_read_network_requests_tool_is_advertised():
@@ -19145,6 +19251,14 @@ async def run_all_tests():
         "browser_fast_mode_timeout_is_demo_only",
         test_browser_fast_mode_timeout_is_demo_only,
     )
+    r.record(
+        "visible_result_completion_rewrites_post_submit_wait",
+        test_visible_result_completion_rewrites_post_submit_wait,
+    )
+    r.record(
+        "visible_result_completion_does_not_rewrite_before_submit",
+        test_visible_result_completion_does_not_rewrite_before_submit,
+    )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
     r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
@@ -19761,6 +19875,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_drag_dispatches_to_tool_executor",
         test_execute_action_drag_dispatches_to_tool_executor,
+    )
+    await r.record_async(
+        "action_history_record_action_accepts_tuple_coordinates",
+        test_action_history_record_action_accepts_tuple_coordinates,
+    )
+    await r.record_async(
+        "execute_drag_records_through_real_action_history",
+        test_execute_drag_records_through_real_action_history,
     )
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
     r.record(

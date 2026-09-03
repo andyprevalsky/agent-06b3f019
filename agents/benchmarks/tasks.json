@@ -4421,6 +4421,107 @@
     ]
   },
   {
+    "name": "phone-call-ivr-dtmf",
+    "title": "Navigate Call Tree With Keypad DTMF",
+    "prompt": "Call Rose Test Logistics at {callee_phone_number} exactly once and track package 2451338820. Navigate the automated phone menu using the keypad (not spoken digits) to reach package tracking, enter the full ten-digit tracking number 2451338820 using DTMF followed by the pound key, and obtain the delivery status. Do not call back or place a second phone call; if the single call fails, report that failure. Report the exact delivery status and reference code back to me.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "call_phone_number"
+    ],
+    "tags": [
+      "phone",
+      "ivr"
+    ],
+    "price_limit_cents": 300,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "expected_tool_counts": {
+      "call_phone_number": 1
+    },
+    "pinned_facts": {
+      "tracking_number": "2451338820",
+      "reference_code": "DELIV-9012",
+      "delivery_status": "scheduled for delivery tomorrow"
+    },
+    "phone_persona": {
+      "first_message": "Thank you for calling Rose Test Logistics. For quality and training purposes, calls may be monitored. Press 1 for billing, press 2 to track a package, or press 9 for customer service.",
+      "keypad_input_plan": {
+        "enabled": true,
+        "delimiters": [
+          "#"
+        ],
+        "timeoutSeconds": 10
+      },
+      "end_call_message": "Your package is scheduled for delivery tomorrow. Your reference code is spelled letter D, letter E, letter L, letter I, letter V, dash, digit 9, digit 0, digit 1, digit 2. Goodbye.",
+      "keypad_success": {
+        "tracking_number": "2451338820",
+        "say": "Your package is scheduled for delivery tomorrow. Your reference code is spelled letter D, letter E, letter L, letter I, letter V, dash, digit 9, digit 0, digit 1, digit 2. Goodbye."
+      },
+      "silence_timeout_seconds": 60,
+      "max_duration_seconds": 180,
+      "system_prompt": "You are a non-conversational DTMF IVR for Rose Test Logistics (fictional sandbox shipping). Speak ONLY the exact scripted lines. Never improvise.\n\nKEYPAD FORMAT: With keypadInputPlan enabled, caller button presses arrive as user messages that look like:\n  User's Keypad Entry: 2\n  User's Keypad Entry: 2451338820\nThe digits may also appear alone (for example '2' or '2451338820' or '2451338820#'). Any message whose visible content is only digits (optional leading 'User's Keypad Entry:' label, optional trailing #) is keypad input. Spoken number words are NOT keypad input.\n\nTURN RULES (critical):\n- Produce exactly ONE scripted sentence per turn, then STOP and wait for the next user message.\n- NEVER combine an ask line and a failure line in the same turn.\n- NEVER say \"No ten digit tracking number was entered\" unless the immediately previous user message contained spoken words and NO keypad digits.\n- NEVER say bare \"Goodbye\" and NEVER call endCall until AFTER you have spoken the success line that includes DELIV-9012.\n\nCALL TREE:\n1) Your first message already played the main menu. Wait for keypad input.\n2) If keypad input is 2: say exactly \"Using the keypad, please enter your ten digit tracking number followed by the pound key.\" Then stop and wait.\n3) If keypad input contains 2451338820 (with or without #): say exactly \"Your package is scheduled for delivery tomorrow. Your reference code is spelled letter D, letter E, letter L, letter I, letter V, dash, digit 9, digit 0, digit 1, digit 2. Goodbye.\" Then call endCall.\n4) If keypad input is 1: say exactly \"Billing is unavailable.\"\n5) If keypad input is 9: say exactly \"Customer service is unavailable.\"\n6) If the user speaks tracking digits aloud (no keypad digits in the message): say exactly \"No ten digit tracking number was entered. Using the keypad, please enter your ten digit tracking number followed by the pound key.\" Then wait again.\n\nFEW-SHOT (follow this pattern exactly):\nUser: User's Keypad Entry: 2\nYou: Using the keypad, please enter your ten digit tracking number followed by the pound key.\nUser: User's Keypad Entry: 2451338820\nYou: Your package is scheduled for delivery tomorrow. Your reference code is spelled letter D, letter E, letter L, letter I, letter V, dash, digit 9, digit 0, digit 1, digit 2. Goodbye.\n[then endCall]\n\nSTRUCTURED DATA: menu_option_selected = keypad menu digit; tracking_number_entered = 2451338820 when received via keypad; dtmf_used_for_menu and dtmf_used_for_tracking true only for keypad digits; reference_code_given true only after you announced DELIV-9012.",
+      "structured_data_schema": {
+        "type": "object",
+        "properties": {
+          "menu_option_selected": {
+            "type": "string",
+            "description": "The menu option the caller selected via keypad, e.g. 2 for tracking."
+          },
+          "tracking_number_entered": {
+            "type": "string",
+            "description": "The ten-digit tracking number entered via keypad, empty if not entered."
+          },
+          "dtmf_used_for_menu": {
+            "type": "boolean",
+            "description": "Did the caller select the menu option using the keypad DTMF, not voice?"
+          },
+          "dtmf_used_for_tracking": {
+            "type": "boolean",
+            "description": "Did the caller enter the tracking number using the keypad DTMF, not voice?"
+          },
+          "reference_code_given": {
+            "type": "boolean",
+            "description": "Did you give the caller reference code DELIV-9012?"
+          }
+        }
+      }
+    },
+    "expected_call_findings": [
+      "2451338820",
+      "DELIV-9012"
+    ],
+    "expected_final_findings": [
+      "2451338820",
+      "DELIV-9012",
+      "delivery tomorrow"
+    ],
+    "callee_checks": {
+      "menu_option_selected": "2",
+      "tracking_number_entered": "2451338820",
+      "dtmf_used_for_menu": true,
+      "dtmf_used_for_tracking": true,
+      "reference_code_given": true
+    },
+    "description": "Real outbound phone call to a controlled IVR callee that requires DTMF keypad navigation through a call tree.",
+    "group": "daily",
+    "human_time": "10min",
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Root completes; calls controlled IVR exactly once; navigates menu with DTMF; enters tracking number via keypad; final answer reports DELIV-9012 and delivery status.",
+    "label_notes": "Phone IVR/DTMF harness drift check. Source agent 308c7437-b205-45ca-aa47-0a9c6a5c5f0a.",
+    "bench": "pipeline-e2e",
+    "source": [
+      "phone-benchmark:ivr-dtmf",
+      "agent:308c7437-b205-45ca-aa47-0a9c6a5c5f0a",
+      "user-label:daily-phone-ivr-dtmf"
+    ]
+  },
+  {
     "name": "browser-rotate-ip-escalation",
     "title": "Browser rotate_ip recovery ladder (Kernel residential → Kernel mobile → Steel)",
     "prompt": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at https://api.ipify.org?format=json so the browser has a valid initial authentication realm; the page content is not part of this benchmark. Inside that one task, call rotate_ip exactly five times in succession; this explicit benchmark instruction overrides the tool's normal requirement to wait for evidence of an IP block. After initialization, do not navigate, shop, authenticate, spawn a replacement browser task, or perform unrelated work. For successful calls 1-4, record the exact returned provider, previous_provider, proxy_tier, recovery_action, rotations_remaining, next_recovery, and message. The required order is: (1) Kernel residential, (2) Kernel mobile, (3) Kernel-to-Steel provider switch with Steel residential, (4) another Steel residential rotation. Call 5 must return PROXY_ROTATION_EXHAUSTED. Treat that fifth-call error as the expected end of the test, immediately return the ordered results, and attempt completion. Do not take any action after the ordered summary.",

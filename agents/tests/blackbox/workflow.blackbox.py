@@ -6264,7 +6264,7 @@ async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
 
 
 async def test_workflow_attempt_completion_drains_fast_mode_explores():
-    """attempt_completion must await fire-and-track OAi-demo explores first."""
+    """attempt_completion still drains leftover tracked explores if any exist."""
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
     wf.user_id = "user-1"

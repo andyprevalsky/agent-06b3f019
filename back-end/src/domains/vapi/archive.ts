@@ -20,6 +20,45 @@ export type VapiPollExchange = {
   };
 };
 
+const VAPI_POLL_DIAGNOSTIC_HEADERS = [
+  'age',
+  'cache-control',
+  'cf-cache-status',
+  'date',
+  'etag',
+  'last-modified',
+  'server',
+  'via',
+  'x-cache',
+] as const;
+
+export function buildVapiPollExchange(
+  requestUrl: string,
+  startedAt: Date,
+  receivedAt: Date,
+  response: Response
+): VapiPollExchange {
+  const headers = Object.fromEntries(
+    VAPI_POLL_DIAGNOSTIC_HEADERS.flatMap((name) => {
+      const value = response.headers.get(name);
+      return value === null ? [] : [[name, value]];
+    })
+  );
+  return {
+    request: {
+      method: 'GET',
+      url: requestUrl,
+      startedAt: startedAt.toISOString(),
+    },
+    response: {
+      status: response.status,
+      headers,
+      receivedAt: receivedAt.toISOString(),
+      durationMs: Math.max(0, receivedAt.getTime() - startedAt.getTime()),
+    },
+  };
+}
+
 export function agentIdFromOperationKey(operationKey?: string): string | null {
   if (operationKey === undefined) return null;
   const prefix = `${VAPI_CALL_OPERATION_TYPE}:`;

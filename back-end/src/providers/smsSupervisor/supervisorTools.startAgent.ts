@@ -3,10 +3,12 @@
  * Split from supervisorTools.ts to stay under max-lines.
  */
 
+import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
 import { reconcileWorkflowStart, startAgentWorkflow } from '../temporal';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
+import type { FilePointer } from '../storage';
 import type { SupervisorChannel } from './channelDelivery';
 
 const log = createLogger('SmsSupervisorTools');
@@ -30,7 +32,8 @@ export interface WebSearchArgs {
 export async function commitStartNewAgent(
   op: { kind: 'start_new_agent'; args: StartNewAgentArgs; provisionalId: string },
   userId: string,
-  channel: SupervisorChannel = 'SMS'
+  channel: SupervisorChannel = 'SMS',
+  attachments: readonly FilePointer[] = []
 ): Promise<ToolResult> {
   const { args, provisionalId } = op;
   const { goal, budget_dollars } = args;
@@ -42,6 +45,7 @@ export async function commitStartNewAgent(
     provisionalId,
     goal: goal.substring(0, 100),
     priceLimitCents,
+    attachmentCount: attachments.length,
   });
 
   let agent: { id: string; fastModeCacheEnabled?: boolean } | undefined;
@@ -80,6 +84,19 @@ export async function commitStartNewAgent(
           timestamp: new Date(),
         },
       });
+
+      // Same attachment-message contract as POST /api/agents createAttachmentMessages.
+      for (const attachment of attachments) {
+        await tx.message.create({
+          data: {
+            agentId: newAgent.id,
+            text: '',
+            role: 'USER',
+            timestamp: new Date(),
+            filePointer: attachment as unknown as Prisma.JsonObject,
+          },
+        });
+      }
 
       return newAgent;
     });
