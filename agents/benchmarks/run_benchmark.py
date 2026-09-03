@@ -1569,6 +1569,19 @@ def _extract_agent_payment_output_blob(data: dict) -> str:
     return json.dumps(blobs, default=str) if blobs else ""
 
 
+# Grounded test-payment confirmation ids are always `tp_` + exactly 8 lowercase hex chars.
+# Matching this in the populated browser output is sufficient for the shop contract; the LLM
+# judge exists only for key-name-agnostic recovery when the id is present under an unexpected
+# shape that a regex might miss. Prefer the deterministic check so a successful checkout cannot
+# false-fail when the judge waterfall is out of credits (OpenAI/Anthropic/OpenRouter 402).
+_AGENT_PAYMENT_CONFIRMATION_ID_RE = re.compile(r"\btp_[0-9a-f]{8}\b")
+
+
+def agent_payment_blob_has_grounded_confirmation_id(blob: str) -> bool:
+    """True when the agent output already contains a grounded tp_<8 hex> confirmation id."""
+    return bool(_AGENT_PAYMENT_CONFIRMATION_ID_RE.search(blob or ""))
+
+
 async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id: str) -> Optional[str]:
     """Semantic gate for the payment lifecycle's browser-purchase step. The browser agent's populated
     output must let the STANDARD semantic output judge recover a grounded payment confirmation id
@@ -1578,6 +1591,8 @@ async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id
     blob = _extract_agent_payment_output_blob(data)
     if not blob:
         return "agent did not return a grounded browser payment confirmation order id"
+    if agent_payment_blob_has_grounded_confirmation_id(blob):
+        return None
     return await _judge_output_recovers_expected_fields(
         root_agent_id,
         blob,
